@@ -31,7 +31,7 @@ interface VectorRule {
 	write?: boolean;
 	requires?: string[];
 	admitted?: boolean;
-	subject?: string;
+	callerIs?: string;
 	fields?: string[];
 	/** Names the rule's condition, which each row's `matches` answers. */
 	when?: string;
@@ -69,7 +69,7 @@ const vectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as { cases: Rules
  */
 const whenNames = new WeakMap<AccessRuleDef, string>();
 
-/** Only the name of a subject field is read, so the rest stays unbuilt. */
+/** Only the name of a `callerIs` field is read, so the rest stays unbuilt. */
 const ruleOf = (r: VectorRule): AccessRuleDef => {
 	const rule: AccessRuleDef = {
 		read: r.read === true,
@@ -77,12 +77,12 @@ const ruleOf = (r: VectorRule): AccessRuleDef => {
 		update: r.write === true || r.update === true,
 		delete: r.write === true || r.delete === true,
 		requires: r.admitted === true ? [] : [ ...(r.requires ?? []) ].sort(),
-		subject: r.subject === undefined ? undefined : ({ name: r.subject } as DescField),
+		callerIs: r.callerIs === undefined ? undefined : ({ name: r.callerIs } as DescField),
 		fields: r.fields === undefined ? undefined : [ ...r.fields ].sort(),
 		when: r.when === undefined ? undefined : create(ConditionSchema),
 		// The entity of an entry stands for its name, which each row's within
 		// answers.
-		within: (r.within ?? []).map((name) => ({ entity: name, subject: undefined, when: undefined })),
+		within: (r.within ?? []).map((name) => ({ entity: name, callerIs: undefined, when: undefined })),
 	};
 	if (r.when !== undefined) whenNames.set(rule, r.when);
 	return rule;
@@ -95,7 +95,7 @@ const verdictOf = (v: boolean | null | undefined): Verdict =>
 
 const rowOf = (v: VectorRow): RuleRow => ({
 	held: (permission) => verdictOf(v.held[permission]),
-	subject: (field) => v.fields[field] ?? missing,
+	fieldValue: (field) => v.fields[field] ?? missing,
 	matches: (rule) => verdictOf(v.matches?.[whenNames.get(rule)!]),
 	within: (rule) => {
 		let answer: Verdict = 'yes';

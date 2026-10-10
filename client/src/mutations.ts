@@ -199,7 +199,7 @@ export interface AccessRuleDef {
 	 */
 	requires: readonly string[];
 	/** The field that must hold one of the caller's subjects. */
-	subject: DescField | undefined;
+	callerIs: DescField | undefined;
 	/** The units an update may change, by proto name, sorted. */
 	fields: readonly string[] | undefined;
 	/** The condition a row must match, with proto-name paths. */
@@ -215,7 +215,7 @@ export interface AccessRuleDef {
 export interface WithinDef {
 	entity: string;
 	/** The proto name of the field of `entity` that must hold one of the caller's subjects. */
-	subject: string | undefined;
+	callerIs: string | undefined;
 	/** The condition the row of `entity` must match, with proto-name paths. */
 	when: Condition | undefined;
 }
@@ -272,7 +272,7 @@ export function entityDefOf(schema: DescMessage): EntityDef {
 
 /**
  * Resolves an entity's access rules against its schema. The server refuses a
- * rule whose subject names no field at registration, so such a check never
+ * rule whose `caller_is` names no field at registration, so such a check never
  * matches here.
  */
 function accessRulesOf(
@@ -286,12 +286,12 @@ function accessRulesOf(
 		update: rule.write || rule.update,
 		delete: rule.write || rule.delete,
 		requires: [ ...rule.requires ].sort(),
-		subject: rule.subject === '' ? undefined : schema.fields.find((f) => f.name === rule.subject),
+		callerIs: rule.callerIs === '' ? undefined : schema.fields.find((f) => f.name === rule.callerIs),
 		fields: rule.fields.length === 0 ? undefined : [ ...rule.fields ].sort(),
 		when: rule.when,
 		within: rule.within.map((w) => ({
 			entity: w.entity,
-			subject: w.subject === '' ? undefined : w.subject,
+			callerIs: w.callerIs === '' ? undefined : w.callerIs,
 			when: w.when,
 		})),
 	}));

@@ -120,11 +120,11 @@ var _ = Describe("Access model registration of owner rules", func() {
 			Expect(register(change)).To(MatchError(ContainSubstring(want)))
 		},
 		Entry("a subject field that does not exist", func(file *descriptorpb.FileDescriptorProto) {
-			rulesOf(file, "Post").Allow[1].Subject = "writer_id"
-		}, `access allow[1] subject: field "writer_id" not found`),
+			rulesOf(file, "Post").Allow[1].CallerIs = "writer_id"
+		}, `access allow[1] caller_is: field "writer_id" not found`),
 		Entry("a subject field that is not a string", func(file *descriptorpb.FileDescriptorProto) {
-			rulesOf(file, "Post").Allow[1].Subject = "room"
-		}, `access allow[1] subject: field "room" is message; it must be a string`),
+			rulesOf(file, "Post").Allow[1].CallerIs = "room"
+		}, `access allow[1] caller_is: field "room" is message; it must be a string`),
 		Entry("a fields list on a rule that names another operation", func(file *descriptorpb.FileDescriptorProto) {
 			rulesOf(file, "Post").Allow[2].Delete = true
 		}, `access allow[2] names fields, which only a rule whose one operation is update can name`),
@@ -152,7 +152,7 @@ var _ = Describe("Access model registration of owner rules", func() {
 			rules.Allow[2].Fields = []string{"status", "title"}
 			rules.Allow = append(rules.Allow, &syncplanev1.AccessRule{
 				Update: true, Requires: []string{"view_posts"},
-				Subject: "assignee_id", Fields: []string{"title", "status"},
+				CallerIs: "assignee_id", Fields: []string{"title", "status"},
 			})
 		}, `access allow[2] and allow[3] are the same rule`),
 		Entry("a creator field that is not a string", func(file *descriptorpb.FileDescriptorProto) {
@@ -184,7 +184,7 @@ var _ = Describe("Access model registration of owner rules", func() {
 			// Wider than allow[2] on every check, so allow[2] decides nothing.
 			rules.Allow = append(rules.Allow, &syncplanev1.AccessRule{
 				Update: true, Requires: []string{"post"},
-				Subject: "author_id", Fields: []string{"body", "title"},
+				CallerIs: "author_id", Fields: []string{"body", "title"},
 			})
 		})).To(Succeed())
 		Expect(neverDecides(logs)).To(ConsistOf(
@@ -333,12 +333,12 @@ var _ = Describe("Owner rules", func() {
 
 			applied(put("ann", "post", "po-new", &accessv1.Post{Id: "po-new", Room: room("r1"), Body: "mine"}))
 			Expect(post("po-new").GetAuthorId()).To(Equal("user:ann"))
-			// The subject check compares with every subject of the caller.
+			// The caller_is check compares with every subject of the caller.
 			applied(patch("ann", "post", "po-new", &accessv1.Post{Body: "edited"}, "body"))
 		})
 	})
 
-	Describe("a subject check on a write rule", func() {
+	Describe("a caller_is check on a write rule", func() {
 		It("lets the author edit the fields its rule lists", func() {
 			applied(patch("ann", "post", "po-ann", &accessv1.Post{Body: "edited"}, "body"))
 
@@ -360,7 +360,7 @@ var _ = Describe("Owner rules", func() {
 			refusal := refusalLog(logs)
 			Expect(refusal).To(HaveKeyWithValue("op", "update"))
 			Expect(refusal["rules"]).To(ContainSubstring(
-				"allow[2] update:requires=post:subject=author_id:fields=body: the update changes title, and fields lists body"))
+				"allow[2] update:requires=post:caller_is=author_id:fields=body: the update changes title, and fields lists body"))
 			Expect(refusal["rules"]).To(ContainSubstring(
 				"allow[3] update,delete:requires=moderate_posts: moderate_posts is not held at the root, the row or a row above it"))
 		})
@@ -432,7 +432,7 @@ var _ = Describe("Owner rules", func() {
 			Expect(ticket("tk").GetTitle()).To(Equal("fix"))
 		})
 
-		It("refuses a caller the subject check does not admit", func() {
+		It("refuses a caller the caller_is check does not admit", func() {
 			denied(patch("bob", "ticket", "tk", &accessv1.Ticket{Status: "done"}, "status"))
 		})
 
@@ -465,7 +465,7 @@ var _ = Describe("Owner rules", func() {
 		})
 	})
 
-	Describe("a subject check on a read rule", func() {
+	Describe("a caller_is check on a read rule", func() {
 		It("reads only the rows that name the caller", func() {
 			Expect(f.pull("ann")).To(ContainElement("draft/d-ann"))
 			Expect(f.pull("ann")).To(lackAll("draft/d-bob", "draft/d-bob2"))
@@ -525,7 +525,7 @@ var _ = Describe("Owner rules", func() {
 		})
 	})
 
-	Describe("sync of rows a subject check reads", func() {
+	Describe("sync of rows a caller_is check reads", func() {
 		It("sends a row when its subject comes to name the caller, and removes it when it stops", func() {
 			r := newAccessReplica(f, "ann")
 			r.sync()
@@ -596,7 +596,7 @@ var _ = Describe("Owner rules", func() {
 	})
 })
 
-var _ = Describe("A subject check on a read rule below a row that moves", func() {
+var _ = Describe("A caller_is check on a read rule below a row that moves", func() {
 	var f *accessFixture
 
 	// seedOrg plus pages below t1 in p1: pg-own owned by editor, and pg-other

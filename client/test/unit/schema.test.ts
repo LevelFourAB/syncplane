@@ -811,17 +811,21 @@ describe('schema builder — owner rules', () => {
 		access: {
 			allow: [
 				{ read: true, requires: 'view' },
-				{ create: true, delete: true, requires: 'post', subject: 'authorId' },
-				{ update: true, requires: 'post', subject: 'authorId', fields: [ 'title', 'body' ] },
+				{ create: true, delete: true, requires: 'post', callerIs: 'authorId' },
+				{ update: true, requires: 'post', callerIs: 'authorId', fields: [ 'title', 'body' ] },
 			],
 		},
 	});
 	const bundle = defineSchema(room, post);
 
-	it('lowers subject and fields with proto field names, the fields sorted on the server', () => {
+	it('lowers callerIs and fields with proto field names, the fields sorted on the server', () => {
 		const [ , create, update ] = getOption(bundle.descMessage('post'), entityExt).access!.allow;
-		expect(create).toMatchObject({ create: true, delete: true, subject: 'author_id', fields: [] });
-		expect(update).toMatchObject({ update: true, subject: 'author_id', fields: [ 'title', 'body' ] });
+		expect(create).toMatchObject({ create: true, delete: true, callerIs: 'author_id', fields: [] });
+		expect(update).toMatchObject({
+			update: true,
+			callerIs: 'author_id',
+			fields: [ 'title', 'body' ],
+		});
 	});
 
 	it('lowers .creator() onto the field', () => {
@@ -838,7 +842,7 @@ describe('schema builder — owner rules', () => {
 			requires: [ 'post' ],
 			fields: [ 'body', 'title' ],
 		});
-		expect(def.accessRules![2]!.subject?.name).toBe('author_id');
+		expect(def.accessRules![2]!.callerIs?.name).toBe('author_id');
 		expect(def.writeAccess).toEqual({
 			create: true,
 			update: true,
@@ -869,12 +873,12 @@ describe('schema builder — owner rules', () => {
 			expect(() => text().protected().creator()).toThrow(/not valid on a protected\(\) field/);
 			expect(() => text().creator().protected()).toThrow(/not valid on a creator\(\) field/);
 		});
-		it('rejects a subject that is not a declared text() field', () => {
-			expect(allowing({ read: true, requires: 'p', subject: 'who' })).toThrow(
-				'entity "e" access.allow[0]: subject field "who" is not declared',
+		it('rejects a callerIs that is not a declared text() field', () => {
+			expect(allowing({ read: true, requires: 'p', callerIs: 'who' })).toThrow(
+				'entity "e" access.allow[0]: callerIs field "who" is not declared',
 			);
-			expect(allowing({ read: true, requires: 'p', subject: 'count' })).toThrow(
-				'entity "e" access.allow[0]: subject field "count" must be a singular text() field',
+			expect(allowing({ read: true, requires: 'p', callerIs: 'count' })).toThrow(
+				'entity "e" access.allow[0]: callerIs field "count" must be a singular text() field',
 			);
 		});
 		it('rejects fields on a rule that names another operation than update', () => {
@@ -903,7 +907,7 @@ describe('schema builder — owner rules', () => {
 				{ update: true, requires: 'p', fields: [ 'count', 'note' ] },
 			)).toThrow('entity "e" access.allow[1]: the rule repeats access.allow[0]');
 			expect(allowing(
-				{ read: true, requires: 'p', subject: 'ownerId' },
+				{ read: true, requires: 'p', callerIs: 'ownerId' },
 				{ read: true, requires: 'p' },
 			)).not.toThrow();
 		});
@@ -1007,7 +1011,7 @@ describe('schema builder — within entries', () => {
 					admitted: true,
 					within: [
 						within(project, { when: (p) => p.isPrivate.eq(false) }),
-						{ entity: 'project', subject: 'ownerId' },
+						{ entity: 'project', callerIs: 'ownerId' },
 					],
 				},
 			],
@@ -1017,7 +1021,7 @@ describe('schema builder — within entries', () => {
 	it('lowers each entry with proto field names, and reads it onto the EntityDef', () => {
 		const bundle = defineSchema(project, task);
 		const within = getOption(bundle.descMessage('task'), entityExt).access!.allow[1]!.within;
-		expect(within.map((w) => [ w.entity, w.subject ])).toEqual([ [ 'project', '' ], [
+		expect(within.map((w) => [ w.entity, w.callerIs ])).toEqual([ [ 'project', '' ], [
 			'project',
 			'owner_id',
 		] ]);
@@ -1029,7 +1033,7 @@ describe('schema builder — within entries', () => {
 		});
 		const def = entityDefOf(bundle.descMessage('task'));
 		expect(def.accessRules![0]!.within).toEqual([]);
-		expect(def.accessRules![1]!.within.map((w) => w.subject)).toEqual([ undefined, 'owner_id' ]);
+		expect(def.accessRules![1]!.within.map((w) => w.callerIs)).toEqual([ undefined, 'owner_id' ]);
 	});
 
 	describe('validation', () => {
@@ -1042,25 +1046,28 @@ describe('schema builder — within entries', () => {
 
 		it('rejects an entry without a check', () => {
 			expect(allowing({ entity: 'project' }))
-				.toThrow('entity "e" access.allow[0] within[0]: sets no check; set subject or when');
+				.toThrow('entity "e" access.allow[0] within[0]: sets no check; set callerIs or when');
 		});
 		it('rejects an entry that repeats another', () => {
 			expect(
-				allowing({ entity: 'project', subject: 'ownerId' }, { entity: 'project', subject: 'ownerId' }),
+				allowing({ entity: 'project', callerIs: 'ownerId' }, {
+					entity: 'project',
+					callerIs: 'ownerId',
+				}),
 			)
 				.toThrow('entity "e" access.allow[0] within[1]: repeats an earlier entry');
 		});
 		it('rejects an entity outside the schema', () => {
-			expect(allowing({ entity: 'nothing', subject: 'ownerId' }))
+			expect(allowing({ entity: 'nothing', callerIs: 'ownerId' }))
 				.toThrow(
 					'entity "e" access.allow[0] within[0]: names entity "nothing", which is not part of this schema',
 				);
 		});
-		it('rejects a subject field that is not a text() field of the entity', () => {
-			expect(allowing({ entity: 'project', subject: 'missing' }))
-				.toThrow('subject field "missing" is not declared on entity "project"');
-			expect(allowing({ entity: 'project', subject: 'isPrivate' }))
-				.toThrow('subject field "isPrivate" must be a singular text() field');
+		it('rejects a callerIs field that is not a text() field of the entity', () => {
+			expect(allowing({ entity: 'project', callerIs: 'missing' }))
+				.toThrow('callerIs field "missing" is not declared on entity "project"');
+			expect(allowing({ entity: 'project', callerIs: 'isPrivate' }))
+				.toThrow('callerIs field "isPrivate" must be a singular text() field');
 		});
 		it('rejects a condition that cannot decide access', () => {
 			expect(allowing(within(project, { when: (p) => or(p.ownerId.eq('x'), p.match('y')) })))
@@ -1070,18 +1077,18 @@ describe('schema builder — within entries', () => {
 			const other = entity('other', { id: text().key(), ownerId: text() }, {
 				access: { allow: [ { read: true, requires: 'p' } ] },
 			});
-			expect(allowing(within(() => other, { subject: 'ownerId' })))
+			expect(allowing(within(() => other, { callerIs: 'ownerId' })))
 				.toThrow(
 					'entity "e" access.allow[0] within[0]: names entity "other", which is not part of this schema',
 				);
 			const missing = undefined as unknown as EntitySchema;
-			expect(allowing({ entity: () => missing, subject: 'ownerId' }))
+			expect(allowing({ entity: () => missing, callerIs: 'ownerId' }))
 				.toThrow(
 					'entity "e" access.allow[0] within[0]: names entity <unresolved>, which is not part of this schema',
 				);
 		});
 		it('rejects an entry that sets both self and entity', () => {
-			const both = { self: true, entity: 'project', subject: 'ownerId' } as unknown as WithinDecl;
+			const both = { self: true, entity: 'project', callerIs: 'ownerId' } as unknown as WithinDecl;
 			expect(allowing(both)).toThrow(
 				'entity "e" access.allow[0] within[0]: sets both self and entity; set one',
 			);
@@ -1090,8 +1097,8 @@ describe('schema builder — within entries', () => {
 			const repeated = entity('e', fields, {
 				access: {
 					allow: [
-						{ read: true, requires: 'p', within: within(() => project, { subject: 'ownerId' }) },
-						{ read: true, requires: 'p', within: within(() => project, { subject: 'ownerId' }) },
+						{ read: true, requires: 'p', within: within(() => project, { callerIs: 'ownerId' }) },
+						{ read: true, requires: 'p', within: within(() => project, { callerIs: 'ownerId' }) },
 					],
 				},
 			});
@@ -1134,7 +1141,7 @@ describe('schema builder — within entries', () => {
 		});
 	});
 
-	it("names the rule's own entity through self, with subject and when typed against its fields", () => {
+	it("names the rule's own entity through self, with callerIs and when typed against its fields", () => {
 		// A self reference needs a named field map; see the issue entity above.
 		type FolderFields = {
 			id: Field<string>;
@@ -1152,22 +1159,22 @@ describe('schema builder — within entries', () => {
 				allow: [
 					{ read: true, requires: 'view_private' },
 					{ read: true, admitted: true, within: { self: true, when: (f) => f.isPrivate.eq(false) } },
-					{ write: true, admitted: true, within: { self: true, subject: 'ownerId' } },
+					{ write: true, admitted: true, within: { self: true, callerIs: 'ownerId' } },
 				],
 			},
 		});
 		const allow = (
 			within: AccessRuleDecl<FolderFields>['within'],
 		) => [ { read: true, admitted: true, within } ];
-		// @ts-expect-error a subject is a text() field
-		allow({ self: true, subject: 'isPrivate' });
+		// @ts-expect-error callerIs names a text() field
+		allow({ self: true, callerIs: 'isPrivate' });
 		// @ts-expect-error not a field of a folder
 		allow({ self: true, when: (f) => f.private.eq(false) });
 		const rules = getOption(defineSchema(folder).descMessage('folder'), entityExt).access!.allow;
 		expect(rules[1]!.within.map((w) => w.entity)).toEqual([ 'folder' ]);
 		expect(condFromProto(rules[1]!.within[0]!.when!))
 			.toEqual({ kind: 'cmp', path: [ 'is_private' ], op: 'eq', value: false });
-		expect(rules[2]!.within.map((w) => [ w.entity, w.subject ])).toEqual([ [
+		expect(rules[2]!.within.map((w) => [ w.entity, w.callerIs ])).toEqual([ [
 			'folder',
 			'owner_id',
 		] ]);
@@ -1331,22 +1338,22 @@ describe('schema builder — typed access names', () => {
 			access: {
 				allow: [
 					{ read: true, requires: 'view_posts' },
-					{ update: true, requires: 'post', subject: 'authorId', fields: [ 'body' ] },
+					{ update: true, requires: 'post', callerIs: 'authorId', fields: [ 'body' ] },
 				],
 			},
 		});
 		expect(post.access?.allow).toHaveLength(2);
 	});
 
-	it('refuses a rule subject or fields entry that is not a matching field, at compile time', () => {
+	it('refuses a rule callerIs or fields entry that is not a matching field, at compile time', () => {
 		const opts = (allow: AccessRuleDecl<typeof postFields>[]) => ({ access: { allow } });
 		opts([
 			// @ts-expect-error not a field of a post
-			{ update: true, requires: 'post', subject: 'authorIdd' },
+			{ update: true, requires: 'post', callerIs: 'authorIdd' },
 		]);
 		opts([
-			// @ts-expect-error a subject is a text() field
-			{ update: true, requires: 'post', subject: 'pinned' },
+			// @ts-expect-error callerIs names a text() field
+			{ update: true, requires: 'post', callerIs: 'pinned' },
 		]);
 		opts([
 			// @ts-expect-error not a field of a post
@@ -1419,7 +1426,7 @@ describe('schema builder — typed access names', () => {
 		const allow: AccessRuleDecl[] = [ {
 			update: true,
 			requires: 'post',
-			subject: 'anyField',
+			callerIs: 'anyField',
 			fields: [ 'x' ],
 		} ];
 		expect(allow).toHaveLength(1);

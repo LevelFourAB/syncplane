@@ -50,7 +50,7 @@ var _ = Describe("An access model that declares no role", func() {
 		})).To(Succeed())
 	})
 
-	It("holds a rule with a subject check to the caller's own rows", func() {
+	It("holds a rule with a caller_is check to the caller's own rows", func() {
 		r := f.push("ann", "c1", putMutation("c1", 1, "setting", "ann", &accessv1.Setting{UserId: "ann", Theme: "dark"}))[0]
 		Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED), r.GetErrorMessage())
 

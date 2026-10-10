@@ -178,7 +178,7 @@ func (a *txAccess) holdsAt(tx storage.ReadTx, perm string, at *anchorRow) (bool,
 // as of tx. A rule with permissions needs each of them at the workspace root,
 // at the row itself, or at a row up its parent chain. A rule that admits every
 // admitted caller holds for every caller that passed the workspace gate,
-// which is every caller with an access. A rule with a subject check also
+// which is every caller with an access. A rule with a caller_is check also
 // needs the row's subject field to hold one of the caller's subjects, and a
 // rule with a when check needs the row to match its condition, and a rule
 // with within entries needs the row to sit within a row that passes each. row
@@ -291,8 +291,8 @@ func (a *txAccess) ruleOutcome(tx storage.ReadTx, rule accessRule, info *entityI
 	if row == nil && (rule.checksRow() || rule.checksAbove()) {
 		why = append(why, "the row does not exist, and the rule checks it")
 	}
-	if row != nil && rule.subject != nil && !subjectMatches(a.caller.subjects, row.Get(rule.subject).String()) {
-		why = append(why, fmt.Sprintf("%s does not hold a subject of the caller", rule.subject.Name()))
+	if row != nil && rule.callerIs != nil && !subjectMatches(a.caller.subjects, row.Get(rule.callerIs).String()) {
+		why = append(why, fmt.Sprintf("%s does not hold a subject of the caller", rule.callerIs.Name()))
 	}
 	if row != nil && rule.when != nil && !rule.when.Eval(row) {
 		why = append(why, "the row does not match when")

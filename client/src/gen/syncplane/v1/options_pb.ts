@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSI4Cg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUijwIKCkFjY2Vzc1J1bGUSDAoEcmVhZBgBIAEoCBIOCgZjcmVhdGUYAiABKAgSDgoGdXBkYXRlGAMgASgIEg4KBmRlbGV0ZRgEIAEoCBINCgV3cml0ZRgFIAEoCBIQCghyZXF1aXJlcxgGIAMoCRIuCghhZG1pdHRlZBgHIAEoCzIcLnN5bmNwbGFuZS52MS5BZG1pdHRlZENhbGxlchIPCgdzdWJqZWN0GAggASgJEg4KBmZpZWxkcxgJIAMoCRIlCgR3aGVuGAogASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbhIqCgZ3aXRoaW4YCyADKAsyGi5zeW5jcGxhbmUudjEuQWNjZXNzV2l0aGluIlYKDEFjY2Vzc1dpdGhpbhIOCgZlbnRpdHkYASABKAkSDwoHc3ViamVjdBgCIAEoCRIlCgR3aGVuGAMgASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbiIQCg5BZG1pdHRlZENhbGxlciJQCgxHcmFudE9wdGlvbnMSDwoHc3ViamVjdBgBIAEoCRIMCgRyb2xlGAIgASgJEiEKBXJvbGVzGAMgAygLMhIuc3luY3BsYW5lLnYxLlJvbGUiNgoEUm9sZRIMCgRuYW1lGAEgASgJEg4KBmdyYW50cxgCIAMoCRIQCghpbmNsdWRlcxgDIAMoCSIgCg5NZW1iZXJzT3B0aW9ucxIOCgZlbnRpdHkYASABKAkiFQoTQWNjZXNzUGFyZW50T3B0aW9ucyIQCg5DcmVhdG9yT3B0aW9ucyIQCg5IaXN0b3J5T3B0aW9ucyISChBSZWZlcmVuY2VPcHRpb25zIhsKC1NlYXJjaEZpZWxkEgwKBHBhdGgYASABKAkiTwoKU2VhcmNoU3BlYxIoCgVmaWVsZBgBIAMoCzIZLnN5bmNwbGFuZS52MS5TZWFyY2hGaWVsZBIXCg9rZWVwX2RpYWNyaXRpY3MYAiABKAgiJgoISW5kZXhLZXkSDAoEcGF0aBgBIAEoCRIMCgRkZXNjGAIgASgIIj4KCUluZGV4U3BlYxIMCgRuYW1lGAEgASgJEiMKA2tleRgCIAMoCzIWLnN5bmNwbGFuZS52MS5JbmRleEtleSLXAgoNRmllbGRCZWhhdmlvchIOCgZvcGFxdWUYASABKAgSEQoJa2V5X2ZpZWxkGAIgAygJEhMKC29yZGVyX2ZpZWxkGAMgASgJEgwKBHRleHQYBCABKAgSDwoHaW5kZXhlZBgFIAEoCBIPCgdoaXN0b3J5GAYgASgIEhIKCnNlYXJjaGFibGUYByABKAgSNAoMd3JpdGVfcG9saWN5GAggASgOMh4uc3luY3BsYW5lLnYxLkZpZWxkV3JpdGVQb2xpY3kSEQoJd29ya3NwYWNlGAkgASgIEhgKEHJldmVyc2VfcmVsYXRpb24YCiABKAkSOAoNYWNjZXNzX3BhcmVudBgLIAEoCzIhLnN5bmNwbGFuZS52MS5BY2Nlc3NQYXJlbnRPcHRpb25zEi0KB2NyZWF0b3IYDCABKAsyHC5zeW5jcGxhbmUudjEuQ3JlYXRvck9wdGlvbnMqeQoQRmllbGRXcml0ZVBvbGljeRIiCh5GSUVMRF9XUklURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIcChhGSUVMRF9XUklURV9QT0xJQ1lfQUxMT1cQARIjCh9GSUVMRF9XUklURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAI6VgoGZW50aXR5Eh8uZ29vZ2xlLnByb3RvYnVmLk1lc3NhZ2VPcHRpb25zGLSHAyABKAsyGy5zeW5jcGxhbmUudjEuRW50aXR5T3B0aW9uc1IGZW50aXR5Ol8KCXJlZmVyZW5jZRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi2hwMgASgLMh4uc3luY3BsYW5lLnYxLlJlZmVyZW5jZU9wdGlvbnNSCXJlZmVyZW5jZTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor, file_syncplane_v1_query]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSI4Cg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUikQIKCkFjY2Vzc1J1bGUSDAoEcmVhZBgBIAEoCBIOCgZjcmVhdGUYAiABKAgSDgoGdXBkYXRlGAMgASgIEg4KBmRlbGV0ZRgEIAEoCBINCgV3cml0ZRgFIAEoCBIQCghyZXF1aXJlcxgGIAMoCRIuCghhZG1pdHRlZBgHIAEoCzIcLnN5bmNwbGFuZS52MS5BZG1pdHRlZENhbGxlchIRCgljYWxsZXJfaXMYCCABKAkSDgoGZmllbGRzGAkgAygJEiUKBHdoZW4YCiABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uEioKBndpdGhpbhgLIAMoCzIaLnN5bmNwbGFuZS52MS5BY2Nlc3NXaXRoaW4iWAoMQWNjZXNzV2l0aGluEg4KBmVudGl0eRgBIAEoCRIRCgljYWxsZXJfaXMYAiABKAkSJQoEd2hlbhgDIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24iEAoOQWRtaXR0ZWRDYWxsZXIiUAoMR3JhbnRPcHRpb25zEg8KB3N1YmplY3QYASABKAkSDAoEcm9sZRgCIAEoCRIhCgVyb2xlcxgDIAMoCzISLnN5bmNwbGFuZS52MS5Sb2xlIjYKBFJvbGUSDAoEbmFtZRgBIAEoCRIOCgZncmFudHMYAiADKAkSEAoIaW5jbHVkZXMYAyADKAkiIAoOTWVtYmVyc09wdGlvbnMSDgoGZW50aXR5GAEgASgJIhUKE0FjY2Vzc1BhcmVudE9wdGlvbnMiEAoOQ3JlYXRvck9wdGlvbnMiEAoOSGlzdG9yeU9wdGlvbnMiEgoQUmVmZXJlbmNlT3B0aW9ucyIbCgtTZWFyY2hGaWVsZBIMCgRwYXRoGAEgASgJIk8KClNlYXJjaFNwZWMSKAoFZmllbGQYASADKAsyGS5zeW5jcGxhbmUudjEuU2VhcmNoRmllbGQSFwoPa2VlcF9kaWFjcml0aWNzGAIgASgIIiYKCEluZGV4S2V5EgwKBHBhdGgYASABKAkSDAoEZGVzYxgCIAEoCCI+CglJbmRleFNwZWMSDAoEbmFtZRgBIAEoCRIjCgNrZXkYAiADKAsyFi5zeW5jcGxhbmUudjEuSW5kZXhLZXki1wIKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCBISCgpzZWFyY2hhYmxlGAcgASgIEjQKDHdyaXRlX3BvbGljeRgIIAEoDjIeLnN5bmNwbGFuZS52MS5GaWVsZFdyaXRlUG9saWN5EhEKCXdvcmtzcGFjZRgJIAEoCBIYChByZXZlcnNlX3JlbGF0aW9uGAogASgJEjgKDWFjY2Vzc19wYXJlbnQYCyABKAsyIS5zeW5jcGxhbmUudjEuQWNjZXNzUGFyZW50T3B0aW9ucxItCgdjcmVhdG9yGAwgASgLMhwuc3luY3BsYW5lLnYxLkNyZWF0b3JPcHRpb25zKnkKEEZpZWxkV3JpdGVQb2xpY3kSIgoeRklFTERfV1JJVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASHAoYRklFTERfV1JJVEVfUE9MSUNZX0FMTE9XEAESIwofRklFTERfV1JJVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpfCglyZWZlcmVuY2USHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtocDIAEoCzIeLnN5bmNwbGFuZS52MS5SZWZlcmVuY2VPcHRpb25zUglyZWZlcmVuY2U6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor, file_syncplane_v1_query]);
 
 /**
  * Declares a message as a syncable entity.
@@ -200,7 +200,7 @@ export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
  * update must be admitted by one rule for both the stored row and the row as
  * it will be stored, so a rule admits a write that moves a row to another
  * access parent only when its source holds at the old place and at the new
- * one, a rule with `subject` admits no write that changes the subject field
+ * one, a rule with `caller_is` admits no write that changes the named field
  * to a value outside the caller's subjects, and a rule with `when` admits no
  * write that makes the row fail the condition.
  *
@@ -219,9 +219,9 @@ export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
  *     access: { allow: [
  *       { read: true requires: "view_tasks" },
  *       { create: true delete: true
- *         requires: "comment" subject: "author_id" },
+ *         requires: "comment" caller_is: "author_id" },
  *       { update: true requires: "comment"
- *         subject: "author_id" fields: ["body"] }
+ *         caller_is: "author_id" fields: ["body"] }
  *     ] }
  *   };
  *   string id = 1;
@@ -316,9 +316,9 @@ export type AccessRule = Message<"syncplane.v1.AccessRule"> & {
    * skip the check. A member of a `oneof` is empty on a row that holds
    * another case, so it never matches there.
    *
-   * @generated from field: string subject = 8;
+   * @generated from field: string caller_is = 8;
    */
-  subject: string;
+  callerIs: string;
 
   /**
    * Admits only updates that change no field outside this list. Valid only
@@ -416,7 +416,7 @@ export const AccessRuleSchema: GenMessage<AccessRule> = /*@__PURE__*/
  *     access: { allow: [
  *       { read: true requires: "view_docs" },
  *       { write: true requires: "view_docs"
- *         within: { entity: "doc" subject: "owner_id" } }
+ *         within: { entity: "doc" caller_is: "owner_id" } }
  *     ] }
  *   };
  *   string id = 1;
@@ -434,7 +434,7 @@ export const AccessRuleSchema: GenMessage<AccessRule> = /*@__PURE__*/
  *
  * Registration refuses an entry that sets no check, an `entity` whose rows the
  * rule's entity cannot sit below (its own entity only when it is recursive), a
- * `subject` that is not a top-level, singular `string` field of `entity`, a
+ * `caller_is` that is not a top-level, singular `string` field of `entity`, a
  * `when` that reads another row, and unknown fields inside this message.
  *
  * @generated from message syncplane.v1.AccessWithin
@@ -451,9 +451,9 @@ export type AccessWithin = Message<"syncplane.v1.AccessWithin"> & {
    * Admits only a row of `entity` whose field with this name holds one of
    * the caller's subjects. An empty value never matches.
    *
-   * @generated from field: string subject = 2;
+   * @generated from field: string caller_is = 2;
    */
-  subject: string;
+  callerIs: string;
 
   /**
    * Admits only a row of `entity` that matches this condition. Paths start

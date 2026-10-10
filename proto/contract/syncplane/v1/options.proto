@@ -123,7 +123,7 @@ message AccessOptions {
 // update must be admitted by one rule for both the stored row and the row as
 // it will be stored, so a rule admits a write that moves a row to another
 // access parent only when its source holds at the old place and at the new
-// one, a rule with `subject` admits no write that changes the subject field
+// one, a rule with `caller_is` admits no write that changes the named field
 // to a value outside the caller's subjects, and a rule with `when` admits no
 // write that makes the row fail the condition.
 //
@@ -142,9 +142,9 @@ message AccessOptions {
 //     access: { allow: [
 //       { read: true requires: "view_tasks" },
 //       { create: true delete: true
-//         requires: "comment" subject: "author_id" },
+//         requires: "comment" caller_is: "author_id" },
 //       { update: true requires: "comment"
-//         subject: "author_id" fields: ["body"] }
+//         caller_is: "author_id" fields: ["body"] }
 //     ] }
 //   };
 //   string id = 1;
@@ -201,7 +201,7 @@ message AccessRule {
 	// value never matches, and a permission held at the workspace root does not
 	// skip the check. A member of a `oneof` is empty on a row that holds
 	// another case, so it never matches there.
-	string subject = 8;
+	string caller_is = 8;
 	// Admits only updates that change no field outside this list. Valid only
 	// on a rule whose one operation is `update`. Each entry names a top-level
 	// field outside any `oneof`, or a `oneof`, and no key field. A move
@@ -276,7 +276,7 @@ message AccessRule {
 //     access: { allow: [
 //       { read: true requires: "view_docs" },
 //       { write: true requires: "view_docs"
-//         within: { entity: "doc" subject: "owner_id" } }
+//         within: { entity: "doc" caller_is: "owner_id" } }
 //     ] }
 //   };
 //   string id = 1;
@@ -294,14 +294,14 @@ message AccessRule {
 //
 // Registration refuses an entry that sets no check, an `entity` whose rows the
 // rule's entity cannot sit below (its own entity only when it is recursive), a
-// `subject` that is not a top-level, singular `string` field of `entity`, a
+// `caller_is` that is not a top-level, singular `string` field of `entity`, a
 // `when` that reads another row, and unknown fields inside this message.
 message AccessWithin {
 	// The entity the row must sit within, by its entity name.
 	string entity = 1;
 	// Admits only a row of `entity` whose field with this name holds one of
 	// the caller's subjects. An empty value never matches.
-	string subject = 2;
+	string caller_is = 2;
 	// Admits only a row of `entity` that matches this condition. Paths start
 	// at that row.
 	Condition when = 3;

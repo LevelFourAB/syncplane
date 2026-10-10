@@ -55,8 +55,9 @@ export type CanAnswer = 'yes' | 'no' | 'unknown';
  * - `'row_not_held'`: a row the answer depends on is not held locally: the
  *   row itself, a row up its chain of access parents, or a row a `within`
  *   entry reads.
- * - `'new_value'`: the update changes a subject field, the access parent, or
- *   a field a condition reads, and the new value decides.
+ * - `'new_value'`: the update changes a field a `callerIs` check reads,
+ *   the access parent, or a field a condition reads, and the new value
+ *   decides.
  * - `'chain_too_deep'`: the chain of access parents is longer than
  *   {@link MAX_ACCESS_CHAIN} rows.
  * - `'error'`: the read of the local store failed. Only the React hooks give
@@ -263,13 +264,13 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 /**
  * One row of an operation, as {@link decideRules} reads it: whether the
  * caller holds each permission at the row or up its chain, the value of each
- * subject field, an {@link UnknownDetail} where the client cannot know it,
- * whether the row matches a rule's `when` condition, and whether it sits
- * within rows that pass a rule's `within` entries.
+ * field a `callerIs` check reads, an {@link UnknownDetail} where the client
+ * cannot know it, whether the row matches a rule's `when` condition, and
+ * whether it sits within rows that pass a rule's `within` entries.
  */
 export interface RuleRow {
 	held(permission: string): Verdict;
-	subject(field: string): string | UnknownDetail;
+	fieldValue(field: string): string | UnknownDetail;
 	matches(rule: AccessRuleDef): Verdict;
 	within(rule: AccessRuleDef): Verdict;
 }
@@ -280,10 +281,10 @@ export interface RuleRow {
  * testdata/access/rules.json pins the two against each other.
  *
  * A rule admits an operation it names when the caller holds each permission in
- * its `requires` on the row, its subject check passes, the row matches its
- * `when` condition and sits within rows that pass its `within` entries:
- * `subjects` holds the subject field's value,
- * which must not be empty. `row` is the row read or deleted, the row a create
+ * its `requires` on the row, its `callerIs` check passes, the row matches its
+ * `when` condition and sits within rows that pass its `within` entries.
+ * The `callerIs` check passes when `subjects` holds the field value, which
+ * must not be empty. `row` is the row read or deleted, the row a create
  * will store, or the stored row of an update. An update also needs the same
  * rule to admit `final`, the row it will store, and its fields check to allow
  * `changed`, the units the update changes; `null` stands for fields that no
@@ -298,10 +299,10 @@ export function decideRules(
 	changed?: readonly string[] | null,
 ): Verdict {
 	const admits = (rule: AccessRuleDef, side: RuleRow): Verdict => {
-		let subject: Verdict = 'yes';
-		if (rule.subject !== undefined) {
-			const value = side.subject(rule.subject.name);
-			subject = typeof value !== 'string'
+		let callerIs: Verdict = 'yes';
+		if (rule.callerIs !== undefined) {
+			const value = side.fieldValue(rule.callerIs.name);
+			callerIs = typeof value !== 'string'
 				? value
 				: value !== '' && subjects.includes(value)
 				? 'yes'
@@ -311,7 +312,7 @@ export function decideRules(
 		const within: Verdict = rule.within.length === 0 ? 'yes' : side.within(rule);
 		let source: Verdict = 'yes';
 		for (const permission of rule.requires) source = and(source, side.held(permission));
-		return and(and(and(subject, when), within), source);
+		return and(and(and(callerIs, when), within), source);
 	};
 	let answer: Verdict = 'no';
 	for (const rule of rules) {
@@ -494,9 +495,9 @@ export function accessRowId(row: AccessRow): string {
 /**
  * The row of `def` with `key` as {@link decideRules} reads it from local
  * data: a permission is decided by {@link canAt} over `chain`, or by
- * {@link canAtEach} with `throughEach`, and a subject field and a `when`
- * condition read `row`, which is unknown when the client does not hold the
- * row.
+ * {@link canAtEach} with `throughEach`, and a field a `callerIs` check reads
+ * and a `when` condition read `row`, which is unknown when the client does
+ * not hold the row.
  */
 export function ruleRowOf(
 	summary: AccessSummary,
@@ -509,7 +510,7 @@ export function ruleRowOf(
 	const decide = throughEach ? canAtEach : canAt;
 	return {
 		held: (permission) => decide(summary, permission, def.name, key, chain),
-		subject: (name) => {
+		fieldValue: (name) => {
 			if (row === undefined) return unknownBecause('row_not_held');
 			const field = def.schema.fields.find((f) => f.name === name);
 			const value = field === undefined
@@ -615,8 +616,8 @@ function passesWithin(
 	row: Message,
 	entry: WithinDef,
 ): boolean {
-	if (entry.subject !== undefined) {
-		const field = def.schema.fields.find((f) => f.name === entry.subject);
+	if (entry.callerIs !== undefined) {
+		const field = def.schema.fields.find((f) => f.name === entry.callerIs);
 		const value = field === undefined
 			? undefined
 			: fieldValueOf(row as unknown as Record<string, unknown>, field);
@@ -629,8 +630,8 @@ function passesWithin(
 /**
  * Whether an update of a row of `def` that changes the units in `changed` can
  * change whether the row passes a `within` entry of `rule` on its own entity:
- * the entry's subject field or condition reads one of them. `changed` holds
- * proto names, and a oneof counts by its name.
+ * the field its `callerIs` check names or its condition reads one of them.
+ * `changed` holds proto names, and a oneof counts by its name.
  */
 export function withinReads(
 	def: EntityDef,
@@ -639,9 +640,9 @@ export function withinReads(
 ): boolean {
 	return rule.within.some((entry) => {
 		if (entry.entity !== def.name) return false;
-		if (entry.subject !== undefined) {
-			const field = def.schema.fields.find((f) => f.name === entry.subject);
-			if (changed.includes(field?.oneof?.name ?? entry.subject)) return true;
+		if (entry.callerIs !== undefined) {
+			const field = def.schema.fields.find((f) => f.name === entry.callerIs);
+			if (changed.includes(field?.oneof?.name ?? entry.callerIs)) return true;
 		}
 		return entry.when !== undefined
 			&& ruleWhenOf(def.schema, entry.when).units.some((u) => changed.includes(u));
@@ -737,14 +738,14 @@ export function accessInputsOf(
 	if (subjects) {
 		const rec = row as unknown as Record<string, unknown>;
 		for (const rule of def.accessRules ?? []) {
-			if (rule.subject !== undefined) {
+			if (rule.callerIs !== undefined) {
 				// Read as ruleRowOf reads it.
-				const value = fieldValueOf(rec, rule.subject);
+				const value = fieldValueOf(rec, rule.callerIs);
 				inputs.push(typeof value === 'string' ? value : '');
 			}
 			for (const entry of rule.within) {
-				if (entry.entity !== def.name || entry.subject === undefined) continue;
-				const field = def.schema.fields.find((f) => f.name === entry.subject);
+				if (entry.entity !== def.name || entry.callerIs === undefined) continue;
+				const field = def.schema.fields.find((f) => f.name === entry.callerIs);
 				const value = field === undefined ? undefined : fieldValueOf(rec, field);
 				inputs.push(typeof value === 'string' ? value : '');
 			}

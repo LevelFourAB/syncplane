@@ -107,17 +107,17 @@ var _ = Describe("Access model registration of within entries", func() {
 				ContainSubstring(`access allow[1] within[0]`), ContainSubstring(want))))
 		},
 		Entry("an entry without an entity", &syncplanev1.AccessWithin{When: open}, `names no entity`),
-		Entry("an entry without a check", &syncplanev1.AccessWithin{Entity: "dossier"}, `sets no check; set subject or when`),
+		Entry("an entry without a check", &syncplanev1.AccessWithin{Entity: "dossier"}, `sets no check; set caller_is or when`),
 		Entry("an entity that is not registered",
 			&syncplanev1.AccessWithin{Entity: "nothing", When: open},
 			`names entity "nothing", which is not a registered entity in the access model`),
 		Entry("an entity whose rows the rule's rows cannot sit below",
-			&syncplanev1.AccessWithin{Entity: "memo", Subject: "title"},
+			&syncplanev1.AccessWithin{Entity: "memo", CallerIs: "title"},
 			`names entity "memo", whose rows "matter" rows cannot sit below`),
 		Entry("a subject field the entity does not have",
-			&syncplanev1.AccessWithin{Entity: "dossier", Subject: "nobody"}, `field "nobody" not found`),
+			&syncplanev1.AccessWithin{Entity: "dossier", CallerIs: "nobody"}, `field "nobody" not found`),
 		Entry("a subject field that is not a string",
-			&syncplanev1.AccessWithin{Entity: "dossier", Subject: "private"}, `field "private" is bool; it must be a string`),
+			&syncplanev1.AccessWithin{Entity: "dossier", CallerIs: "private"}, `field "private" is bool; it must be a string`),
 		Entry("a condition on a field the entity does not have",
 			&syncplanev1.AccessWithin{Entity: "dossier", When: query.Eq("closed", true)}, `closed`),
 		Entry("a rel condition, which reads another row",
@@ -149,7 +149,7 @@ var _ = Describe("Access model registration of within entries", func() {
 	It("accepts two entries, which must both hold", func() {
 		Expect(register(withinOn(
 			&syncplanev1.AccessWithin{Entity: "dossier", When: open},
-			&syncplanev1.AccessWithin{Entity: "dossier", Subject: "owner_id"},
+			&syncplanev1.AccessWithin{Entity: "dossier", CallerIs: "owner_id"},
 		))).To(Succeed())
 	})
 

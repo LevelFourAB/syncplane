@@ -155,7 +155,7 @@ message Page {
 		access: {
 			allow: [
 				{ read: true requires: "view_tasks" },
-				{ read: true requires: "view_projects" subject: "owner_id" },
+				{ read: true requires: "view_projects" caller_is: "owner_id" },
 				{ write: true requires: "edit_tasks" }
 			]
 		}
@@ -559,7 +559,7 @@ message RoomMember {
 			allow: [
 				{ read: true requires: "view_room_members" },
 				{ write: true requires: "manage_room_members" },
-				{ delete: true requires: "view_rooms" subject: "user_id" }
+				{ delete: true requires: "view_rooms" caller_is: "user_id" }
 			]
 		}
 	};
@@ -582,12 +582,12 @@ message Post {
 					create: true
 					delete: true
 					requires: "post"
-					subject: "author_id"
+					caller_is: "author_id"
 				},
 				{
 					update: true
 					requires: "post"
-					subject: "author_id"
+					caller_is: "author_id"
 					fields: [ "body" ]
 				},
 				{ update: true delete: true requires: "moderate_posts" }
@@ -612,7 +612,7 @@ message Draft {
 				read: true
 				write: true
 				requires: "view_posts"
-				subject: "author_id"
+				caller_is: "author_id"
 			} ]
 		}
 	};
@@ -635,7 +635,7 @@ message Ticket {
 				{
 					update: true
 					requires: "view_posts"
-					subject: "assignee_id"
+					caller_is: "assignee_id"
 					fields: [ "status" ]
 				}
 			]
@@ -659,7 +659,7 @@ message Setting {
 				read: true
 				write: true
 				admitted: {}
-				subject: "user_id"
+				caller_is: "user_id"
 			} ]
 		}
 	};
@@ -737,7 +737,7 @@ message Bulletin {
 					read: true
 					write: true
 					admitted: {}
-					subject: "author_id"
+					caller_is: "author_id"
 				}
 			]
 		}
@@ -851,7 +851,7 @@ message RepoMember {
 			allow: [
 				{ read: true requires: "view_repo_members" },
 				{ write: true requires: "manage_repo_members" },
-				{ delete: true requires: "view_repos" subject: "user_id" }
+				{ delete: true requires: "view_repos" caller_is: "user_id" }
 			]
 		}
 	};
@@ -1583,7 +1583,7 @@ message Memo {
 					read: true
 					write: true
 					admitted: {}
-					within: { entity: "dossier" subject: "owner_id" }
+					within: { entity: "dossier" caller_is: "owner_id" }
 				}
 			]
 		}
@@ -1608,7 +1608,7 @@ message Binder {
 					read: true
 					update: true
 					admitted: {}
-					within: { entity: "binder" subject: "owner_id" }
+					within: { entity: "binder" caller_is: "owner_id" }
 				}
 			]
 		}
@@ -1632,7 +1632,7 @@ message Sheet {
 					read: true
 					write: true
 					admitted: {}
-					within: { entity: "binder" subject: "owner_id" }
+					within: { entity: "binder" caller_is: "owner_id" }
 				}
 			]
 		}

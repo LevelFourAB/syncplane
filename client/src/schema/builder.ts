@@ -370,7 +370,7 @@ export class Field<T> {
 	 *
 	 * The local view shows the primary subject from the last access summary
 	 * on a row this client creates, and an empty value before the first
-	 * summary arrives. An access rule's `subject` check can name the field to
+	 * summary arrives. An access rule's `callerIs` check can name the field to
 	 * admit only the author.
 	 *
 	 * Throws unless the field is a singular `text()` that is not a key and not
@@ -387,8 +387,8 @@ export class Field<T> {
 	 *   access: {
 	 *     allow: [
 	 *       { read: true, requires: 'view_tasks' },
-	 *       { create: true, delete: true, requires: 'comment', subject: 'authorId' },
-	 *       { update: true, requires: 'comment', subject: 'authorId', fields: ['body'] },
+	 *       { create: true, delete: true, requires: 'comment', callerIs: 'authorId' },
+	 *       { update: true, requires: 'comment', callerIs: 'authorId', fields: ['body'] },
 	 *     ],
 	 *   },
 	 * });
@@ -724,7 +724,7 @@ export interface EntitySchema<F extends Fields = Fields> {
  *
  * `allow` holds at least one rule, and no two rules the same.
  *
- * Within `entity()`, a rule's `subject` and `fields`, and a grant's `subject`
+ * Within `entity()`, a rule's `callerIs` and `fields`, and a grant's `subject`
  * and `role`, accept only the names of the entity's fields. A declaration
  * annotated as `AccessDecl` takes any name, and does not fit an entity's
  * options; to share rules between entities, check them with `satisfies`.
@@ -777,7 +777,7 @@ type SubjectKeys<F extends Fields> = Fields extends F ? string : {
  * hook admits a caller; in a schema where some entity declares `grant`, the
  * caller must also hold at least one permission in the workspace.
  *
- * `subject` names a singular `text()` field that must hold one of the
+ * `callerIs` names a singular `text()` field that must hold one of the
  * caller's subjects; an empty value never matches, and a permission held at
  * the root does not skip the check. `fields` names the fields an update may
  * change, by accessor name; it is valid only on a rule whose one operation is
@@ -790,8 +790,8 @@ type SubjectKeys<F extends Fields> = Fields extends F ? string : {
  *
  * An update must be admitted by one rule for both the stored row and the row
  * as it will be stored, so a rule admits moving a row to another access parent
- * only when its source holds at both places, a rule with `subject` admits no
- * update that writes someone else into the subject field, and a rule with
+ * only when its source holds at both places, a rule with `callerIs` admits no
+ * update that writes someone else into that field, and a rule with
  * `when` admits no update that makes the row fail the condition. A row with
  * several access parents shows to the readers of each, so a rule admits a
  * create, or an update that adds or removes a parent, only when its source
@@ -801,8 +801,8 @@ type SubjectKeys<F extends Fields> = Fields extends F ? string : {
  * ```ts
  * const allow: schema.AccessRuleDecl[] = [
  *   { read: true, requires: 'view_tasks' },
- *   { create: true, delete: true, requires: 'comment', subject: 'authorId' },
- *   { update: true, requires: 'comment', subject: 'authorId', fields: ['body'] },
+ *   { create: true, delete: true, requires: 'comment', callerIs: 'authorId' },
+ *   { update: true, requires: 'comment', callerIs: 'authorId', fields: ['body'] },
  *   { update: true, delete: true, requires: 'moderate_comments' },
  * ];
  * ```
@@ -840,7 +840,7 @@ export type AccessRuleDecl<F extends Fields = Fields> =
 		update?: boolean;
 		delete?: boolean;
 		write?: boolean;
-		subject?: TextKeys<F>;
+		callerIs?: TextKeys<F>;
 		fields?: readonly FieldKeys<F>[];
 		when?(row: QueryRef<RowOf<F>>): Cond;
 		within?: WithinEntry<F> | readonly WithinEntry<F>[];
@@ -860,7 +860,7 @@ export type AccessRuleDecl<F extends Fields = Fields> =
  * sit below, by its wire name or as a thunk that returns it. A thunk is
  * called by `defineSchema()`, so it can name an entity declared later. For
  * the rule's own entity, when its rows sit below rows of their own, use
- * {@link SelfWithinDecl}. `subject` names a singular `text()` field of that
+ * {@link SelfWithinDecl}. `callerIs` names a singular `text()` field of that
  * entity, by accessor name, that must hold one of the caller's subjects;
  * `when` is a condition that row must match, and reads only that row. At
  * least one of the two is set. Build an entry with `when` through
@@ -881,7 +881,7 @@ export type AccessRuleDecl<F extends Fields = Fields> =
  * }, {
  *   access: {
  *     allow: [
- *       { read: true, write: true, admitted: true, within: { entity: 'doc', subject: 'ownerId' } },
+ *       { read: true, write: true, admitted: true, within: { entity: 'doc', callerIs: 'ownerId' } },
  *     ],
  *   },
  * });
@@ -890,7 +890,7 @@ export type AccessRuleDecl<F extends Fields = Fields> =
 export interface WithinDecl<F extends Fields = Fields> {
 	entity: string | (() => EntitySchema);
 	self?: never;
-	subject?: Extract<keyof F, string>;
+	callerIs?: Extract<keyof F, string>;
 	when?(row: QueryRef<RowOf<F>>): Cond;
 }
 
@@ -898,7 +898,7 @@ export interface WithinDecl<F extends Fields = Fields> {
  * A within entry on rows of the rule's own entity, for an entity whose rows
  * sit below rows of their own through an `.accessParent()` reference to
  * itself. It means the same as a {@link WithinDecl} that names the entity,
- * and types `subject` and `when` against the entity's fields.
+ * and types `callerIs` and `when` against the entity's fields.
  *
  * @example
  * Folders that every caller reads when the folder, or a folder above it, is
@@ -921,7 +921,7 @@ export interface WithinDecl<F extends Fields = Fields> {
 export interface SelfWithinDecl<F extends Fields = Fields> {
 	self: true;
 	entity?: never;
-	subject?: TextKeys<F>;
+	callerIs?: TextKeys<F>;
 	when?(row: QueryRef<RowOf<F>>): Cond;
 }
 
@@ -1427,13 +1427,13 @@ function assertAccessRules(
 		} else if (rule.admitted !== true) {
 			throw new Error(`${at}: admitted must be true`);
 		}
-		if (rule.subject !== undefined) {
-			const spec = fields[rule.subject]?.spec;
+		if (rule.callerIs !== undefined) {
+			const spec = fields[rule.callerIs]?.spec;
 			if (spec === undefined) {
-				throw new Error(`${at}: subject field "${rule.subject}" is not declared`);
+				throw new Error(`${at}: callerIs field "${rule.callerIs}" is not declared`);
 			}
 			if (spec.kind !== 'scalar' || spec.scalar !== 'string' || spec.repeated) {
-				throw new Error(`${at}: subject field "${rule.subject}" must be a singular text() field`);
+				throw new Error(`${at}: callerIs field "${rule.callerIs}" must be a singular text() field`);
 			}
 		}
 		if (rule.fields !== undefined) {
@@ -1463,7 +1463,7 @@ function assertAccessRules(
 		const key = JSON.stringify([
 			...ACCESS_OPERATIONS.map((op) => rule[op] === true),
 			requires === undefined ? null : [ ...requires ].sort(),
-			rule.subject ?? null,
+			rule.callerIs ?? null,
 			rule.fields === undefined ? null : [ ...rule.fields ].sort(),
 			when === undefined ? null : toJson(ConditionSchema, when),
 			within,
@@ -1520,8 +1520,8 @@ function withinKeysOf(
 		if (w.self === undefined && !w.entity) throw new Error(`${where}: names no entity`);
 		const entity = withinEntityOf(owner, w, resolve);
 		if (entity !== undefined) validateEntityName(entity, where);
-		if (w.subject === undefined && w.when === undefined) {
-			throw new Error(`${where}: sets no check; set subject or when`);
+		if (w.callerIs === undefined && w.when === undefined) {
+			throw new Error(`${where}: sets no check; set callerIs or when`);
 		}
 		if (entity === undefined) {
 			lazy = true;
@@ -1531,7 +1531,7 @@ function withinKeysOf(
 		// needs the entity's fields.
 		const key = JSON.stringify([
 			entity,
-			w.subject ?? null,
+			w.callerIs ?? null,
 			w.when === undefined ? null : w.when(rootRef()),
 		]);
 		if (keys.includes(key)) throw new Error(`${where}: repeats an earlier entry`);
@@ -1542,8 +1542,8 @@ function withinKeysOf(
 
 /**
  * Checks each within entry of every rule against the entity it names: one of
- * `entities`, with a singular `text()` subject field, and a condition over its
- * fields that reads only its row. Then checks the rules that hold a within
+ * `entities`, with a singular `text()` `callerIs` field, and a condition over
+ * its fields that reads only its row. Then checks the rules that hold a within
  * thunk for repeats, which entity() could not. Whether the rule's rows can sit
  * below that entity's rows is the server's to check at registration.
  */
@@ -1564,15 +1564,15 @@ function validateWithinTargets(entities: readonly EntitySchema[]): void {
 					);
 				}
 				if (typeof w.entity === 'function') lazy = true;
-				if (w.subject !== undefined) {
-					const spec = target.fields[w.subject]?.spec;
+				if (w.callerIs !== undefined) {
+					const spec = target.fields[w.callerIs]?.spec;
 					if (spec === undefined) {
 						throw new Error(
-							`${where}: subject field "${w.subject}" is not declared on entity "${target.name}"`,
+							`${where}: callerIs field "${w.callerIs}" is not declared on entity "${target.name}"`,
 						);
 					}
 					if (spec.kind !== 'scalar' || spec.scalar !== 'string' || spec.repeated) {
-						throw new Error(`${where}: subject field "${w.subject}" must be a singular text() field`);
+						throw new Error(`${where}: callerIs field "${w.callerIs}" must be a singular text() field`);
 					}
 				}
 				whenOf(where, w.when, target.fields);
@@ -1943,7 +1943,7 @@ function accessRuleOf(
 		requires: [ ...(requiresOf(rule) ?? []) ],
 		admitted: rule.requires === undefined ? create(AdmittedCallerSchema) : undefined,
 		// Accessor names lower to proto names, as a grant's fields do.
-		subject: rule.subject === undefined ? '' : snakeCase(rule.subject),
+		callerIs: rule.callerIs === undefined ? '' : snakeCase(rule.callerIs),
 		fields: (rule.fields ?? []).map(snakeCase),
 		when: whenOf('', rule.when, fields),
 		within: withinListOf(rule).map((w) => {
@@ -1951,7 +1951,7 @@ function accessRuleOf(
 			const target = entities.find((e) => e.name === entity)!;
 			return create(AccessWithinSchema, {
 				entity,
-				subject: w.subject === undefined ? '' : snakeCase(w.subject),
+				callerIs: w.callerIs === undefined ? '' : snakeCase(w.callerIs),
 				when: whenOf('', w.when, target.fields),
 			});
 		}),

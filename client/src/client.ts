@@ -3591,7 +3591,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 								return typeof held === 'string' ? held : newValue;
 							}
 							: stored.held,
-						subject: (field) => (changed?.includes(field) ? newValue : stored.subject(field)),
+						fieldValue: (field) => (changed?.includes(field) ? newValue : stored.fieldValue(field)),
 						matches: (rule) =>
 							changed !== null && whenReads(def.schema, rule, changed) ? newValue : stored.matches(rule),
 						within: (rule) =>

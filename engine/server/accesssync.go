@@ -552,7 +552,7 @@ func sameAnchors(x, y *permAnchors) bool {
 
 // readAccessUnchanged reports whether the two sides of a resync read entity
 // under the same anchors, for every permission its read rules need. The
-// subjects a subject check compares with are the same on both sides: a
+// subjects a caller_is check compares with are the same on both sides: a
 // cursor recorded for other subjects cannot resync. A when check reads only
 // the row, so it decides the same on both sides.
 func readAccessUnchanged(oldEm, newEm *rowEmitter, entity string) bool {
@@ -642,8 +642,8 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 	// A read rule in checked reads the rows below the anchors of each of its
 	// own permissions that pass its checks. One with a permission that moved
 	// to or from the root can show or hide every such row, wherever it sits:
-	// the rows that name the caller for a subject check, the rows within a row
-	// that names the caller for a within entry's subject check, and any row
+	// the rows that name the caller for a caller_is check, the rows within a row
+	// that names the caller for a within entry's caller_is check, and any row
 	// otherwise, which no index finds.
 	var named []string
 	for _, rule := range a.read.checked {
@@ -661,8 +661,8 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 		}
 		var rows []string
 		ok := false
-		if rule.subject != nil {
-			rows, ok, err = subjectRows(tx, info, rule.subject, newEm.caller.subjects, maxCandidates, newEm.srv.limits)
+		if rule.callerIs != nil {
+			rows, ok, err = subjectRows(tx, info, rule.callerIs, newEm.caller.subjects, maxCandidates, newEm.srv.limits)
 		} else {
 			rows, ok, err = withinRows(tx, newEm.caller.model, info, rule, newEm.caller.subjects, maxCandidates, newEm.srv.limits)
 		}

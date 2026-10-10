@@ -24,7 +24,7 @@ type rulesVectorRule struct {
 	Write    bool     `json:"write"`
 	Requires []string `json:"requires"`
 	Admitted bool     `json:"admitted"`
-	Subject  string   `json:"subject"`
+	CallerIs string   `json:"callerIs"`
 	Fields   []string `json:"fields"`
 	// When names the rule's condition, which each row's Matches answers.
 	When string `json:"when"`
@@ -105,8 +105,8 @@ var _ = Describe("access rule conformance vectors", func() {
 			// admits mirrors txAccess.admits, with the chain walks and the
 			// condition answered by the vector.
 			admits := func(rule accessRule, row *rulesVectorRow) bool {
-				if rule.subject != nil {
-					v := row.Fields[string(rule.subject.Name())]
+				if rule.callerIs != nil {
+					v := row.Fields[string(rule.callerIs.Name())]
 					if v == nil || !subjectMatches(subjects, *v) {
 						return false
 					}
@@ -172,8 +172,8 @@ func rulesVectorRuleOf(r rulesVectorRule) accessRule {
 	if !r.Admitted {
 		rule.requires = slices.Sorted(slices.Values(r.Requires))
 	}
-	if r.Subject != "" {
-		rule.subject = vectorKeyField(r.Subject)
+	if r.CallerIs != "" {
+		rule.callerIs = vectorKeyField(r.CallerIs)
 	}
 	if r.Fields != nil {
 		rule.fields = slices.Sorted(slices.Values(r.Fields))

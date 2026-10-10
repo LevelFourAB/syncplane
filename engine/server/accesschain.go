@@ -64,11 +64,11 @@ func withinStateOf(model *accessModel, info *entityInfo, row protoreflect.Messag
 	}
 	st := rowWithin{live: true}
 	for _, w := range checks {
-		if w.subject != nil {
+		if w.callerIs != nil {
 			if st.subjects == nil {
 				st.subjects = map[string]string{}
 			}
-			st.subjects[string(w.subject.Name())] = row.Get(w.subject).String()
+			st.subjects[string(w.callerIs.Name())] = row.Get(w.callerIs).String()
 		}
 		if w.when != nil && !slices.Contains(st.matched, w.whenSpec) && w.when.Eval(row) {
 			st.matched = append(st.matched, w.whenSpec)
@@ -84,7 +84,7 @@ func (st rowWithin) passes(w *withinCheck, subjects []string) bool {
 	if !st.live {
 		return false
 	}
-	if w.subject != nil && !subjectMatches(subjects, st.subjects[string(w.subject.Name())]) {
+	if w.callerIs != nil && !subjectMatches(subjects, st.subjects[string(w.callerIs.Name())]) {
 		return false
 	}
 	if w.when != nil {

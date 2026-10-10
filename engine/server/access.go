@@ -75,9 +75,9 @@ type accessRule struct {
 	// requires are the permissions the rule needs, sorted. Empty for a rule
 	// that admits every admitted caller.
 	requires []string
-	// subject is the field that must hold one of the caller's subjects, nil
-	// when the rule sets no subject check.
-	subject protoreflect.FieldDescriptor
+	// callerIs is the field that must hold one of the caller's subjects, nil
+	// when the rule sets no caller_is check.
+	callerIs protoreflect.FieldDescriptor
 	// fields are the units an update the rule admits may change, sorted: the
 	// names of top-level fields outside a oneof, and of oneofs. Nil when the
 	// rule sets no fields check.
@@ -96,8 +96,9 @@ type accessRule struct {
 // checks that row must pass.
 type withinEntry struct {
 	entity string
-	// subject is the name of the subject field, "" without a subject check.
-	subject string
+	// callerIs is the name of the field that must hold one of the caller's
+	// subjects, "" without a caller_is check.
+	callerIs string
 	// when is the condition, nil without a when check. whenSpec renders it in
 	// a canonical form, "" without one.
 	when     *syncplanev1.Condition
@@ -108,7 +109,7 @@ type withinEntry struct {
 // the same rows. "{", "}" and ";" cannot be part of an entity or field name,
 // and a when spec is hex.
 func (w withinEntry) spec() string {
-	return w.entity + "{subject=" + w.subject + ",when=" + w.whenSpec + "}"
+	return w.entity + "{caller_is=" + w.callerIs + ",when=" + w.whenSpec + "}"
 }
 
 // admitted reports whether the rule admits every caller admitted to the
@@ -124,9 +125,9 @@ func (r accessRule) names(op accessOp) bool {
 }
 
 // checksRow reports whether the rule reads the row's fields to decide: it
-// sets a subject check or a when check.
+// sets a caller_is check or a when check.
 func (r accessRule) checksRow() bool {
-	return r.subject != nil || r.when != nil
+	return r.callerIs != nil || r.when != nil
 }
 
 // checksAbove reports whether the rule reads rows at or above the row to
@@ -175,7 +176,7 @@ func (r accessRule) source() string {
 // condition. A check the rule does not set holds. subjects are sorted, and an
 // empty subject value never matches.
 func (r accessRule) rowHolds(subjects []string, row protoreflect.Message) bool {
-	if r.subject != nil && !subjectMatches(subjects, row.Get(r.subject).String()) {
+	if r.callerIs != nil && !subjectMatches(subjects, row.Get(r.callerIs).String()) {
 		return false
 	}
 	return r.when == nil || r.when.Eval(row)
@@ -219,8 +220,8 @@ func (r accessRule) spec() string {
 		source = "requires=" + r.source()
 	}
 	spec := strings.Join(ops, ",") + ":" + source
-	if r.subject != nil {
-		spec += ":subject=" + string(r.subject.Name())
+	if r.callerIs != nil {
+		spec += ":caller_is=" + string(r.callerIs.Name())
 	}
 	if r.fields != nil {
 		spec += ":fields=" + strings.Join(r.fields, ",")
@@ -241,7 +242,7 @@ func (a *entityAccess) names(op accessOp) bool {
 }
 
 // maskCovered reports whether some update rule's fields check allows a PATCH
-// with the mask paths, whatever the rule's source and subject check: the rule
+// with the mask paths, whatever the rule's source and caller_is check: the rule
 // has no fields list, or its list names the unit each path writes into. A key
 // field is left out, since a PATCH that changes one is refused anyway. When
 // no rule allows the mask, heads are its units, sorted.
@@ -272,7 +273,7 @@ type readers struct {
 	// on the row, sorted and without repeats. Empty when all is set.
 	perms []string
 	all   bool
-	// checked are the entity's read rules with a subject check or a when
+	// checked are the entity's read rules with a caller_is check or a when
 	// check, or that need more than one permission, sorted by spec. Empty when
 	// all is set, since all admits every row they could.
 	checked []accessRule
@@ -625,12 +626,12 @@ func accessRuleOf(i int, r *syncplanev1.AccessRule, desc protoreflect.MessageDes
 		rule.requires = append(rule.requires, p)
 	}
 	sort.Strings(rule.requires)
-	if name := r.GetSubject(); name != "" {
+	if name := r.GetCallerIs(); name != "" {
 		fd, err := stringField(desc, name)
 		if err != nil {
-			return accessRule{}, fmt.Errorf("%s subject: %w", where, err)
+			return accessRule{}, fmt.Errorf("%s caller_is: %w", where, err)
 		}
-		rule.subject = fd
+		rule.callerIs = fd
 	}
 	if r.GetFields() != nil {
 		if rule.ops != opUpdate {
@@ -674,10 +675,10 @@ func withinEntryOf(where string, w *syncplanev1.AccessWithin) (withinEntry, erro
 	if w.GetEntity() == "" {
 		return withinEntry{}, fmt.Errorf("%s names no entity", where)
 	}
-	if w.GetSubject() == "" && w.GetWhen() == nil {
-		return withinEntry{}, fmt.Errorf("%s sets no check; set subject or when", where)
+	if w.GetCallerIs() == "" && w.GetWhen() == nil {
+		return withinEntry{}, fmt.Errorf("%s sets no check; set caller_is or when", where)
 	}
-	entry := withinEntry{entity: w.GetEntity(), subject: w.GetSubject()}
+	entry := withinEntry{entity: w.GetEntity(), callerIs: w.GetCallerIs()}
 	if cond := w.GetWhen(); cond != nil {
 		if err := refuseUnknownCondFields(cond.ProtoReflect()); err != nil {
 			return withinEntry{}, fmt.Errorf("%s when: %w", where, err)
@@ -780,7 +781,7 @@ func singularStringField(desc protoreflect.MessageDescriptor, name string) (prot
 
 // stringField resolves a field that a check reads on each row: a top-level,
 // singular string field. A member of a oneof reads as empty on a row that
-// holds another case, which no subject check matches.
+// holds another case, which no caller_is check matches.
 func stringField(desc protoreflect.MessageDescriptor, name string) (protoreflect.FieldDescriptor, error) {
 	fd := desc.Fields().ByName(protoreflect.Name(name))
 	switch {
@@ -1194,7 +1195,7 @@ func membersOf(eo *syncplanev1.EntityOptions, access *entityAccess) (string, err
 // buildSubjectIndexes derives an index over each field the access model
 // looks rows up by subject in: each string case of a grant entity's subject,
 // so resolving a caller's grants probes its own rows, and the subject field
-// of each read rule with a subject check, so a read narrows to the rows that
+// of each read rule with a caller_is check, so a read narrows to the rows that
 // name the caller. A team case is a reference, which has its reference index
 // already. Each index has the name an indexed mark on the field would give.
 // It runs after buildDeclaredIndexes, so a field the schema marks indexed
@@ -1206,8 +1207,8 @@ func buildSubjectIndexes(info *entityInfo) error {
 	}
 	if info.access != nil {
 		for _, o := range info.access.read.checked {
-			if o.subject != nil {
-				fields = append(fields, o.subject)
+			if o.callerIs != nil {
+				fields = append(fields, o.callerIs)
 			}
 		}
 	}
@@ -1681,8 +1682,8 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 type withinCheck struct {
 	spec   string
 	target *entityInfo
-	// subject is nil without a subject check.
-	subject protoreflect.FieldDescriptor
+	// callerIs is nil without a caller_is check.
+	callerIs protoreflect.FieldDescriptor
 	// when is nil without a when check. whenSpec renders it as the entry's
 	// spec does.
 	when     *query.Compiled
@@ -1706,7 +1707,7 @@ func (m *accessModel) resolveWithins(names []string) error {
 					return fmt.Errorf("%s names entity %q, which is not a registered entity in the access model", where, w.entity)
 				case !slices.Contains(m.below[w.entity], name) && w.entity == name:
 					return fmt.Errorf("%s names the rule's own entity, whose rows do not sit below rows of their own entity; "+
-						"check the row itself with subject or when", where)
+						"check the row itself with caller_is or when", where)
 				case !slices.Contains(m.below[w.entity], name):
 					return fmt.Errorf("%s names entity %q, whose rows %q rows cannot sit below", where, w.entity, name)
 				}
@@ -1716,12 +1717,12 @@ func (m *accessModel) resolveWithins(names []string) error {
 				}
 				check := &withinCheck{spec: spec, target: target, whenSpec: w.whenSpec}
 				desc := target.msgType.Descriptor()
-				if w.subject != "" {
-					fd, err := stringField(desc, w.subject)
+				if w.callerIs != "" {
+					fd, err := stringField(desc, w.callerIs)
 					if err != nil {
-						return fmt.Errorf("%s subject: entity %q: %w", where, w.entity, err)
+						return fmt.Errorf("%s caller_is: entity %q: %w", where, w.entity, err)
 					}
-					check.subject = fd
+					check.callerIs = fd
 				}
 				if w.when != nil {
 					compiled, err := query.Compile(desc, w.when)
@@ -1814,7 +1815,7 @@ func (m *accessModel) covers(a, b accessRule) bool {
 			}
 		}
 	}
-	if a.subject != nil && a.subject != b.subject {
+	if a.callerIs != nil && a.callerIs != b.callerIs {
 		return false
 	}
 	if a.when != nil && a.whenSpec != b.whenSpec {

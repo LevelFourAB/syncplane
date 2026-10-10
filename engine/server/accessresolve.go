@@ -715,7 +715,7 @@ type checkedRead struct {
 func checkedReadsOf(r readers, caller *accessCaller, set *accessSet) []checkedRead {
 	var out []checkedRead
 	for _, rule := range r.checked {
-		if (rule.subject != nil || slices.ContainsFunc(rule.within, func(w withinEntry) bool { return w.subject != "" })) &&
+		if (rule.callerIs != nil || slices.ContainsFunc(rule.within, func(w withinEntry) bool { return w.callerIs != "" })) &&
 			len(caller.subjects) == 0 {
 			continue
 		}
@@ -827,7 +827,7 @@ func (e *rowEmitter) accessNarrows(info *entityInfo) bool {
 // accessCandidates returns, in key order, the keys of the rows of info that the
 // bound access set can let the caller read: the anchors of its read
 // permissions that are rows of info, and the rows of info below such an
-// anchor (see rowsBelow). For a read rule with a subject check, the rows whose
+// anchor (see rowsBelow). For a read rule with a caller_is check, the rows whose
 // subject field names the caller stand in when its subject index is ready. A
 // when check does not narrow the keys. The keys are a superset of the rows
 // the model's filter admits, so reading these keys and classifying each row
@@ -857,15 +857,15 @@ func (e *rowEmitter) accessCandidates(tx storage.ReadTx, info *entityInfo, maxCa
 // checkedCandidates returns, in key order, a superset of the keys of the rows
 // of info that the read rule o admits the bound caller to: the rows whose
 // subject field names one of the caller's subjects when the rule has a
-// subject check and the field's index is ready; otherwise the rows below the
+// caller_is check and the field's index is ready; otherwise the rows below the
 // anchors of every permission the rule needs that the caller does not hold at
 // the root; otherwise the rows within a row that a within entry's subject
 // field names the caller in (see withinRows). ok is false when none can be
 // read within maxCandidates keys, which is always the case for a rule without
-// a subject check whose permissions the caller holds at the root.
+// a caller_is check whose permissions the caller holds at the root.
 func (e *rowEmitter) checkedCandidates(tx storage.ReadTx, info *entityInfo, o checkedRead, maxCandidates int) ([]string, bool, error) {
-	if o.rule.subject != nil {
-		keys, ok, err := subjectRows(tx, info, o.rule.subject, e.caller.subjects, maxCandidates, e.srv.limits)
+	if o.rule.callerIs != nil {
+		keys, ok, err := subjectRows(tx, info, o.rule.callerIs, e.caller.subjects, maxCandidates, e.srv.limits)
 		if err != nil || ok {
 			return keys, ok, err
 		}
@@ -962,7 +962,7 @@ func subjectRows(tx storage.ReadTx, info *entityInfo, fd protoreflect.FieldDescr
 // withinRows returns, in key order, a superset of the keys of the rows of info
 // that pass the within entries of rule for a caller with subjects: the rows
 // at or below a row whose field names one of subjects, for the first entry
-// with a subject check whose field's index is ready. ok is false when no
+// with a caller_is check whose field's index is ready. ok is false when no
 // entry has one, or the rows do not fit in maxCandidates keys.
 func withinRows(
 	tx storage.ReadTx,
@@ -975,10 +975,10 @@ func withinRows(
 ) ([]string, bool, error) {
 	for _, entry := range rule.within {
 		w := model.withins[entry.spec()]
-		if w == nil || w.subject == nil {
+		if w == nil || w.callerIs == nil {
 			continue
 		}
-		named, ok, err := subjectRows(tx, w.target, w.subject, subjects, maxCandidates, limits)
+		named, ok, err := subjectRows(tx, w.target, w.callerIs, subjects, maxCandidates, limits)
 		if err != nil {
 			return nil, false, err
 		}

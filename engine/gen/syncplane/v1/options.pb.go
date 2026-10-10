@@ -343,7 +343,7 @@ func (x *AccessOptions) GetAllow() []*AccessRule {
 // update must be admitted by one rule for both the stored row and the row as
 // it will be stored, so a rule admits a write that moves a row to another
 // access parent only when its source holds at the old place and at the new
-// one, a rule with `subject` admits no write that changes the subject field
+// one, a rule with `caller_is` admits no write that changes the named field
 // to a value outside the caller's subjects, and a rule with `when` admits no
 // write that makes the row fail the condition.
 //
@@ -363,9 +363,9 @@ func (x *AccessOptions) GetAllow() []*AccessRule {
 //	    access: { allow: [
 //	      { read: true requires: "view_tasks" },
 //	      { create: true delete: true
-//	        requires: "comment" subject: "author_id" },
+//	        requires: "comment" caller_is: "author_id" },
 //	      { update: true requires: "comment"
-//	        subject: "author_id" fields: ["body"] }
+//	        caller_is: "author_id" fields: ["body"] }
 //	    ] }
 //	  };
 //	  string id = 1;
@@ -424,7 +424,7 @@ type AccessRule struct {
 	// value never matches, and a permission held at the workspace root does not
 	// skip the check. A member of a `oneof` is empty on a row that holds
 	// another case, so it never matches there.
-	Subject string `protobuf:"bytes,8,opt,name=subject,proto3" json:"subject,omitempty"`
+	CallerIs string `protobuf:"bytes,8,opt,name=caller_is,json=callerIs,proto3" json:"caller_is,omitempty"`
 	// Admits only updates that change no field outside this list. Valid only
 	// on a rule whose one operation is `update`. Each entry names a top-level
 	// field outside any `oneof`, or a `oneof`, and no key field. A move
@@ -545,9 +545,9 @@ func (x *AccessRule) GetAdmitted() *AdmittedCaller {
 	return nil
 }
 
-func (x *AccessRule) GetSubject() string {
+func (x *AccessRule) GetCallerIs() string {
 	if x != nil {
-		return x.Subject
+		return x.CallerIs
 	}
 	return ""
 }
@@ -611,7 +611,7 @@ func (x *AccessRule) GetWithin() []*AccessWithin {
 //	    access: { allow: [
 //	      { read: true requires: "view_docs" },
 //	      { write: true requires: "view_docs"
-//	        within: { entity: "doc" subject: "owner_id" } }
+//	        within: { entity: "doc" caller_is: "owner_id" } }
 //	    ] }
 //	  };
 //	  string id = 1;
@@ -630,7 +630,7 @@ func (x *AccessRule) GetWithin() []*AccessWithin {
 //
 // Registration refuses an entry that sets no check, an `entity` whose rows the
 // rule's entity cannot sit below (its own entity only when it is recursive), a
-// `subject` that is not a top-level, singular `string` field of `entity`, a
+// `caller_is` that is not a top-level, singular `string` field of `entity`, a
 // `when` that reads another row, and unknown fields inside this message.
 type AccessWithin struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -638,7 +638,7 @@ type AccessWithin struct {
 	Entity string `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
 	// Admits only a row of `entity` whose field with this name holds one of
 	// the caller's subjects. An empty value never matches.
-	Subject string `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
+	CallerIs string `protobuf:"bytes,2,opt,name=caller_is,json=callerIs,proto3" json:"caller_is,omitempty"`
 	// Admits only a row of `entity` that matches this condition. Paths start
 	// at that row.
 	When          *Condition `protobuf:"bytes,3,opt,name=when,proto3" json:"when,omitempty"`
@@ -683,9 +683,9 @@ func (x *AccessWithin) GetEntity() string {
 	return ""
 }
 
-func (x *AccessWithin) GetSubject() string {
+func (x *AccessWithin) GetCallerIs() string {
 	if x != nil {
-		return x.Subject
+		return x.CallerIs
 	}
 	return ""
 }
@@ -1875,7 +1875,7 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x05grant\x18\v \x01(\v2\x1a.syncplane.v1.GrantOptionsR\x05grant\x126\n" +
 	"\amembers\x18\f \x01(\v2\x1c.syncplane.v1.MembersOptionsR\amembersJ\x04\b\x04\x10\x05J\x04\b\a\x10\bJ\x04\b\b\x10\tR\rdelete_policyR\rcreate_policyR\rupdate_policy\"?\n" +
 	"\rAccessOptions\x12.\n" +
-	"\x05allow\x18\x01 \x03(\v2\x18.syncplane.v1.AccessRuleR\x05allow\"\xe7\x02\n" +
+	"\x05allow\x18\x01 \x03(\v2\x18.syncplane.v1.AccessRuleR\x05allow\"\xea\x02\n" +
 	"\n" +
 	"AccessRule\x12\x12\n" +
 	"\x04read\x18\x01 \x01(\bR\x04read\x12\x16\n" +
@@ -1884,15 +1884,15 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x06delete\x18\x04 \x01(\bR\x06delete\x12\x14\n" +
 	"\x05write\x18\x05 \x01(\bR\x05write\x12\x1a\n" +
 	"\brequires\x18\x06 \x03(\tR\brequires\x128\n" +
-	"\badmitted\x18\a \x01(\v2\x1c.syncplane.v1.AdmittedCallerR\badmitted\x12\x18\n" +
-	"\asubject\x18\b \x01(\tR\asubject\x12\x16\n" +
+	"\badmitted\x18\a \x01(\v2\x1c.syncplane.v1.AdmittedCallerR\badmitted\x12\x1b\n" +
+	"\tcaller_is\x18\b \x01(\tR\bcallerIs\x12\x16\n" +
 	"\x06fields\x18\t \x03(\tR\x06fields\x12+\n" +
 	"\x04when\x18\n" +
 	" \x01(\v2\x17.syncplane.v1.ConditionR\x04when\x122\n" +
-	"\x06within\x18\v \x03(\v2\x1a.syncplane.v1.AccessWithinR\x06within\"m\n" +
+	"\x06within\x18\v \x03(\v2\x1a.syncplane.v1.AccessWithinR\x06within\"p\n" +
 	"\fAccessWithin\x12\x16\n" +
-	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x18\n" +
-	"\asubject\x18\x02 \x01(\tR\asubject\x12+\n" +
+	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x1b\n" +
+	"\tcaller_is\x18\x02 \x01(\tR\bcallerIs\x12+\n" +
 	"\x04when\x18\x03 \x01(\v2\x17.syncplane.v1.ConditionR\x04when\"\x10\n" +
 	"\x0eAdmittedCaller\"f\n" +
 	"\fGrantOptions\x12\x18\n" +

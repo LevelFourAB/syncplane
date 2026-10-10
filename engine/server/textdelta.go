@@ -200,8 +200,8 @@ func readInputsOf(model *accessModel, info *entityInfo, row proto.Message) readI
 		var b strings.Builder
 		self := false
 		for _, rule := range checked {
-			if rule.subject != nil {
-				b.WriteString(strconv.Quote(r.Get(rule.subject).String()))
+			if rule.callerIs != nil {
+				b.WriteString(strconv.Quote(r.Get(rule.callerIs).String()))
 			}
 			if rule.when != nil {
 				b.WriteString(strconv.FormatBool(rule.when.Eval(r)))

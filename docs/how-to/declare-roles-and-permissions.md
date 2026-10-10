@@ -170,7 +170,7 @@ Before you ship, check these points:
 - **Every role of the member entity makes a member.** For guests who see a team but do not get its grants, use a separate grant entity anchored at the team.
 - **A team cannot be a member of a team.** Registration refuses a member entity whose subject is a team.
 - **To give teams other roles than users**, declare a separate grant entity with a plain `Team team` subject and its own roles. Role names are unique across the schema, so name them differently, such as `project_team_reader`.
-- **To let a user leave a project**, add `{ delete: true requires: "view_roster" subject: "user_id" }`. A team's row holds no `user_id`, so the rule does not let a member remove the team.
+- **To let a user leave a project**, add `{ delete: true requires: "view_roster" caller_is: "user_id" }`. A team's row holds no `user_id`, so the rule does not let a member remove the team.
 - **Delete the grants before the team.** A client cannot delete a team that a live grant row names.
 - **Admins are members only with a row.** A role at the workspace root does not make a caller a member of a team. To let an admin see what a team sees, grant the admin the same permissions at the root.
 
@@ -407,7 +407,7 @@ message Task {
 
 - The update rule must admit the stored row and the row as it will be stored, so a holder of `edit_tasks` cannot archive a task or restore one. Give that to another rule, here the `write` rule with `manage_tasks`.
 - When a task becomes hidden, clients that read it through the first rule alone receive a delete. When it stops being hidden, they receive it again.
-- To let the author read their own draft, add a second read rule with `subject` beside the one with `when`. The rules join with OR.
+- To let the author read their own draft, add a second read rule with `caller_is` beside the one with `when`. The rules join with OR.
 - A condition reads only the row. To decide by a field of the project above the task, use `within`; see the next section.
 
 In the TypeScript schema builder, `when` takes the same field proxy as a query's `where`:
@@ -420,7 +420,7 @@ In the TypeScript schema builder, `when` takes the same field proxy as a query's
 
 ### Decide by a field of a row above: private, archived and owned parents
 
-Add `within` to a rule to admit only rows that sit within a row that passes a check. The entry names the entity of that row, and a `subject` field or a `when` condition on it. Here a private project hides its tasks and their comments from org members, an archived project makes its tasks read-only, and the owner of a project reads and writes the comments of its tasks:
+Add `within` to a rule to admit only rows that sit within a row that passes a check. The entry names the entity of that row, and a `caller_is` field or a `when` condition on it. Here a private project hides its tasks and their comments from org members, an archived project makes its tasks read-only, and the owner of a project reads and writes the comments of its tasks:
 
 1. Give the org role and the project role different read permissions, so that one rule can check the project for org members and another can leave it unchecked for project members:
 
@@ -511,7 +511,7 @@ Add `within` to a rule to admit only rows that sit within a row that passes a ch
    					read: true
    					write: true
    					admitted: {}
-   					within: { entity: "project" subject: "owner_id" }
+   					within: { entity: "project" caller_is: "owner_id" }
    				}
    			]
    		}
@@ -526,11 +526,11 @@ Add `within` to a rule to admit only rows that sit within a row that passes a ch
 - A write that changes `private` or `owner_id` changes what other callers read below the project, so it needs, where the project is, a read rule of each entity below it. A caller that edits projects but cannot read their tasks cannot make a project public.
 - In a tree of one entity, such as folders inside folders, one row that passes is enough. A private inner folder below a folder that is not private does not hide its documents through such a rule.
 
-In the TypeScript schema builder, an entry with `subject` is a plain object. Build an entry with `when` through `schema.within`, which types the condition against the parent's fields. Pass a thunk, `() => project`, when `project` is declared after the entity:
+In the TypeScript schema builder, an entry with `callerIs` is a plain object. Build an entry with `when` through `schema.within`, which types the condition against the parent's fields. Pass a thunk, `() => project`, when `project` is declared after the entity:
 
 ```ts
 { read: true, requires: 'view_open_tasks', within: schema.within(() => project, { when: (p) => p.private.eq(false) }) },
-{ read: true, write: true, admitted: true, within: { entity: 'project', subject: 'ownerId' } },
+{ read: true, write: true, admitted: true, within: { entity: 'project', callerIs: 'ownerId' } },
 ```
 
 In a tree of one entity, write `{ self: true, when }` for an entry on the entity's own rows. TypeScript types `when` against the entity's fields:
