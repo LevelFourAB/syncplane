@@ -17,13 +17,16 @@ import {
 	accessParentUnits,
 	type AccessRow,
 	accessRowId,
-	type AccessSummary,
+	AccessSummary,
 	anchorEntities,
+	answerOf,
 	type CanAnswer,
 	canAt,
+	type CanDetail,
 	decideRules,
 	decodeAccess,
 	type DecodedAccess,
+	detailOf,
 	entitiesAboveOf,
 	MAX_ACCESS_CHAIN,
 	type ParentRefs,
@@ -33,7 +36,10 @@ import {
 	ruleRowOf,
 	touchPendingAccess,
 	UNKNOWN_CHAIN,
+	unknownBecause,
+	type UnknownDetail,
 	updateUnitsOf,
+	type Verdict,
 	whenReads,
 	withinEntities,
 	withinReads,
@@ -829,8 +835,17 @@ export interface PatchOptions extends CasOptions {
 export type FieldNameOf<D extends DescMessage> = DescMessage extends D ? string
 	: Exclude<keyof MessageShape<D> & string, '$typeName' | '$unknown'>;
 
+/** Options for {@link SyncClient.canCreate} and {@link SyncClient.hasPermission}. */
+export interface DetailOptions {
+	/**
+	 * When `true`, the answer is a {@link CanDetail}, which also gives the
+	 * reason for an `'unknown'` answer.
+	 */
+	detail?: boolean;
+}
+
 /** Options for {@link SyncClient.can}. */
-export interface CanOptions<D extends DescMessage = DescMessage> {
+export interface CanOptions<D extends DescMessage = DescMessage> extends DetailOptions {
 	/**
 	 * For an update, the fields it changes, by accessor name, with a oneof
 	 * named by its own name, as a patch init object names them. When omitted,
@@ -1124,15 +1139,37 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 		schema: D,
 		key: string,
 		operation: Exclude<AccessOperation, 'create'>,
+		opts: CanOptions<D> & { detail: true },
+	): Promise<CanDetail>;
+	can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
 		opts?: CanOptions<D>,
 	): Promise<CanAnswer>;
 	/** Predicts a create in this workspace; see SyncClient.canCreate. */
-	canCreate<D extends DescMessage>(schema: D, row: MessageInitShape<D>): Promise<CanAnswer>;
+	canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts: DetailOptions & { detail: true },
+	): Promise<CanDetail>;
+	canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts?: DetailOptions,
+	): Promise<CanAnswer>;
 	/** Predicts a permission at a row in this workspace; see SyncClient.hasPermission. */
 	hasPermission<D extends DescMessage>(
 		schema: D,
 		key: string,
 		permission: string,
+		opts: DetailOptions & { detail: true },
+	): Promise<CanDetail>;
+	hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts?: DetailOptions,
 	): Promise<CanAnswer>;
 	scan<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>>;
 	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
@@ -1414,21 +1451,63 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 		schema: D,
 		key: string,
 		operation: Exclude<AccessOperation, 'create'>,
+		opts: CanOptions<D> & { detail: true },
+	): Promise<CanDetail>;
+	can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
 		opts?: CanOptions<D>,
-	): Promise<CanAnswer> {
-		return this.client.canIn(this.workspaceId, schema, key, operation, opts);
+	): Promise<CanAnswer>;
+	async can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions<D>,
+	): Promise<CanAnswer | CanDetail> {
+		return answerAs(await this.client.canIn(this.workspaceId, schema, key, operation, opts), opts);
 	}
 
-	canCreate<D extends DescMessage>(schema: D, row: MessageInitShape<D>): Promise<CanAnswer> {
-		return this.client.canCreateIn(this.workspaceId, schema, row);
+	canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts: DetailOptions & { detail: true },
+	): Promise<CanDetail>;
+	canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts?: DetailOptions,
+	): Promise<CanAnswer>;
+	async canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts?: DetailOptions,
+	): Promise<CanAnswer | CanDetail> {
+		return answerAs(await this.client.canCreateIn(this.workspaceId, schema, row), opts);
 	}
 
 	hasPermission<D extends DescMessage>(
 		schema: D,
 		key: string,
 		permission: string,
-	): Promise<CanAnswer> {
-		return this.client.hasPermissionIn(this.workspaceId, schema, key, permission);
+		opts: DetailOptions & { detail: true },
+	): Promise<CanDetail>;
+	hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts?: DetailOptions,
+	): Promise<CanAnswer>;
+	async hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts?: DetailOptions,
+	): Promise<CanAnswer | CanDetail> {
+		return answerAs(
+			await this.client.hasPermissionIn(this.workspaceId, schema, key, permission),
+			opts,
+		);
 	}
 
 	getRow<D extends DescMessage>(
@@ -1744,20 +1823,37 @@ interface QueryPage<T> {
  * client does not hold it, and the rows above it.
  */
 type AccessPlan =
-	& { def: EntityDef; decide(row: Message | undefined, chain: AccessChain): CanAnswer }
+	& { def: EntityDef; decide(row: Message | undefined, chain: AccessChain): Verdict }
 	& ({ key: string } | { row: Message });
+
+/** The answer outright, or the row a prediction starts from. */
+type AccessPlanner = (summary: AccessSummary) => Verdict | AccessPlan;
+
+/**
+ * A prediction before it reads the store: the answer outright, which needs no
+ * summary, or the planner that decides it from one.
+ */
+type AccessQuestion = Verdict | AccessPlanner;
 
 /** One prediction waiting in an access batch; see SyncClient.askAccess. */
 interface AccessAsk {
 	workspaceId: string;
-	/** The answer outright, or the row it starts from. */
-	plan(summary: AccessSummary): CanAnswer | AccessPlan;
-	resolve(answer: CanAnswer): void;
+	plan: AccessPlanner;
+	resolve(answer: Verdict): void;
 	reject(err: unknown): void;
 }
 
 /** How one prediction of a batch came out. */
-type AccessOutcome = { answer: CanAnswer } | { error: unknown };
+type AccessOutcome = { answer: Verdict } | { error: unknown };
+
+function isAccessPlan(plan: Verdict | AccessPlan): plan is AccessPlan {
+	return typeof plan === 'object' && 'decide' in plan;
+}
+
+/** `verdict` in the form `opts` asks for. */
+function answerAs(verdict: Verdict, opts: DetailOptions | undefined): CanAnswer | CanDetail {
+	return opts?.detail === true ? detailOf(verdict) : answerOf(verdict);
+}
 
 /** One prediction of a batch, part way up its chain of access parents. */
 interface AccessWalk {
@@ -1869,8 +1965,13 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 */
 	private accessSummaries = new Map<
 		string,
-		{ generation: unknown; summary: Promise<AccessSummary | undefined> }
+		{ generation: unknown; summary: Promise<AccessSummary | UnknownDetail> }
 	>();
+	/**
+	 * Per workspace, the summary the last access batch decided from, or why it
+	 * had none. What peekAccess decides from, with no read of the store.
+	 */
+	private settledAccess = new Map<string, AccessSummary | UnknownDetail>();
 	/**
 	 * Per workspace, the CallerAccess that storedAccessUnder read last, or that
 	 * this tab stored last (see accessStored), with its stored bytes and the
@@ -2046,6 +2147,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		this.coordinator?.removeWorkspace(workspaceId);
 		this.statusTracker.removeWorkspace(workspaceId);
 		this.accessSummaries.delete(workspaceId);
+		this.settledAccess.delete(workspaceId);
 		this.decodedAccess.delete(workspaceId);
 		this.accessAsked.delete(workspaceId);
 		if (this.defaultWorkspaceId === workspaceId) {
@@ -3265,30 +3367,50 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * write queued against it until that ack arrives.
 	 *
 	 * Resolves to `'unknown'`, unless a rule admits the operation without the
-	 * missing input:
+	 * missing input, in these cases. With `opts.detail`, the answer is a
+	 * {@link CanDetail} that names the {@link UnknownReason}:
 	 *
-	 * - before the first summary arrives;
-	 * - when a rule's subject check or condition reads a row that is not held
-	 *   locally;
-	 * - when a permission depends on a row of the chain that is not held
-	 *   locally, the row itself included, and the caller holds that permission
-	 *   at a row of an entity that can sit above it;
-	 * - while a local write to a grant row, or a delete of a row other rows sit
-	 *   below, waits for its ack.
+	 * - `'no_summary'`: before the first summary arrives;
+	 * - `'row_not_held'`: when a rule's subject check or condition reads a row
+	 *   that is not held locally, or when a permission depends on a row of the
+	 *   chain that is not held locally, the row itself included, and the
+	 *   caller holds that permission at a row of an entity that can sit above
+	 *   it;
+	 * - `'pending_grant'`: while a local write to a grant row, or a delete of a
+	 *   row other rows sit below, waits for its ack;
+	 * - `'new_value'`: when the update changes a field whose new value decides;
+	 * - `'chain_too_deep'`: when the chain of access parents is longer than
+	 *   the client walks.
 	 *
 	 * @example
 	 * ```ts
 	 * const canEdit = await client.can(CommentSchema, id, 'update', { fields: ['body'] });
 	 * const canDelete = await client.can(CommentSchema, id, 'delete');
+	 * const { answer, reason } = await client.can(CommentSchema, id, 'delete', { detail: true });
 	 * ```
 	 */
 	can<D extends DescMessage>(
 		schema: D,
 		key: string,
 		operation: Exclude<AccessOperation, 'create'>,
+		opts: CanOptions<D> & { detail: true },
+	): Promise<CanDetail>;
+	can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
 		opts?: CanOptions<D>,
-	): Promise<CanAnswer> {
-		return this.canIn(this.defaultScope().workspaceId, schema, key, operation, opts);
+	): Promise<CanAnswer>;
+	async can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions<D>,
+	): Promise<CanAnswer | CanDetail> {
+		return answerAs(
+			await this.canIn(this.defaultScope().workspaceId, schema, key, operation, opts),
+			opts,
+		);
 	}
 
 	/**
@@ -3303,8 +3425,22 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * const canComment = await client.canCreate(CommentSchema, { id: 'c1', task: { id: taskId } });
 	 * ```
 	 */
-	canCreate<D extends DescMessage>(schema: D, row: MessageInitShape<D>): Promise<CanAnswer> {
-		return this.canCreateIn(this.defaultScope().workspaceId, schema, row);
+	canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts: DetailOptions & { detail: true },
+	): Promise<CanDetail>;
+	canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts?: DetailOptions,
+	): Promise<CanAnswer>;
+	async canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts?: DetailOptions,
+	): Promise<CanAnswer | CanDetail> {
+		return answerAs(await this.canCreateIn(this.defaultScope().workspaceId, schema, row), opts);
 	}
 
 	/**
@@ -3321,8 +3457,24 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		schema: D,
 		key: string,
 		permission: string,
-	): Promise<CanAnswer> {
-		return this.hasPermissionIn(this.defaultScope().workspaceId, schema, key, permission);
+		opts: DetailOptions & { detail: true },
+	): Promise<CanDetail>;
+	hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts?: DetailOptions,
+	): Promise<CanAnswer>;
+	async hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts?: DetailOptions,
+	): Promise<CanAnswer | CanDetail> {
+		return answerAs(
+			await this.hasPermissionIn(this.defaultScope().workspaceId, schema, key, permission),
+			opts,
+		);
 	}
 
 	/** @internal backs WorkspaceClient.can. */
@@ -3332,13 +3484,86 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		key: string,
 		operation: Exclude<AccessOperation, 'create'>,
 		opts?: CanOptions<D>,
-	): Promise<CanAnswer> {
+	): Promise<Verdict> {
 		this.assertOpen();
+		return this.askQuestion(workspaceId, this.canQuestion(schema, key, operation, opts));
+	}
+
+	/** @internal backs WorkspaceClient.canCreate. */
+	async canCreateIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		init: MessageInitShape<D>,
+	): Promise<Verdict> {
+		this.assertOpen();
+		return this.askQuestion(workspaceId, this.canCreateQuestion(schema, init));
+	}
+
+	/** @internal backs WorkspaceClient.hasPermission. */
+	async hasPermissionIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		key: string,
+		permission: string,
+	): Promise<Verdict> {
+		this.assertOpen();
+		return this.askQuestion(workspaceId, this.hasPermissionQuestion(schema, key, permission));
+	}
+
+	/**
+	 * What canIn answers, decided at once from what the client holds in
+	 * memory: the summary the last prediction in `workspaceId` read, and no
+	 * row. An unknown verdict can mean only that the rows were not read.
+	 * Undefined before a prediction in the workspace read a summary, and
+	 * where canIn rejects.
+	 * @internal the answer useCan starts from.
+	 */
+	peekCanIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions<D>,
+	): Verdict | undefined {
+		return this.peekAccess(workspaceId, () => this.canQuestion(schema, key, operation, opts));
+	}
+
+	/**
+	 * What canCreateIn answers, decided as {@link peekCanIn} decides.
+	 * @internal the answer useCanCreate starts from.
+	 */
+	peekCanCreateIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		init: MessageInitShape<D>,
+	): Verdict | undefined {
+		return this.peekAccess(workspaceId, () => this.canCreateQuestion(schema, init));
+	}
+
+	/**
+	 * What hasPermissionIn answers, decided as {@link peekCanIn} decides.
+	 * @internal the answer useHasPermission starts from.
+	 */
+	peekHasPermissionIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		key: string,
+		permission: string,
+	): Verdict | undefined {
+		return this.peekAccess(workspaceId, () => this.hasPermissionQuestion(schema, key, permission));
+	}
+
+	private canQuestion<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions<D>,
+	): AccessQuestion {
 		const def = this.entityRegistry.bySchema(schema);
 		const rules = def.accessRules;
 		// An entity outside the model is open to every caller in the workspace.
 		if (rules === undefined) return 'yes';
-		return this.askAccess(workspaceId, (summary) => ({
+		return (summary) => ({
 			def,
 			key,
 			decide: (row, chain) => {
@@ -3353,41 +3578,44 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					: [ null, ...new Set(rules.flatMap((r) => (r.update ? r.fields ?? [] : []))) ].map((u) =>
 						u === null ? null : [ u ]
 					);
-				let answer: CanAnswer = 'no';
+				const newValue = unknownBecause('new_value');
+				let answer: Verdict = 'no';
 				for (const changed of candidates) {
 					// The new value of a changed subject field, access parent or field a
 					// condition reads decides the final side, and none is known here.
 					const moves = changed !== null && accessParentUnits(def).some((u) => changed.includes(u));
 					const final: RuleRow = {
-						held: moves ? (p) => canAt(summary, p, def.name, key, UNKNOWN_CHAIN) : stored.held,
-						subject: (field) => (changed?.includes(field) ? undefined : stored.subject(field)),
+						held: moves
+							? (p) => {
+								const held = canAt(summary, p, def.name, key, UNKNOWN_CHAIN);
+								return typeof held === 'string' ? held : newValue;
+							}
+							: stored.held,
+						subject: (field) => (changed?.includes(field) ? newValue : stored.subject(field)),
 						matches: (rule) =>
-							changed !== null && whenReads(def.schema, rule, changed) ? 'unknown' : stored.matches(rule),
+							changed !== null && whenReads(def.schema, rule, changed) ? newValue : stored.matches(rule),
 						within: (rule) =>
 							moves || (changed !== null && withinReads(def, rule, changed))
-								? 'unknown'
+								? newValue
 								: stored.within(rule),
 					};
 					const one = decideRules(rules, 'update', summary.subjects, stored, final, changed);
 					if (one === 'yes') return 'yes';
-					if (one === 'unknown') answer = 'unknown';
+					if (one !== 'no' && answer === 'no') answer = one;
 				}
 				return answer;
 			},
-		}));
+		});
 	}
 
-	/** @internal backs WorkspaceClient.canCreate. */
-	async canCreateIn<D extends DescMessage>(
-		workspaceId: string,
+	private canCreateQuestion<D extends DescMessage>(
 		schema: D,
 		init: MessageInitShape<D>,
-	): Promise<CanAnswer> {
-		this.assertOpen();
+	): AccessQuestion {
 		const def = this.entityRegistry.bySchema(schema);
 		const rules = def.accessRules;
 		if (rules === undefined) return 'yes';
-		return this.askAccess(workspaceId, (summary) => {
+		return (summary) => {
 			const row = stampCreatorFields(def, create(schema, init), summary.subjects[0] ?? '');
 			return {
 				def,
@@ -3400,22 +3628,47 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						ruleRowOf(summary, def, keyOf(def, row), row, chain, true),
 					),
 			};
-		});
+		};
 	}
 
-	/** @internal backs WorkspaceClient.hasPermission. */
-	async hasPermissionIn<D extends DescMessage>(
-		workspaceId: string,
+	private hasPermissionQuestion<D extends DescMessage>(
 		schema: D,
 		key: string,
 		permission: string,
-	): Promise<CanAnswer> {
-		this.assertOpen();
+	): AccessQuestion {
 		const def = this.entityRegistry.bySchema(schema);
-		return this.askAccess(workspaceId, (summary) =>
+		return (summary) =>
 			summary.holds(permission, def.name, key)
 				? 'yes'
-				: { def, key, decide: (_, chain) => canAt(summary, permission, def.name, key, chain) });
+				: { def, key, decide: (_, chain) => canAt(summary, permission, def.name, key, chain) };
+	}
+
+	/** The answer to `question`, read from the store when it needs a summary. */
+	private askQuestion(workspaceId: string, question: AccessQuestion): Promise<Verdict> {
+		return typeof question === 'function'
+			? this.askAccess(workspaceId, question)
+			: Promise.resolve(question);
+	}
+
+	/** See {@link peekCanIn}. */
+	private peekAccess(workspaceId: string, question: () => AccessQuestion): Verdict | undefined {
+		if (this.closed) return undefined;
+		try {
+			const q = question();
+			if (typeof q !== 'function') return q;
+			const summary = this.settledAccess.get(workspaceId);
+			if (!(summary instanceof AccessSummary)) return summary;
+			const plan = q(summary);
+			if (!isAccessPlan(plan)) return plan;
+			const row = 'row' in plan ? plan.row : undefined;
+			return plan.decide(row, {
+				parents: row === undefined ? undefined : parentRefsOf(plan.def, row),
+				above: () => undefined,
+				entitiesAbove: (entity) => entitiesAboveOf(plan.def).get(entity),
+			});
+		} catch {
+			return undefined;
+		}
 	}
 
 	/**
@@ -3449,7 +3702,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * in one synchronous run (a Promise.all over many keys, the effects of one
 	 * React commit) share one read. Rejects when that read fails.
 	 */
-	private askAccess(workspaceId: string, plan: AccessAsk['plan']): Promise<CanAnswer> {
+	private askAccess(workspaceId: string, plan: AccessPlanner): Promise<Verdict> {
 		return new Promise((resolve, reject) => {
 			const ask: AccessAsk = { workspaceId, plan, resolve, reject };
 			if (this.accessBatch !== undefined) {
@@ -3519,17 +3772,20 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				),
 			),
 		);
+		for (const [ ws, summary ] of summaries) {
+			if (this.scopes.has(ws)) this.settledAccess.set(ws, summary);
+		}
 		const out: AccessOutcome[] = new Array(batch.length);
 		const walks: AccessWalk[] = [];
 		batch.forEach((ask, at) => {
-			const summary = summaries.get(ask.workspaceId);
-			if (summary === undefined) {
-				out[at] = { answer: 'unknown' };
+			const summary = summaries.get(ask.workspaceId)!;
+			if (!(summary instanceof AccessSummary)) {
+				out[at] = { answer: summary };
 				return;
 			}
 			try {
 				const plan = ask.plan(summary);
-				if (typeof plan === 'string') out[at] = { answer: plan };
+				if (!isAccessPlan(plan)) out[at] = { answer: plan };
 				else {
 					walks.push({
 						at,
@@ -3662,9 +3918,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
-	 * The summary canIn decides from in `workspaceId`, or undefined when it
-	 * cannot decide: none is stored, or a queued write can change the caller's
-	 * grants. Reuses the one decided under the same access generation. Under a
+	 * The summary canIn decides from in `workspaceId`, or why it cannot decide:
+	 * none is stored, or a queued write can change the caller's grants. Reuses the one decided under the same access generation. Under a
 	 * new generation it reads the stored CallerAccess only when it changed (see
 	 * storedAccessUnder), and walks the pending queue unless the pending-access
 	 * record counts no queued write that can change the grants (see
@@ -3673,7 +3928,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	private async accessSummaryIn(
 		tx: KVRead,
 		workspaceId: string,
-	): Promise<AccessSummary | undefined> {
+	): Promise<AccessSummary | UnknownDetail> {
 		// The generations and the pending-access record in one getMany:
 		// IndexedDB opens one transaction for it where a get per key opens one
 		// each.
@@ -3687,7 +3942,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		if (generation !== undefined && cached?.generation === generation) return cached.summary;
 		const summary = (async () => {
 			const decoded = await this.storedAccessUnder(tx, workspaceId, storedGeneration);
-			if (decoded === undefined) return undefined;
+			if (decoded === undefined) return unknownBecause('no_summary');
 			// Only a count of zero is trusted. A build that predates the record
 			// drops queued writes without counting them down, so a count above
 			// zero can be too high, and the walk keeps the answer exact for it.
@@ -3695,7 +3950,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				pendingAccessOf(pendingRecord, lastMutationId) !== 0
 				&& pendingChangesAccess(this.entityRegistry, await readPending(tx, workspaceId))
 			) {
-				return undefined;
+				return unknownBecause('pending_grant');
 			}
 			return decoded.summary;
 		})();

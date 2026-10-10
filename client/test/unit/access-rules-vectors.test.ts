@@ -13,9 +13,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	type AccessOperation,
+	answerOf,
 	type CanAnswer,
 	decideRules,
 	type RuleRow,
+	unknownBecause,
+	type Verdict,
 } from '../../src/access.js';
 import { ConditionSchema } from '../../src/gen/syncplane/v1/query_pb.js';
 import type { AccessRuleDef } from '../../src/mutations.js';
@@ -85,19 +88,21 @@ const ruleOf = (r: VectorRule): AccessRuleDef => {
 	return rule;
 };
 
-const answerOf = (v: boolean | null | undefined): CanAnswer =>
-	v === null ? 'unknown' : v === true ? 'yes' : 'no';
+const missing = unknownBecause('row_not_held');
+
+const verdictOf = (v: boolean | null | undefined): Verdict =>
+	v === null ? missing : v === true ? 'yes' : 'no';
 
 const rowOf = (v: VectorRow): RuleRow => ({
-	held: (permission) => answerOf(v.held[permission]),
-	subject: (field) => v.fields[field] ?? undefined,
-	matches: (rule) => answerOf(v.matches?.[whenNames.get(rule)!]),
+	held: (permission) => verdictOf(v.held[permission]),
+	subject: (field) => v.fields[field] ?? missing,
+	matches: (rule) => verdictOf(v.matches?.[whenNames.get(rule)!]),
 	within: (rule) => {
-		let answer: CanAnswer = 'yes';
+		let answer: Verdict = 'yes';
 		for (const entry of rule.within) {
-			const one = answerOf(v.within?.[entry.entity]);
+			const one = verdictOf(v.within?.[entry.entity]);
 			if (one === 'no') return 'no';
-			if (one === 'unknown') answer = 'unknown';
+			if (one !== 'yes') answer = one;
 		}
 		return answer;
 	},
@@ -110,14 +115,14 @@ describe('access rule conformance vectors', () => {
 
 	for (const tc of vectors.cases) {
 		it(tc.name, () => {
-			const answer = decideRules(
+			const answer = answerOf(decideRules(
 				tc.rules.map(ruleOf),
 				tc.op,
 				tc.subjects,
 				rowOf(tc.row),
 				tc.final === undefined ? undefined : rowOf(tc.final),
 				tc.changed,
-			);
+			));
 			expect(answer).toBe(tc.want);
 		});
 	}

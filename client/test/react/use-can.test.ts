@@ -19,6 +19,7 @@ import {
 	RoomSchema,
 	TaskSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
+import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { createReactSync, useCan, useCanCreate, useHasPermission } from '../../src/react/index.js';
 import { createTestClient } from '../../src/testing/index.js';
 
@@ -435,6 +436,101 @@ describe('useCanCreate', () => {
 		t.server.setCallerAccess(posting('view_posts', 'post'));
 		await act(() => t.sync());
 		await waitFor(() => expect(result.current).toBe('yes'));
+		await t.client.close();
+	});
+});
+
+describe('the first render of an access hook', () => {
+	/** Renders `hook` and records what each render returned. */
+	function renderRecorded<T>(hook: (props: { id: string }) => T, client: SyncClient, id = 'po') {
+		const seen: T[] = [];
+		const rendered = renderHook(
+			(props: { id: string }) => {
+				const out = hook(props);
+				seen.push(out);
+				return out;
+			},
+			{ wrapper: wrapper(client), initialProps: { id } },
+		);
+		return { seen, ...rendered };
+	}
+
+	async function room() {
+		const t = await createTestClient({ entities: roomEntities });
+		t.server.put(RoomSchema, { id: 'r1' });
+		t.server.put(PostSchema, { id: 'po', room: { id: 'r1' }, authorId: 'ann' });
+		t.server.put(PostSchema, { id: 'po-bob', room: { id: 'r1' }, authorId: 'bob' });
+		t.server.setCallerAccess(posting('view_posts', 'post'));
+		await t.sync();
+		return t;
+	}
+
+	it('is unknown with the reason loading before the client read a summary', async () => {
+		const t = await room();
+		const { seen, result } = renderRecorded(
+			() => useHasPermission(RoomSchema, 'r1', 'post', { detail: true }),
+			t.client,
+		);
+		expect(seen[0]).toEqual({ answer: 'unknown', reason: 'loading' });
+		await waitFor(() => expect(result.current).toEqual({ answer: 'yes' }));
+		await t.client.close();
+	});
+
+	it('decides from the summary the client read last where no row is needed', async () => {
+		const t = await room();
+		// Any prediction reads the summary.
+		expect(await t.client.hasPermission(PostSchema, 'po', 'post')).toBe('yes');
+
+		// Held at the room itself, and held at no room at all.
+		const held = renderRecorded(() => useHasPermission(RoomSchema, 'r1', 'post'), t.client);
+		const nowhere = renderRecorded(
+			() => useHasPermission(PostSchema, 'po', 'moderate_posts'),
+			t.client,
+		);
+		expect(held.seen[0]).toBe('yes');
+		expect(nowhere.seen[0]).toBe('no');
+		await settle();
+		expect(held.seen.every((a) => a === 'yes')).toBe(true);
+		expect(nowhere.seen.every((a) => a === 'no')).toBe(true);
+		await t.client.close();
+	});
+
+	it('answers yes for an entity outside the model before any summary', async () => {
+		const t = await createTestClient({ entities: [ ...roomEntities, WidgetSchema ] });
+		const can = renderRecorded(() => useCan(WidgetSchema, 'w1', 'delete'), t.client);
+		const create = renderRecorded(() => useCanCreate(WidgetSchema, { id: 'w2' }), t.client);
+		expect(can.seen[0]).toBe('yes');
+		expect(create.seen[0]).toBe('yes');
+		await t.client.close();
+	});
+
+	it('starts from the answer the same question got last', async () => {
+		const t = await room();
+		const canEdit = ({ id }: { id: string }) =>
+			useCan(PostSchema, id, 'update', { fields: [ 'body' ], detail: true });
+
+		const first = renderRecorded(canEdit, t.client);
+		await waitFor(() => expect(first.result.current).toEqual({ answer: 'yes' }));
+		first.unmount();
+
+		const again = renderRecorded(canEdit, t.client);
+		expect(again.seen[0]).toEqual({ answer: 'yes' });
+
+		// A new question does not show the answer to the old one.
+		again.rerender({ id: 'po-bob' });
+		expect(again.seen.at(-1)).toEqual({ answer: 'unknown', reason: 'loading' });
+		await waitFor(() => expect(again.result.current).toEqual({ answer: 'no' }));
+		await t.client.close();
+	});
+
+	it('gives the reason once the answer is read', async () => {
+		const t = await createTestClient({ entities: roomEntities });
+		t.server.put(PostSchema, { id: 'po', room: { id: 'r1' }, authorId: 'ann' });
+		await t.sync();
+		const { result } = renderHook(() => useCan(PostSchema, 'po', 'read', { detail: true }), {
+			wrapper: wrapper(t.client),
+		});
+		await waitFor(() => expect(result.current).toEqual({ answer: 'unknown', reason: 'no_summary' }));
 		await t.client.close();
 	});
 });

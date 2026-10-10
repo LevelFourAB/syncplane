@@ -8,8 +8,16 @@ import {
 } from '@bufbuild/protobuf';
 import { useEffect, useMemo, useState } from 'react';
 
-import { accessInputsOf, type AccessOperation, type CanAnswer } from '../../access.js';
-import type { CanOptions, WorkspaceClient } from '../../client.js';
+import {
+	accessInputsOf,
+	type AccessOperation,
+	type CanAnswer,
+	type CanDetail,
+	detailOf,
+	unknownBecause,
+	type Verdict,
+} from '../../access.js';
+import type { CanOptions, DetailOptions, SyncClient, WorkspaceClient } from '../../client.js';
 import { useSyncClient, useWorkspaceScope } from '../context.js';
 import { rowWatchIdentity, rowWatchOf, watchRowCell } from '../row-store.js';
 import type { UseWorkspaceOptions } from '../types.js';
@@ -18,6 +26,9 @@ import type { UseWorkspaceOptions } from '../types.js';
 export interface UseCanOptions<D extends DescMessage = DescMessage>
 	extends UseWorkspaceOptions, CanOptions<D>
 {}
+
+/** Options for {@link useCanCreate} and {@link useHasPermission}. */
+export interface UseDetailOptions extends UseWorkspaceOptions, DetailOptions {}
 
 /**
  * Predicts whether the entity's access rules admit `operation` on the row of
@@ -32,7 +43,17 @@ export interface UseCanOptions<D extends DescMessage = DescMessage>
  * workspace: a new summary of the caller's access arrives, a local write that
  * can change the caller's grants is queued, acked or rolled back, or a row
  * that other rows sit below changes, in this tab or another sharing the
- * store. Returns `'unknown'` until the first answer resolves.
+ * store.
+ *
+ * The first render gives an answer at once, before the hook reads the store:
+ * `'yes'` or `'no'` when the summary the client read last decides it without
+ * a row, else the answer the same question got last in this client, else
+ * `'unknown'` with the reason `'loading'`. An answer from the client's
+ * memory can be out of date until the read finishes. A failed read gives
+ * `'unknown'` with the reason `'error'`.
+ *
+ * With `opts.detail`, the hook returns a {@link CanDetail}, which gives the
+ * reason for an `'unknown'` answer.
  *
  * The access hooks and `useRow` calls without `include` on rows of one entity
  * share one watch of those rows.
@@ -43,24 +64,46 @@ export interface UseCanOptions<D extends DescMessage = DescMessage>
  *   const can = useCan(CommentSchema, id, 'delete');
  *   return <button disabled={can !== 'yes'}>Delete</button>;
  * }
+ *
+ * function EditButton({ id }: { id: string }) {
+ *   const can = useCan(CommentSchema, id, 'update', { detail: true });
+ *   if (can.reason === 'loading') return <Spinner />;
+ *   return <button disabled={can.answer !== 'yes'}>Edit</button>;
+ * }
  * ```
  */
 export function useCan<D extends DescMessage>(
 	schema: D,
 	key: string,
 	operation: Exclude<AccessOperation, 'create'>,
+	opts: UseCanOptions<D> & { detail: true },
+): CanDetail;
+export function useCan<D extends DescMessage>(
+	schema: D,
+	key: string,
+	operation: Exclude<AccessOperation, 'create'>,
 	opts?: UseCanOptions<D>,
-): CanAnswer {
+): CanAnswer;
+export function useCan<D extends DescMessage>(
+	schema: D,
+	key: string,
+	operation: Exclude<AccessOperation, 'create'>,
+	opts?: UseCanOptions<D>,
+): CanAnswer | CanDetail {
 	const fields = opts?.fields;
 	// A fields array written inline is a new array on every render.
 	const fieldsKey = fields === undefined ? undefined : JSON.stringify(fields);
-	return useAnswer(
+	const canOpts = fields === undefined ? undefined : { fields };
+	const detail = useAnswer(
 		opts?.workspaceId,
 		schema,
 		{ key, subjects: true },
-		(scope) => scope.can(schema, key, operation, fields === undefined ? undefined : { fields }),
+		[ 'can', schema.typeName, key, operation, fieldsKey ],
+		(scope) => scope.can(schema, key, operation, { ...canOpts, detail: true }),
+		(client, ws) => client.peekCanIn(ws, schema, key, operation, canOpts),
 		[ schema, key, operation, fieldsKey ],
 	);
+	return opts?.detail === true ? detail : detail.answer;
 }
 
 /**
@@ -68,8 +111,8 @@ export function useCan<D extends DescMessage>(
  * resolved workspace. See `SyncClient.canCreate` for what the answer means.
  *
  * Re-evaluates when `row` changes by value, and when
- * `SyncClient.onAccessChange` reports the workspace. Returns `'unknown'`
- * until the first answer resolves.
+ * `SyncClient.onAccessChange` reports the workspace. Starts from an answer
+ * it can give at once, and takes `opts.detail`, as {@link useCan} does.
  *
  * @example
  * ```tsx
@@ -82,21 +125,38 @@ export function useCan<D extends DescMessage>(
 export function useCanCreate<D extends DescMessage>(
 	schema: D,
 	row: MessageInitShape<D>,
-	opts?: UseWorkspaceOptions,
-): CanAnswer {
+	opts: UseDetailOptions & { detail: true },
+): CanDetail;
+export function useCanCreate<D extends DescMessage>(
+	schema: D,
+	row: MessageInitShape<D>,
+	opts?: UseDetailOptions,
+): CanAnswer;
+export function useCanCreate<D extends DescMessage>(
+	schema: D,
+	row: MessageInitShape<D>,
+	opts?: UseDetailOptions,
+): CanAnswer | CanDetail {
 	// An object literal is a new object on every render; its encoding is not.
 	const encoded = useMemo(() => toBinary(schema, create(schema, row)).join(','), [ schema, row ]);
-	return useAnswer(opts?.workspaceId, schema, undefined, (scope) => scope.canCreate(schema, row), [
+	const detail = useAnswer(
+		opts?.workspaceId,
 		schema,
-		encoded,
-	]);
+		undefined,
+		[ 'create', schema.typeName, encoded ],
+		(scope) => scope.canCreate(schema, row, { detail: true }),
+		(client, ws) => client.peekCanCreateIn(ws, schema, row),
+		[ schema, encoded ],
+	);
+	return opts?.detail === true ? detail : detail.answer;
 }
 
 /**
  * Predicts whether the caller holds `permission` at the row of `schema` with
  * `key`, for the resolved workspace. See `SyncClient.hasPermission` for what
- * the answer means. Re-evaluates as {@link useCan} does, except that a
- * subject field is not an input.
+ * the answer means. Re-evaluates, starts from an answer it can give at once,
+ * and takes `opts.detail`, as {@link useCan} does, except that a subject
+ * field is not an input.
  *
  * @example
  * ```tsx
@@ -110,15 +170,59 @@ export function useHasPermission<D extends DescMessage>(
 	schema: D,
 	key: string,
 	permission: string,
-	opts?: UseWorkspaceOptions,
-): CanAnswer {
-	return useAnswer(
+	opts: UseDetailOptions & { detail: true },
+): CanDetail;
+export function useHasPermission<D extends DescMessage>(
+	schema: D,
+	key: string,
+	permission: string,
+	opts?: UseDetailOptions,
+): CanAnswer;
+export function useHasPermission<D extends DescMessage>(
+	schema: D,
+	key: string,
+	permission: string,
+	opts?: UseDetailOptions,
+): CanAnswer | CanDetail {
+	const detail = useAnswer(
 		opts?.workspaceId,
 		schema,
 		{ key, subjects: false },
-		(scope) => scope.hasPermission(schema, key, permission),
+		[ 'permission', schema.typeName, key, permission ],
+		(scope) => scope.hasPermission(schema, key, permission, { detail: true }),
+		(client, ws) => client.peekHasPermissionIn(ws, schema, key, permission),
 		[ schema, key, permission ],
 	);
+	return opts?.detail === true ? detail : detail.answer;
+}
+
+/** How many answers {@link lastAnswers} keeps for each client. */
+const LAST_ANSWERS_MAX = 1000;
+
+/**
+ * Per client, the newest answer each question got from the store, by
+ * question id, the least recent first: what a hook that asks the same
+ * question again starts from.
+ */
+const lastAnswers = new WeakMap<SyncClient, Map<string, CanDetail>>();
+
+function rememberAnswer(client: SyncClient, id: string, detail: CanDetail): void {
+	let answers = lastAnswers.get(client);
+	if (answers === undefined) lastAnswers.set(client, answers = new Map());
+	answers.delete(id);
+	answers.set(id, detail);
+	if (answers.size > LAST_ANSWERS_MAX) answers.delete(answers.keys().next().value!);
+}
+
+/**
+ * The answer a hook shows before its first read of the store: what `peek`
+ * decides from memory when it decides, else the last answer to the question.
+ */
+function seedOf(client: SyncClient, id: string, peek: () => Verdict | undefined): CanDetail {
+	const now = peek();
+	// An unknown peek is only a peek that read no rows.
+	if (now === 'yes' || now === 'no') return detailOf(now);
+	return lastAnswers.get(client)?.get(id) ?? unknownBecause('loading');
 }
 
 /** The row an answer is for, and which of its fields are inputs of the answer. */
@@ -131,18 +235,30 @@ interface AnswerRow {
 /**
  * Holds the newest answer `ask` gives, asked again on every access change in
  * the workspace and, when there is a row, on every change of what
- * accessInputsOf reads from it. `deps` decide when `ask` itself changes.
+ * accessInputsOf reads from it. Before the first answer, holds the one
+ * seedOf gives. `question` names what `ask` asks, as JSON values, and
+ * `deps` decide when `ask` itself changes.
  */
 function useAnswer<D extends DescMessage>(
 	workspaceId: string | undefined,
 	schema: D,
 	row: AnswerRow | undefined,
-	ask: (scope: WorkspaceClient) => Promise<CanAnswer>,
+	question: readonly unknown[],
+	ask: (scope: WorkspaceClient) => Promise<CanDetail>,
+	peek: (client: SyncClient, workspaceId: string) => Verdict | undefined,
 	deps: readonly unknown[],
-): CanAnswer {
+): CanDetail {
 	const client = useSyncClient();
 	const scope = useWorkspaceScope(workspaceId);
-	const [ answer, setAnswer ] = useState<CanAnswer>('unknown');
+	const id = JSON.stringify([ scope.workspaceId, ...question ]);
+	// The answer held is for the question it was asked for, so a hook asked a
+	// new question shows that question's seed and not the old answer.
+	const [ held, setHeld ] = useState<{ id: string; detail: CanDetail }>();
+	// `peek` is a new closure on every render; `id` names what it reads.
+	const seed = useMemo(() => seedOf(client, id, () => peek(client, scope.workspaceId)), [
+		client,
+		id,
+	]);
 	const key = row?.key;
 	const subjects = row?.subjects ?? false;
 	useEffect(() => {
@@ -152,14 +268,18 @@ function useAnswer<D extends DescMessage>(
 		let live = true;
 		// Answers resolve out of order; only the newest one may land.
 		let generation = 0;
+		const land = (detail: CanDetail) =>
+			setHeld((prev) => (prev?.id === id && prev.detail === detail ? prev : { id, detail }));
 		const evaluate = () => {
 			const mine = ++generation;
 			ask(scope).then(
-				(a) => {
-					if (live && mine === generation) setAnswer(a);
+				(detail) => {
+					if (!live || mine !== generation) return;
+					rememberAnswer(client, id, detail);
+					land(detail);
 				},
 				() => {
-					if (live && mine === generation) setAnswer('unknown');
+					if (live && mine === generation) land(unknownBecause('error'));
 				},
 			);
 		};
@@ -200,6 +320,6 @@ function useAnswer<D extends DescMessage>(
 			offRow?.();
 		};
 		// `ask` is a new closure on every render; deps lists what it reads.
-	}, [ client, scope, key, subjects, ...deps ]);
-	return answer;
+	}, [ client, scope, key, subjects, id, ...deps ]);
+	return held?.id === id ? held.detail : seed;
 }

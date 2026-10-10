@@ -37,11 +37,77 @@ import type { TouchSet } from './touch.js';
 
 /**
  * A prediction about the caller's access: `'yes'`, `'no'`, or `'unknown'`
- * when the client cannot tell — no summary has arrived for the workspace, a
- * row the answer depends on is not held locally, or local writes the server
- * has not acked yet can change the caller's grants.
+ * when the client cannot tell. {@link CanDetail} also gives the
+ * {@link UnknownReason}.
  */
 export type CanAnswer = 'yes' | 'no' | 'unknown';
+
+/**
+ * Why a prediction is `'unknown'`. When more than one applies, the answer
+ * gives one of them.
+ *
+ * - `'loading'`: the hook has no answer yet. Only the React hooks give it.
+ * - `'no_summary'`: no summary of the caller's access has arrived for the
+ *   workspace.
+ * - `'pending_grant'`: a local write the server has not acked can change the
+ *   caller's grants: a write to a grant row, or a delete of a row that other
+ *   rows sit below.
+ * - `'row_not_held'`: a row the answer depends on is not held locally: the
+ *   row itself, a row up its chain of access parents, or a row a `within`
+ *   entry reads.
+ * - `'new_value'`: the update changes a subject field, the access parent, or
+ *   a field a condition reads, and the new value decides.
+ * - `'chain_too_deep'`: the chain of access parents is longer than
+ *   {@link MAX_ACCESS_CHAIN} rows.
+ * - `'error'`: the read of the local store failed. Only the React hooks give
+ *   it; the client methods reject.
+ */
+export type UnknownReason =
+	| 'loading'
+	| 'no_summary'
+	| 'pending_grant'
+	| 'row_not_held'
+	| 'new_value'
+	| 'chain_too_deep'
+	| 'error';
+
+/**
+ * A prediction with the reason for an `'unknown'` answer. Equal answers are
+ * the same object, so a hook that returns one keeps a stable reference.
+ */
+export type CanDetail =
+	| { readonly answer: 'yes' | 'no'; readonly reason?: undefined }
+	| UnknownDetail;
+
+/** An `'unknown'` prediction and why it is unknown. */
+export interface UnknownDetail {
+	readonly answer: 'unknown';
+	readonly reason: UnknownReason;
+}
+
+/** A prediction as the decision functions give it: an unknown one says why. */
+export type Verdict = 'yes' | 'no' | UnknownDetail;
+
+const YES_DETAIL: CanDetail = Object.freeze({ answer: 'yes' });
+const NO_DETAIL: CanDetail = Object.freeze({ answer: 'no' });
+const unknowns = new Map<UnknownReason, UnknownDetail>();
+
+/** The unknown verdict for `reason`; equal reasons give the same object. */
+export function unknownBecause(reason: UnknownReason): UnknownDetail {
+	let out = unknowns.get(reason);
+	if (out === undefined) unknowns.set(reason, out = Object.freeze({ answer: 'unknown', reason }));
+	return out;
+}
+
+/** The plain answer of `verdict`. */
+export function answerOf(verdict: Verdict): CanAnswer {
+	return typeof verdict === 'string' ? verdict : 'unknown';
+}
+
+/** `verdict` as a {@link CanDetail}; equal verdicts give the same object. */
+export function detailOf(verdict: Verdict): CanDetail {
+	return verdict === 'yes' ? YES_DETAIL : verdict === 'no' ? NO_DETAIL : verdict;
+}
 
 /** An operation on a row that an entity's access rules decide. */
 export type AccessOperation = 'read' | 'create' | 'update' | 'delete';
@@ -197,20 +263,20 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 /**
  * One row of an operation, as {@link decideRules} reads it: whether the
  * caller holds each permission at the row or up its chain, the value of each
- * subject field, `undefined` where the client cannot know it, whether the
- * row matches a rule's `when` condition, and whether it sits within rows that
- * pass a rule's `within` entries.
+ * subject field, an {@link UnknownDetail} where the client cannot know it,
+ * whether the row matches a rule's `when` condition, and whether it sits
+ * within rows that pass a rule's `within` entries.
  */
 export interface RuleRow {
-	held(permission: string): CanAnswer;
-	subject(field: string): string | undefined;
-	matches(rule: AccessRuleDef): CanAnswer;
-	within(rule: AccessRuleDef): CanAnswer;
+	held(permission: string): Verdict;
+	subject(field: string): string | UnknownDetail;
+	matches(rule: AccessRuleDef): Verdict;
+	within(rule: AccessRuleDef): Verdict;
 }
 
 /**
  * Decides whether one of an entity's access rules admits `op`. The rule the
- * server applies, with `'unknown'` where the client lacks an input;
+ * server applies, with an unknown verdict where the client lacks an input;
  * testdata/access/rules.json pins the two against each other.
  *
  * A rule admits an operation it names when the caller holds each permission in
@@ -230,24 +296,24 @@ export function decideRules(
 	row: RuleRow,
 	final?: RuleRow,
 	changed?: readonly string[] | null,
-): CanAnswer {
-	const admits = (rule: AccessRuleDef, side: RuleRow): CanAnswer => {
-		let subject: CanAnswer = 'yes';
+): Verdict {
+	const admits = (rule: AccessRuleDef, side: RuleRow): Verdict => {
+		let subject: Verdict = 'yes';
 		if (rule.subject !== undefined) {
 			const value = side.subject(rule.subject.name);
-			subject = value === undefined
-				? 'unknown'
+			subject = typeof value !== 'string'
+				? value
 				: value !== '' && subjects.includes(value)
 				? 'yes'
 				: 'no';
 		}
-		const when: CanAnswer = rule.when === undefined ? 'yes' : side.matches(rule);
-		const within: CanAnswer = rule.within.length === 0 ? 'yes' : side.within(rule);
-		let source: CanAnswer = 'yes';
+		const when: Verdict = rule.when === undefined ? 'yes' : side.matches(rule);
+		const within: Verdict = rule.within.length === 0 ? 'yes' : side.within(rule);
+		let source: Verdict = 'yes';
 		for (const permission of rule.requires) source = and(source, side.held(permission));
 		return and(and(and(subject, when), within), source);
 	};
-	let answer: CanAnswer = 'no';
+	let answer: Verdict = 'no';
 	for (const rule of rules) {
 		if (!rule[op]) continue;
 		let ruleAnswer = admits(rule, row);
@@ -258,17 +324,21 @@ export function decideRules(
 					&& changed.every((u) => listed.includes(u));
 				ruleAnswer = and(ruleAnswer, allowed ? 'yes' : 'no');
 			}
-			ruleAnswer = and(ruleAnswer, final === undefined ? 'unknown' : admits(rule, final));
+			ruleAnswer = and(
+				ruleAnswer,
+				final === undefined ? unknownBecause('new_value') : admits(rule, final),
+			);
 		}
 		if (ruleAnswer === 'yes') return 'yes';
-		if (ruleAnswer === 'unknown') answer = 'unknown';
+		if (ruleAnswer !== 'no' && answer === 'no') answer = ruleAnswer;
 	}
 	return answer;
 }
 
-function and(a: CanAnswer, b: CanAnswer): CanAnswer {
+/** `'no'` when either is, else the first unknown of the two, else `'yes'`. */
+function and(a: Verdict, b: Verdict): Verdict {
 	if (a === 'no' || b === 'no') return 'no';
-	return a === 'unknown' || b === 'unknown' ? 'unknown' : 'yes';
+	return a === 'yes' ? b : a;
 }
 
 /** One row of a workspace. */
@@ -310,8 +380,8 @@ export const UNKNOWN_CHAIN: AccessChain = { parents: undefined, above: () => und
 /**
  * Decides `permission` at the row of `entity` with `key`, given the rows
  * above it: at the workspace root, at the row itself, or at a row above it on
- * any path. The rule the server applies, with `'unknown'` where the client
- * lacks an input.
+ * any path. The rule the server applies, with an unknown verdict where the
+ * client lacks an input.
  */
 export function canAt(
 	summary: AccessSummary | undefined,
@@ -319,12 +389,12 @@ export function canAt(
 	entity: string,
 	key: string,
 	chain: AccessChain,
-): CanAnswer {
-	if (summary === undefined) return 'unknown';
+): Verdict {
+	if (summary === undefined) return unknownBecause('no_summary');
 	if (summary.holds(permission, entity, key)) return 'yes';
 	if (chain.parents === undefined) {
 		return heldAbove(summary, permission, entity, chain)
-			? 'unknown'
+			? unknownBecause('row_not_held')
 			: 'no';
 	}
 	return reach(summary, permission, chain.parents, chain);
@@ -335,7 +405,7 @@ export function canAt(
  * parents on its own: at the workspace root, at the row itself, or at that
  * parent or a row above it. A row without a parent needs the root or the
  * row. A create needs its permissions this way. The rule the server applies,
- * with `'unknown'` where the client lacks an input.
+ * with an unknown verdict where the client lacks an input.
  */
 export function canAtEach(
 	summary: AccessSummary | undefined,
@@ -343,16 +413,16 @@ export function canAtEach(
 	entity: string,
 	key: string,
 	chain: AccessChain,
-): CanAnswer {
-	if (summary === undefined) return 'unknown';
+): Verdict {
+	if (summary === undefined) return unknownBecause('no_summary');
 	if (summary.holds(permission, entity, key)) return 'yes';
 	if (chain.parents === undefined) {
 		return heldAbove(summary, permission, entity, chain)
-			? 'unknown'
+			? unknownBecause('row_not_held')
 			: 'no';
 	}
 	if (chain.parents.length === 0) return 'no';
-	let answer: CanAnswer = 'yes';
+	let answer: Verdict = 'yes';
 	for (const parent of chain.parents) {
 		answer = and(answer, reach(summary, permission, [ parent ], chain));
 	}
@@ -368,7 +438,7 @@ function reach(
 	permission: string,
 	start: readonly AccessRow[],
 	chain: AccessChain,
-): CanAnswer {
+): Verdict {
 	const seen = new Set<string>();
 	const fresh = (rows: readonly AccessRow[]) =>
 		rows.filter((row) => {
@@ -390,10 +460,10 @@ function reach(
 				if (heldAbove(summary, permission, row.entity, chain)) complete = false;
 			} else next.push(...fresh(up));
 		}
-		if (hops >= MAX_ACCESS_CHAIN && next.length > 0) return 'unknown';
+		if (hops >= MAX_ACCESS_CHAIN && next.length > 0) return unknownBecause('chain_too_deep');
 		level = next;
 	}
-	return complete ? 'no' : 'unknown';
+	return complete ? 'no' : unknownBecause('row_not_held');
 }
 
 /**
@@ -440,7 +510,7 @@ export function ruleRowOf(
 	return {
 		held: (permission) => decide(summary, permission, def.name, key, chain),
 		subject: (name) => {
-			if (row === undefined) return undefined;
+			if (row === undefined) return unknownBecause('row_not_held');
 			const field = def.schema.fields.find((f) => f.name === name);
 			const value = field === undefined
 				? undefined
@@ -449,7 +519,7 @@ export function ruleRowOf(
 		},
 		matches: (rule) => {
 			if (rule.when === undefined) return 'yes';
-			if (row === undefined) return 'unknown';
+			if (row === undefined) return unknownBecause('row_not_held');
 			return evalCond(row, ruleWhenOf(def.schema, rule.when).cond, def.schema) ? 'yes' : 'no';
 		},
 		within: (rule) => withinAt(summary.subjects, def, key, row, chain, rule),
@@ -461,7 +531,7 @@ export function ruleRowOf(
  * value is `row`, undefined when the client does not hold it, given the rows
  * above it: each entry needs {@link withinReach} to find a row of its entity
  * that passes its checks for a caller with `subjects`. The rule the server
- * applies, with `'unknown'` where the client lacks an input.
+ * applies, with an unknown verdict where the client lacks an input.
  */
 export function withinAt(
 	subjects: readonly string[],
@@ -470,16 +540,16 @@ export function withinAt(
 	row: Message | undefined,
 	chain: AccessChain,
 	rule: AccessRuleDef,
-): CanAnswer {
-	let answer: CanAnswer = 'yes';
+): Verdict {
+	let answer: Verdict = 'yes';
 	for (const entry of rule.within) {
-		const passes = (at: AccessRow): CanAnswer => {
+		const passes = (at: AccessRow): Verdict => {
 			if (at.entity === def.name && at.key === key) {
-				if (row === undefined) return 'unknown';
+				if (row === undefined) return unknownBecause('row_not_held');
 				return passesWithin(subjects, def, row, entry) ? 'yes' : 'no';
 			}
 			const held = chain.row?.(at);
-			if (held === undefined) return 'unknown';
+			if (held === undefined) return unknownBecause('row_not_held');
 			return passesWithin(subjects, held.def, held.row, entry) ? 'yes' : 'no';
 		};
 		answer = and(answer, withinReach({ entity: def.name, key }, entry.entity, chain, passes));
@@ -498,17 +568,19 @@ export function withinReach(
 	row: AccessRow,
 	entity: string,
 	chain: AccessChain,
-	passes: (at: AccessRow) => CanAnswer,
-): CanAnswer {
-	let complete = true;
+	passes: (at: AccessRow) => Verdict,
+): Verdict {
+	// The first unknown met, which the answer is when no row passes.
+	let missing: UnknownDetail | undefined;
 	const decide = (at: AccessRow): boolean => {
 		const answer = passes(at);
-		if (answer === 'unknown') complete = false;
+		if (typeof answer !== 'string') missing ??= answer;
 		return answer === 'yes';
 	};
 	if (row.entity === entity && decide(row)) return 'yes';
 	if (chain.parents === undefined) {
-		return complete && !canSitAbove(entity, row.entity, chain) ? 'no' : 'unknown';
+		if (missing === undefined && !canSitAbove(entity, row.entity, chain)) return 'no';
+		return missing ?? unknownBecause('row_not_held');
 	}
 	const seen = new Set<string>();
 	const fresh = (rows: readonly AccessRow[]) =>
@@ -527,13 +599,13 @@ export function withinReach(
 		for (const at of level) {
 			const up = chain.above(at);
 			if (up === undefined) {
-				if (canSitAbove(entity, at.entity, chain)) complete = false;
+				if (canSitAbove(entity, at.entity, chain)) missing ??= unknownBecause('row_not_held');
 			} else next.push(...fresh(up));
 		}
-		if (hops >= MAX_ACCESS_CHAIN && next.length > 0) return 'unknown';
+		if (hops >= MAX_ACCESS_CHAIN && next.length > 0) return unknownBecause('chain_too_deep');
 		level = next;
 	}
-	return complete ? 'no' : 'unknown';
+	return missing ?? 'no';
 }
 
 /** Whether `row`, a row of `def`, passes the checks of `entry` for a caller with `subjects`. */

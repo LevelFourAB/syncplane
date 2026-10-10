@@ -1485,10 +1485,14 @@ TypeScript checks the field names in `subject`, `fields`, `grant.subject` and `g
 
 ```ts
 type CanAnswer = 'yes' | 'no' | 'unknown';
+type CanDetail =
+	| { answer: 'yes' | 'no'; reason?: undefined }
+	| { answer: 'unknown'; reason: UnknownReason };
 
 client.can(schema, key, operation, opts?): Promise<CanAnswer>; // operation: 'read' | 'update' | 'delete'
-client.canCreate(schema, row): Promise<CanAnswer>;
-client.hasPermission(schema, key, permission): Promise<CanAnswer>;
+client.canCreate(schema, row, opts?): Promise<CanAnswer>;
+client.hasPermission(schema, key, permission, opts?): Promise<CanAnswer>;
+client.can(schema, key, operation, { detail: true }): Promise<CanDetail>; // also canCreate and hasPermission
 client.ws(id).can(...); // also canCreate and hasPermission
 client.onAccessChange((workspaceId) => { ... }): () => void;
 ```
@@ -1523,14 +1527,7 @@ const canComment = await client.canCreate(CommentSchema, {
 | `'no'`      | No rule admits it.                                                        |
 | `'unknown'` | No rule admits it for certain, and one of the cases below decides a rule. |
 
-`can` and `canCreate` answer `'unknown'` in these cases:
-
-- No summary has arrived.
-- A rule's `subject` check or condition reads a row the client does not hold.
-- A permission depends on a row of the chain the client does not hold, the row itself included, and the caller holds that permission at a row of an entity that can sit above it.
-- The chain is longer than 32 rows.
-- A local write to a grant row, or a delete of a row that other rows sit below, waits for its ack.
-- An update changes a field whose new value decides: the access parent, a `subject` field, or a field that a `when` or `within` check reads.
+`can` and `canCreate` answer `'unknown'` in the cases that [Why an answer is unknown](#why-an-answer-is-unknown) lists.
 
 ##### Permissions: `hasPermission`
 
@@ -1549,6 +1546,26 @@ const canInvite = await client.hasPermission(
 | `'yes'`     | The summary holds the permission at the root, the row, or a row up its chain.                                                                                                                                                                                                                                             |
 | `'no'`      | It does not, and each path up the chain ends at a row without an access parent or with its reference unset, or at a row the client does not hold where the caller holds the permission at no row of an entity that can sit above it.                                                                                      |
 | `'unknown'` | No summary has arrived, the answer depends on a row of the chain the client does not hold (the row itself included) and the caller holds the permission at a row of an entity that can sit above it, or on a chain longer than 32 rows, or a local write to a grant row (or a delete of an anchor row) waits for its ack. |
+
+##### Why an answer is unknown
+
+Pass `{ detail: true }` to `can`, `canCreate` or `hasPermission`, or to their hooks, to get a `CanDetail`. Its `reason` says why an answer is `'unknown'`; for `'yes'` and `'no'` it is `undefined`. When more than one reason applies, the answer gives one of them. Equal answers are the same object.
+
+```ts
+const { answer, reason } = await client.can(TaskSchema, id, 'delete', {
+	detail: true,
+});
+```
+
+| `reason`           | When                                                                                                                                                                                                                                                           |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'loading'`        | The hook has no answer yet. Only the hooks give it.                                                                                                                                                                                                            |
+| `'no_summary'`     | No summary has arrived for the workspace.                                                                                                                                                                                                                      |
+| `'pending_grant'`  | A local write to a grant row, or a delete of a row that other rows sit below, waits for its ack.                                                                                                                                                               |
+| `'row_not_held'`   | A rule's `subject` check or condition reads a row the client does not hold, or a permission depends on a row of the chain the client does not hold (the row itself included) and the caller holds that permission at a row of an entity that can sit above it. |
+| `'new_value'`      | An update changes a field whose new value decides: the access parent, a `subject` field, or a field that a `when` or `within` check reads.                                                                                                                     |
+| `'chain_too_deep'` | The chain is longer than 32 rows.                                                                                                                                                                                                                              |
+| `'error'`          | The read of the local store failed. Only the hooks give it; the methods reject.                                                                                                                                                                                |
 
 ##### Following changes
 
@@ -1907,15 +1924,22 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   can be edited without a scope change.
 
 - **`useCan(schema, key, operation, opts?)`** — `client.can` as a hook. `opts`
-  takes `fields` and `workspaceId`. Asks again when an access input in the row
-  changes (whether the row is held, its access parent, or a subject field the
-  access rules name) and when `onAccessChange` reports the workspace. A change
-  of any other field of the row does not ask again. `'unknown'` until the first
-  answer resolves. See [Predicting access](#predicting-access).
+  takes `fields`, `detail` and `workspaceId`. Asks again when an access input in
+  the row changes (whether the row is held, its access parent, or a subject
+  field the access rules name) and when `onAccessChange` reports the workspace. A change
+  of any other field of the row does not ask again. The first render gives an
+  answer at once: `'yes'` or `'no'` when the summary the client read last
+  decides it without a row, else the answer the same question got last in this
+  client, else `'unknown'`. An answer from the client's memory can be out of
+  date until the hook's first read of the store finishes. With
+  `{ detail: true }`, the hook returns a `CanDetail`, whose reason is
+  `'loading'` before that first read. See
+  [Predicting access](#predicting-access).
   **`useCanCreate(schema, row, opts?)`** — `client.canCreate` as a hook; asks
   again when `row` changes by value. **`useHasPermission(schema, key,
   permission, opts?)`** — `client.hasPermission` as a hook; asks again as
-  `useCan` does, except that a subject field is not an input.
+  `useCan` does, except that a subject field is not an input. Both take
+  `detail` and `workspaceId`, and start as `useCan` does.
 
 - **`useSyncStatus()`** — the live account-wide status object.
   **`useWorkspaceStatus(opts?)`** — one workspace's slice of it (its pending

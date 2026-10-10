@@ -11,7 +11,15 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { type AccessChain, type AccessRow, type CanAnswer, withinReach } from '../../src/access.js';
+import {
+	type AccessChain,
+	type AccessRow,
+	answerOf,
+	type CanAnswer,
+	unknownBecause,
+	type Verdict,
+	withinReach,
+} from '../../src/access.js';
 
 interface WithinCase {
 	name: string;
@@ -59,12 +67,13 @@ describe('access within conformance vectors', () => {
 				entitiesAbove: entitiesAboveOf(c.entitiesAbove),
 			};
 			// A row of the entry's entity the case does not list does not exist.
-			const passes = (at: AccessRow): CanAnswer => {
+			const passes = (at: AccessRow): Verdict => {
 				const p = c.passes.find((x) => x.entity === at.entity && x.key === at.key);
 				if (p === undefined) return 'no';
-				return p.passes === null ? 'unknown' : p.passes ? 'yes' : 'no';
+				return p.passes === null ? unknownBecause('row_not_held') : p.passes ? 'yes' : 'no';
 			};
-			expect(withinReach({ entity: c.entity, key: c.key }, c.within, chain, passes)).toBe(c.want);
+			expect(answerOf(withinReach({ entity: c.entity, key: c.key }, c.within, chain, passes)))
+				.toBe(c.want);
 		});
 	}
 });

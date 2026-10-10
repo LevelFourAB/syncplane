@@ -12,7 +12,12 @@
 import { create, type DescMessage, type MessageInitShape, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, it, vi } from 'vitest';
 
-import { type CanAnswer, countAccessChanges, entitiesAboveOf } from '../../src/access.js';
+import {
+	type CanAnswer,
+	countAccessChanges,
+	entitiesAboveOf,
+	MAX_ACCESS_CHAIN,
+} from '../../src/access.js';
 import { SyncClient } from '../../src/client.js';
 import {
 	AccountSchema,
@@ -694,6 +699,98 @@ describe('can()', () => {
 		expect(await t.client.can(WidgetSchema, 'w1', 'update', { fields: [ 'label' ] })).toBe('yes');
 		expect(await t.client.can(WidgetSchema, 'w1', 'delete')).toBe('yes');
 		expect(await t.client.canCreate(WidgetSchema, { id: 'w2' })).toBe('yes');
+		await t.client.close();
+	});
+});
+
+describe('an answer with detail', () => {
+	it('gives yes and no without a reason, as the same object each time', async () => {
+		const t = await roomClient(inR1('view_posts', 'post'));
+		const yes = await t.client.can(PostSchema, 'po-ann', 'delete', { detail: true });
+		expect(yes).toEqual({ answer: 'yes' });
+		expect(yes.reason).toBeUndefined();
+		expect(await t.client.can(PostSchema, 'po-ann', 'read', { detail: true })).toBe(yes);
+		expect(await t.client.can(PostSchema, 'po-bob', 'delete', { detail: true })).toEqual({
+			answer: 'no',
+		});
+		await t.client.close();
+	});
+
+	it('names no_summary before any summary arrives', async () => {
+		const t = await createTestClient({ entities: roomEntities });
+		t.server.put(PostSchema, { id: 'po-ann', room: { id: 'r1' }, authorId: 'ann' });
+		await t.sync();
+		expect(await t.client.can(PostSchema, 'po-ann', 'read', { detail: true })).toEqual({
+			answer: 'unknown',
+			reason: 'no_summary',
+		});
+		expect(await t.client.hasPermission(PostSchema, 'po-ann', 'view_posts', { detail: true }))
+			.toEqual({ answer: 'unknown', reason: 'no_summary' });
+		expect(
+			await t.client.canCreate(PostSchema, { id: 'po-new', room: { id: 'r1' } }, { detail: true }),
+		).toEqual({ answer: 'unknown', reason: 'no_summary' });
+		await t.client.close();
+	});
+
+	it('names row_not_held for a row the client does not hold', async () => {
+		const t = await roomClient(inR1('view_posts', 'post'));
+		expect(await t.client.can(PostSchema, 'po-gone', 'read', { detail: true })).toEqual({
+			answer: 'unknown',
+			reason: 'row_not_held',
+		});
+		await t.client.close();
+	});
+
+	it('names new_value where the new value of a changed field decides', async () => {
+		const t = await roomClient(inR1('view_posts'));
+		for (const fields of [ [ 'authorId' ], [ 'room' ] ] as const) {
+			expect(await t.client.can(DraftSchema, 'd-ann', 'update', { fields, detail: true })).toEqual({
+				answer: 'unknown',
+				reason: 'new_value',
+			});
+		}
+		await t.client.close();
+	});
+
+	it('names pending_grant while a write to a grant row is queued', async () => {
+		const t = await createTestClient({
+			entities: [ ProjectSchema, ProjectMemberSchema, TaskSchema ],
+		});
+		t.server.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		t.server.setCallerAccess({ permissions: [ { permission: 'edit_tasks', root: true } ] });
+		await t.sync();
+		await t.client.mutate.put(ProjectMemberSchema, {
+			id: 'pm-new',
+			project: { id: 'p1' },
+			userId: 'someone',
+			role: 'project_reader',
+		});
+		expect(await t.client.can(TaskSchema, 't1', 'update', { detail: true })).toEqual({
+			answer: 'unknown',
+			reason: 'pending_grant',
+		});
+		await t.close();
+	});
+
+	it('names chain_too_deep past the longest chain the client walks', async () => {
+		const t = await createTestClient({ entities: [ FolderSchema ] });
+		const depth = MAX_ACCESS_CHAIN + 2;
+		t.server.put(FolderSchema, { id: 'f0' });
+		for (let i = 1; i < depth; i++) {
+			t.server.put(FolderSchema, { id: `f${i}`, parent: { id: `f${i - 1}` } });
+		}
+		t.server.setCallerAccess({
+			permissions: [ {
+				permission: 'view_folders',
+				anchors: [ { entity: 'folder', keys: [ 'f0' ] } ],
+			} ],
+		});
+		await t.sync();
+		expect(
+			await t.client.hasPermission(FolderSchema, `f${depth - 1}`, 'view_folders', { detail: true }),
+		)
+			.toEqual({ answer: 'unknown', reason: 'chain_too_deep' });
+		expect(await t.client.hasPermission(FolderSchema, 'f1', 'view_folders')).toBe('yes');
 		await t.client.close();
 	});
 });

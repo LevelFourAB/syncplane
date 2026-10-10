@@ -33,7 +33,7 @@ export {
 	useWorkspaceScope,
 } from './context.js';
 export { useCan, useCanCreate, useHasPermission } from './hooks/use-can.js';
-export type { UseCanOptions } from './hooks/use-can.js';
+export type { UseCanOptions, UseDetailOptions } from './hooks/use-can.js';
 export { useDistinctHook, useGroupCountHook, useGroupRowsHook } from './hooks/use-groups.js';
 export type { DistinctResult, GroupResult, RowGroupResult } from './hooks/use-groups.js';
 export { useOnMutationRejected } from './hooks/use-on-mutation-rejected.js';

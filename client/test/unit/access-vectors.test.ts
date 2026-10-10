@@ -14,6 +14,7 @@ import {
 	type AccessChain,
 	type AccessRow,
 	AccessSummary,
+	answerOf,
 	type CanAnswer,
 	canAt,
 	canAtEach,
@@ -89,7 +90,8 @@ describe('access conformance vectors', () => {
 	for (const c of vectors.cases) {
 		it(c.name, () => {
 			const decide = c.each ? canAtEach : canAt;
-			expect(decide(summaryOf(c.access), c.permission, c.entity, c.key, chainOf(c))).toBe(c.want);
+			expect(answerOf(decide(summaryOf(c.access), c.permission, c.entity, c.key, chainOf(c))))
+				.toBe(c.want);
 		});
 	}
 });
