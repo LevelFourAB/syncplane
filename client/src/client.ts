@@ -4057,11 +4057,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		});
 	}
 
-	/** Forces one push+pull cycle across every workspace (mostly for tests). */
+	/**
+	 * Forces one push+pull cycle across every workspace (mostly for tests). A
+	 * workspace that waits for a grant (`access === 'none'`) is asked again at
+	 * once, without waiting for its backoff: call it after the app's backend
+	 * writes the caller's first grant.
+	 */
 	async syncNow(): Promise<void> {
 		this.assertOpen();
 		if (!this.coordinator) throw new Error('start() first');
-		await this.coordinator.syncNow();
+		await this.coordinator.syncNow({ retryNoAccess: true });
 	}
 
 	/**

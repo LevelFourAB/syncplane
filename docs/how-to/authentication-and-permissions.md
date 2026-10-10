@@ -87,6 +87,8 @@ Return the appropriate error type based on the failure condition:
 | `server.DenyWorkspace(...)` | Settled denial       | Receives `permission_denied` and `workspace_access_revoked`, then stops syncing |
 | Any other error             | Policy cannot decide | Receives an infrastructure error, then retries                                  |
 
+In a schema that uses the access model, a caller that `CanAccessWorkspace` admits but that holds no permission in the workspace gets `permission_denied` with `workspace_no_access`. In-process calls return `server.ErrNoAccess`. This denial is not permanent: the client keeps its queue and syncs again once a grant exists. See [Create a workspace and invite people](create-a-workspace-and-invite-people.md).
+
 **Note:** Do not return a denial when a membership store is unreachable. Return the transient error so clients retry instead of discarding valid local data.
 
 ### Filtering reads and writes with CanMutate and ReadFilter

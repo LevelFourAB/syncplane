@@ -223,4 +223,23 @@ describe('syncplane/testing', () => {
 			await t.close();
 		}
 	});
+
+	it('surfaces a workspace that waits for a grant on status(), and syncs it once the grant exists', async () => {
+		const t = await createTestClient({ entities: [ TodoSchema ] });
+		try {
+			await t.sync();
+			t.server.withholdAccess('main');
+			await t.db.todo.mutate.put({ id: 't1', title: 'Waiting' });
+			await t.sync();
+			expect(t.client.status().workspaces['main']?.access).toBe('none');
+			expect(t.client.status().workspaces['main']?.pendingMutations).toBe(1);
+
+			t.server.restore('main');
+			await t.sync();
+			expect(t.client.status().workspaces['main']?.access).toBe('granted');
+			expect(t.server.get(TodoSchema, 't1')?.title).toBe('Waiting');
+		} finally {
+			await t.close();
+		}
+	});
 });

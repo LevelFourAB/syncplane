@@ -35,6 +35,7 @@ Task-oriented recipes. Each assumes you already have something running.
 - [Authentication and permissions](how-to/authentication-and-permissions.md)
 - [Declare roles and permissions (access model)](how-to/declare-roles-and-permissions.md)
 - [Share a project with the whole workspace or with chosen teams](how-to/share-with-the-workspace-or-chosen-teams.md)
+- [Create a workspace and invite people](how-to/create-a-workspace-and-invite-people.md)
 - [Write from server-side code](how-to/server-side-writes.md)
 - [Query from server-side code](how-to/server-side-queries.md)
 - [React to changes (server-side effects)](how-to/react-to-changes.md)

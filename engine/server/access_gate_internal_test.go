@@ -102,12 +102,12 @@ var _ = Describe("The grant check of the workspace gate", func() {
 			func(name string, run func(f *gateFixture, user string) string) {
 				apart := newGateFixture(false, WithPermissions(openPolicy{}))
 				want := run(apart, "stranger")
-				Expect(want).To(ContainSubstring(CodeWorkspaceAccessRevoked))
+				Expect(want).To(ContainSubstring(CodeWorkspaceNoAccess))
 				Expect(run(f, "stranger")).To(Equal(want))
 				Expect(f.rec.cursorStateCalls()).To(BeEmpty())
 				// The request is malformed, so an admitted caller is refused for
 				// another reason, which a refused caller must not learn.
-				Expect(run(f, "me")).NotTo(ContainSubstring(CodeWorkspaceAccessRevoked))
+				Expect(run(f, "me")).NotTo(ContainSubstring(CodeWorkspaceNoAccess))
 			},
 			Entry("an undecodable pull cursor", "pull", func(f *gateFixture, user string) string {
 				return f.pull(user, ws, []byte{0xff})
@@ -215,7 +215,7 @@ const (
 	grantProbe = "probe:repo_member/__field_user_id"
 	// refusedOutcome matches the outcome of a request the gate refused for
 	// want of a permission.
-	refusedOutcome = "no access to this workspace|" + CodeWorkspaceAccessRevoked
+	refusedOutcome = "holds no permission in this workspace|" + CodeWorkspaceNoAccess
 )
 
 // gateOp is one request a caller can make of a workspace.

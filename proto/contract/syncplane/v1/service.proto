@@ -568,6 +568,10 @@ message WorkspaceDropped {
 		// A failure scoped to this workspace that may not persist (storage
 		// error, a permission hook that could not decide). Reopen with backoff.
 		REASON_ERROR = 3;
+		// The caller holds no permission in the workspace's access model. A
+		// grant written later lifts it, so keep the local copy and the queue,
+		// and retry with backoff.
+		REASON_NO_ACCESS = 4;
 	}
 	Reason reason = 1;
 	// Human-readable detail for logs. Never parse it; branch on reason.

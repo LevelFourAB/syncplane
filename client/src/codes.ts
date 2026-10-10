@@ -28,11 +28,13 @@
  * | Room publish could not be sent       | `Room.onError`                 | `room_offline`             |
  * | Room send on a closed or dropped room | the `RoomSendError` it rejects with | `room_closed`, `room_dropped` |
  * | Access to a workspace withdrawn      | `status().workspaces[id].access` | (no code — `'revoked'`)  |
+ * | No grant in a workspace yet          | `status().workspaces[id].access` | (no code — `'none'`)     |
  * | Server/client schema revisions differ | `status().schemaSkew`         | (no code — see SchemaSkewInfo) |
  *
- * The two `status()` fields at the bottom are standing conditions rather than
- * failures: unlike `lastError` they survive a successful sync cycle, because
- * neither clears by retrying.
+ * The `status()` fields at the bottom are standing conditions rather than
+ * failures: unlike `lastError` they survive a successful sync cycle. `'revoked'`
+ * and a schema skew do not clear by retrying; `'none'` clears once a grant
+ * exists and the client's next retry finds it.
  */
 
 /** The caller may not perform this mutation. */
@@ -85,6 +87,19 @@ export const CodeTextStateStale = 'text_state_stale';
  * on its own — `removeWorkspace(id, { purge: true })` is how an app decides to.
  */
 export const CodeWorkspaceAccessRevoked = 'workspace_access_revoked';
+
+/**
+ * The caller holds no permission in the workspace's access model. It arrives
+ * where CodeWorkspaceAccessRevoked does, and as a `WorkspaceDropped` frame with
+ * reason NO_ACCESS on Subscribe.
+ *
+ * Unlike CodeWorkspaceAccessRevoked it is not permanent: a grant written later
+ * admits the caller. The client keeps the workspace's local rows and queue,
+ * surfaces `status().workspaces[id].access === 'none'`, and asks again with
+ * backoff, 1 to 30 seconds apart, and at once on `syncNow()`. The first answer
+ * that admits the caller sets `access` to `'granted'`.
+ */
+export const CodeWorkspaceNoAccess = 'workspace_no_access';
 
 /**
  * A push batch's mutation ids were not contiguous with the server's watermark

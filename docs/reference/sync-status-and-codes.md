@@ -30,7 +30,8 @@ The client reports failures and errors through specific channels based on their 
 | The server withdrew a room                                   | `Room.status()`, `Room.onError`                                             | `room_dropped`                                                                    |
 | A room publish message could not be sent                     | `Room.onError`                                                              | `room_offline`                                                                    |
 | `Room.send` was called on a closed or dropped room           | The rejected `RoomSendError`                                                | `room_closed`, `room_dropped`                                                     |
-| Access to a workspace was withdrawn                          | `status().workspaces[id].access`                                            | None                                                                              |
+| Access to a workspace was withdrawn                          | `status().workspaces[id].access` is `'revoked'`                             | None                                                                              |
+| The caller holds no permission in a workspace yet            | `status().workspaces[id].access` is `'none'`                                | None                                                                              |
 | Server and client schema revisions differ                    | `status().schemaSkew`                                                       | None                                                                              |
 
 Failure reporting channels operate with different lifecycles:
@@ -38,6 +39,13 @@ Failure reporting channels operate with different lifecycles:
 - `onMutationRejected`: Reports per-mutation rejections. The client rolls back local mutation state before invoking the callback.
 - `status().lastError`: Reports transient sync-loop errors. A successful sync cycle clears `lastError`.
 - `status().workspaces[id].access` and `status().schemaSkew`: Report standing conditions that persist until the underlying condition changes.
+
+Workspace access has these values:
+
+- Unset: The server has not refused the workspace.
+- `'revoked'`: Terminal. The application's `CanAccessWorkspace` denied the caller (`workspace_access_revoked` on the wire). The client stops syncing the workspace and keeps its local rows.
+- `'none'`: Not terminal. The caller holds no permission in the workspace's access model (`workspace_no_access` on the wire). The client keeps the local rows and the queue, and asks again with backoff, 1 to 30 seconds apart, and at once on `syncNow()`.
+- `'granted'`: The server admitted the caller after `'none'`. The client syncs the workspace again, queued writes included.
 - `TextHandle.status()` and `TextHandle.onError`: Report errors on an individual live text handle without affecting client status.
 - `Room.status()`, `Room.onError`, and `RoomSendError`: Report errors on an individual open room without affecting client status.
 

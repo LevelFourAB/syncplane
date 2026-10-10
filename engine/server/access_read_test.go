@@ -126,7 +126,7 @@ var _ = Describe("Access model reads", func() {
 				Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
 				var cerr *connect.Error
 				Expect(err).To(BeAssignableToTypeOf(cerr))
-				Expect(err.(*connect.Error).Meta().Get(server.ErrorCodeMetadataKey)).To(Equal(server.CodeWorkspaceAccessRevoked))
+				Expect(err.(*connect.Error).Meta().Get(server.ErrorCodeMetadataKey)).To(Equal(server.CodeWorkspaceNoAccess))
 			},
 			Entry("an anonymous caller", ""),
 			Entry("a caller with no grant rows", "stranger"),
@@ -145,6 +145,31 @@ var _ = Describe("Access model reads", func() {
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
 			f.seed(&accessv1.ProjectMember{Id: "pm-late", Project: project("p2"), UserId: "late", Role: "project_reader"})
 			Expect(f.pull("late")).To(ContainElement("task/t2"))
+		})
+
+		It("tells a caller with no grant on Push and Subscribe that a grant can still admit it", func() {
+			req := connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+				putMutation("c-late", 1, "task", "t9", &accessv1.Task{Id: "t9", Project: project("p2")}),
+			}))
+			as("late", req.Header())
+			resp, err := f.sync.Push(f.ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetResults()[0].GetErrorCode()).To(Equal(server.CodeWorkspaceNoAccess))
+
+			sub := connect.NewRequest(&syncplanev1.SubscribeRequest{
+				ClientId: "c-late",
+				Scopes:   []*syncplanev1.WorkspaceScope{{WorkspaceId: ws}},
+			})
+			as("late", sub.Header())
+			streamCtx, cancel := context.WithCancel(f.ctx)
+			defer cancel()
+			stream, err := f.sync.Subscribe(streamCtx, sub)
+			Expect(err).NotTo(HaveOccurred())
+			var dropped *syncplanev1.WorkspaceDropped
+			for dropped == nil && stream.Receive() {
+				dropped = stream.Msg().GetDropped()
+			}
+			Expect(dropped.GetReason()).To(Equal(syncplanev1.WorkspaceDropped_REASON_NO_ACCESS))
 		})
 	})
 
@@ -246,6 +271,7 @@ var _ = Describe("Access model reads", func() {
 			err := f.srv.View(stranger, ws, func(*server.ViewTx) error { return nil })
 			_, denied := server.AsWorkspaceDenial(err)
 			Expect(denied).To(BeTrue())
+			Expect(err).To(MatchError(server.ErrNoAccess))
 		})
 
 		It("filters a Subscribe catch-up", func() {

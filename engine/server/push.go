@@ -111,6 +111,9 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 
 	// refused reports the workspace gate's error.
 	refused := func(err error) *syncplanev1.WorkspaceResults {
+		if errors.Is(err, ErrNoAccess) {
+			return fail(CodeWorkspaceNoAccess, "workspace %q: the caller holds no permission", ws)
+		}
 		if _, denied := AsWorkspaceDenial(err); denied {
 			return fail(CodeWorkspaceAccessRevoked, "workspace %q: access denied", ws)
 		}

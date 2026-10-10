@@ -660,6 +660,8 @@ err := srv.Mutate(server.Trusted(ctx), workspaceID, func(tx *server.EntityTx) er
 })
 ```
 
+Until a grant exists, the caller's client reports `status().workspaces[id].access === 'none'`, keeps its queued writes, and syncs by itself once the grant exists. To create a workspace from the client, also offline, and to invite people, see [Create a workspace and invite people](create-a-workspace-and-invite-people.md).
+
 ## 6. Declare who may invoke each mutator
 
 In a schema that uses the model, a mutator without `MutatorAccess` can only be invoked by trusted code. Name the permission and the row it is checked at:

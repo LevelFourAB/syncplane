@@ -729,9 +729,12 @@ func andFilters(a, b readFilter) readFilter {
 	}
 }
 
-// errNoAccess is the settled denial for a caller who holds no permission in a
-// workspace whose schema declares a role.
-var errNoAccess = DenyWorkspace("no access to this workspace")
+// ErrNoAccess is the denial for a caller who holds no permission in a
+// workspace whose schema declares a role. It is a WorkspaceDenial, so
+// AsWorkspaceDenial matches it, and test for it with errors.Is. Unlike other
+// denials it is not permanent: a grant row written later admits the caller,
+// and the wire carries it as CodeWorkspaceNoAccess.
+var ErrNoAccess error = DenyWorkspace("the caller holds no permission in this workspace")
 
 // admitAccess resolves what the caller holds from the primary and, when the
 // schema declares a role, refuses a caller that holds nothing. The primary is
@@ -754,14 +757,14 @@ func (s *Server) admitAccess(ctx context.Context, workspaceID string, c *accessC
 }
 
 // admitted is the workspace gate's verdict on set, what reading a caller's
-// grants returned with err: errNoAccess for a set that holds no permission,
+// grants returned with err: ErrNoAccess for a set that holds no permission,
 // and err wrapped as a failure to decide.
 func admitted(set *accessSet, err error) (*accessSet, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server: resolving access: %w", err)
 	}
 	if !set.any() {
-		return nil, errNoAccess
+		return nil, ErrNoAccess
 	}
 	return set, nil
 }

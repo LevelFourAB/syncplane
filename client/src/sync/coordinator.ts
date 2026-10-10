@@ -10,6 +10,7 @@ import {
 	CodeTextStateStale,
 	CodeUnavailable,
 	CodeWorkspaceAccessRevoked,
+	CodeWorkspaceNoAccess,
 	ErrorCodeMetadataKey,
 	type RejectionCode,
 	type SyncErrorCode,
@@ -395,6 +396,13 @@ interface WorkspaceSync {
 	 */
 	revoked: boolean;
 	/**
+	 * The server said the caller holds no permission in the workspace yet. Not
+	 * permanent: a grant written later admits the caller. While set, the
+	 * workspace sits out the stream, and each cycle until retryAt; the timer
+	 * starts a cycle then. An answer that admits the caller clears it.
+	 */
+	noAccess?: { backoff: Backoff; retryAt: number; timer?: ReturnType<typeof setTimeout> };
+	/**
 	 * The server refused this workspace's queue for a mutation-id gap and has
 	 * not taken it since. Cleared once a push is accepted or the queue is
 	 * resequenced onto the server's watermark; see recoverGap.
@@ -478,6 +486,11 @@ export class Coordinator {
 	private writeDebounceTimer?: ReturnType<typeof setTimeout>;
 	private writeMaxDelayTimer?: ReturnType<typeof setTimeout>;
 	private retryBackoff = new Backoff();
+	/**
+	 * The workspaces the server answered with no access during the running
+	 * cycle, so that a push refused that way is not followed by a pull.
+	 */
+	private cycleDenied = new Set<string>();
 	/** Per-workspace state, in the order the workspaces were added. */
 	private workspaces = new Map<string, WorkspaceSync>();
 	/**
@@ -651,6 +664,7 @@ export class Coordinator {
 
 	/** Stops syncing a workspace. Its local data is untouched. */
 	removeWorkspace(workspaceId: string): void {
+		clearTimeout(this.workspaces.get(workspaceId)?.noAccess?.timer);
 		if (!this.workspaces.delete(workspaceId)) return;
 		// Nobody is going to finish that snapshot now. Dropped rather than left
 		// standing: the status entry goes with the workspace, and a re-added
@@ -779,6 +793,7 @@ export class Coordinator {
 	async stop(): Promise<void> {
 		this.stopped = true;
 		this.clearWriteWindow();
+		for (const state of this.workspaces.values()) clearTimeout(state.noAccess?.timer);
 		this.abort.abort();
 		this.leadership?.stop();
 		if (this.onPageHide && typeof window !== 'undefined') {
@@ -893,8 +908,12 @@ export class Coordinator {
 		this.writeMaxDelayTimer = undefined;
 	}
 
-	/** Runs one push+pull cycle and resolves when it completes (or fails). */
-	syncNow(): Promise<void> {
+	/**
+	 * Runs one push+pull cycle and resolves when it completes (or fails).
+	 * `retryNoAccess` includes the workspaces that wait for a grant before their
+	 * backoff has passed.
+	 */
+	syncNow(opts?: { retryNoAccess?: boolean }): Promise<void> {
 		// Synchronously, before the chain: a write landing while this cycle runs
 		// must arm a FRESH window (this cycle may already have snapshotted the
 		// queue past it), whereas one that arrived before it is subsumed.
@@ -923,9 +942,12 @@ export class Coordinator {
 			// server never delta-resyncs A→B→A between tabs (subscription thrash).
 			// (The leader's stream is the opposite: it carries the whole union, so a
 			// workspace only a peer holds still gets its live tail — see planStream.)
+			this.cycleDenied.clear();
+			const now = Date.now();
 			const active: [string, Subscription[]][] = [];
 			for (const [ ws, state ] of this.workspaces) {
 				if (state.revoked) continue;
+				if (state.noAccess && !opts?.retryNoAccess && now < state.noAccess.retryAt) continue;
 				active.push([ ws, union.get(ws) ?? state.subscriptions ]);
 			}
 			if (active.length === 0) return;
@@ -941,7 +963,7 @@ export class Coordinator {
 				try {
 					if (await this.ensureBase(ws, subs)) syncable.push([ ws, subs ]);
 				} catch (err) {
-					if (!this.noteRevoked(ws, err)) errors.push(err);
+					if (!this.noteDenied(ws, err)) errors.push(err);
 				}
 			}
 			// Keep a "resync" decision armed when a bootstrap failed, so the next
@@ -976,12 +998,13 @@ export class Coordinator {
 					.map(([ ws ]) => ws)
 					.filter((ws) => this.workspaces.get(ws)?.gapped);
 				for (const [ ws, subs ] of syncable) {
-					if (this.workspaces.get(ws)?.revoked) continue;
+					if (this.workspaces.get(ws)?.revoked || this.cycleDenied.has(ws)) continue;
 					try {
 						await this.doPull(ws, subs);
+						this.clearNoAccess(ws);
 						this.opts.onScopeSynced?.(ws, gens.get(ws) ?? 0);
 					} catch (err) {
-						if (!this.noteRevoked(ws, err)) errors.push(err);
+						if (!this.noteDenied(ws, err)) errors.push(err);
 					}
 				}
 				for (const ws of gapped) errors.push(gapError(ws));
@@ -1143,24 +1166,62 @@ export class Coordinator {
 	}
 
 	/**
-	 * Marks a workspace permanently revoked when an error carries the revocation
-	 * code, and reports it. Returns true when it did — the caller then treats the
-	 * failure as handled rather than as a reason to back off and retry, because
-	 * retrying can never change the answer.
+	 * Marks a workspace when an error carries a workspace denial: permanently
+	 * revoked, or waiting for a grant. Returns true when it did — the caller then
+	 * treats the failure as handled rather than as a reason to back off the whole
+	 * cycle: a revocation never changes, and a workspace that waits for a grant
+	 * backs off on its own.
 	 *
 	 * Pull, Bootstrap and Query are single-workspace RPCs, so the server denies
 	 * them as an RPC error with the code in metadata rather than as in-band data
 	 * (see codes.ts); this is where that arrives.
 	 */
-	private noteRevoked(workspaceId: string, err: unknown): boolean {
-		if (
-			!(err instanceof ConnectError)
-			|| err.metadata.get(ErrorCodeMetadataKey) !== CodeWorkspaceAccessRevoked
-		) {
-			return false;
+	private noteDenied(workspaceId: string, err: unknown): boolean {
+		if (!(err instanceof ConnectError)) return false;
+		switch (err.metadata.get(ErrorCodeMetadataKey)) {
+			case CodeWorkspaceAccessRevoked:
+				this.markRevoked(workspaceId);
+				return true;
+			case CodeWorkspaceNoAccess:
+				this.markNoAccess(workspaceId);
+				return true;
+			default:
+				return false;
 		}
-		this.markRevoked(workspaceId);
-		return true;
+	}
+
+	/**
+	 * Records that the caller holds no permission in a workspace yet: the
+	 * workspace sits out the stream and its cycles until its own backoff passes,
+	 * and a timer starts the cycle that asks again. Each answer of no access
+	 * lengthens the wait, up to the backoff's cap.
+	 */
+	private markNoAccess(workspaceId: string): void {
+		const state = this.workspaces.get(workspaceId);
+		if (!state || state.revoked) return;
+		this.cycleDenied.add(workspaceId);
+		const wait = state.noAccess ?? { backoff: new Backoff(), retryAt: 0 };
+		clearTimeout(wait.timer);
+		const delay = wait.backoff.next();
+		wait.retryAt = Date.now() + delay;
+		wait.timer = setTimeout(() => {
+			if (!this.stopped) this.syncSoon();
+		}, delay);
+		state.noAccess = wait;
+		this.opts.status.updateWorkspace(workspaceId, { access: 'none' });
+	}
+
+	/**
+	 * Ends a wait for a grant after an answer that admits the caller, and puts
+	 * the workspace back on the stream.
+	 */
+	private clearNoAccess(workspaceId: string): void {
+		const state = this.workspaces.get(workspaceId);
+		if (state?.noAccess === undefined) return;
+		clearTimeout(state.noAccess.timer);
+		state.noAccess = undefined;
+		this.opts.status.updateWorkspace(workspaceId, { access: 'granted' });
+		this.publishScopes();
 	}
 
 	/** Records a permanent access revocation and re-scopes the stream off it. */
@@ -1504,6 +1565,13 @@ export class Coordinator {
 							// never succeed, so stop and let the status carry it.
 							if (state) state.poison = undefined;
 							this.markRevoked(sent.workspaceId);
+							continue;
+						}
+						if (wsResult.errorCode === CodeWorkspaceNoAccess) {
+							// Not yet: the queue waits, untouched, for a grant. It says
+							// nothing about the head mutation, so it does not count
+							// toward the poison backstop.
+							this.markNoAccess(sent.workspaceId);
 							continue;
 						}
 						// Internal or unrecognized: presumed transient, so the cycle retries
@@ -2369,6 +2437,11 @@ export class Coordinator {
 			}
 			case WorkspaceDropped_Reason.ACCESS_REVOKED:
 				this.markRevoked(workspaceId);
+				return { reopen: false, resetCommitted: false };
+			case WorkspaceDropped_Reason.NO_ACCESS:
+				// The scope is gone from this stream, and a grant puts it back:
+				// clearNoAccess re-scopes the stream once a pull is admitted.
+				this.markNoAccess(workspaceId);
 				return { reopen: false, resetCommitted: false };
 			default:
 				// Transient, or a reason this build does not know. Reopen with
@@ -3302,7 +3375,8 @@ export class Coordinator {
 			minSeq: bigint;
 		}[] = [];
 		for (const [ ws, subs ] of union) {
-			if (this.workspaces.get(ws)?.revoked) continue;
+			const state = this.workspaces.get(ws);
+			if (state?.revoked || state?.noAccess) continue;
 			if (scopes.length >= this.maxWorkspacesPerRequest) break;
 			const { cursor, minSeq } = await this.pullPosition(ws);
 			scopes.push({

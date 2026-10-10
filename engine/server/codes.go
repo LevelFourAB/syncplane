@@ -37,6 +37,13 @@ const (
 	// should stop syncing that workspace and discard its local copy rather than
 	// back off and retry.
 	CodeWorkspaceAccessRevoked = "workspace_access_revoked"
+	// CodeWorkspaceNoAccess reports that the caller holds no permission in the
+	// workspace's access model. Unlike CodeWorkspaceAccessRevoked it is not
+	// permanent: a grant row written later admits the caller. It arrives where
+	// CodeWorkspaceAccessRevoked does, and as a WorkspaceDropped frame with
+	// reason NO_ACCESS on Subscribe. A client seeing it keeps its local copy and
+	// its queue, and retries with backoff.
+	CodeWorkspaceNoAccess = "workspace_no_access"
 )
 
 // Workspace-scoped failure codes. These appear on WorkspaceResults.error_code,

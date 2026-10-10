@@ -277,6 +277,9 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 	adm, err := s.enterWorkspace(ctx, ws)
 	principal := adm.principal
 	if err != nil {
+		if errors.Is(err, ErrNoAccess) {
+			return nil, syncplanev1.WorkspaceDropped_REASON_NO_ACCESS, err
+		}
 		if _, denied := AsWorkspaceDenial(err); denied {
 			return nil, syncplanev1.WorkspaceDropped_REASON_ACCESS_REVOKED, err
 		}
@@ -363,9 +366,9 @@ func (s *Server) refreshEpoch(ctx context.Context, sc *subScope) error {
 // notification: a hook on that path would run per change, which is the cost the
 // rest of the scope's state is resolved once at open to avoid.
 //
-// A settled denial drops the scope as ACCESS_REVOKED — the same permanent,
-// actionable verdict openScope sends, so a client reacts to a revocation
-// identically whenever it arrives. A gate that cannot DECIDE drops it as ERROR:
+// A settled denial drops the scope as ACCESS_REVOKED, or as NO_ACCESS for a
+// caller who holds no permission yet — the same verdict openScope sends, so a
+// client reacts to a denial identically whenever it arrives. A gate that cannot DECIDE drops it as ERROR:
 // an outage must never read as revocation (the client would discard good data),
 // but continuing to stream a workspace whose access can no longer be affirmed
 // is the wrong side to fail on. That scope's client reopens with backoff and
@@ -383,7 +386,9 @@ func (s *Server) regateScopes(ctx context.Context, stream *connect.ServerStream[
 			continue
 		}
 		reason := syncplanev1.WorkspaceDropped_REASON_ERROR
-		if _, denied := AsWorkspaceDenial(err); denied {
+		if errors.Is(err, ErrNoAccess) {
+			reason = syncplanev1.WorkspaceDropped_REASON_NO_ACCESS
+		} else if _, denied := AsWorkspaceDenial(err); denied {
 			reason = syncplanev1.WorkspaceDropped_REASON_ACCESS_REVOKED
 		}
 		sc.logger.LogAttrs(ctx, slog.LevelInfo, "subscribe scope dropped by access re-check",

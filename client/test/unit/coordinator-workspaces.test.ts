@@ -1,8 +1,12 @@
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
-import { createRouterTransport, type Transport } from '@connectrpc/connect';
+import { Code, ConnectError, createRouterTransport, type Transport } from '@connectrpc/connect';
 import { describe, expect, it, vi } from 'vitest';
 
-import { CodeWorkspaceAccessRevoked } from '../../src/codes.js';
+import {
+	CodeWorkspaceAccessRevoked,
+	CodeWorkspaceNoAccess,
+	ErrorCodeMetadataKey,
+} from '../../src/codes.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { CrudOp, type Mutation, MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import { type RowChange, RowChangeSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
@@ -398,5 +402,210 @@ describe('coordinator across workspaces', () => {
 		expect(await h.pendingIds(B)).toEqual([]);
 
 		await coord.stop();
+	});
+
+	describe('a workspace where the caller holds no permission yet', () => {
+		function noAccess(): ConnectError {
+			const err = new ConnectError('the caller holds no permission', Code.PermissionDenied);
+			err.metadata.set(ErrorCodeMetadataKey, CodeWorkspaceNoAccess);
+			return err;
+		}
+
+		/** Pins the backoff draw and lets a test move the clock by hand. */
+		function clock() {
+			let now = 1_000_000;
+			vi.spyOn(Math, 'random').mockReturnValue(0.5);
+			vi.spyOn(Date, 'now').mockImplementation(() => now);
+			return {
+				advance(ms: number) {
+					now += ms;
+				},
+				restore() {
+					vi.restoreAllMocks();
+				},
+			};
+		}
+
+		it('waits for a grant on its own, without failing the cycle of the others', async () => {
+			const h = harness();
+			await h.seed({ [B]: [ put(1n, 'b1', 'b one') ] });
+			const time = clock();
+			let granted = false;
+			const pulls = { [A]: 0, [B]: 0 };
+			const status = new StatusTracker();
+			const transport = createRouterTransport(({ service }) => {
+				service(SyncService, {
+					push: (req: PushRequest) => pushAppliedAll(req),
+					pull: (req) => {
+						pulls[req.workspaceId as typeof A]++;
+						if (req.workspaceId === A && !granted) throw noAccess();
+						return { ...noopPull(req), lastAckedMutationId: req.workspaceId === B ? 1n : 0n };
+					},
+					// eslint-disable-next-line require-yield
+					async *bootstrap() {
+						throw new Error('bootstrap should not run');
+					},
+					query: () => ({ rows: [] }),
+				});
+			});
+			const coord = h.coordinator(transport, { status });
+			try {
+				await coord.syncNow();
+				expect(status.current().workspaces[A]?.access).toBe('none');
+				expect(status.current().workspaces[B]?.access).toBeUndefined();
+				expect(await h.pendingIds(B)).toEqual([]);
+
+				// Inside its backoff, a cycle leaves the workspace alone.
+				await coord.syncNow();
+				expect(pulls[A]).toBe(1);
+				expect(pulls[B]).toBe(2);
+
+				// Past it, a cycle asks again, and a grant ends the wait.
+				granted = true;
+				time.advance(60_000);
+				await coord.syncNow();
+				expect(pulls[A]).toBe(2);
+				expect(status.current().workspaces[A]?.access).toBe('granted');
+			} finally {
+				time.restore();
+				await coord.stop();
+			}
+		});
+
+		it('asks again at once on an explicit retry', async () => {
+			const h = harness();
+			await h.seed();
+			const time = clock();
+			let pullsA = 0;
+			const status = new StatusTracker();
+			const transport = createRouterTransport(({ service }) => {
+				service(SyncService, {
+					push: (req: PushRequest) => pushAppliedAll(req),
+					pull: (req) => {
+						if (req.workspaceId !== A) return noopPull(req);
+						pullsA++;
+						if (pullsA === 1) throw noAccess();
+						return noopPull(req);
+					},
+					// eslint-disable-next-line require-yield
+					async *bootstrap() {
+						throw new Error('bootstrap should not run');
+					},
+					query: () => ({ rows: [] }),
+				});
+			});
+			const coord = h.coordinator(transport, { status });
+			try {
+				await coord.syncNow();
+				expect(status.current().workspaces[A]?.access).toBe('none');
+				await coord.syncNow({ retryNoAccess: true });
+				expect(pullsA).toBe(2);
+				expect(status.current().workspaces[A]?.access).toBe('granted');
+			} finally {
+				time.restore();
+				await coord.stop();
+			}
+		});
+
+		it('keeps the queue of a workspace whose push says no access, and ships it once a grant exists', async () => {
+			const h = harness();
+			await h.seed({ [A]: [ put(1n, 'a1', 'a one') ] });
+			const time = clock();
+			let granted = false;
+			const status = new StatusTracker();
+			const transport = createRouterTransport(({ service }) => {
+				service(SyncService, {
+					push(req) {
+						return {
+							results: req.batches.map((batch) =>
+								batch.workspaceId === A && !granted
+									? {
+										workspaceId: A,
+										results: [],
+										errorCode: CodeWorkspaceNoAccess,
+										errorMessage: 'the caller holds no permission',
+									}
+									: pushAppliedAll({ ...req, batches: [ batch ] }).results[0]!
+							),
+						};
+					},
+					pull: (req) => ({
+						...noopPull(req),
+						lastAckedMutationId: req.workspaceId === A && granted ? 1n : 0n,
+					}),
+					// eslint-disable-next-line require-yield
+					async *bootstrap() {
+						throw new Error('bootstrap should not run');
+					},
+					query: () => ({ rows: [] }),
+				});
+			});
+			const coord = h.coordinator(transport, { status });
+			try {
+				await coord.syncNow();
+				expect(status.current().workspaces[A]?.access).toBe('none');
+				expect(await h.pendingIds(A)).toEqual([ 1n ]);
+
+				granted = true;
+				time.advance(60_000);
+				await coord.syncNow();
+				expect(await h.pendingIds(A)).toEqual([]);
+				expect(status.current().workspaces[A]?.access).toBe('granted');
+			} finally {
+				time.restore();
+				await coord.stop();
+			}
+		});
+
+		it('leaves the stream on a drop, and comes back to it once a grant exists', async () => {
+			const h = harness();
+			await h.seed();
+			const opened: string[][] = [];
+			let granted = false;
+			const status = new StatusTracker();
+			const transport = createRouterTransport(({ service }) => {
+				service(SyncService, {
+					push: (req: PushRequest) => pushAppliedAll(req),
+					pull: (req) => {
+						if (req.workspaceId === A && !granted) throw noAccess();
+						return noopPull(req);
+					},
+					// eslint-disable-next-line require-yield
+					async *bootstrap() {
+						throw new Error('bootstrap should not run');
+					},
+					async *subscribe(req, ctx) {
+						opened.push(req.scopes.map((s) => s.workspaceId).sort());
+						if (!granted && req.scopes.some((s) => s.workspaceId === A)) {
+							yield dropped(A, WorkspaceDropped_Reason.NO_ACCESS);
+						}
+						yield caughtUp(B);
+						await waitAbort(ctx.signal);
+					},
+					query: () => ({ rows: [] }),
+				});
+			});
+			const coord = h.coordinator(transport, { streamEnabled: true, status });
+			await coord.start();
+			try {
+				await vi.waitFor(() => {
+					expect(status.current().workspaces[A]?.access).toBe('none');
+				});
+				// One stream, whichever came first: the drop of A from it, or the
+				// cycle whose pull left A out before it opened. No reconnect loop.
+				await new Promise((r) => setTimeout(r, 30));
+				expect(opened).toHaveLength(1);
+
+				granted = true;
+				await coord.syncNow({ retryNoAccess: true });
+				expect(status.current().workspaces[A]?.access).toBe('granted');
+				await vi.waitFor(() => {
+					expect(opened).toHaveLength(2);
+					expect(opened[1]).toEqual([ A, B ]);
+				});
+			} finally {
+				await coord.stop();
+			}
+		});
 	});
 });

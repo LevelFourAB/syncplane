@@ -279,6 +279,29 @@ describe('access model on the client', () => {
 		expect(changed).toContain(ws);
 	});
 
+	it('keeps the queue of a caller with no grant yet, and syncs it once the grant exists', async () => {
+		const ws = freshWorkspace();
+		await seed(ws);
+		const late = clientAs('late', ws);
+		await late.start();
+		await late.mutate.put(TaskSchema, { id: 't-late', project: { id: 'p1' }, title: 'queued' });
+		await late.syncNow();
+		expect(late.status().workspaces[ws]?.access).toBe('none');
+		expect(late.status().workspaces[ws]?.pendingMutations).toBe(1);
+
+		await trusted(ws, [
+			{
+				entity: 'project_member',
+				value: { id: 'pm-late', project: { id: 'p1' }, userId: 'late', role: 'project_writer' },
+			},
+		]);
+		await late.syncNow();
+		expect(late.status().workspaces[ws]?.access).toBe('granted');
+		expect(late.status().workspaces[ws]?.pendingMutations).toBe(0);
+		const admin = await synced(clientAs('admin', ws));
+		expect((await admin.get(TaskSchema, 't-late'))?.title).toBe('queued');
+	});
+
 	it('sends the rows a new grant reveals, and drops the ones a lost grant hides', async () => {
 		const ws = freshWorkspace();
 		await seed(ws);

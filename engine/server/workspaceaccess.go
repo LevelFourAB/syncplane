@@ -22,7 +22,8 @@ import (
 // row, no notifier subscription, no epoch lookup. Those side effects are how a
 // gate placed one step too late still leaks the existence of a workspace.
 //
-// A settled denial becomes permission_denied tagged CodeWorkspaceAccessRevoked;
+// A settled denial becomes permission_denied tagged CodeWorkspaceAccessRevoked,
+// or CodeWorkspaceNoAccess for a caller who holds no permission yet;
 // a failure to decide becomes internal, so a client never reads an outage as
 // revocation. Errors already carrying a Connect code (a policy that built one
 // itself) pass through untouched.
@@ -208,11 +209,20 @@ type gateError struct{ err error }
 func (e *gateError) Error() string { return e.err.Error() }
 func (e *gateError) Unwrap() error { return e.err }
 
+// denialCode is the wire code of a settled workspace denial: one a grant can
+// lift, or a permanent one.
+func denialCode(err error) string {
+	if errors.Is(err, ErrNoAccess) {
+		return CodeWorkspaceNoAccess
+	}
+	return CodeWorkspaceAccessRevoked
+}
+
 // workspaceAccessError maps a CanAccessWorkspace verdict onto the wire.
 func workspaceAccessError(err error) error {
 	if d, ok := AsWorkspaceDenial(err); ok {
 		ce := connect.NewError(connect.CodePermissionDenied, d)
-		ce.Meta().Set(ErrorCodeMetadataKey, CodeWorkspaceAccessRevoked)
+		ce.Meta().Set(ErrorCodeMetadataKey, denialCode(err))
 		return ce
 	}
 	if connect.CodeOf(err) != connect.CodeUnknown {

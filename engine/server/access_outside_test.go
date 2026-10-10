@@ -41,7 +41,7 @@ var _ = Describe("An entity outside the access model", func() {
 	It("still refuses a caller who holds no permission", func() {
 		_, err := f.pullErr("stranger")
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
-		Expect(err.(*connect.Error).Meta().Get(server.ErrorCodeMetadataKey)).To(Equal(server.CodeWorkspaceAccessRevoked))
+		Expect(err.(*connect.Error).Meta().Get(server.ErrorCodeMetadataKey)).To(Equal(server.CodeWorkspaceNoAccess))
 	})
 
 	It("answers the Query RPC with every row for a caller below the root", func() {

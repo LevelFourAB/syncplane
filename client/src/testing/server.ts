@@ -17,6 +17,7 @@ import {
 	CodePermissionDenied,
 	CodeTextFullStateRequired,
 	CodeWorkspaceAccessRevoked,
+	CodeWorkspaceNoAccess,
 	ErrorCodeMetadataKey,
 } from '../codes.js';
 import { type CrudMutation, CrudOp, type Mutation } from '../gen/syncplane/v1/mutation_pb.js';
@@ -308,7 +309,8 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	private workspaces = new Map<string, WorkspaceState>();
 	private mutators = new Map<string, TestMutator>();
 	private rules = new Set<RejectRule>();
-	private revoked = new Set<string>();
+	/** Workspaces denied to the caller, by how: permanently, or until a grant. */
+	private denied = new Map<string, 'revoked' | 'none'>();
 	private callerAccess = new Map<string, CallerAccess>();
 	private holds = 0;
 	private holdWaiters: (() => void)[] = [];
@@ -423,13 +425,51 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	 * undoes it.
 	 */
 	revoke(workspaceId: string): void {
-		this.revoked.add(workspaceId);
+		this.denied.set(workspaceId, 'revoked');
 		this.ws(workspaceId).wake();
 	}
 
-	/** Lifts a {@link TestServer.revoke}. Clients notice on their next cycle. */
+	/**
+	 * Answers as the server does for a caller who holds no permission in a
+	 * workspace yet: pushes fail with `workspace_no_access`, pulls and
+	 * bootstraps fail as `permission_denied`, and a subscribe stream drops the
+	 * workspace with reason NO_ACCESS. The client surfaces it as
+	 * `status().workspaces[id].access === 'none'` and keeps its queue.
+	 * {@link TestServer.restore} stands for the grant that admits the caller.
+	 */
+	withholdAccess(workspaceId: string): void {
+		this.denied.set(workspaceId, 'none');
+		this.ws(workspaceId).wake();
+	}
+
+	/**
+	 * Lifts a {@link TestServer.revoke} or {@link TestServer.withholdAccess}.
+	 * Clients notice on their next cycle.
+	 */
 	restore(workspaceId: string): void {
-		this.revoked.delete(workspaceId);
+		this.denied.delete(workspaceId);
+	}
+
+	/** The wire code and drop reason of a denied workspace, or undefined. */
+	private denial(
+		workspaceId: string,
+	): { code: string; reason: WorkspaceDropped_Reason; message: string } | undefined {
+		switch (this.denied.get(workspaceId)) {
+			case 'revoked':
+				return {
+					code: CodeWorkspaceAccessRevoked,
+					reason: WorkspaceDropped_Reason.ACCESS_REVOKED,
+					message: `workspace "${workspaceId}": access denied`,
+				};
+			case 'none':
+				return {
+					code: CodeWorkspaceNoAccess,
+					reason: WorkspaceDropped_Reason.NO_ACCESS,
+					message: `workspace "${workspaceId}": the caller holds no permission`,
+				};
+			default:
+				return undefined;
+		}
 	}
 
 	/**
@@ -579,9 +619,8 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			errorCode,
 			errorMessage,
 		});
-		if (this.revoked.has(workspaceId)) {
-			return fail(CodeWorkspaceAccessRevoked, `workspace "${workspaceId}": access denied`);
-		}
+		const denial = this.denial(workspaceId);
+		if (denial) return fail(denial.code, denial.message);
 		const state = this.ws(workspaceId);
 		const results = [];
 		let applied = false;
@@ -748,12 +787,10 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	private assertAccess(workspaceId: string): void {
-		if (!this.revoked.has(workspaceId)) return;
-		const err = new ConnectError(
-			`workspace "${workspaceId}": access denied`,
-			Code.PermissionDenied,
-		);
-		err.metadata.set(ErrorCodeMetadataKey, CodeWorkspaceAccessRevoked);
+		const denial = this.denial(workspaceId);
+		if (!denial) return;
+		const err = new ConnectError(denial.message, Code.PermissionDenied);
+		err.metadata.set(ErrorCodeMetadataKey, denial.code);
 		throw err;
 	}
 
@@ -868,12 +905,9 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		// Catch-up: pages until drained, then caughtUp, per scope.
 		for (const scope of pending) {
 			const state = this.ws(scope.workspaceId);
-			if (this.revoked.has(scope.workspaceId)) {
-				yield drop(
-					scope.workspaceId,
-					WorkspaceDropped_Reason.ACCESS_REVOKED,
-					`workspace "${scope.workspaceId}": access denied`,
-				);
+			const denial = this.denial(scope.workspaceId);
+			if (denial) {
+				yield drop(scope.workspaceId, denial.reason, denial.message);
 				continue;
 			}
 			const from = decodeCursor(scope.cursor);
@@ -905,12 +939,9 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			});
 			if (signal.aborted) return;
 			for (const workspaceId of [ ...cursors.keys() ]) {
-				if (this.revoked.has(workspaceId)) {
-					yield drop(
-						workspaceId,
-						WorkspaceDropped_Reason.ACCESS_REVOKED,
-						`workspace "${workspaceId}": access denied`,
-					);
+				const denial = this.denial(workspaceId);
+				if (denial) {
+					yield drop(workspaceId, denial.reason, denial.message);
 					continue;
 				}
 				yield* this.pageFrames(workspaceId, cursors, req);

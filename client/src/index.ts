@@ -46,6 +46,7 @@ export {
 	CodeUnavailable,
 	CodeWatchFailed,
 	CodeWorkspaceAccessRevoked,
+	CodeWorkspaceNoAccess,
 	CodeWorkspacePurged,
 	ErrorCodeMetadataKey,
 } from './codes.js';

@@ -92,6 +92,10 @@ const (
 	// A failure scoped to this workspace that may not persist (storage
 	// error, a permission hook that could not decide). Reopen with backoff.
 	WorkspaceDropped_REASON_ERROR WorkspaceDropped_Reason = 3
+	// The caller holds no permission in the workspace's access model. A
+	// grant written later lifts it, so keep the local copy and the queue,
+	// and retry with backoff.
+	WorkspaceDropped_REASON_NO_ACCESS WorkspaceDropped_Reason = 4
 )
 
 // Enum value maps for WorkspaceDropped_Reason.
@@ -101,12 +105,14 @@ var (
 		1: "REASON_RESET",
 		2: "REASON_ACCESS_REVOKED",
 		3: "REASON_ERROR",
+		4: "REASON_NO_ACCESS",
 	}
 	WorkspaceDropped_Reason_value = map[string]int32{
 		"REASON_UNSPECIFIED":    0,
 		"REASON_RESET":          1,
 		"REASON_ACCESS_REVOKED": 2,
 		"REASON_ERROR":          3,
+		"REASON_NO_ACCESS":      4,
 	}
 )
 
@@ -2298,15 +2304,16 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x06scopes\x18\x02 \x03(\v2\x1c.syncplane.v1.WorkspaceScopeR\x06scopes\x12\x14\n" +
 	"\x05limit\x18\x03 \x01(\rR\x05limit\x12*\n" +
 	"\x11no_delta_entities\x18\x04 \x03(\tR\x0fnoDeltaEntities\x12#\n" +
-	"\rsparse_cursor\x18\x05 \x01(\bR\fsparseCursor\"\xcc\x01\n" +
+	"\rsparse_cursor\x18\x05 \x01(\bR\fsparseCursor\"\xe2\x01\n" +
 	"\x10WorkspaceDropped\x12=\n" +
 	"\x06reason\x18\x01 \x01(\x0e2%.syncplane.v1.WorkspaceDropped.ReasonR\x06reason\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"_\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"u\n" +
 	"\x06Reason\x12\x16\n" +
 	"\x12REASON_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fREASON_RESET\x10\x01\x12\x19\n" +
 	"\x15REASON_ACCESS_REVOKED\x10\x02\x12\x10\n" +
-	"\fREASON_ERROR\x10\x03\"\x94\x02\n" +
+	"\fREASON_ERROR\x10\x03\x12\x14\n" +
+	"\x10REASON_NO_ACCESS\x10\x04\"\x94\x02\n" +
 	"\x11SubscribeResponse\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12'\n" +
 	"\x0fschema_revision\x18\x02 \x01(\tR\x0eschemaRevision\x120\n" +
