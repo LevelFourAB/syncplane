@@ -17,7 +17,7 @@ import type { KVRead } from '../kv/store.js';
 import type { EntityDef, EntityRegistry } from '../mutations.js';
 import type { CompiledIndex } from '../optimistic/index-maintain.js';
 import { sortOrderedFields } from '../ordering.js';
-import { decodeWholeRow, scanDecoded, scanMergedRows, scanProjected } from '../read.js';
+import { decodeWholeRow, rowOf, scanDecoded, scanMergedRows, scanProjected } from '../read.js';
 import { compareRows, evalCond } from './evaluate.js';
 import {
 	groupByIndex,
@@ -127,7 +127,7 @@ export async function readRowGroups<D extends DescMessage>(
 		sortOrderedFields(schema, value);
 		if (compiled.where && !evalCond(value, compiled.where, schema)) continue;
 		const row: IndexedRow<MessageShape<D>> = {
-			row: { key: merged.key, value, workspaceId: merged.workspaceId, version: merged.version },
+			row: rowOf(schema, merged.key, value, merged.workspaceId, merged.version, merged.hidden),
 			bytes: merged.v,
 		};
 		for (const group of groupValuesOf(value, compiled.by, schema)) {

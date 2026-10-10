@@ -21,7 +21,9 @@ import (
 // every row the closure reads is passed through the entity's ReadFilter — the
 // same filter, resolved by the same machinery, that decides what a sync client
 // may pull. A filtered-out row reads as absent: Get reports not-found, scans and
-// queries skip it. Authorization is against the ctx principal, so a ctx with no
+// queries skip it. Each field a field guard hides from the caller reads as its
+// zero value in the rows the closure receives; a query's predicate and order
+// still read the stored value. Authorization is against the ctx principal, so a ctx with no
 // principal reads as anonymous.
 //
 // Both hooks are resolved BEFORE the snapshot opens, so neither can pin it.
@@ -44,7 +46,7 @@ func (s *Server) View(ctx context.Context, workspaceID string, fn func(tx *ViewT
 	if err != nil {
 		return err
 	}
-	visible, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
+	visible, project, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
 	if err != nil {
 		return adm.verdict.settle(ctx, err)
 	}
@@ -52,7 +54,7 @@ func (s *Server) View(ctx context.Context, workspaceID string, fn func(tx *ViewT
 		if err := bind(tx); err != nil {
 			return err
 		}
-		return fn(&ViewTx{srv: s, tx: tx, ws: workspaceID, visible: visible})
+		return fn(&ViewTx{srv: s, tx: tx, ws: workspaceID, visible: visible, project: project})
 	})
 	return adm.verdict.settle(ctx, err)
 }
@@ -70,6 +72,9 @@ type ViewTx struct {
 	// Trusted read (everything live is visible). Resolved before the snapshot
 	// opened; see Server.readGate.
 	visible func(storage.Row) (bool, error)
+	// project clears the fields a guard hides from the caller in each row the
+	// read returns, or is nil for a Trusted read.
+	project rowProjector
 }
 
 // RowMeta is what the engine recorded about a stored row, returned alongside
@@ -103,7 +108,7 @@ func (v *ViewTx) Get(dst proto.Message, key string) (found bool, version uint64,
 	if err != nil {
 		return false, 0, err
 	}
-	return readRowVisible(v.tx, info, dst, key, v.visible)
+	return readRowVisible(v.tx, info, dst, key, v.visible, v.project)
 }
 
 // GetMeta is Get, reporting the row's whole RowMeta instead of its version
@@ -114,7 +119,7 @@ func (v *ViewTx) GetMeta(dst proto.Message, key string) (found bool, meta RowMet
 	if err != nil {
 		return false, RowMeta{}, err
 	}
-	return readRowMeta(v.tx, info, dst, key, v.visible)
+	return readRowMeta(v.tx, info, dst, key, v.visible, v.project)
 }
 
 // ScanPage iterates up to limit live rows of the entity identified by prototype
@@ -127,7 +132,7 @@ func (v *ViewTx) ScanPage(prototype proto.Message, afterKey string, limit int, f
 	if err != nil {
 		return "", false, err
 	}
-	return scanPageRows(v.tx, info, afterKey, limit, v.visible, fn)
+	return scanPageRows(v.tx, info, afterKey, limit, v.visible, v.project, fn)
 }
 
 // Query iterates the live rows of the entity identified by prototype that
@@ -169,7 +174,7 @@ func (v *ViewTx) Query(prototype proto.Message, spec query.Spec, fn func(msg pro
 	if err != nil {
 		return err
 	}
-	rows, err := runQuerySpec(v.srv, v.tx, v.ws, info, spec, v.visible)
+	rows, err := runQuerySpec(v.srv, v.tx, v.ws, info, spec, v.visible, v.project)
 	if err != nil {
 		return err
 	}
@@ -188,8 +193,17 @@ func (v *ViewTx) Query(prototype proto.Message, spec query.Spec, fn func(msg pro
 //
 // visible is nil for a trusted read, in which case everything live matches.
 // Because it is applied inside queryRows, the page counts only rows the caller
-// may actually see — a filtered row consumes no page budget.
-func runQuerySpec(srv *Server, tx storage.ReadTx, ws string, info *entityInfo, spec query.Spec, visible func(storage.Row) (bool, error)) ([]qrow, error) {
+// may actually see — a filtered row consumes no page budget. project, nil for
+// a trusted read, clears the fields a guard hides in each row returned.
+func runQuerySpec(
+	srv *Server,
+	tx storage.ReadTx,
+	ws string,
+	info *entityInfo,
+	spec query.Spec,
+	visible func(storage.Row) (bool, error),
+	project rowProjector,
+) ([]qrow, error) {
 	limits := srv.limits
 	desc := info.msgType.Descriptor()
 	where := spec.Where
@@ -237,7 +251,15 @@ func runQuerySpec(srv *Server, tx storage.ReadTx, ws string, info *entityInfo, s
 	// surfaces to the Go caller instead of being quarantined out of the result
 	// set.
 	rows, _, err := queryRows(tx, info, predicate, order, pageFor(after, before, spec.Offset, spec.Limit), visible, nil, limits)
-	return rows, err
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if err := project.apply(info, r.row.Key, r.msg); err != nil {
+			return nil, err
+		}
+	}
+	return rows, nil
 }
 
 // decodeSpecCursor unwraps one of a Spec's cursors. Nothing bounds its length
@@ -269,7 +291,7 @@ func entityInfoFor(s *Server, msg proto.Message) (*entityInfo, error) {
 // was found and its version. Shared by EntityTx.Get (write tx) and ViewTx.Get
 // (read tx) — both run over a storage.ReadTx.
 func readRowInto(tx storage.ReadTx, info *entityInfo, dst proto.Message, key string) (found bool, version uint64, err error) {
-	return readRowVisible(tx, info, dst, key, nil)
+	return readRowVisible(tx, info, dst, key, nil, nil)
 }
 
 // readRowVisible is readRowInto with an optional visibility gate applied before
@@ -281,8 +303,9 @@ func readRowVisible(
 	dst proto.Message,
 	key string,
 	visible func(storage.Row) (bool, error),
+	project rowProjector,
 ) (found bool, version uint64, err error) {
-	found, meta, err := readRowMeta(tx, info, dst, key, visible)
+	found, meta, err := readRowMeta(tx, info, dst, key, visible, project)
 	return found, meta.Version, err
 }
 
@@ -294,6 +317,7 @@ func readRowMeta(
 	dst proto.Message,
 	key string,
 	visible func(storage.Row) (bool, error),
+	project rowProjector,
 ) (found bool, meta RowMeta, err error) {
 	row, err := tx.GetRow(info.name, key)
 	if err == storage.ErrNotFound {
@@ -318,6 +342,9 @@ func readRowMeta(
 	if err := proto.Unmarshal(row.Value, dst); err != nil {
 		return false, RowMeta{}, err
 	}
+	if err := project.apply(info, key, dst); err != nil {
+		return false, RowMeta{}, err
+	}
 	return true, RowMeta{Version: row.Version, Actor: row.Actor}, nil
 }
 
@@ -338,6 +365,7 @@ func scanPageRows(
 	afterKey string,
 	limit int,
 	visible func(storage.Row) (bool, error),
+	project rowProjector,
 	fn func(msg proto.Message, version uint64) error,
 ) (lastKey string, more bool, err error) {
 	if limit <= 0 {
@@ -362,6 +390,9 @@ func scanPageRows(
 		}
 		msg, err := info.decode(r.Value)
 		if err != nil {
+			return err
+		}
+		if err := project.apply(info, r.Key, msg); err != nil {
 			return err
 		}
 		return fn(msg, r.Version)

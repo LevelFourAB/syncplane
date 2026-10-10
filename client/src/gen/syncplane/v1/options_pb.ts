@@ -184,9 +184,9 @@ export type AccessOptions = Message<"syncplane.v1.AccessOptions"> & {
   allow: AccessRule[];
 
   /**
-   * The field guards: each one restricts who can write a set of fields,
-   * whatever rule in `allow` admits the write. A field that no guard names
-   * follows `allow` alone. See `FieldGuard`.
+   * The field guards: each one restricts who can read and who can write a
+   * set of fields, whatever rule in `allow` admits the read or the write. A
+   * field that no guard names follows `allow` alone. See `FieldGuard`.
    *
    * @generated from field: repeated syncplane.v1.FieldGuard guard = 2;
    */
@@ -201,7 +201,27 @@ export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 1);
 
 /**
- * Restricts who can write a set of fields of an entity.
+ * Restricts who can read and who can write a set of fields of an entity.
+ *
+ * A caller reads a guarded field of a row when a rule in `allow` of the
+ * entity admits reading the row, and a rule of the guard that names `read`
+ * admits reading the row too. A guard without a read rule hides its fields
+ * from every client. A read rule of a guard admits a caller as a read rule of
+ * the entity does: its source holds for the caller where the row sits, and
+ * every check it sets holds on the row.
+ *
+ * The server clears each field a caller may not read before it sends the row,
+ * and names the field in `RowChange.hidden`. Sync, `Query` and the field
+ * history all apply the same rule. A guard decides per row, so a check on the
+ * row can hide a field on some rows and show it on others. A change of the
+ * caller's grants that shows or hides a field sends the row again.
+ *
+ * A `Query`, a subscription predicate, a window, a follow path or a facet
+ * that names a field fails with `PermissionDenied` unless the caller reads
+ * that field on every row it reads: a read rule of the guard that needs no
+ * permission and sets no check, or whose permission the caller holds at the
+ * workspace root. So does a search condition when the guard restricts a
+ * search field.
  *
  * A write that sets a guarded field needs a rule in `allow` of the entity that
  * admits the write, and a rule of the guard that admits the field operation:
@@ -218,12 +238,13 @@ export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
  * - a `PUT` that updates a row keeps the stored value of each guarded field;
  * - a `PUT` that creates a row stores the zero value in each guarded field.
  *
- * Every caller that reads the row reads the guarded fields: each guard admits
- * reading with the rule `{ read: true admitted: {} }`, and registration refuses
- * a guard without it.
+ * Reading and writing are separate. A caller can write a field it may not
+ * read: a `PATCH` whose mask names the field sets it, and a `PUT` that
+ * updates a row keeps the stored value of each field the caller may not read
+ * on the stored row when the `PUT` leaves it unset.
  *
- * A total that only server code computes, and a status that only managers
- * set:
+ * A total that only server code computes, a status that only managers set,
+ * and a salary that only HR reads and writes:
  *
  * ```protobuf
  * access: {
@@ -236,6 +257,9 @@ export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
  *     { fields: ["status"] allow: [
  *       { read: true admitted: {} },
  *       { write: true requires: "manage_orders" }
+ *     ] },
+ *     { fields: ["salary"] allow: [
+ *       { read: true write: true requires: "hr" }
  *     ] }
  *   ]
  * }
@@ -245,10 +269,17 @@ export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
  * rule in `allow` instead: that rule adds a narrow update, and a guard takes
  * a field away from every rule.
  *
- * Registration refuses a guard without fields or rules, a field that is a key
- * field, an access parent or a `creator` field, a field that two guards name,
+ * A guard without rules hides its fields from every client and leaves them to
+ * trusted writes.
+ *
+ * Registration refuses a guard without fields, a field that is a key field,
+ * an access parent or a `creator` field, a field that two guards name,
  * a rule with `delete` or `fields`, a rule whose `caller_is` or `when` reads a
- * guarded field, and unknown fields inside this message.
+ * guarded field, and unknown fields inside this message. When a guard can
+ * hide its fields, it also refuses a field that a rule in `allow` checks
+ * with `caller_is` or `when`, a field that a `within` entry reads, and the
+ * subject and role fields of a grant entity: a client reads those to decide
+ * access.
  *
  * @generated from message syncplane.v1.FieldGuard
  */
@@ -264,8 +295,7 @@ export type FieldGuard = Message<"syncplane.v1.FieldGuard"> & {
 
   /**
    * The rules. A rule names `read`, `create`, `update` or `write`, which
-   * admits `create` and `update`. A rule that names `read` admits every
-   * admitted caller and sets no check.
+   * admits `create` and `update`.
    *
    * @generated from field: repeated syncplane.v1.AccessRule allow = 2;
    */

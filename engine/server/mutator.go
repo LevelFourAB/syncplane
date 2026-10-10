@@ -374,7 +374,7 @@ func (e *EntityTx) GetMeta(dst proto.Message, key string) (found bool, meta RowM
 	if err != nil {
 		return false, RowMeta{}, err
 	}
-	return readRowMeta(e.tx, info, dst, key, nil)
+	return readRowMeta(e.tx, info, dst, key, nil, nil)
 }
 
 // Put stores msg as a full-row snapshot; the key derives from key_fields.
@@ -901,7 +901,7 @@ func (e *EntityTx) Query(prototype proto.Message, spec query.Spec, fn func(msg p
 	if err != nil {
 		return err
 	}
-	rows, err := runQuerySpec(e.srv, e.tx, e.ws, info, spec, nil)
+	rows, err := runQuerySpec(e.srv, e.tx, e.ws, info, spec, nil, nil)
 	if err != nil {
 		return err
 	}
@@ -921,7 +921,7 @@ func (e *EntityTx) ScanPage(prototype proto.Message, afterKey string, limit int,
 	if err != nil {
 		return "", false, err
 	}
-	return scanPageRows(e.tx, info, afterKey, limit, nil, func(msg proto.Message, _ uint64) error {
+	return scanPageRows(e.tx, info, afterKey, limit, nil, nil, func(msg proto.Message, _ uint64) error {
 		return fn(msg)
 	})
 }

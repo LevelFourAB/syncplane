@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"log/slog"
-	"slices"
 	"sort"
 
 	"connectrpc.com/connect"
@@ -242,21 +241,26 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		return err
 	}
 
-	// visibleOf keeps the rows of a page the client may see. It runs inside
-	// the page's read transaction, which is where the parent chains of the
-	// access model are read; snapshots never need tombstones, so it drops
-	// every other row.
-	visibleOf := func(tx storage.ReadTx, page []storage.Row) ([]storage.Row, error) {
+	// visibleOf renders the rows of a page the client may see, without the
+	// fields it may not read. It runs inside the page's read transaction,
+	// which is where the parent chains of the access model are read;
+	// snapshots never need tombstones, so it drops every other row.
+	visibleOf := func(tx storage.ReadTx, page []storage.Row) ([]*syncplanev1.RowChange, error) {
 		emitter.readChainsFrom(tx)
-		out := page[:0]
+		var out []*syncplanev1.RowChange
 		for _, row := range page {
 			class, err := emitter.classify(row)
 			if err != nil {
 				return nil, err
 			}
-			if class == rowVisible {
-				out = append(out, row)
+			if class != rowVisible {
+				continue
 			}
+			rc, err := emitter.rowChange(row)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, rc)
 		}
 		return out, nil
 	}
@@ -264,10 +268,10 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	// ship buffers one visible row and records the position that a resumed
 	// attempt continues from. Both delivery paths below go through it, which
 	// is what keeps their output — and their resume tokens — indistinguishable.
-	ship := func(entity string, row storage.Row) error {
-		chunk = append(chunk, rowChange(row))
+	ship := func(entity string, rc *syncplanev1.RowChange) error {
+		chunk = append(chunk, rc)
 		rowsSent++
-		pos.row(entity, row.Key)
+		pos.row(entity, rc.GetKey())
 		if len(chunk) >= s.chunkSize {
 			return flush()
 		}
@@ -294,7 +298,10 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			candidates = candidates[sort.Search(len(candidates), func(i int) bool { return candidates[i] > afterKey }):]
 			for start := 0; start < len(candidates); start += maxRowBatch {
 				batch := candidates[start:min(start+maxRowBatch, len(candidates))]
-				var page []storage.Row
+				var (
+					page    []storage.Row
+					visible []*syncplanev1.RowChange
+				)
 				if err := s.readTx(ctx, msg.GetWorkspaceId(), begin.GetSeq(), func(tx storage.ReadTx) error {
 					page = page[:0]
 					if err := tx.GetRows(entity, batch, func(row storage.Row) error {
@@ -309,13 +316,13 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 						return err
 					}
 					var err error
-					page, err = visibleOf(tx, page)
+					visible, err = visibleOf(tx, page)
 					return err
 				}); err != nil {
 					return err
 				}
-				for _, row := range page {
-					if err := ship(entity, row); err != nil {
+				for _, rc := range visible {
+					if err := ship(entity, rc); err != nil {
 						return err
 					}
 				}
@@ -326,7 +333,10 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		for {
 			// Short tx per page: stream writes happen outside so the tx stays
 			// brief.
-			var page, visible []storage.Row
+			var (
+				page    []storage.Row
+				visible []*syncplanev1.RowChange
+			)
 			// Floored at the Begin seq: pages of one snapshot must not read
 			// from before the position the Begin frame promised.
 			if err := s.readTx(ctx, msg.GetWorkspaceId(), begin.GetSeq(), func(tx storage.ReadTx) error {
@@ -338,13 +348,13 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 					return err
 				}
 				var err error
-				visible, err = visibleOf(tx, slices.Clone(page))
+				visible, err = visibleOf(tx, page)
 				return err
 			}); err != nil {
 				return err
 			}
-			for _, row := range visible {
-				if err := ship(entity, row); err != nil {
+			for _, rc := range visible {
+				if err := ship(entity, rc); err != nil {
 					return err
 				}
 			}

@@ -23,6 +23,7 @@ import {
 	type CanAnswer,
 	canAt,
 	type CanDetail,
+	decideRead,
 	decideRules,
 	decideUpdate,
 	decodeAccess,
@@ -228,6 +229,7 @@ import {
 	readMergedRowsWithVersion,
 	type ReadScope,
 	type Row,
+	rowOf,
 	scanDecoded,
 	scanProjected,
 	workspacesWithRows,
@@ -280,6 +282,7 @@ import {
 	type StackName,
 	UndoManager,
 	type UndoOptions,
+	UndoRefusedError,
 	type UndoScopeOptions,
 } from './undo.js';
 import {
@@ -848,8 +851,14 @@ export interface DetailOptions {
 /** Options for {@link SyncClient.can}. */
 export interface CanOptions<D extends DescMessage = DescMessage> extends DetailOptions {
 	/**
-	 * For an update, the fields it changes, by accessor name, with a oneof
-	 * named by its own name, as a patch init object names them. When omitted,
+	 * For a read, the fields to read, by accessor name, with a oneof named by
+	 * its own name. Reading a field that a field guard restricts also needs a
+	 * read rule of that guard, so naming such a field answers `'no'` when no
+	 * read rule of the guard admits the caller on the row. When omitted, the
+	 * answer is for reading the row.
+	 *
+	 * For an update, the fields it changes, named the same way, as a patch init
+	 * object names them. When omitted,
 	 * the answer is for some update: `'yes'` when a rule admits an update of
 	 * one field its `fields` list names, or a rule without a list admits an
 	 * update of fields that keeps the access parent and every subject field.
@@ -2561,6 +2570,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				return undefined;
 			}
 		};
+		// A field the server does not send reads as an empty document, and an
+		// edit of it would type into text the caller cannot see.
+		const head = schema.fields.find((f) => f.name === path.split('.')[0]);
+		const unit = head?.oneof?.localName ?? head?.localName;
+		const isHidden = (row: Row<MessageShape<D>> | undefined): boolean =>
+			unit !== undefined && row?.hidden?.includes(unit) === true;
 		return openTextHandle({
 			acquirePeer: async () => {
 				const lease = await (await this.textPeerLeases()).acquire();
@@ -2573,7 +2588,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					},
 				};
 			},
-			load: async () => fieldOf(await scope.get(schema, rowKey)),
+			load: async () => {
+				const row = await this.getRowIn(scope.workspaceId, schema, rowKey);
+				if (isHidden(row)) {
+					throw new Error(
+						`text: field "${fieldName}" of row "${rowKey}" is hidden from this caller by a field guard`,
+					);
+				}
+				return fieldOf(row?.value);
+			},
 			patch: (state, inverseOps, coalesce) => {
 				const crud = buildPatch(
 					def,
@@ -2599,7 +2622,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			watch: (cb) => {
 				const handle = scope.watchRows(schema, [ rowKey ], (rows) => {
 					if (!rows.has(rowKey)) return;
-					cb(fieldOf(rows.get(rowKey)?.value));
+					const row = rows.get(rowKey);
+					// A field the server stops sending reads as empty; the handle
+					// keeps the document it holds instead.
+					if (isHidden(row)) return;
+					cb(fieldOf(row?.value));
 				});
 				return () => handle.close();
 			},
@@ -3575,6 +3602,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			key,
 			decide: (row, chain) => {
 				const stored = ruleRowOf(summary, def, key, row, chain);
+				if (operation === 'read' && opts?.fields !== undefined) {
+					return decideRead(
+						rules,
+						def.guards,
+						summary.subjects,
+						stored,
+						updateUnitsOf(def.schema, opts.fields),
+					);
+				}
 				if (operation !== 'update') return decideRules(rules, operation, summary.subjects, stored);
 				// Without named fields the answer is for some update, and the best
 				// answer of the candidates wins: null, for an update that only a rule
@@ -5266,7 +5302,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				if (rc.body.case !== 'value') continue;
 				const value = fromBinary(schema, rc.body.value);
 				sortOrderedFields(schema, value);
-				rows.push({ key: rc.key, value, workspaceId, version: rc.version });
+				rows.push(rowOf(schema, rc.key, value, workspaceId, rc.version, rc.hidden));
 			}
 			return {
 				value: g.value === undefined ? undefined : scalarFromProto(g.value),
@@ -5544,7 +5580,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			if (rc.body.case === 'value') {
 				const value = fromBinary(schema, rc.body.value);
 				sortOrderedFields(schema, value);
-				rows.push({ key: rc.key, value, workspaceId, version: rc.version });
+				rows.push(rowOf(schema, rc.key, value, workspaceId, rc.version, rc.hidden));
 			}
 		}
 		// A server query sees the whole entity, so the only thing that can make
@@ -5711,7 +5747,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					if (row === undefined) return undefined;
 					const value = fromBinary(schema, row.v);
 					sortOrderedFields(schema, value);
-					return { key: keys[i]!, value, workspaceId, version: row.version };
+					return rowOf(schema, keys[i]!, value, workspaceId, row.version, row.hidden);
 				});
 			} finally {
 				tx.release();
@@ -5858,10 +5894,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 							// row: what lets the apply below state the merged view it leaves,
 							// so a watcher takes the row from the touch set instead of
 							// reading it back (see TouchSet.rowWithView).
-							let confirmed: { version: bigint } | undefined;
+							let confirmed: { version: bigint; hidden?: readonly string[] } | undefined;
 							if (at !== undefined) {
 								const rec = pre[at + 2] as ConfirmedRecord | undefined;
-								confirmed = { version: rec ? BigInt(rec.ver) : 0n };
+								confirmed = { version: rec ? BigInt(rec.ver) : 0n, hidden: rec?.h };
 							}
 							// The records are in hand, but the row is RESOLVED on first use:
 							// for a collaborative-text keystroke that means folding the row's
@@ -5941,10 +5977,23 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 							if (undoMgr) {
 								const override = undoOpts?.overrides?.[crudIndex]
 									?? this.textStringInverse(crud, textEdits);
+								// The fields the server did not send, which the prior row holds
+								// as zero values.
+								const hidden = at !== undefined
+									? confirmed?.hidden ?? []
+									: ((await tx.get(confirmedKey(crud.entity, workspaceId, crud.key))) as
+										| ConfirmedRecord
+										| undefined)?.h ?? [];
 								if (override !== undefined) {
 									capturedInverses.push(override);
+								} else if (crud.op === CrudOp.DELETE && hidden.length > 0) {
+									capturedInverses.push({
+										kind: 'refused',
+										reason: `undo: row "${crud.key}" of ${crud.entity} had fields hidden from this caller `
+											+ `(${hidden.join(', ')}), which restoring it would clear`,
+									});
 								} else {
-									const inv = invertCrud(crud, await priorRow());
+									const inv = invertCrud(crud, await priorRow(), hidden);
 									capturedInverses.push(inv && { kind: 'crud', crud: inv });
 								}
 							}
@@ -6164,6 +6213,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * multi-mutation group (a transact() batch) replays atomically as one batch.
 	 * Concurrent remote edits to fields named by the inverse get clobbered —
 	 * accepted per-field LWW.
+	 *
+	 * Rejects with {@link UndoRefusedError} for a group that deleted a row with
+	 * fields the server did not send (see Row.hidden); the group is used up. An
+	 * undo restores no field the server did not send.
 	 */
 	undo(): Promise<boolean> {
 		return this.undoIn(this.defaultScope());
@@ -6186,7 +6239,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		try {
 			await this.enqueueInverses(scope, group.map((entry) => entry.inverse), 'redo');
 		} catch (err) {
-			mgr.restoreUndoGroup(group);
+			// A refused step can never replay, so it stays used up.
+			if (!(err instanceof UndoRefusedError)) mgr.restoreUndoGroup(group);
 			throw err;
 		}
 		return true;
@@ -6207,7 +6261,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		try {
 			await this.enqueueInverses(scope, group.map((entry) => entry.inverse), 'undo');
 		} catch (err) {
-			mgr.restoreRedoGroup(group);
+			if (!(err instanceof UndoRefusedError)) mgr.restoreRedoGroup(group);
 			throw err;
 		}
 		return true;
@@ -6256,6 +6310,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// same counters twice for different content.
 		const docs = new Map<string, TextDoc>();
 		for (const inverse of inverses) {
+			if (inverse.kind === 'refused') throw new UndoRefusedError(inverse.reason);
 			if (inverse.kind === 'crud') {
 				cruds.push(inverse.crud);
 				overrides.push(undefined);

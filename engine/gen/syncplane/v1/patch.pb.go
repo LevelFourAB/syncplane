@@ -97,7 +97,8 @@ func (x *FieldDelta) GetFragment() []byte {
 // RowChange is a full-row snapshot (or tombstone) at a given workspace
 // sequence. Every field is a merged snapshot except the collaborative-text
 // fields named in text_deltas, which the recipient reconstructs from state it
-// already holds.
+// already holds, and the fields named in hidden, which the recipient may not
+// read.
 type RowChange struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The name of the entity for this row.
@@ -122,7 +123,20 @@ type RowChange struct {
 	// a named field must discard the page and re-bootstrap; one that knows in
 	// advance it holds no schema for an entity names it in
 	// PullRequest.no_delta_entities instead.
-	TextDeltas    []*FieldDelta `protobuf:"bytes,6,rep,name=text_deltas,json=textDeltas,proto3" json:"text_deltas,omitempty"`
+	TextDeltas []*FieldDelta `protobuf:"bytes,6,rep,name=text_deltas,json=textDeltas,proto3" json:"text_deltas,omitempty"`
+	// The fields of the row that the recipient may not read, sorted: each
+	// entry names a top-level field outside any `oneof`, or a `oneof`. The
+	// server clears each one in `value`, so a cleared field reads as its zero
+	// value; this list tells it apart from a stored zero value. Empty when
+	// the recipient reads every field. A field guard decides it (see
+	// `syncplane.v1.FieldGuard`), per row, so two rows of one entity can
+	// hide different fields, and a change of the recipient's access sends
+	// the row again with a new list.
+	//
+	// A `PUT` that updates the row keeps the stored value of each field the
+	// writer may not read and leaves unset, so a recipient can write the row
+	// back whole.
+	Hidden        []string `protobuf:"bytes,7,rep,name=hidden,proto3" json:"hidden,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -210,13 +224,20 @@ func (x *RowChange) GetTextDeltas() []*FieldDelta {
 	return nil
 }
 
+func (x *RowChange) GetHidden() []string {
+	if x != nil {
+		return x.Hidden
+	}
+	return nil
+}
+
 type isRowChange_Body interface {
 	isRowChange_Body()
 }
 
 type RowChange_Value struct {
 	// Serialized entity message. Full merged snapshot, EXCEPT that every
-	// field named in text_deltas is cleared.
+	// field named in text_deltas or in hidden is cleared.
 	Value []byte `protobuf:"bytes,4,opt,name=value,proto3,oneof"`
 }
 
@@ -632,7 +653,7 @@ const file_syncplane_v1_patch_proto_rawDesc = "" +
 	"\n" +
 	"FieldDelta\x12\x14\n" +
 	"\x05field\x18\x01 \x01(\tR\x05field\x12\x1a\n" +
-	"\bfragment\x18\x02 \x01(\fR\bfragment\"\xca\x01\n" +
+	"\bfragment\x18\x02 \x01(\fR\bfragment\"\xe2\x01\n" +
 	"\tRowChange\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\tR\x03key\x12\x18\n" +
@@ -640,7 +661,8 @@ const file_syncplane_v1_patch_proto_rawDesc = "" +
 	"\x05value\x18\x04 \x01(\fH\x00R\x05value\x12\x1e\n" +
 	"\ttombstone\x18\x05 \x01(\bH\x00R\ttombstone\x129\n" +
 	"\vtext_deltas\x18\x06 \x03(\v2\x18.syncplane.v1.FieldDeltaR\n" +
-	"textDeltasB\x06\n" +
+	"textDeltas\x12\x16\n" +
+	"\x06hidden\x18\a \x03(\tR\x06hiddenB\x06\n" +
 	"\x04body\"_\n" +
 	"\x05Patch\x121\n" +
 	"\achanges\x18\x01 \x03(\v2\x17.syncplane.v1.RowChangeR\achanges\x12#\n" +

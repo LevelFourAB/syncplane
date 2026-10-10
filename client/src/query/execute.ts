@@ -57,7 +57,7 @@ import type { EntityDef, EntityRegistry } from '../mutations.js';
 import type { CompiledIndex } from '../optimistic/index-maintain.js';
 import { sortOrderedFields } from '../ordering.js';
 import type { OverlayEntry } from '../overlaycache.js';
-import { decodeWholeRow, foldTextLog, readOverlay, type Row } from '../read.js';
+import { decodeWholeRow, foldTextLog, readOverlay, type Row, rowOf } from '../read.js';
 import type { QueryDeclineReason } from '../sync/events.js';
 import type { CompiledQuery, Cond, PageWindow, Path } from './ast.js';
 import { compareRows, evalCond, type Matcher, matcherOf } from './evaluate.js';
@@ -443,7 +443,7 @@ export async function queryByIndex<D extends DescMessage>(
 	const overlayProjected = overlayView !== undefined && kept.length > 0;
 	const overlayRows: IndexedRow<MessageShape<D>>[] = kept.map((c) => {
 		const base = bases.get(c.key);
-		const row = { key: c.key, value: c.value, workspaceId, version: base ? BigInt(base.ver) : 0n };
+		const row = rowOf(schema, c.key, c.value, workspaceId, base ? BigInt(base.ver) : 0n, base?.h);
 		return {
 			row: overlayProjected && !cutsAPage ? decodeWholeRow(schema, row, c.bytes) : row,
 			bytes: c.bytes,
@@ -1289,7 +1289,7 @@ async function querySearchIndex<D extends DescMessage>(
 	);
 	const overlayRows: IndexedRow<MessageShape<D>>[] = kept.map((c, i) => {
 		const base = baseRecords[i] as ConfirmedRecord | undefined;
-		const row = { key: c.key, value: c.value, workspaceId, version: base ? BigInt(base.ver) : 0n };
+		const row = rowOf(schema, c.key, c.value, workspaceId, base ? BigInt(base.ver) : 0n, base?.h);
 		return {
 			row: overlayView === undefined ? row : decodeWholeRow(schema, row, c.bytes),
 			bytes: c.bytes,
@@ -1848,7 +1848,7 @@ async function decodeConfirmedMany<D extends DescMessage>(
 		const key = keys[i]!;
 		const decoded = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v, view);
 		out[i] = {
-			row: { key, value: decoded.value, workspaceId, version: BigInt(record.ver) },
+			row: rowOf(schema, key, decoded.value, workspaceId, BigInt(record.ver), record.h),
 			bytes: decoded.bytes,
 		};
 	}

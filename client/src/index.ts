@@ -225,6 +225,7 @@ export { applyTextInverse } from './text/undo-ops.js';
 export type { TextInverseOp } from './text/undo-ops.js';
 // Undo is driven through the client (undo/redo/canUndo) — the manager and the
 // inversion it runs on are not part of the surface; only the option types are.
+export { UndoRefusedError } from './undo.js';
 export type { UndoOptions, UndoScopeOptions } from './undo.js';
 export type {
 	KeyedRows,

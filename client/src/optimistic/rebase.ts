@@ -166,8 +166,9 @@ export type LocalApplyOutcome = 'applied' | 'no-target';
  * absent argument. It must be the row as of this call: pass it only from the
  * same transaction, and only before anything else in it has written the row.
  *
- * `confirmed` is the row's confirmed base version, which a caller that read the
- * confirmed record up front already holds. Given it, a write that produces a
+ * `confirmed` is the row's confirmed base version and the fields its confirmed
+ * record hides (see ConfirmedRecord.h), which a caller that read the confirmed
+ * record up front already holds. Given it, a write that produces a
  * whole row reports that row on `touched` as well as its key, so a consumer can
  * take the post-commit merged view from there rather than reading it back (see
  * TouchSet.rowWithView). Leaving it out costs a read, not correctness.
@@ -180,7 +181,7 @@ export async function applyCrudLocally(
 	touched: TouchSet,
 	prior?: { bytes: Uint8Array | undefined },
 	slot?: TextLogSlot,
-	confirmed?: { version: bigint },
+	confirmed?: { version: bigint; hidden?: readonly string[] },
 ): Promise<LocalApplyOutcome> {
 	const def = registry.get(crud.entity);
 	if (!def) throw new Error(`unknown entity "${crud.entity}"`);
@@ -219,6 +220,7 @@ export async function applyCrudLocally(
 				touched.rowWithView(workspaceId, def.name, crud.key, {
 					v: value,
 					version: confirmed.version,
+					hidden: confirmed.hidden,
 				});
 			}
 			return 'applied';
@@ -259,6 +261,7 @@ export async function applyCrudLocally(
 				touched.rowWithView(workspaceId, def.name, crud.key, {
 					v: bytes,
 					version: confirmed.version,
+					hidden: confirmed.hidden,
 				});
 			}
 			return 'applied';
@@ -600,6 +603,13 @@ function detached(bytes: Uint8Array): Uint8Array {
 	return ownsBuffer ? bytes : bytes.slice();
 }
 
+/** The confirmed record of a value row change whose row bytes are `value`. */
+function confirmedRecordOf(change: RowChange, value: Uint8Array): ConfirmedRecord {
+	const record: ConfirmedRecord = { v: value, ver: change.version.toString() };
+	if (change.hidden.length > 0) record.h = [ ...change.hidden ];
+	return record;
+}
+
 /**
  * Applies a batch of one workspace's server row changes to the confirmed state.
  *
@@ -643,7 +653,7 @@ export async function applyServerChanges(
 			const value = detached(
 				await applyTextDeltas(tx, registry, workspaceId, change, change.body.value),
 			);
-			let record: ConfirmedRecord = { v: value, ver: change.version.toString() };
+			let record = confirmedRecordOf(change, value);
 			if (idx.length > 0) {
 				// Where the row USED to sit does not matter — the position list is
 				// replaced, not amended — so this needs neither the bytes being
@@ -768,7 +778,7 @@ async function writeSnapshotRows(
 			}
 		} else if (change.body.case === 'value') {
 			const value = detached(change.body.value);
-			let record: ConfirmedRecord = { v: value, ver: change.version.toString() };
+			let record = confirmedRecordOf(change, value);
 			const compiled = index?.indexes.for(change.entity) ?? [];
 			if (compiled.length > 0) {
 				const def = registry.get(change.entity)!;

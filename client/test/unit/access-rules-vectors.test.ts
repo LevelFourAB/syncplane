@@ -15,7 +15,9 @@ import {
 	type AccessOperation,
 	answerOf,
 	type CanAnswer,
+	decideRead,
 	decideRules,
+	decideUpdate,
 	type RuleRow,
 	unknownBecause,
 	type Verdict,
@@ -50,6 +52,8 @@ interface RulesCase {
 	name: string;
 	op: AccessOperation;
 	rules: VectorRule[];
+	guards?: { units: string[]; rules: VectorRule[] }[];
+	readFields?: string[];
 	subjects: string[];
 	row: VectorRow;
 	final?: VectorRow;
@@ -115,15 +119,31 @@ describe('access rule conformance vectors', () => {
 
 	for (const tc of vectors.cases) {
 		it(tc.name, () => {
-			const answer = answerOf(decideRules(
-				tc.rules.map(ruleOf),
-				tc.op,
-				tc.subjects,
-				rowOf(tc.row),
-				tc.final === undefined ? undefined : rowOf(tc.final),
-				tc.changed,
-			));
-			expect(answer).toBe(tc.want);
+			const rules = tc.rules.map(ruleOf);
+			const guards = (tc.guards ?? []).map((g) => ({ units: g.units, rules: g.rules.map(ruleOf) }));
+			let verdict: Verdict;
+			if (tc.op === 'read' && tc.readFields !== undefined) {
+				verdict = decideRead(rules, guards, tc.subjects, rowOf(tc.row), tc.readFields);
+			} else if (tc.op === 'update' && tc.guards !== undefined) {
+				verdict = decideUpdate(
+					rules,
+					guards,
+					tc.subjects,
+					rowOf(tc.row),
+					rowOf(tc.final!),
+					tc.changed ?? null,
+				);
+			} else {
+				verdict = decideRules(
+					rules,
+					tc.op,
+					tc.subjects,
+					rowOf(tc.row),
+					tc.final === undefined ? undefined : rowOf(tc.final),
+					tc.changed,
+				);
+			}
+			expect(answerOf(verdict)).toBe(tc.want);
 		});
 	}
 });

@@ -2127,7 +2127,11 @@ func (e *rowEmitter) emitMembershipDiff(tx storage.ReadTx, oldSet map[closureKey
 		if oldSet[ck] || row.Version > seq {
 			continue // already held, or the incremental scan delivered it
 		}
-		patch.Changes = append(patch.Changes, rowChange(row))
+		rc, err := e.rowChange(row)
+		if err != nil {
+			return err
+		}
+		patch.Changes = append(patch.Changes, rc)
 	}
 	// Removals: members the cursor carried that the set no longer holds. They
 	// are grouped by entity and resolved in batches, because a client whose

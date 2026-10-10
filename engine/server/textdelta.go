@@ -166,20 +166,20 @@ func (info *entityInfo) recordTextDeltaGaps(tx storage.WriteTx, key string, path
 }
 
 // readInputs is what a row's own fields decide about which callers may read it
-// in the access model: its access parents, the values of the fields its read
-// rules check against the caller's subjects, and whether it matches each read
-// rule's when condition. The zero value is a row whose fields decide nothing:
-// one that does not exist, or one whose entity's read rules do not read its
-// fields.
+// and its fields in the access model: its access parents, the values of the
+// fields its read rules and the read rules of its guards check against the
+// caller's subjects, and whether it matches each such rule's when condition.
+// The zero value is a row whose fields decide nothing: one that does not
+// exist, or one whose entity's read rules do not read its fields.
 type readInputs struct {
 	decides bool
 	// parents is the key of the row's parent edge (see chainEdge.key), so
 	// that two values compare with ==.
 	parents string
 	// checks holds, for each read rule with a check on the row in rule order,
-	// the value of its subject field quoted and whether the row matches its
-	// when condition, then what within entries on the row's own entity read
-	// of it.
+	// the entity's and then each guard's, the value of its subject field
+	// quoted and whether the row matches its when condition, then what within
+	// entries on the row's own entity read of it.
 	checks string
 }
 
@@ -187,10 +187,16 @@ type readInputs struct {
 // read it. model is nil for a schema without the access model, and row is nil
 // for a row that does not exist.
 func readInputsOf(model *accessModel, info *entityInfo, row proto.Message) readInputs {
-	if model == nil || row == nil || info.access == nil || info.access.read.all {
+	if model == nil || row == nil || info.access == nil {
 		return readInputs{}
 	}
-	checked := info.access.read.checked
+	var checked []accessRule
+	for _, r := range info.access.readerSets() {
+		checked = append(checked, r.checked...)
+	}
+	if info.access.read.all && !info.access.hidesFields() {
+		return readInputs{}
+	}
 	if len(model.parents[info.name]) == 0 && len(checked) == 0 {
 		return readInputs{}
 	}

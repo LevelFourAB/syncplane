@@ -363,6 +363,28 @@ export function decideUpdate(
 	return answer;
 }
 
+/**
+ * Decides whether the caller reads the units in `fields` of `row`: one of the
+ * entity's `rules` admits reading the row as {@link decideRules} decides, and
+ * for each of `guards` that restricts a unit in `fields`, one of its rules
+ * admits reading the row too. A guard with no read rule admits no read.
+ */
+export function decideRead(
+	rules: readonly AccessRuleDef[],
+	guards: readonly GuardDef[],
+	subjects: readonly string[],
+	row: RuleRow,
+	fields: readonly string[],
+): Verdict {
+	let answer = decideRules(rules, 'read', subjects, row);
+	for (const guard of guards) {
+		if (answer === 'no') return answer;
+		if (!guard.units.some((u) => fields.includes(u))) continue;
+		answer = and(answer, decideRules(guard.rules, 'read', subjects, row));
+	}
+	return answer;
+}
+
 /** `'no'` when either is, else the first unknown of the two, else `'yes'`. */
 function and(a: Verdict, b: Verdict): Verdict {
 	if (a === 'no' || b === 'no') return 'no';

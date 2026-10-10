@@ -384,10 +384,15 @@ export async function mergedRowFrom(
 	return await foldTextLog(tx, registry, entity, workspaceId, key, base);
 }
 
-/** A merged-view row: its bytes plus the confirmed base version (see Row.version). */
+/**
+ * A merged-view row: its bytes plus the confirmed base version (see
+ * Row.version), and the fields the server did not send of the confirmed base,
+ * by proto name (see ConfirmedRecord.h).
+ */
 export interface MergedRow {
 	v: Uint8Array;
 	version: bigint;
+	hidden?: readonly string[];
 }
 
 /**
@@ -423,6 +428,7 @@ export async function readMergedRowsWithVersion(
 		out[i] = {
 			v: await foldTextLog(tx, registry, entity, workspaceId, key, base),
 			version: confirmed ? BigInt(confirmed.ver) : 0n,
+			...(confirmed?.h === undefined ? {} : { hidden: confirmed.h }),
 		};
 	}
 	return out;
@@ -569,16 +575,20 @@ export async function forEachMergedRow(
 	for await (const [ k, v ] of tx.scan(cPrefix)) {
 		const suffix = k.slice(cPrefix.length);
 		overlayOnly(suffix);
-		const version = BigInt((v as ConfirmedRecord).ver);
+		const confirmed = v as ConfirmedRecord;
+		const version = BigInt(confirmed.ver);
+		// The hidden fields belong to the confirmed base: a local write cannot
+		// show a field the server does not send.
+		const hidden = confirmed.h === undefined ? {} : { hidden: confirmed.h };
 		if (next < overlay.length && overlay[next]!.suffix === suffix) {
 			const { record } = overlay[next]!;
 			next++;
 			if (record.del) continue;
 			// Keep the confirmed base version under an optimistic edit.
-			emit(suffix, { ...split(suffix), v: record.v, version });
+			emit(suffix, { ...split(suffix), v: record.v, version, ...hidden });
 			continue;
 		}
-		emit(suffix, { ...split(suffix), v: (v as ConfirmedRecord).v, version });
+		emit(suffix, { ...split(suffix), v: confirmed.v, version, ...hidden });
 	}
 	overlayOnly(undefined);
 }
@@ -671,6 +681,53 @@ export interface Row<T = unknown> {
 	 * compare-and-swap that rejects if the row moved server-side since you read.
 	 */
 	version: bigint;
+	/**
+	 * The fields of the row the server did not send, by accessor name, with a
+	 * oneof by its own name: a field guard hides them from the caller (see
+	 * schema.FieldGuardDecl). Each reads as its zero value in `value`, so a UI
+	 * shows it as hidden rather than as empty. Absent when the caller reads
+	 * every field.
+	 *
+	 * It follows the server-confirmed row: a local write to a hidden field
+	 * leaves it listed until the server says otherwise.
+	 */
+	hidden?: readonly string[];
+}
+
+/**
+ * Builds a Row, with `hidden` given by proto name as a merged-view row holds
+ * it (see MergedRow) and set only when it names a field.
+ */
+export function rowOf<T>(
+	schema: DescMessage,
+	key: string,
+	value: T,
+	workspaceId: string,
+	version: bigint,
+	hidden: readonly string[] | undefined,
+): Row<T> {
+	const row: Row<T> = { key, value, workspaceId, version };
+	if (hidden !== undefined && hidden.length > 0) row.hidden = accessorNamesOf(schema, hidden);
+	return row;
+}
+
+/**
+ * The accessor names of the fields and oneofs of `schema` that `names` names
+ * by proto name, in order. A name the schema does not declare, from a server
+ * that knows a newer schema, is left out.
+ */
+function accessorNamesOf(schema: DescMessage, names: readonly string[]): string[] {
+	const out: string[] = [];
+	for (const name of names) {
+		const field = schema.fields.find((f) => f.name === name && f.oneof === undefined);
+		if (field !== undefined) {
+			out.push(field.localName);
+			continue;
+		}
+		const oneof = schema.oneofs.find((o) => o.name === name);
+		if (oneof !== undefined) out.push(oneof.localName);
+	}
+	return out;
 }
 
 export async function scanDecoded<D extends DescMessage>(
@@ -684,7 +741,7 @@ export async function scanDecoded<D extends DescMessage>(
 	await forEachMergedRow(tx, registry, def.name, scope, (row) => {
 		const value = fromBinary(schema, row.v);
 		sortOrderedFields(schema, value);
-		rows.push({ key: row.key, value, workspaceId: row.workspaceId, version: row.version });
+		rows.push(rowOf(schema, row.key, value, row.workspaceId, row.version, row.hidden));
 	});
 	return rows;
 }
@@ -716,7 +773,7 @@ export async function scanProjected<D extends DescMessage>(
 			readUnknownFields: false,
 		}) as unknown as MessageShape<D>;
 		sortOrderedFields(schema, value);
-		const out = { key: row.key, value, workspaceId: row.workspaceId, version: row.version };
+		const out = rowOf(schema, row.key, value, row.workspaceId, row.version, row.hidden);
 		rows.push(out);
 		sources.set(out, row.v);
 	});
@@ -734,5 +791,12 @@ export function decodeWholeRow<D extends DescMessage>(
 ): Row<MessageShape<D>> {
 	const value = fromBinary(schema, bytes);
 	sortOrderedFields(schema, value);
-	return { key: row.key, value, workspaceId: row.workspaceId, version: row.version };
+	const out: Row<MessageShape<D>> = {
+		key: row.key,
+		value,
+		workspaceId: row.workspaceId,
+		version: row.version,
+	};
+	if (row.hidden !== undefined) out.hidden = row.hidden;
+	return out;
 }

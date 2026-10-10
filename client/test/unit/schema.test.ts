@@ -1079,16 +1079,52 @@ describe('schema builder — field guards', () => {
 			)
 				.toThrow('entity "e" access.guard[1] and access.guard[0] both name "total"');
 		});
-		it('rejects a guard without the admitted read rule', () => {
-			expect(guarding({ fields: [ 'total' ], allow: [ { update: true, requires: 'p' } ] })).toThrow(
-				'entity "e" access.guard[0]: has no read rule',
+		it('accepts a guard without a read rule, and read rules with a source or a check', () => {
+			expect(guarding({ fields: [ 'total' ], allow: [ { update: true, requires: 'p' } ] })).not
+				.toThrow();
+			expect(guarding({ fields: [ 'total' ], allow: [] })).not.toThrow();
+			expect(guarding({ fields: [ 'total' ], allow: [ { read: true, write: true, requires: 'p' } ] }))
+				.not.toThrow();
+			expect(guarding({ fields: [ 'total' ], allow: [ { ...read, callerIs: 'ownerId' } ] })).not
+				.toThrow();
+		});
+		it('rejects hiding a field that a rule of the entity checks', () => {
+			const hiding = (rule: AccessRuleDecl<typeof fields>) => () =>
+				entity('e', fields, {
+					access: {
+						allow: [ { read: true, write: true, admitted: true }, rule ],
+						guard: [ { fields: [ 'ownerId', 'note' ], allow: [ { read: true, requires: 'p' } ] } ],
+					},
+				});
+			expect(hiding({ read: true, admitted: true, callerIs: 'ownerId' })).toThrow(
+				'entity "e" access.allow[1]: reads "owner_id", which a guard can hide',
 			);
-			expect(guarding({ fields: [ 'total' ], allow: [ { read: true, requires: 'p' } ] })).toThrow(
-				'entity "e" access.guard[0].allow[0]: names read with a source or a check other than admitted',
+			expect(hiding({ update: true, requires: 'p', when: (e) => e.note.eq('x') })).toThrow(
+				'entity "e" access.allow[1]: reads "note", which a guard can hide',
 			);
-			expect(guarding({ fields: [ 'total' ], allow: [ { ...read, callerIs: 'ownerId' } ] })).toThrow(
-				'names read with a source or a check other than admitted',
+			// A guard that every reader of the row reads through hides nothing.
+			expect(() =>
+				entity('e', fields, {
+					access: {
+						allow: [ { read: true, write: true, admitted: true, callerIs: 'ownerId' } ],
+						guard: [ { fields: [ 'ownerId' ], allow: [ read ] } ],
+					},
+				})
+			).not.toThrow();
+		});
+		it('rejects hiding the subject or the role of a grant entity', () => {
+			const granting = (hidden: 'userId' | 'role') => () =>
+				entity('member', { id: text().key(), userId: text(), role: text() }, {
+					grant: { subject: 'userId', role: 'role', roles: [ { name: 'r', grants: [ 'p' ] } ] },
+					access: {
+						allow: [ { read: true, write: true, requires: 'p' } ],
+						guard: [ { fields: [ hidden ], allow: [ { read: true, requires: 'p' } ] } ],
+					},
+				});
+			expect(granting('userId')).toThrow(
+				'entity "member": grant field "userId" is restricted by a guard that can hide it',
 			);
+			expect(granting('role')).toThrow('entity "member": grant field "role" is restricted by a guard');
 		});
 		it('rejects a guard rule with delete or fields', () => {
 			expect(

@@ -35,7 +35,8 @@ message FieldDelta {
 // RowChange is a full-row snapshot (or tombstone) at a given workspace
 // sequence. Every field is a merged snapshot except the collaborative-text
 // fields named in text_deltas, which the recipient reconstructs from state it
-// already holds.
+// already holds, and the fields named in hidden, which the recipient may not
+// read.
 message RowChange {
 	// The name of the entity for this row.
 	string entity = 1;
@@ -47,7 +48,7 @@ message RowChange {
 	// The row content or deletion status.
 	oneof body {
 		// Serialized entity message. Full merged snapshot, EXCEPT that every
-		// field named in text_deltas is cleared.
+		// field named in text_deltas or in hidden is cleared.
 		bytes value = 4;
 		// True when the row was deleted.
 		bool tombstone = 5;
@@ -61,6 +62,19 @@ message RowChange {
 	// advance it holds no schema for an entity names it in
 	// PullRequest.no_delta_entities instead.
 	repeated FieldDelta text_deltas = 6;
+	// The fields of the row that the recipient may not read, sorted: each
+	// entry names a top-level field outside any `oneof`, or a `oneof`. The
+	// server clears each one in `value`, so a cleared field reads as its zero
+	// value; this list tells it apart from a stored zero value. Empty when
+	// the recipient reads every field. A field guard decides it (see
+	// `syncplane.v1.FieldGuard`), per row, so two rows of one entity can
+	// hide different fields, and a change of the recipient's access sends
+	// the row again with a new list.
+	//
+	// A `PUT` that updates the row keeps the stored value of each field the
+	// writer may not read and leaves unset, so a recipient can write the row
+	// back whole.
+	repeated string hidden = 7;
 }
 
 // Represents an ordered set of row changes to apply to confirmed state.

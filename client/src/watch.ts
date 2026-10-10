@@ -59,6 +59,7 @@ import {
 	readMergedRowsWithVersion,
 	type ReadScope,
 	type Row,
+	rowOf,
 	scanMergedRows,
 	type ScopedRow,
 	type WorkspaceScope,
@@ -1071,7 +1072,7 @@ export class WatcherHub {
 				scoped.rows.get(id),
 				id,
 				suffixOf(watcher, workspaceId, key),
-				{ v: view.v, version: view.version, workspaceId, key },
+				{ v: view.v, version: view.version, workspaceId, key, hidden: view.hidden },
 			);
 			scoped.rows.set(id, row);
 			// The same object means the same bytes and version, so nothing a
@@ -1535,7 +1536,7 @@ export class WatcherHub {
 				scoped.rows.get(id),
 				id,
 				suffixOf(sample, workspaceId, key),
-				{ v: view.v, version: view.version, workspaceId, key },
+				{ v: view.v, version: view.version, workspaceId, key, hidden: view.hidden },
 			);
 			scoped.rows.set(id, row);
 			changed.set(id, row);
@@ -1634,7 +1635,7 @@ export class WatcherHub {
 			const id = rowId(entry.row.workspaceId, entry.row.key);
 			const prev = scoped.rows.get(id);
 			const row = prev !== undefined && bytesEqual(prev.bytes, entry.bytes)
-					&& prev.row.version === entry.row.version
+					&& prev.row.version === entry.row.version && sameHidden(prev.row.hidden, entry.row.hidden)
 				? prev
 				: {
 					id,
@@ -1839,12 +1840,16 @@ export class WatcherHub {
 		if (watcher.matches === undefined) return;
 		const merged = await scanMergedRows(tx, this.registry, watcher.entity, readScope(watcher));
 		const bytes = new Map(merged.map((row) => [ rowId(row.workspaceId, row.key), row.v ]));
-		const scanned: Row<unknown>[] = merged.map((row) => ({
-			key: row.key,
-			value: decodeRow(watcher.schema, row.v),
-			workspaceId: row.workspaceId,
-			version: row.version,
-		}));
+		const scanned: Row<unknown>[] = merged.map((row) =>
+			rowOf(
+				watcher.schema,
+				row.key,
+				decodeRow(watcher.schema, row.v),
+				row.workspaceId,
+				row.version,
+				row.hidden,
+			)
+		);
 		// The definition, minus the page: a match set is the whole result, and the
 		// offset/limit slice happens on emit. A per-workspace predicate is applied
 		// before the sort rather than inside it, which is the same set — `runQuery`
@@ -2157,7 +2162,7 @@ export class WatcherHub {
 						const id = rowId(entry.row.workspaceId, entry.row.key);
 						const prev = scoped.rows.get(id);
 						const row = prev !== undefined && bytesEqual(prev.bytes, entry.bytes)
-								&& prev.row.version === entry.row.version
+								&& prev.row.version === entry.row.version && sameHidden(prev.row.hidden, entry.row.hidden)
 							? prev
 							: {
 								id,
@@ -2683,10 +2688,12 @@ function sameTail(
  * decode it avoids — cheaper too than trusting the row version, which would
  * serve wrong data on a stale hit.
  *
- * The Row wrapper is reused as well, but only when the version also held:
- * version can move without the bytes moving (an optimistic create acked to
- * byte-identical confirmed bytes), and that difference is exactly what a
- * compare-and-swap guard reads.
+ * The Row wrapper is reused as well, but only when the version and the hidden
+ * fields also held: version can move without the bytes moving (an optimistic
+ * create acked to byte-identical confirmed bytes), and that difference is
+ * exactly what a compare-and-swap guard reads. A field the server starts to
+ * hide can leave the bytes as they were too, when its value was the zero
+ * value.
  */
 function resultRow(
 	schema: DescMessage,
@@ -2696,16 +2703,24 @@ function resultRow(
 	row: ScopedRow,
 ): ResultRow {
 	if (prev !== undefined && bytesEqual(prev.bytes, row.v)) {
-		if (prev.row.version === row.version) return prev;
-		return { id, suffix, bytes: row.v, row: { ...prev.row, version: row.version } };
+		const next = rowOf(schema, row.key, prev.row.value, row.workspaceId, row.version, row.hidden);
+		if (prev.row.version === row.version && sameHidden(prev.row.hidden, next.hidden)) return prev;
+		return { id, suffix, bytes: row.v, row: next };
 	}
 	const value = decodeRow(schema, row.v);
 	return {
 		id,
 		suffix,
 		bytes: row.v,
-		row: { key: row.key, value, workspaceId: row.workspaceId, version: row.version },
+		row: rowOf(schema, row.key, value, row.workspaceId, row.version, row.hidden),
 	};
+}
+
+/** Whether two rows hide the same fields. */
+function sameHidden(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+	if (a === b) return true;
+	if (a === undefined || b === undefined || a.length !== b.length) return false;
+	return a.every((name, i) => name === b[i]);
 }
 
 function decodeRow(schema: DescMessage, bytes: Uint8Array): unknown {

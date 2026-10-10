@@ -1,7 +1,9 @@
 import {
+	clearField,
 	create,
 	type DescMessage,
 	fromBinary,
+	isFieldSet,
 	type Message,
 	type MessageInitShape,
 	type MessageShape,
@@ -16,6 +18,7 @@ import {
 	AccessSummary,
 	decideRules,
 	parentRefsOf,
+	type RuleRow,
 	ruleRowOf,
 } from '../access.js';
 import {
@@ -132,9 +135,11 @@ export interface TestServerOptions<E extends readonly DescMessage[] = readonly D
 	 * Which rows bootstrap and pull send. `'all'` sends every row.
 	 * `'readable'` sends a row of an entity with access rules only while a
 	 * read rule admits the caller that {@link TestServer.setCallerAccess} sets
-	 * for the workspace, and none before it is set. A row the caller stops
-	 * reading arrives as a tombstone, and one it starts reading arrives on the
-	 * next pull, as on the real server. Writes stay unchecked.
+	 * for the workspace, and none before it is set. A field that a field guard
+	 * hides from the caller arrives cleared and named in `RowChange.hidden`. A
+	 * row the caller stops reading arrives as a tombstone, and one it starts
+	 * reading, or whose hidden fields change, arrives on the next pull, as on
+	 * the real server. Writes stay unchecked.
 	 * @defaultValue 'all'
 	 */
 	serve?: 'all' | 'readable';
@@ -177,10 +182,11 @@ class WorkspaceState {
 	/** Subscribe streams parked on this workspace. */
 	wakers = new Set<() => void>();
 	/**
-	 * clientId → entity name → the keys of the rows the client was last sent
-	 * a value of. Kept only when the server serves readable rows.
+	 * clientId → entity name → row key → the fields hidden in the value the
+	 * client was last sent of the row, joined by commas. Kept only when the
+	 * server serves readable rows.
 	 */
-	served = new Map<string, Map<string, Set<string>>>();
+	served = new Map<string, Map<string, Map<string, string>>>();
 
 	rowsOf(entity: string): Map<string, StoredRow> {
 		let m = this.rows.get(entity);
@@ -290,29 +296,69 @@ function decodeCursor(cursor: Uint8Array): bigint | undefined {
 	}
 }
 
-function rowChangeInit(entity: string, key: string, row: StoredRow) {
+function rowChangeInit(entity: string, key: string, row: StoredRow, hidden?: Hidden) {
+	if (row.value === undefined || hidden === undefined || hidden.units.length === 0) {
+		return {
+			entity,
+			key,
+			version: row.version,
+			body: row.value !== undefined
+				? { case: 'value' as const, value: row.value }
+				: { case: 'tombstone' as const, value: true },
+		};
+	}
+	const { schema } = hidden.def;
+	const msg = fromBinary(schema, row.value);
+	for (const unit of hidden.units) {
+		const oneof = schema.oneofs.find((o) => o.name === unit);
+		for (const field of oneof?.fields ?? schema.fields.filter((f) => f.name === unit)) {
+			clearField(msg, field);
+		}
+	}
 	return {
 		entity,
 		key,
 		version: row.version,
-		body: row.value !== undefined
-			? { case: 'value' as const, value: row.value }
-			: { case: 'tombstone' as const, value: true },
+		body: { case: 'value' as const, value: toBinary(schema, msg) },
+		hidden: [ ...hidden.units ],
 	};
+}
+
+/** The fields of a row a guard hides from the caller, by proto name, sorted. */
+interface Hidden {
+	def: EntityDef;
+	units: readonly string[];
+}
+
+/**
+ * What the caller of a workspace reads of the committed rows, decided over
+ * them; see TestServer.readableIn.
+ */
+interface ReadView {
+	/** Whether the caller reads the live row of `entity` with `key`. */
+	reads(entity: string, key: string): boolean;
+	/** The fields of that row a guard hides from the caller. */
+	hidden(entity: string, key: string): Hidden | undefined;
+}
+
+/** The fields `hidden` names, joined as WorkspaceState.served records them. */
+function hiddenSig(hidden: Hidden | undefined): string {
+	return hidden === undefined ? '' : hidden.units.join(',');
 }
 
 const opNames = { put: CrudOp.PUT, patch: CrudOp.PATCH, delete: CrudOp.DELETE } as const;
 
 /** Records in `served` what a client holds after it applies `changes`. */
 function markServed(
-	served: Map<string, Set<string>>,
+	served: Map<string, Map<string, string>>,
 	changes: readonly { entity: string; key: string; row: StoredRow }[],
+	view: ReadView,
 ): void {
 	for (const { entity, key, row } of changes) {
 		let keys = served.get(entity);
-		if (keys === undefined) served.set(entity, keys = new Set());
+		if (keys === undefined) served.set(entity, keys = new Map());
 		if (row.value === undefined) keys.delete(key);
-		else keys.add(key);
+		else keys.set(key, hiddenSig(view.hidden(entity, key)));
 	}
 }
 
@@ -750,16 +796,17 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		}
 		const seq = state.seq + 1n;
 		const staging = new Staging(state);
+		const view = this.readableIn(workspaceId, state);
 		switch (mutation.payload.case) {
 			case 'crud':
-				this.applyCrud(staging, mutation.payload.value, seq);
+				this.applyCrud(staging, mutation.payload.value, seq, view);
 				break;
 			case 'batch': {
 				const cruds = mutation.payload.value.mutations;
 				if (cruds.length === 0) {
 					throw new Rejection(CodeInvalidArgument, 'batch must be non-empty');
 				}
-				for (const crud of cruds) this.applyCrud(staging, crud, seq);
+				for (const crud of cruds) this.applyCrud(staging, crud, seq, view);
 				break;
 			}
 			case 'custom': {
@@ -782,7 +829,18 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		return seq;
 	}
 
-	private applyCrud(staging: Staging, crud: CrudMutation, seq: bigint): void {
+	/**
+	 * Applies one CRUD. `view` is what the caller reads of the committed rows
+	 * when the server serves readable rows: a PUT that updates a row keeps the
+	 * stored value of each field a guard hides from the caller, as on the real
+	 * server.
+	 */
+	private applyCrud(
+		staging: Staging,
+		crud: CrudMutation,
+		seq: bigint,
+		view: ReadView | undefined,
+	): void {
 		const def = this.registry.get(crud.entity);
 		if (!def) throw new Rejection(CodeInvalidArgument, `unknown entity "${crud.entity}"`);
 		const current = staging.get(crud.entity, crud.key);
@@ -796,12 +854,34 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		switch (crud.op) {
 			case CrudOp.PUT: {
 				let value = crud.value;
+				const hidden = current?.value === undefined ? undefined : view?.hidden(crud.entity, crud.key);
+				if (hidden !== undefined) {
+					const stored = fromBinary(def.schema, current!.value!);
+					const next = fromBinary(def.schema, value);
+					// The caller received each hidden field cleared, so one the put
+					// leaves unset keeps its stored value, and a set one is a value
+					// the caller wrote.
+					const dst = next as Record<string, unknown>;
+					const src = stored as Record<string, unknown>;
+					for (const unit of hidden.units) {
+						const oneof = def.schema.oneofs.find((o) => o.name === unit);
+						if (oneof !== undefined) {
+							if ((dst[oneof.localName] as { case?: string }).case === undefined) {
+								dst[oneof.localName] = src[oneof.localName];
+							}
+							continue;
+						}
+						const field = def.schema.fields.find((f) => f.name === unit)!;
+						if (!isFieldSet(next, field)) dst[field.localName] = src[field.localName];
+					}
+					value = toBinary(def.schema, next);
+				}
 				// The PUT exception: collaborative-text fields union with the
 				// stored document instead of replacing it.
 				const textPaths = this.registry.textPathsOf(def.name);
 				if (textPaths.length > 0 && current?.value !== undefined) {
 					const base = fromBinary(def.schema, current.value);
-					const next = fromBinary(def.schema, crud.value);
+					const next = fromBinary(def.schema, value);
 					mergeTextFieldsInto(def.schema, textPaths, base, next);
 					value = toBinary(def.schema, next);
 				}
@@ -840,15 +920,14 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
-	 * Whether the caller of `workspaceId` can read the live row of an entity
-	 * with a key, decided over the committed rows; undefined when the server
-	 * serves every row. The returned function keeps each answer, so ask for a
-	 * new one after a commit.
+	 * What the caller of `workspaceId` reads of the live rows, decided over the
+	 * committed rows; undefined when the server serves every row. The view
+	 * keeps each answer, so ask for a new one after a commit.
 	 */
 	private readableIn(
 		workspaceId: string,
 		state: WorkspaceState,
-	): ((entity: string, key: string) => boolean) | undefined {
+	): ReadView | undefined {
 		if (this.serve !== 'readable') return undefined;
 		const access = this.callerAccess.get(workspaceId);
 		let summary: AccessSummary | undefined;
@@ -866,46 +945,66 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			return decoded.get(id);
 		};
 		const verdicts = new Map<string, boolean>();
-		return (entity, key) => {
-			const def = this.registry.get(entity);
-			// An entity outside the model is open to every caller in the workspace.
-			if (def?.accessRules === undefined) return true;
-			if (summary === undefined) return false;
-			const id = accessRowId({ entity, key });
-			let verdict = verdicts.get(id);
-			if (verdict === undefined) {
+		const hiddenRows = new Map<string, Hidden | undefined>();
+		// The rule row of a live row, as decideRules reads it.
+		const ruleRow = (def: EntityDef, key: string, row: Message): RuleRow => {
+			// The server holds every row, so a row it does not hold above
+			// this one does not exist and leads nowhere, where a client
+			// would read it as not known.
+			const chain: AccessChain = {
+				parents: parentRefsOf(def, row),
+				above: (at) => {
+					const atDef = this.registry.get(at.entity);
+					const atRow = atDef === undefined ? undefined : rowOf(atDef, at.key);
+					return atRow === undefined ? [] : parentRefsOf(atDef!, atRow) ?? [];
+				},
+				row: (at) => {
+					const atDef = this.registry.get(at.entity);
+					const atRow = atDef === undefined ? undefined : rowOf(atDef, at.key);
+					return atRow === undefined ? undefined : { def: atDef!, row: atRow };
+				},
+			};
+			return ruleRowOf(summary!, def, key, row, chain);
+		};
+		return {
+			reads: (entity, key) => {
+				const def = this.registry.get(entity);
+				// An entity outside the model is open to every caller in the workspace.
+				if (def?.accessRules === undefined) return true;
+				if (summary === undefined) return false;
+				const id = accessRowId({ entity, key });
+				let verdict = verdicts.get(id);
+				if (verdict === undefined) {
+					const row = rowOf(def, key);
+					verdict = row !== undefined
+						&& decideRules(def.accessRules, 'read', summary.subjects, ruleRow(def, key, row)) === 'yes';
+					verdicts.set(id, verdict);
+				}
+				return verdict;
+			},
+			hidden: (entity, key) => {
+				const def = this.registry.get(entity);
+				if (def === undefined || def.guards.length === 0 || summary === undefined) return undefined;
+				const id = accessRowId({ entity, key });
+				if (hiddenRows.has(id)) return hiddenRows.get(id);
 				const row = rowOf(def, key);
-				// The server holds every row, so a row it does not hold above
-				// this one does not exist and leads nowhere, where a client
-				// would read it as not known.
-				const chain: AccessChain = {
-					parents: parentRefsOf(def, row),
-					above: (at) => {
-						const atDef = this.registry.get(at.entity);
-						const atRow = atDef === undefined ? undefined : rowOf(atDef, at.key);
-						return atRow === undefined ? [] : parentRefsOf(atDef!, atRow) ?? [];
-					},
-					row: (at) => {
-						const atDef = this.registry.get(at.entity);
-						const atRow = atDef === undefined ? undefined : rowOf(atDef, at.key);
-						return atRow === undefined ? undefined : { def: atDef!, row: atRow };
-					},
-				};
-				verdict = row !== undefined
-					&& decideRules(
-							def.accessRules,
-							'read',
-							summary.subjects,
-							ruleRowOf(summary, def, key, row, chain),
-						) === 'yes';
-				verdicts.set(id, verdict);
-			}
-			return verdict;
+				let hidden: Hidden | undefined;
+				if (row !== undefined) {
+					const at = ruleRow(def, key, row);
+					const units = def.guards
+						.filter((g) => decideRules(g.rules, 'read', summary.subjects, at) !== 'yes')
+						.flatMap((g) => g.units)
+						.sort();
+					if (units.length > 0) hidden = { def, units };
+				}
+				hiddenRows.set(id, hidden);
+				return hidden;
+			},
 		};
 	}
 
 	/** The rows a client was sent a value of, by entity; see WorkspaceState.served. */
-	private servedTo(state: WorkspaceState, clientId: string): Map<string, Set<string>> {
+	private servedTo(state: WorkspaceState, clientId: string): Map<string, Map<string, string>> {
 		let served = state.served.get(clientId);
 		if (served === undefined) state.served.set(clientId, served = new Map());
 		return served;
@@ -932,7 +1031,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		for (const [ entity, rows ] of state.rows) {
 			for (const [ key, row ] of rows) {
 				if (row.version <= from) continue;
-				if (readable !== undefined && row.value !== undefined && !readable(entity, key)) continue;
+				if (readable !== undefined && row.value !== undefined && !readable.reads(entity, key)) continue;
 				changed.push({ entity, key, row });
 			}
 		}
@@ -952,15 +1051,17 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		if (readable !== undefined) {
 			const served = this.servedTo(state, clientId);
 			for (const [ entity, keys ] of served) {
-				for (const key of keys) {
+				for (const [ key, sig ] of keys) {
 					const row = state.rows.get(entity)?.get(key);
 					if (row?.value === undefined) {
 						// A delete after `from` is in `changed` already.
 						if (row === undefined || row.version <= from) {
 							resync.push({ entity, key, row: { version: state.seq, value: undefined } });
 						}
-					} else if (!readable(entity, key)) {
+					} else if (!readable.reads(entity, key)) {
 						resync.push({ entity, key, row: { version: row.version, value: undefined } });
+					} else if (row.version <= from && hiddenSig(readable.hidden(entity, key)) !== sig) {
+						resync.push({ entity, key, row });
 					}
 				}
 			}
@@ -968,17 +1069,19 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 				for (const [ key, row ] of rows) {
 					if (
 						row.version <= from && row.value !== undefined && served.get(entity)?.has(key) !== true
-						&& readable(entity, key)
+						&& readable.reads(entity, key)
 					) resync.push({ entity, key, row });
 				}
 			}
-			markServed(served, resync);
-			markServed(served, included);
+			markServed(served, resync, readable);
+			markServed(served, included, readable);
 		}
 		const access = this.callerAccess.get(workspaceId);
 		return {
 			patch: {
-				changes: [ ...resync, ...included ].map((c) => rowChangeInit(c.entity, c.key, c.row)),
+				changes: [ ...resync, ...included ].map((c) =>
+					rowChangeInit(c.entity, c.key, c.row, readable?.hidden(c.entity, c.key))
+				),
 				dropEntities: [],
 			},
 			nextCursor: encodeCursor(through),
@@ -1031,20 +1134,25 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			},
 		});
 		const readable = this.readableIn(req.workspaceId, state);
-		const served = readable === undefined ? undefined : new Map<string, Set<string>>();
+		const served = readable === undefined ? undefined : new Map<string, Map<string, string>>();
 		if (served !== undefined) state.served.set(req.clientId, served);
 		for (const entity of order) {
 			const live = [ ...(state.rows.get(entity) ?? new Map<string, StoredRow>()) ]
-				.filter(([ key, row ]) => row.value !== undefined && (readable?.(entity, key) ?? true))
+				.filter(([ key, row ]) => row.value !== undefined && (readable?.reads(entity, key) ?? true))
 				.sort(([ a ], [ b ]) => (a < b ? -1 : 1));
-			if (served !== undefined) served.set(entity, new Set(live.map(([ key ]) => key)));
+			if (served !== undefined) {
+				served.set(
+					entity,
+					new Map(live.map(([ key ]) => [ key, hiddenSig(readable!.hidden(entity, key)) ])),
+				);
+			}
 			for (let i = 0; i < live.length; i += this.chunkSize) {
 				yield create(BootstrapResponseSchema, {
 					body: {
 						case: 'chunk',
 						value: {
 							rows: live.slice(i, i + this.chunkSize)
-								.map(([ key, row ]) => rowChangeInit(entity, key, row)),
+								.map(([ key, row ]) => rowChangeInit(entity, key, row, readable?.hidden(entity, key))),
 						},
 					},
 				});

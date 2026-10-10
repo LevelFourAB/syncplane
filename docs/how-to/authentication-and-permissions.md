@@ -217,7 +217,7 @@ message Order {
 }
 ```
 
-A guard can also give a field back to some callers, such as a status that only managers set. For more information, see [Field guards](../reference/proto-options.md#field-guards).
+A guard can also give a field back to some callers, such as a status that only managers set, and keep a field from some readers, such as a salary that only HR reads. For more information, see [Field guards](../reference/proto-options.md#field-guards).
 
 ## Check writes against the stored row
 

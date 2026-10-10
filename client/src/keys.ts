@@ -720,6 +720,12 @@ export interface ConfirmedRecord {
 	 * from a snapshot that is not installed yet (see promoteStaged).
 	 */
 	ix?: string[];
+	/**
+	 * The fields the server did not send, by proto name, sorted: what
+	 * RowChange.hidden named. The server cleared each one in `v`, so it reads
+	 * as its zero value. Absent when the caller reads every field.
+	 */
+	h?: string[];
 }
 
 /** Optimistic overlay record stored at o/ keys. */

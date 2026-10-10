@@ -796,6 +796,29 @@ func (w *accessWrite) guardAdmits(tx storage.ReadTx, g *fieldGuard, op accessOp,
 	return false, nil
 }
 
+// unitSet reports whether msg, a row of info, sets unit: a oneof holds a case,
+// or a field holds a value other than its default.
+func unitSet(info *entityInfo, msg protoreflect.Message, unit string) bool {
+	desc := info.msgType.Descriptor()
+	if od := desc.Oneofs().ByName(protoreflect.Name(unit)); od != nil {
+		return msg.WhichOneof(od) != nil
+	}
+	fd := desc.Fields().ByName(protoreflect.Name(unit))
+	return fd != nil && msg.Has(fd)
+}
+
+// guardReads reports whether a read rule of g admits the caller on the stored
+// row, as of tx.
+func (w *accessWrite) guardReads(tx storage.ReadTx, g *fieldGuard) (bool, error) {
+	for _, rule := range g.reads {
+		ok, err := w.access.admits(tx, rule, w.info, w.key, w.stored)
+		if err != nil || ok {
+			return ok, err
+		}
+	}
+	return false, nil
+}
+
 // guardRefusal is the verdict on a write that names a guarded field its guard
 // does not admit for the caller.
 func guardRefusal(info *entityInfo, key, unit string) error {
@@ -811,8 +834,11 @@ func guardRefusal(info *entityInfo, key, unit string) error {
 // row has a fields list, each unit that none of those lists names keeps its
 // stored value. Then, on a create or an update, each guarded unit whose guard
 // does not admit the caller keeps its stored value, or gets the zero value on
-// a create. A guard decides on msg after the first step: its checks read only
-// fields that no guard restricts.
+// a create. On an update, each guarded unit that the caller may not read on
+// the stored row keeps its stored value too, unless the write names it or sets
+// it: the caller received the unit cleared, so a PUT that leaves it unset does
+// not mean to clear it. A guard decides on msg after the first step: its checks read
+// only fields that no guard restricts.
 //
 // named are units the write names outright, as a PATCH mask does; a guarded
 // one the caller may not write is refused rather than carried over.
@@ -844,6 +870,28 @@ func (w *accessWrite) carryGuarded(tx storage.ReadTx, msg proto.Message, named [
 			return err
 		}
 		if ok {
+			if !w.live || !g.hides() {
+				continue
+			}
+			reads, err := w.guardReads(tx, g)
+			if err != nil {
+				return err
+			}
+			if reads {
+				continue
+			}
+			// The caller received each unit cleared, so a PUT that leaves one
+			// unset sends back what it was given, and a set one is a value the
+			// caller wrote.
+			var carried []string
+			for _, unit := range g.units {
+				if !slices.Contains(named, unit) && !unitSet(w.info, fr, unit) {
+					carried = append(carried, unit)
+				}
+			}
+			if err := carryProtectedFields(w.info, carried, base, msg); err != nil {
+				return err
+			}
 			continue
 		}
 		for _, unit := range named {

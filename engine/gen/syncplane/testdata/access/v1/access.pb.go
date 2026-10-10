@@ -4319,6 +4319,120 @@ func (x *Expense) GetClosed() bool {
 	return false
 }
 
+// A staff record below a project, whose field guards restrict who reads five
+// of its fields: `salary` only a caller with edit_projects reads and writes,
+// `review` only the person it is about reads, `bonus` no client reads or
+// writes, `pin` a caller with edit_tasks writes and no client reads, and
+// `bio` only a caller with edit_projects reads. `name` follows the entity
+// rules alone. Its history records the changes of `name` and `salary`.
+type Staff struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Project       *Project               `protobuf:"bytes,2,opt,name=project,proto3" json:"project,omitempty"`
+	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	Salary        int64                  `protobuf:"varint,4,opt,name=salary,proto3" json:"salary,omitempty"`
+	Review        string                 `protobuf:"bytes,5,opt,name=review,proto3" json:"review,omitempty"`
+	PersonId      string                 `protobuf:"bytes,6,opt,name=person_id,json=personId,proto3" json:"person_id,omitempty"`
+	Bonus         int64                  `protobuf:"varint,7,opt,name=bonus,proto3" json:"bonus,omitempty"`
+	Pin           string                 `protobuf:"bytes,8,opt,name=pin,proto3" json:"pin,omitempty"`
+	Bio           []byte                 `protobuf:"bytes,9,opt,name=bio,proto3" json:"bio,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Staff) Reset() {
+	*x = Staff{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[64]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Staff) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Staff) ProtoMessage() {}
+
+func (x *Staff) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[64]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Staff.ProtoReflect.Descriptor instead.
+func (*Staff) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{64}
+}
+
+func (x *Staff) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Staff) GetProject() *Project {
+	if x != nil {
+		return x.Project
+	}
+	return nil
+}
+
+func (x *Staff) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Staff) GetSalary() int64 {
+	if x != nil {
+		return x.Salary
+	}
+	return 0
+}
+
+func (x *Staff) GetReview() string {
+	if x != nil {
+		return x.Review
+	}
+	return ""
+}
+
+func (x *Staff) GetPersonId() string {
+	if x != nil {
+		return x.PersonId
+	}
+	return ""
+}
+
+func (x *Staff) GetBonus() int64 {
+	if x != nil {
+		return x.Bonus
+	}
+	return 0
+}
+
+func (x *Staff) GetPin() string {
+	if x != nil {
+		return x.Pin
+	}
+	return ""
+}
+
+func (x *Staff) GetBio() []byte {
+	if x != nil {
+		return x.Bio
+	}
+	return nil
+}
+
 var File_syncplane_testdata_access_v1_access_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
@@ -4956,7 +5070,29 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"edit_tasks\x12 \x18\x012\n" +
 	"edit_tasksR\x10\n" +
 	"\x0e\n" +
-	"\x06closed\x10\x01\x1a\x02(\x00*Q\n" +
+	"\x06closed\x10\x01\x1a\x02(\x00\"\xec\x03\n" +
+	"\x05Staff\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
+	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectB\x06\xaa\xbb\x18\x02Z\x00R\aproject\x12\x1c\n" +
+	"\x04name\x18\x03 \x01(\tB\b\xaa\xbb\x18\x040\x018\x01R\x04name\x12\x1e\n" +
+	"\x06salary\x18\x04 \x01(\x03B\x06\xaa\xbb\x18\x020\x01R\x06salary\x12\x1e\n" +
+	"\x06review\x18\x05 \x01(\tB\x06\xaa\xbb\x18\x028\x01R\x06review\x12\x1b\n" +
+	"\tperson_id\x18\x06 \x01(\tR\bpersonId\x12\x14\n" +
+	"\x05bonus\x18\a \x01(\x03R\x05bonus\x12\x10\n" +
+	"\x03pin\x18\b \x01(\tR\x03pin\x12\x18\n" +
+	"\x03bio\x18\t \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x03bio:\xcc\x01\xa2\xbb\x18\xc7\x01\n" +
+	"\x05staff\x12\x02id2\x00R\xb7\x01\n" +
+	"\x0e\b\x012\n" +
+	"view_tasks\n" +
+	"\x0e(\x012\n" +
+	"edit_tasks\x12\x1d\n" +
+	"\x06salary\x12\x13\b\x01(\x012\redit_projects\x12,\n" +
+	"\x06review\x12\x0f\b\x01:\x00B\tperson_id\x12\x11(\x012\redit_projects\x12\a\n" +
+	"\x05bonus\x12\x15\n" +
+	"\x03pin\x12\x0e(\x012\n" +
+	"edit_tasks\x12(\n" +
+	"\x03bio\x12\x11\b\x012\redit_projects\x12\x0e(\x012\n" +
+	"edit_tasks*Q\n" +
 	"\bTeamRole\x12\x19\n" +
 	"\x15TEAM_ROLE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TEAM_ROLE_VIEWER\x10\x01\x12\x14\n" +
@@ -4975,7 +5111,7 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 64)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 65)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(TeamRole)(0),            // 0: syncplane.testdata.access.v1.TeamRole
 	(*OrgMember)(nil),        // 1: syncplane.testdata.access.v1.OrgMember
@@ -5042,6 +5178,7 @@ var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(*Binder)(nil),           // 62: syncplane.testdata.access.v1.Binder
 	(*Sheet)(nil),            // 63: syncplane.testdata.access.v1.Sheet
 	(*Expense)(nil),          // 64: syncplane.testdata.access.v1.Expense
+	(*Staff)(nil),            // 65: syncplane.testdata.access.v1.Staff
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	2,  // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
@@ -5096,11 +5233,12 @@ var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	62, // 49: syncplane.testdata.access.v1.Binder.parent:type_name -> syncplane.testdata.access.v1.Binder
 	62, // 50: syncplane.testdata.access.v1.Sheet.binder:type_name -> syncplane.testdata.access.v1.Binder
 	2,  // 51: syncplane.testdata.access.v1.Expense.project:type_name -> syncplane.testdata.access.v1.Project
-	52, // [52:52] is the sub-list for method output_type
-	52, // [52:52] is the sub-list for method input_type
-	52, // [52:52] is the sub-list for extension type_name
-	52, // [52:52] is the sub-list for extension extendee
-	0,  // [0:52] is the sub-list for field type_name
+	2,  // 52: syncplane.testdata.access.v1.Staff.project:type_name -> syncplane.testdata.access.v1.Project
+	53, // [53:53] is the sub-list for method output_type
+	53, // [53:53] is the sub-list for method input_type
+	53, // [53:53] is the sub-list for extension type_name
+	53, // [53:53] is the sub-list for extension extendee
+	0,  // [0:53] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_access_v1_access_proto_init() }
@@ -5140,7 +5278,7 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   64,
+			NumMessages:   65,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

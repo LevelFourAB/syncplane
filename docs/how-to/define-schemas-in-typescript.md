@@ -130,6 +130,14 @@ import { schema } from 'syncplane';
 
    A `patch` operation that masks `status` throws an error. A `put` operation succeeds and keeps the stored value of each guarded field the caller may not write. For more information, see [Field guards](../reference/proto-options.md#field-guards).
 
+   A guard read rule narrower than `{ read: true, admitted: true }` keeps its fields from some readers, and a guard without a read rule keeps them from every client. The client receives each such field cleared, and `Row.hidden` names it:
+
+   ```ts
+   guard: [ { fields: [ 'salary' ], allow: [ { read: true, write: true, requires: 'hr' } ] } ],
+   ```
+
+   For more information, see [Who reads a guarded field](../reference/proto-options.md#who-reads-a-guarded-field).
+
 3. Create the schema bundle with `schema.defineSchema()`:
 
    ```ts

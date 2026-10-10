@@ -700,16 +700,24 @@ export interface EntitySchema<F extends Fields = Fields> {
 export interface AccessDecl<F extends Fields = Fields> {
 	allow: readonly AccessRuleDecl<F>[];
 	/**
-	 * The field guards: each one restricts who can write a set of fields,
-	 * whatever rule in `allow` admits the write. A field that no guard names
-	 * follows `allow` alone. See {@link FieldGuardDecl}.
+	 * The field guards: each one restricts who can read and who can write a
+	 * set of fields, whatever rule in `allow` admits the read or the write. A
+	 * field that no guard names follows `allow` alone. See
+	 * {@link FieldGuardDecl}.
 	 */
 	guard?: readonly FieldGuardDecl<F>[];
 }
 
 /**
- * Restricts who can write a set of an entity's fields, mirroring
- * syncplane.v1.FieldGuard.
+ * Restricts who can read and who can write a set of an entity's fields,
+ * mirroring syncplane.v1.FieldGuard.
+ *
+ * A caller reads a guarded field of a row when a rule in `allow` of the entity
+ * admits reading the row, and a guard rule that names `read` admits reading
+ * the row too. A guard without a read rule hides its fields from every client.
+ * The server clears each field a caller may not read before it sends the row,
+ * and {@link Row.hidden} names it. A query, a subscription or a facet that
+ * names a field the caller does not read on every row fails on the server.
  *
  * A write that sets a guarded field needs a rule in `allow` of the entity that
  * admits the write, and a rule of the guard that admits the field operation:
@@ -722,31 +730,33 @@ export interface AccessDecl<F extends Fields = Fields> {
  * When the guard does not admit the caller, a `patch()` whose mask names a
  * guarded field is refused, a `put()` that updates a row keeps the stored
  * value of each guarded field, and a `put()` that creates a row stores the
- * zero value. The client refuses a patch at the call site, and keeps or clears
- * the field on a put, only where no guard rule admits the operation to any
- * caller; the server decides the rest, and a refused patch comes back as a
- * rejection ack.
+ * zero value. A `put()` that updates a row also keeps the stored value of each
+ * field the caller may not read and leaves unset; a `put()` that sets such a
+ * field, or a `patch()`, writes it when a guard rule admits the caller. The
+ * client refuses a patch at the call site, and keeps or clears the field on a
+ * put, only where no guard rule admits the operation to any caller; the server
+ * decides the rest, and a refused patch comes back as a rejection ack.
  *
  * `fields` names the guarded fields by accessor name. A field is in at most
  * one guard, and cannot be a key field, a `.creator()` field or an
- * `.accessParent()` reference. `allow` holds the rule
- * `{ read: true, admitted: true }`, so that every reader of a row reads its
- * guarded fields, and rules that name `create`, `update` or `write`. A guard
- * rule cannot name `delete` or `fields`, and its `callerIs` and `when` cannot
- * read a guarded field.
+ * `.accessParent()` reference. A guard rule cannot name `delete` or `fields`,
+ * and its `callerIs` and `when` cannot read a guarded field. A guard that can
+ * hide its fields cannot name a field that a rule in `allow` reads with
+ * `callerIs` or `when`, or the subject or role field of a grant entity.
  *
  * To let a caller change only some fields of a row, set `fields` on an update
  * rule in `allow` instead: that rule adds a narrow update, and a guard takes a
  * field away from every rule.
  *
  * @example
- * A total that only server code computes, and a status that only managers
- * set:
+ * A total that only server code computes, a status that only managers set,
+ * and a salary that only HR reads and writes:
  * ```ts
  * const order = schema.entity('order', {
  *   id: schema.text().key(),
  *   total: schema.int64(),
  *   status: schema.text(),
+ *   salary: schema.int64(),
  * }, {
  *   access: {
  *     allow: [ { read: true, requires: 'view_orders' }, { write: true, requires: 'edit_orders' } ],
@@ -756,6 +766,7 @@ export interface AccessDecl<F extends Fields = Fields> {
  *         fields: [ 'status' ],
  *         allow: [ { read: true, admitted: true }, { write: true, requires: 'manage_orders' } ],
  *       },
+ *       { fields: [ 'salary' ], allow: [ { read: true, write: true, requires: 'hr' } ] },
  *     ],
  *   },
  * });
@@ -1350,6 +1361,15 @@ function assertAccess(
 	if (grant.subject === grant.role) {
 		throw new Error(`${where}: grant names field "${grant.subject}" as both subject and role`);
 	}
+	const hideable = hideableFields(access.guard ?? []);
+	for (const name of [ grant.role, grant.subject ]) {
+		if (hideable.includes(name)) {
+			throw new Error(
+				`${where}: grant field "${name}" is restricted by a guard that can hide it; `
+					+ 'the subject and role of a grant row are read by every reader of the row',
+			);
+		}
+	}
 	if (grant.roles.length === 0) throw new Error(`${where}: grant declares no roles`);
 	const names = new Set<string>();
 	for (const role of grant.roles) {
@@ -1445,7 +1465,9 @@ function assertAccessRules(
 		}
 		seen.set(key, i);
 	});
-	if (access.guard !== undefined) assertGuards(where, owner, access.guard, fields, resolve);
+	if (access.guard !== undefined) {
+		assertGuards(where, owner, access.allow, access.guard, fields, resolve);
+	}
 }
 
 /**
@@ -1536,6 +1558,7 @@ function assertAccessRule(
 function assertGuards(
 	where: string,
 	owner: string,
+	allow: readonly AccessRuleDecl[],
 	guards: readonly FieldGuardDecl[],
 	fields: Fields,
 	resolve: boolean,
@@ -1574,7 +1597,6 @@ function assertGuards(
 			guardOf.set(name, i);
 		}
 		if (!Array.isArray(guard.allow as unknown)) throw new Error(`${at}: allow must be a list`);
-		let read = false;
 		const seen = new Map<string, number>();
 		guard.allow.forEach((rule, j) => {
 			const ruleAt = `${at}.allow[${j}]`;
@@ -1589,31 +1611,11 @@ function assertGuards(
 				throw new Error(`${ruleAt}: names fields; the guard's own fields are the ones it restricts`);
 			}
 			const key = assertAccessRule(ruleAt, owner, rule, fields, resolve);
-			if (rule.read === true) {
-				// A read rule that narrows needs the server to send a row without
-				// the fields a caller may not read, which it does not do.
-				if (
-					rule.admitted !== true || rule.callerIs !== undefined || rule.when !== undefined
-					|| rule.within !== undefined
-				) {
-					throw new Error(
-						`${ruleAt}: names read with a source or a check other than admitted; `
-							+ 'the read rule of a guard is { read: true, admitted: true }',
-					);
-				}
-				read = true;
-			}
 			if (key === undefined) return;
 			const first = seen.get(key);
 			if (first !== undefined) throw new Error(`${ruleAt}: the rule repeats ${at}.allow[${first}]`);
 			seen.set(key, j);
 		});
-		if (!read) {
-			throw new Error(
-				`${at}: has no read rule; add { read: true, admitted: true }, so that the readers of a row `
-					+ 'read its guarded fields',
-			);
-		}
 	});
 	// Once every guard is known: a check that read a guarded field would depend
 	// on the value a guard decides about.
@@ -1633,6 +1635,38 @@ function assertGuards(
 			}
 		});
 	});
+	// A client decides access from the rows it holds, so a field a rule of the
+	// entity checks must reach every reader of the row.
+	const hideable = new Set(hideableFields(guards).map(snakeCase));
+	allow.forEach((rule, i) => {
+		const reads = rule.callerIs === undefined ? [] : [ snakeCase(rule.callerIs) ];
+		const when = whenOf('', rule.when, fields);
+		if (when !== undefined) reads.push(...conditionHeads(when));
+		for (const name of reads) {
+			if (hideable.has(name)) {
+				throw new Error(
+					`${where} access.allow[${i}]: reads "${name}", which a guard can hide; `
+						+ 'a field that a rule checks is one every reader of the row reads',
+				);
+			}
+		}
+	});
+}
+
+/**
+ * The accessor names of the fields that a guard of `guards` can hide from a
+ * caller that reads the row: each field of a guard without a read rule that
+ * admits every admitted caller and checks nothing.
+ */
+function hideableFields(guards: readonly FieldGuardDecl[]): string[] {
+	return guards
+		.filter((g) =>
+			!g.allow.some((r) =>
+				r.read === true && r.admitted === true && r.callerIs === undefined && r.when === undefined
+				&& r.within === undefined
+			)
+		)
+		.flatMap((g) => [ ...g.fields ]);
 }
 
 /**

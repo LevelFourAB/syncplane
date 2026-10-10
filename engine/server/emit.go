@@ -124,6 +124,10 @@ type rowEmitter struct {
 	verdict    *pendingVerdict
 	chains     *accessChains
 	combined   map[string]readFilter
+	// guardReads memoizes, per entity, how the bound caller reads the units
+	// of each guard that can hide them (see guardReadsOf). Cleared with
+	// combined.
+	guardReads map[string][]guardRead
 	// readAccess and readAccessHash render access as a cursor records it,
 	// once per binding (see boundReadAccess). hiddenEntities are the entities
 	// the old side of a resync reads nothing of (see hideOnOldSide).
@@ -197,9 +201,12 @@ type rowEmitter struct {
 	// deltaSafeBy memoizes the per-entity verdict of deltaSafe.
 	deltaSafeBy map[string]bool
 	// historySources memoizes, per source row, whether the caller may read the
-	// field-history records describing it (see historySourceReadable). Only the
-	// history query populates it.
-	historySources map[historySourceKey]bool
+	// field-history records describing it and which of their fields (see
+	// historySourceReadable). historyViews holds, by key, each record the
+	// caller receives with fields taken out (see projectHistory). Only the
+	// history query populates them.
+	historySources map[historySourceKey]historySourceVerdict
+	historyViews   map[string]*syncplanev1.FieldHistory
 }
 
 // newRowEmitter validates the subscription set (unknown entities and
@@ -456,6 +463,8 @@ func (e *rowEmitter) filterOf(entity string) (readFilter, error) {
 // When the workspace gate left its grant check to this transaction, bindAccess
 // reaches that verdict first and returns the gate's error, a gateError, for a
 // refused caller. A read path calls it before it reads anything else of tx.
+// It refuses a subscription that names a field a guard hides from the caller
+// on some row (see refuseHiddenSubs).
 func (e *rowEmitter) bindAccess(tx storage.ReadTx) error {
 	if e.caller == nil {
 		return nil
@@ -473,7 +482,7 @@ func (e *rowEmitter) bindAccess(tx storage.ReadTx) error {
 	}
 	e.prior = set
 	e.useAccess(set, e.chainsOver(tx.GetRow))
-	return nil
+	return e.refuseHiddenSubs()
 }
 
 // admit gives the emitter the caller the workspace gate resolved, and the set
@@ -509,6 +518,7 @@ func (e *rowEmitter) useAccess(set *accessSet, chains *accessChains) {
 	e.readAccess, e.readAccessHash = nil, 0
 	e.callerAccess, e.callerAccessHash = nil, 0
 	clear(e.combined)
+	clear(e.guardReads)
 }
 
 // appFilterOf resolves and memoizes the application's ReadFilter for entity.
@@ -618,8 +628,16 @@ func (e *rowEmitter) classify(row storage.Row) (rowClass, error) {
 		return 0, err
 	}
 	if filter == nil && !needPred {
-		// Zero-decode fast path.
-		return rowVisible, nil
+		// A row the caller reads with fields hidden is decoded here as well, so
+		// one that will not decode is quarantined rather than shipped whole.
+		hides, err := e.mayHide(info)
+		if err != nil {
+			return 0, err
+		}
+		if !hides {
+			// Zero-decode fast path.
+			return rowVisible, nil
+		}
 	}
 	msg, ok := e.decodeRow(info, row)
 	if !ok {
@@ -658,7 +676,10 @@ func rowChange(row storage.Row) *syncplanev1.RowChange {
 // full snapshot silently and per field: every reason to decline is a size
 // decision, never a correctness one.
 func (e *rowEmitter) emitChange(tx storage.ReadTx, row storage.Row) (*syncplanev1.RowChange, error) {
-	rc := rowChange(row)
+	rc, err := e.rowChange(row)
+	if err != nil {
+		return nil, err
+	}
 	// A row at or below the cursor is one the recipient may never have held (a
 	// page resuming inside a same-version group delivers the rest of that
 	// group), so its state cannot be assumed.
@@ -677,7 +698,9 @@ func (e *rowEmitter) emitChange(tx storage.ReadTx, row storage.Row) (*syncplanev
 	// state has always shipped such a row verbatim (only classify decodes, and
 	// only when a filter or predicate needs it), and turning a pull into an
 	// error here would be a new failure mode introduced by an optimization.
-	msg, err := info.decode(row.Value)
+	// It decodes the projected value, so a field the caller may not read is
+	// already clear and ships as no delta.
+	msg, err := info.decode(rc.GetValue())
 	if err != nil {
 		return rc, nil
 	}

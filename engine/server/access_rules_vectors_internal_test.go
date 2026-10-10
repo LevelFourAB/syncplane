@@ -69,13 +69,22 @@ func (r *rulesVectorRow) known() bool {
 	return true
 }
 
+// rulesVectorGuard is one field guard of the entity.
+type rulesVectorGuard struct {
+	Units []string          `json:"units"`
+	Rules []rulesVectorRule `json:"rules"`
+}
+
 type rulesVectorCase struct {
-	Name     string            `json:"name"`
-	Op       string            `json:"op"`
-	Rules    []rulesVectorRule `json:"rules"`
-	Subjects []string          `json:"subjects"`
-	Row      *rulesVectorRow   `json:"row"`
-	Final    *rulesVectorRow   `json:"final"`
+	Name   string             `json:"name"`
+	Op     string             `json:"op"`
+	Rules  []rulesVectorRule  `json:"rules"`
+	Guards []rulesVectorGuard `json:"guards"`
+	// ReadFields are the units a read reads, nil for a read of the row.
+	ReadFields []string        `json:"readFields"`
+	Subjects   []string        `json:"subjects"`
+	Row        *rulesVectorRow `json:"row"`
+	Final      *rulesVectorRow `json:"final"`
 	// Changed is nil for an update of fields no fields list covers.
 	Changed *[]string `json:"changed"`
 	Want    string    `json:"want"`
@@ -150,6 +159,22 @@ var _ = Describe("access rule conformance vectors", func() {
 			default:
 				got = slices.ContainsFunc(rules, func(rule accessRule) bool {
 					return rule.names(op) && admits(rule, tc.Row)
+				})
+			}
+			// A guard that restricts a unit the operation reads or changes needs
+			// a rule of its own, as guardAdmits and the guard read filter decide.
+			units := tc.ReadFields
+			if tc.Changed != nil {
+				units = *tc.Changed
+			}
+			for _, g := range tc.Guards {
+				if !got || !slices.ContainsFunc(g.Units, func(u string) bool { return slices.Contains(units, u) }) {
+					continue
+				}
+				op := rulesVectorOp(tc.Op)
+				got = slices.ContainsFunc(g.Rules, func(r rulesVectorRule) bool {
+					rule := rulesVectorRuleOf(r)
+					return rule.names(op) && admits(rule, tc.Row) && (op != opUpdate || admits(rule, tc.Final))
 				})
 			}
 			want := map[string]bool{"yes": true, "no": false}[tc.Want]

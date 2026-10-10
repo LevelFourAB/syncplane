@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the decision an entity's access rules make on one operation: the server's write checks (engine/server/accesswrite.go: txAccess.admits and admitsUpdate) and the client's can() (client/src/access.ts: decideRules) must agree on every case the server can decide. `rules` are an entity's (syncplane.v1.entity).access rules: the operations each names (`write` covers create, update and delete), its source (`requires`, the permissions a caller must hold together, or `admitted: true` for every admitted caller), and its checks (`callerIs`, the field that must name one of the caller's `subjects`, `fields`, the units an update may change, `when`, a name that stands for the rule's condition on the row, and `within`, names that stand for the rule's within entries). `row` is the row the operation reads or deletes, the row a create will store, or the stored row of an update; `final` is the row an update will store, and `changed` the units the update changes, null for an update of fields that no fields list covers. For each row, `held` says whether the caller holds each permission at the row or at a row up its chain of access parents, `fields` gives the value of each field a `callerIs` check reads, `matches` says whether the row matches each condition, and `within` whether the row sits within a row that passes each within entry: the row itself or a row above it (testdata/access/within.json pins that walk). testdata/queryeval pins how a condition evaluates, so these cases name a condition rather than spell one out. A permission missing from `held` is held nowhere. A null in `held`, `fields`, `matches` or `within` is an input the client cannot know, such as a parent row it does not hold; the server always knows every input, so it checks only the cases without a null. A rule admits an operation it names when the caller holds each permission in `requires` and its subject and when checks hold on the row; an update needs one rule whose fields check allows `changed` to admit both `row` and `final`. The answer is \"yes\" when one rule admits the operation, \"no\" when every rule refuses it, and \"unknown\" otherwise.",
+	"comment": "Shared conformance vectors for the decision an entity's access rules make on one operation: the server's write checks (engine/server/accesswrite.go: txAccess.admits and admitsUpdate) and the client's can() (client/src/access.ts: decideRules) must agree on every case the server can decide. `rules` are an entity's (syncplane.v1.entity).access rules: the operations each names (`write` covers create, update and delete), its source (`requires`, the permissions a caller must hold together, or `admitted: true` for every admitted caller), and its checks (`callerIs`, the field that must name one of the caller's `subjects`, `fields`, the units an update may change, `when`, a name that stands for the rule's condition on the row, and `within`, names that stand for the rule's within entries). `row` is the row the operation reads or deletes, the row a create will store, or the stored row of an update; `final` is the row an update will store, and `changed` the units the update changes, null for an update of fields that no fields list covers. For each row, `held` says whether the caller holds each permission at the row or at a row up its chain of access parents, `fields` gives the value of each field a `callerIs` check reads, `matches` says whether the row matches each condition, and `within` whether the row sits within a row that passes each within entry: the row itself or a row above it (testdata/access/within.json pins that walk). testdata/queryeval pins how a condition evaluates, so these cases name a condition rather than spell one out. A permission missing from `held` is held nowhere. A null in `held`, `fields`, `matches` or `within` is an input the client cannot know, such as a parent row it does not hold; the server always knows every input, so it checks only the cases without a null. A rule admits an operation it names when the caller holds each permission in `requires` and its subject and when checks hold on the row; an update needs one rule whose fields check allows `changed` to admit both `row` and `final`. The answer is \"yes\" when one rule admits the operation, \"no\" when every rule refuses it, and \"unknown\" otherwise. `guards` are the entity's field guards: the `units` each restricts and its `rules`, written as an entity's rules are. A read that names `readFields`, the units it reads, also needs, for each guard that restricts one of them, a rule of that guard that admits reading the row; an update also needs, for each guard that restricts a unit in `changed`, a rule of that guard that admits the update on `row` and on `final`. A guard without a rule for the operation admits it to no caller.",
 	"cases": [
 		{
 			"name": "a read rule admits a caller who holds its permission",
@@ -2287,6 +2287,463 @@
 				"project"
 			],
 			"want": "no"
+		},
+		{
+			"name": "a guard read rule shows its field to a caller who holds its permission",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_staff"
+					]
+				}
+			],
+			"guards": [
+				{
+					"units": [
+						"salary"
+					],
+					"rules": [
+						{
+							"read": true,
+							"write": true,
+							"requires": [
+								"hr"
+							]
+						}
+					]
+				}
+			],
+			"readFields": [
+				"salary"
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_staff": true,
+					"hr": true
+				},
+				"fields": {}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a guard read rule hides its field from a caller who does not hold its permission",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_staff"
+					]
+				}
+			],
+			"guards": [
+				{
+					"units": [
+						"salary"
+					],
+					"rules": [
+						{
+							"read": true,
+							"write": true,
+							"requires": [
+								"hr"
+							]
+						}
+					]
+				}
+			],
+			"readFields": [
+				"salary"
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_staff": true,
+					"hr": false
+				},
+				"fields": {}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a guard read rule needs the caller to read the row as well",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_staff"
+					]
+				}
+			],
+			"guards": [
+				{
+					"units": [
+						"salary"
+					],
+					"rules": [
+						{
+							"read": true,
+							"requires": [
+								"hr"
+							]
+						}
+					]
+				}
+			],
+			"readFields": [
+				"salary"
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_staff": false,
+					"hr": true
+				},
+				"fields": {}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a guard without a read rule hides its field from every caller",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_staff"
+					]
+				}
+			],
+			"guards": [
+				{
+					"units": [
+						"bonus"
+					],
+					"rules": [
+						{
+							"write": true,
+							"requires": [
+								"hr"
+							]
+						}
+					]
+				}
+			],
+			"readFields": [
+				"bonus"
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_staff": true,
+					"hr": true
+				},
+				"fields": {}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a field no guard restricts follows the entity's rules",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_staff"
+					]
+				}
+			],
+			"guards": [
+				{
+					"units": [
+						"salary"
+					],
+					"rules": []
+				}
+			],
+			"readFields": [
+				"name"
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_staff": true
+				},
+				"fields": {}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a guard read rule with callerIs shows its field to the caller the row names",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_staff"
+					]
+				}
+			],
+			"guards": [
+				{
+					"units": [
+						"review"
+					],
+					"rules": [
+						{
+							"read": true,
+							"admitted": true,
+							"callerIs": "person_id"
+						}
+					]
+				}
+			],
+			"readFields": [
+				"review"
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_staff": true
+				},
+				"fields": {
+					"person_id": "ann"
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a guard read rule with callerIs hides its field from a caller the row does not name",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_staff"
+					]
+				}
+			],
+			"guards": [
+				{
+					"units": [
+						"review"
+					],
+					"rules": [
+						{
+							"read": true,
+							"admitted": true,
+							"callerIs": "person_id"
+						}
+					]
+				}
+			],
+			"readFields": [
+				"review"
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_staff": true
+				},
+				"fields": {
+					"person_id": "bob"
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a guard read rule whose permission the client cannot place answers unknown",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_staff"
+					]
+				}
+			],
+			"guards": [
+				{
+					"units": [
+						"salary"
+					],
+					"rules": [
+						{
+							"read": true,
+							"requires": [
+								"hr"
+							]
+						}
+					]
+				}
+			],
+			"readFields": [
+				"salary"
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_staff": true,
+					"hr": null
+				},
+				"fields": {}
+			},
+			"want": "unknown"
+		},
+		{
+			"name": "an update of a guarded field needs a rule of the guard",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"requires": [
+						"edit_staff"
+					]
+				}
+			],
+			"guards": [
+				{
+					"units": [
+						"status"
+					],
+					"rules": [
+						{
+							"update": true,
+							"requires": [
+								"manage_staff"
+							]
+						}
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit_staff": true,
+					"manage_staff": false
+				},
+				"fields": {}
+			},
+			"final": {
+				"held": {
+					"edit_staff": true,
+					"manage_staff": false
+				},
+				"fields": {}
+			},
+			"changed": [
+				"status"
+			],
+			"want": "no"
+		},
+		{
+			"name": "an update of a guarded field is admitted when a rule of the guard admits it",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"requires": [
+						"edit_staff"
+					]
+				}
+			],
+			"guards": [
+				{
+					"units": [
+						"status"
+					],
+					"rules": [
+						{
+							"update": true,
+							"requires": [
+								"manage_staff"
+							]
+						}
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit_staff": true,
+					"manage_staff": true
+				},
+				"fields": {}
+			},
+			"final": {
+				"held": {
+					"edit_staff": true,
+					"manage_staff": true
+				},
+				"fields": {}
+			},
+			"changed": [
+				"status"
+			],
+			"want": "yes"
+		},
+		{
+			"name": "an update of fields no guard restricts needs no rule of a guard",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"requires": [
+						"edit_staff"
+					]
+				}
+			],
+			"guards": [
+				{
+					"units": [
+						"status"
+					],
+					"rules": []
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit_staff": true
+				},
+				"fields": {}
+			},
+			"final": {
+				"held": {
+					"edit_staff": true
+				},
+				"fields": {}
+			},
+			"changed": [
+				"name"
+			],
+			"want": "yes"
 		}
 	]
 }

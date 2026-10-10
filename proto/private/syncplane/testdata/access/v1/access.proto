@@ -1721,3 +1721,64 @@ message Expense {
 	int32 estimate = 8;
 	bool closed = 9;
 }
+
+// A staff record below a project, whose field guards restrict who reads five
+// of its fields: `salary` only a caller with edit_projects reads and writes,
+// `review` only the person it is about reads, `bonus` no client reads or
+// writes, `pin` a caller with edit_tasks writes and no client reads, and
+// `bio` only a caller with edit_projects reads. `name` follows the entity
+// rules alone. Its history records the changes of `name` and `salary`.
+message Staff {
+	option (syncplane.v1.entity) = {
+		name: "staff"
+		key_fields: [ "id" ]
+		history: {}
+		access: {
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
+			]
+			guard: [
+				{
+					fields: [ "salary" ]
+					allow: [
+						{ read: true write: true requires: "edit_projects" }
+					]
+				},
+				{
+					fields: [ "review" ]
+					allow: [
+						{
+							read: true
+							admitted: {}
+							caller_is: "person_id"
+						},
+						{ write: true requires: "edit_projects" }
+					]
+				},
+				{ fields: [ "bonus" ] },
+				{
+					fields: [ "pin" ]
+					allow: [ { write: true requires: "edit_tasks" } ]
+				},
+				{
+					fields: [ "bio" ]
+					allow: [
+						{ read: true requires: "edit_projects" },
+						{ write: true requires: "edit_tasks" }
+					]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string name = 3
+		[(syncplane.v1.field_behavior) = { searchable: true history: true }];
+	int64 salary = 4 [(syncplane.v1.field_behavior) = { history: true }];
+	string review = 5 [(syncplane.v1.field_behavior) = { searchable: true }];
+	string person_id = 6;
+	int64 bonus = 7;
+	string pin = 8;
+	bytes bio = 9 [(syncplane.v1.field_behavior) = { text: true }];
+}

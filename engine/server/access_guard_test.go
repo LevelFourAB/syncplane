@@ -66,12 +66,6 @@ var _ = Describe("Access model registration of field guards", func() {
 		Entry("a field two guards name", func(a *syncplanev1.AccessOptions) {
 			a.Guard = append(a.Guard, guard([]string{"title", "total"}))
 		}, `access guard[4] and access guard[0] both name "total"`),
-		Entry("a guard without a read rule", func(a *syncplanev1.AccessOptions) {
-			a.Guard[0].Allow = []*syncplanev1.AccessRule{{Update: true, Requires: []string{"edit_tasks"}}}
-		}, `access guard[0] has no read rule`),
-		Entry("a read rule that narrows", func(a *syncplanev1.AccessOptions) {
-			a.Guard[0].Allow = []*syncplanev1.AccessRule{{Read: true, Requires: []string{"edit_projects"}}}
-		}, `access guard[0] allow[0] names read with a source or a check other than admitted`),
 		Entry("a rule that names delete", func(a *syncplanev1.AccessOptions) {
 			a.Guard[0].Allow = append(a.Guard[0].Allow, &syncplanev1.AccessRule{Delete: true, Requires: []string{"edit_tasks"}})
 		}, `access guard[0] allow[1] names delete`),

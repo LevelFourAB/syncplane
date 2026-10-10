@@ -675,13 +675,73 @@ func (s *Server) historyReadable(tx storage.ReadTx, e *rowEmitter, histInfo *ent
 	if err != nil {
 		return false, err
 	}
-	if filter == nil {
+	hides, err := e.mayHide(src)
+	if err != nil {
+		return false, err
+	}
+	if filter == nil && !hides {
 		// Every row of the source entity is readable, so its history is too.
 		// Also the fast path: no source row is fetched in the common case where
 		// an app does not filter reads at all.
 		return true, nil
 	}
-	return e.historySourceReadable(tx, src, rec.GetSourceKey(), filter)
+	verdict, err := e.historySourceReadable(tx, src, rec.GetSourceKey(), filter)
+	if err != nil || !verdict.readable {
+		return false, err
+	}
+	return e.projectHistory(src, row.Key, rec, verdict.hidden), nil
+}
+
+// projectHistory takes out of rec the fields of its source row that a guard
+// hides from the caller, and reports whether anything of rec is left to
+// show: a record of a row's creation, or one whose mask names a field the
+// caller reads. A record it changes is memoized by its key for the query's
+// matching and its result (see historyView).
+//
+// A predicate then matches the record the caller receives, so a condition on
+// the mask cannot tell the caller that a field it does not read changed.
+func (e *rowEmitter) projectHistory(src *entityInfo, key string, rec *syncplanev1.FieldHistory, hidden []string) bool {
+	if len(hidden) == 0 {
+		return true
+	}
+	var kept []string
+	for _, p := range rec.GetMask().GetPaths() {
+		if _, found := slices.BinarySearch(hidden, protectedHead(p)); !found {
+			kept = append(kept, p)
+		}
+	}
+	if len(kept) == len(rec.GetMask().GetPaths()) {
+		return true
+	}
+	if len(kept) == 0 && !rec.GetRowCreated() {
+		return false
+	}
+	out := proto.CloneOf(rec)
+	out.Mask = &fieldmaskpb.FieldMask{Paths: kept}
+	if len(rec.GetPrior()) > 0 {
+		prior, err := src.decode(rec.GetPrior())
+		if err != nil {
+			return false
+		}
+		if err := carryProtectedFields(src, hidden, nil, prior); err != nil {
+			return false
+		}
+		if out.Prior, err = proto.Marshal(prior); err != nil {
+			return false
+		}
+	}
+	if e.historyViews == nil {
+		e.historyViews = map[string]*syncplanev1.FieldHistory{}
+	}
+	e.historyViews[key] = out
+	return true
+}
+
+// historyView returns the history record with key as the caller receives it,
+// and whether projectHistory changed it.
+func (e *rowEmitter) historyView(key string) (*syncplanev1.FieldHistory, bool) {
+	rec, ok := e.historyViews[key]
+	return rec, ok
 }
 
 // historySourceKey identifies the source row a record describes. The workspace
@@ -691,8 +751,16 @@ type historySourceKey struct {
 	key    string
 }
 
+// historySourceVerdict is what the caller reads of a source row: whether it
+// reads the row, and the units a guard hides from it, sorted.
+type historySourceVerdict struct {
+	readable bool
+	hidden   []string
+}
+
 // historySourceReadable is the source-row half of historyReadable — may the
-// caller read this row, right now — memoized for the request.
+// caller read this row right now, and which of its fields — memoized for the
+// request.
 //
 // The memo is what keeps the gate proportional to the ROWS a query touches
 // rather than to the RECORDS it returns, and the difference is the whole shape
@@ -708,7 +776,7 @@ func (e *rowEmitter) historySourceReadable(
 	src *entityInfo,
 	key string,
 	filter readFilter,
-) (bool, error) {
+) (historySourceVerdict, error) {
 	memo := historySourceKey{entity: src.name, key: key}
 	if verdict, known := e.historySources[memo]; known {
 		return verdict, nil
@@ -717,10 +785,10 @@ func (e *rowEmitter) historySourceReadable(
 	if err != nil {
 		// Deliberately not memoized: an error is not a verdict, and a storage
 		// failure the scan recovers from must not have decided this row.
-		return false, err
+		return historySourceVerdict{}, err
 	}
 	if e.historySources == nil {
-		e.historySources = map[historySourceKey]bool{}
+		e.historySources = map[historySourceKey]historySourceVerdict{}
 	}
 	e.historySources[memo] = verdict
 	return verdict, nil
@@ -731,22 +799,30 @@ func (e *rowEmitter) computeHistorySourceReadable(
 	src *entityInfo,
 	key string,
 	filter readFilter,
-) (bool, error) {
+) (historySourceVerdict, error) {
 	srcRow, err := tx.GetRow(src.name, key)
 	if err == storage.ErrNotFound {
-		return false, nil
+		return historySourceVerdict{}, nil
 	}
 	if err != nil {
-		return false, err
+		return historySourceVerdict{}, err
 	}
 	if srcRow.Deleted {
-		return false, nil
+		return historySourceVerdict{}, nil
 	}
 	srcMsg, ok := e.decodeRow(src, srcRow)
 	if !ok {
-		return false, nil
+		return historySourceVerdict{}, nil
 	}
-	return filter(srcRow.Key, srcMsg)
+	readable, err := filter.admits(srcRow.Key, srcMsg)
+	if err != nil || !readable {
+		return historySourceVerdict{}, err
+	}
+	hidden, err := e.hiddenUnits(src, srcRow.Key, srcMsg)
+	if err != nil {
+		return historySourceVerdict{}, err
+	}
+	return historySourceVerdict{readable: true, hidden: hidden}, nil
 }
 
 // historyKeySeqWidth is the widest a rendered sequence can be — math.MaxUint64

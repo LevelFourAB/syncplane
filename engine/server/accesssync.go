@@ -551,10 +551,10 @@ func sameAnchors(x, y *permAnchors) bool {
 }
 
 // readAccessUnchanged reports whether the two sides of a resync read entity
-// under the same anchors, for every permission its read rules need. The
-// subjects a caller_is check compares with are the same on both sides: a
-// cursor recorded for other subjects cannot resync. A when check reads only
-// the row, so it decides the same on both sides.
+// under the same anchors, for every permission its read rules and the read
+// rules of its guards need. The subjects a caller_is check compares with are
+// the same on both sides: a cursor recorded for other subjects cannot resync.
+// A when check reads only the row, so it decides the same on both sides.
 func readAccessUnchanged(oldEm, newEm *rowEmitter, entity string) bool {
 	if newEm.caller == nil {
 		return true
@@ -563,14 +563,15 @@ func readAccessUnchanged(oldEm, newEm *rowEmitter, entity string) bool {
 	if !ok || info.access == nil {
 		return true
 	}
-	r := info.access.read
-	if !sameAnchors(oldEm.access.readAnchors(r), newEm.access.readAnchors(r)) {
-		return false
-	}
-	for _, o := range r.checked {
-		for _, p := range o.requires {
-			if !sameAnchors(oldEm.access.perms[p], newEm.access.perms[p]) {
-				return false
+	for _, r := range info.access.readerSets() {
+		if !sameAnchors(oldEm.access.readAnchors(r), newEm.access.readAnchors(r)) {
+			return false
+		}
+		for _, o := range r.checked {
+			for _, p := range o.requires {
+				if !sameAnchors(oldEm.access.perms[p], newEm.access.perms[p]) {
+					return false
+				}
 			}
 		}
 	}
@@ -610,12 +611,13 @@ func (e *rowEmitter) hideOnOldSide(entities []string) {
 }
 
 // accessDeltaCandidates returns, in key order, the keys of the rows of info
-// whose visibility can differ between the two sides of a resync whose scopes
-// are the same and whose access differs: the anchors of the entity's read
-// permissions that one side holds and the other does not, the rows below
-// those anchors (see rowsBelow), and both sides' window members. ok is false
-// when the entity must be scanned instead: the root was gained, an index is
-// not ready, or the set is larger than maxCandidates.
+// whose visibility, or the fields a guard hides of them, can differ between
+// the two sides of a resync whose scopes are the same and whose access
+// differs: the anchors of the read permissions of the entity and of its
+// guards that one side holds and the other does not, the rows below those
+// anchors (see rowsBelow), and both sides' window members. ok is false when
+// the entity must be scanned instead: the root was gained or lost for one of
+// them, an index is not ready, or the set is larger than maxCandidates.
 //
 // An entity the old side reads nothing of (see hideOnOldSide) takes the new
 // side's candidates instead: every row the new side can read.
@@ -627,51 +629,59 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 		}
 		return withWindowMembers(keys, info.name, maxCandidates, newEm.windowMembers)
 	}
-	a := info.access
-	o, n := oldEm.access.readAnchors(a.read), newEm.access.readAnchors(a.read)
-	oRoot, nRoot := o != nil && o.root, n != nil && n.root
-	if oRoot && nRoot {
-		// Every row is readable on both sides, wherever its parents are.
-		return withWindowMembers(nil, info.name, maxCandidates, oldEm.windowMembers, newEm.windowMembers)
-	}
-	if oRoot || nRoot {
-		return nil, false, nil
-	}
 	changed := map[anchorRow]struct{}{}
-	addChanged(changed, o, n)
-	// A read rule in checked reads the rows below the anchors of each of its
-	// own permissions that pass its checks. One with a permission that moved
-	// to or from the root can show or hide every such row, wherever it sits:
-	// the rows that name the caller for a caller_is check, the rows within a row
-	// that names the caller for a within entry's caller_is check, and any row
-	// otherwise, which no index finds.
 	var named []string
-	for _, rule := range a.read.checked {
-		rooted := false
-		for _, p := range rule.requires {
-			ro, rn := oldEm.access.perms[p], newEm.access.perms[p]
-			if (ro != nil && ro.root) != (rn != nil && rn.root) {
-				rooted = true
-				continue
-			}
-			addChanged(changed, ro, rn)
-		}
-		if !rooted {
+	anchored := false
+	for _, r := range info.access.readerSets() {
+		o, n := oldEm.access.readAnchors(r), newEm.access.readAnchors(r)
+		oRoot, nRoot := o != nil && o.root, n != nil && n.root
+		if oRoot && nRoot {
+			// r admits every row on both sides, wherever its parents are.
 			continue
 		}
-		var rows []string
-		ok := false
-		if rule.callerIs != nil {
-			rows, ok, err = subjectRows(tx, info, rule.callerIs, newEm.caller.subjects, maxCandidates, newEm.srv.limits)
-		} else {
-			rows, ok, err = withinRows(tx, newEm.caller.model, info, rule, newEm.caller.subjects, maxCandidates, newEm.srv.limits)
-		}
-		if err != nil || !ok {
-			return nil, false, err
-		}
-		if named, ok = mergeKeys(named, rows, maxCandidates); !ok {
+		if oRoot || nRoot {
 			return nil, false, nil
 		}
+		anchored = true
+		addChanged(changed, o, n)
+		// A read rule in checked reads the rows below the anchors of each of
+		// its own permissions that pass its checks. One with a permission that
+		// moved to or from the root can show or hide every such row, wherever
+		// it sits: the rows that name the caller for a caller_is check, the
+		// rows within a row that names the caller for a within entry's
+		// caller_is check, and any row otherwise, which no index finds.
+		for _, rule := range r.checked {
+			rooted := false
+			for _, p := range rule.requires {
+				ro, rn := oldEm.access.perms[p], newEm.access.perms[p]
+				if (ro != nil && ro.root) != (rn != nil && rn.root) {
+					rooted = true
+					continue
+				}
+				addChanged(changed, ro, rn)
+			}
+			if !rooted {
+				continue
+			}
+			var rows []string
+			ok := false
+			if rule.callerIs != nil {
+				rows, ok, err = subjectRows(tx, info, rule.callerIs, newEm.caller.subjects, maxCandidates, newEm.srv.limits)
+			} else {
+				rows, ok, err = withinRows(tx, newEm.caller.model, info, rule, newEm.caller.subjects, maxCandidates, newEm.srv.limits)
+			}
+			if err != nil || !ok {
+				return nil, false, err
+			}
+			if named, ok = mergeKeys(named, rows, maxCandidates); !ok {
+				return nil, false, nil
+			}
+		}
+	}
+	if !anchored {
+		// Every row and field is readable on both sides, wherever its parents
+		// are.
+		return withWindowMembers(nil, info.name, maxCandidates, oldEm.windowMembers, newEm.windowMembers)
 	}
 	from := make([]anchorRow, 0, len(changed)+len(oldEm.movedRows))
 	for at := range changed {

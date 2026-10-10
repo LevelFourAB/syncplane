@@ -41,6 +41,10 @@ import (
 //	(no tx)         CanAccessWorkspace, then CanMutate per recorded write.
 //	write tx        the recorded writes are applied at one sequence.
 //
+// Reads apply the caller's read rules as View's do, and clear each field a
+// field guard hides from the caller. A Put of such a row keeps the stored value
+// of each field the caller may not read.
+//
 // No permission hook ever runs inside a transaction on this path, and none of
 // your code runs while the workspace's write lock is held. A policy that needs
 // to do I/O can therefore afford to, and a slow handler does not serialize
@@ -145,14 +149,14 @@ func (s *Server) apply(
 	if key != "" {
 		key = ledgerKey(p, enforced, key)
 	}
-	visible, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
+	visible, project, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
 	if err != nil {
 		return WriteOutcome{}, adm.verdict.settle(ctx, err)
 	}
 
 	// Phase 1: run fn over a read snapshot, recording its writes. No write lock
 	// is held and fn runs at most once (WithReadTx never retries).
-	atx := &ApplyTx{srv: s, ctx: ctx, ws: workspaceID, visible: visible}
+	atx := &ApplyTx{srv: s, ctx: ctx, ws: workspaceID, visible: visible, project: project}
 	var (
 		result []byte
 		replay *storage.IdempotencyRecord
@@ -338,6 +342,9 @@ type ApplyTx struct {
 	// visible gates each row read against the caller's read filter, or is nil
 	// for a Trusted call. Resolved before the snapshot opened; see readGate.
 	visible func(storage.Row) (bool, error)
+	// project clears the fields a guard hides from the caller in each row a
+	// read returns, or is nil for a Trusted call.
+	project rowProjector
 }
 
 // rowRef identifies a row within the workspace for read-after-write detection.
@@ -374,7 +381,7 @@ func (a *ApplyTx) Get(dst proto.Message, key string) (found bool, version uint64
 	if a.written[rowRef{entity: info.name, key: key}] {
 		return false, 0, fmt.Errorf("server: Apply: Get of %s/%q after writing it — reads come from the snapshot taken before the closure ran and do not see recorded writes; keep the written value, or use Mutate for read-your-own-writes", info.name, key)
 	}
-	return readRowVisible(a.tx, info, dst, key, a.visible)
+	return readRowVisible(a.tx, info, dst, key, a.visible, a.project)
 }
 
 // GetMeta is Get, reporting the row's whole RowMeta instead of its version
@@ -389,7 +396,7 @@ func (a *ApplyTx) GetMeta(dst proto.Message, key string) (found bool, meta RowMe
 	if a.written[rowRef{entity: info.name, key: key}] {
 		return false, RowMeta{}, fmt.Errorf("server: Apply: GetMeta of %s/%q after writing it — reads come from the snapshot taken before the closure ran and do not see recorded writes; keep the written value, or use Mutate for read-your-own-writes", info.name, key)
 	}
-	return readRowMeta(a.tx, info, dst, key, a.visible)
+	return readRowMeta(a.tx, info, dst, key, a.visible, a.project)
 }
 
 // ScanPage iterates up to limit live rows of the entity identified by prototype
@@ -405,7 +412,7 @@ func (a *ApplyTx) ScanPage(prototype proto.Message, afterKey string, limit int, 
 	if err != nil {
 		return "", false, err
 	}
-	return scanPageRows(a.tx, info, afterKey, limit, a.visible, fn)
+	return scanPageRows(a.tx, info, afterKey, limit, a.visible, a.project, fn)
 }
 
 // Query iterates the live rows matching spec, in spec's order, decoding each
@@ -425,7 +432,7 @@ func (a *ApplyTx) Query(prototype proto.Message, spec query.Spec, fn func(msg pr
 	if err != nil {
 		return err
 	}
-	rows, err := runQuerySpec(a.srv, a.tx, a.ws, info, spec, a.visible)
+	rows, err := runQuerySpec(a.srv, a.tx, a.ws, info, spec, a.visible, a.project)
 	if err != nil {
 		return err
 	}

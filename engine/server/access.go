@@ -53,18 +53,32 @@ type entityAccess struct {
 	guardOf map[string]int
 }
 
-// fieldGuard is one field guard of an entity: the units it restricts and the
-// rules that admit writing them.
+// fieldGuard is one field guard of an entity: the units it restricts, the
+// rules that admit writing them and who reads them.
 type fieldGuard struct {
 	// units are the units the guard restricts, sorted: the names of top-level
 	// fields outside a oneof, and of oneofs.
 	units []string
-	// rules are the guard's rules that admit a write, in declaration order.
-	// The read rule each guard carries admits every caller that reads the row,
-	// so it decides nothing and is not kept.
+	// rules are the guard's rules that admit a write, in declaration order,
+	// without opRead.
 	rules []accessRule
+	// reads are the guard's rules that admit reading, in declaration order,
+	// each with opRead alone. Empty for a guard that hides its units from
+	// every client.
+	reads []accessRule
+	// read is who reads the units of a row the caller reads, sorted as the
+	// readers of an entity are: read.all for a guard with a read rule that
+	// needs no permission and sets no check.
+	read readers
 	// named holds opCreate and opUpdate when at least one rule names them.
 	named accessOp
+}
+
+// hides reports whether the guard can hide its units from a caller that reads
+// the row: no read rule of the guard admits every admitted caller on every
+// row.
+func (g *fieldGuard) hides() bool {
+	return !g.read.all
 }
 
 // spec renders the guard in a canonical form: two guards with equal specs
@@ -75,7 +89,30 @@ func (g fieldGuard) spec() string {
 		rules[i] = r.spec()
 	}
 	sort.Strings(rules)
-	return strings.Join(g.units, ",") + "{" + strings.Join(rules, ";") + "}"
+	spec := strings.Join(g.units, ",") + "{" + strings.Join(rules, ";") + "}"
+	if g.hides() {
+		spec += "read=" + g.read.key()
+	}
+	return spec
+}
+
+// hidesFields reports whether a guard of the entity can hide its units from
+// a caller that reads the row.
+func (a *entityAccess) hidesFields() bool {
+	return a != nil && slices.ContainsFunc(a.guards, func(g fieldGuard) bool { return g.hides() })
+}
+
+// readerSets returns who reads the rows of the entity, then, for each guard
+// that can hide its units, who reads those units: every set whose anchors
+// decide what a caller receives of a row.
+func (a *entityAccess) readerSets() []readers {
+	out := []readers{a.read}
+	for i := range a.guards {
+		if g := &a.guards[i]; g.hides() {
+			out = append(out, g.read)
+		}
+	}
+	return out
 }
 
 // guardFor returns the guard that restricts unit, or nil when no guard does.
@@ -103,6 +140,9 @@ func (a *entityAccess) allRules() []labeledRule {
 	}
 	for i, g := range a.guards {
 		for _, r := range g.rules {
+			out = append(out, labeledRule{where: fmt.Sprintf("access guard[%d]", i), rule: r})
+		}
+		for _, r := range g.reads {
 			out = append(out, labeledRule{where: fmt.Sprintf("access guard[%d]", i), rule: r})
 		}
 	}
@@ -147,6 +187,9 @@ type accessRule struct {
 	// check. whenSpec renders it in a canonical form, "" without one.
 	when     *query.Compiled
 	whenSpec string
+	// whenReads are the units the when check reads on the row, in the order
+	// the condition names them. Nil without a when check.
+	whenReads []string
 	// within are the rule's within entries, sorted by spec. Nil when the rule
 	// sets none. Each needs the catalog to resolve: see accessModel.withins.
 	within []withinEntry
@@ -622,7 +665,6 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 	}
 	a := &entityAccess{parents: parents, parentUnits: units}
 	seen := map[string]int{}
-	reads := map[string]bool{}
 	for i, r := range opt.GetAllow() {
 		rule, err := accessRuleOf(i, r, desc, info.keyFields)
 		if err != nil {
@@ -639,29 +681,72 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 				a.named |= op
 			}
 		}
-		switch {
-		case !rule.names(opRead):
-		case rule.checksRow() || rule.checksAbove() || rule.joint():
-			a.read.checked = append(a.read.checked, rule)
-		case rule.admitted():
-			a.read.all = true
-		default:
-			reads[rule.requires[0]] = true
-		}
 	}
-	if a.read.all {
-		a.read.checked = nil
-	} else {
-		for p := range reads {
-			a.read.perms = append(a.read.perms, p)
-		}
-		sort.Strings(a.read.perms)
-		sort.Slice(a.read.checked, func(i, j int) bool { return a.read.checked[i].spec() < a.read.checked[j].spec() })
-	}
+	a.read = readersOf(a.rules)
 	if err := a.guardsOf(desc, info.keyFields, opt.GetGuard()); err != nil {
 		return nil, err
 	}
+	if err := a.refuseHiddenChecks(); err != nil {
+		return nil, err
+	}
 	return a, nil
+}
+
+// readersOf returns who the rules that name read admit.
+func readersOf(rules []accessRule) readers {
+	var r readers
+	perms := map[string]bool{}
+	for _, rule := range rules {
+		switch {
+		case !rule.names(opRead):
+		case rule.checksRow() || rule.checksAbove() || rule.joint():
+			r.checked = append(r.checked, rule)
+		case rule.admitted():
+			r.all = true
+		default:
+			perms[rule.requires[0]] = true
+		}
+	}
+	if r.all {
+		r.checked = nil
+		return r
+	}
+	for p := range perms {
+		r.perms = append(r.perms, p)
+	}
+	sort.Strings(r.perms)
+	sort.Slice(r.checked, func(i, j int) bool { return r.checked[i].spec() < r.checked[j].spec() })
+	return r
+}
+
+// refuseHiddenChecks refuses a guard that can hide a field that a rule of
+// the entity reads to decide: a client decides access from the rows it holds,
+// and cannot decide on a field it does not receive.
+func (a *entityAccess) refuseHiddenChecks() error {
+	for i, r := range a.rules {
+		for _, name := range ruleReads(r) {
+			if g := a.guardFor(name); g != nil && g.hides() {
+				return fmt.Errorf("access allow[%d] reads %q, which a guard can hide; "+
+					"a field that a rule checks is one every reader of the row reads", i, name)
+			}
+		}
+	}
+	return nil
+}
+
+// ruleReads returns the units that a rule's caller_is and when checks read on
+// the row, in the order the rule names them.
+func ruleReads(r accessRule) []string {
+	var out []string
+	if r.callerIs != nil {
+		out = append(out, unitOf(r.callerIs))
+	}
+	for _, name := range r.whenReads {
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // guardsOf checks the field guards of an access option and records them on a.
@@ -695,7 +780,6 @@ func (a *entityAccess) guardsOf(desc protoreflect.MessageDescriptor, keyFields [
 			}
 		}
 		guard := fieldGuard{units: units}
-		read := false
 		seen := map[string]int{}
 		for j, r := range g.GetAllow() {
 			rw := fmt.Sprintf("%s allow[%d]", where, j)
@@ -715,14 +799,9 @@ func (a *entityAccess) guardsOf(desc protoreflect.MessageDescriptor, keyFields [
 			}
 			seen[spec] = j
 			if rule.ops&opRead != 0 {
-				// A read rule that narrows needs the read path, sync and Query
-				// alike, to send a row without the fields a caller may not read,
-				// which this build does not do.
-				if !rule.admitted() || rule.checksRow() || rule.checksAbove() {
-					return fmt.Errorf("%s names read with a source or a check other than admitted; "+
-						"the read rule of a guard is { read: true admitted: {} }", rw)
-				}
-				read = true
+				read := rule
+				read.ops = opRead
+				guard.reads = append(guard.reads, read)
 				rule.ops &^= opRead
 				if rule.ops == 0 {
 					continue
@@ -735,9 +814,7 @@ func (a *entityAccess) guardsOf(desc protoreflect.MessageDescriptor, keyFields [
 				}
 			}
 		}
-		if !read {
-			return fmt.Errorf("%s has no read rule; add { read: true admitted: {} }, so that the readers of a row read its guarded fields", where)
-		}
+		guard.read = readersOf(guard.reads)
 		if a.guardOf == nil {
 			a.guardOf = map[string]int{}
 		}
@@ -874,6 +951,15 @@ func accessRuleOf(i int, r *syncplanev1.AccessRule, desc protoreflect.MessageDes
 			return accessRule{}, fmt.Errorf("%s when: %w", where, err)
 		}
 		rule.when, rule.whenSpec = when, spec
+		for _, name := range conditionHeads(r.GetWhen()) {
+			unit := name
+			if fd := desc.Fields().ByName(protoreflect.Name(name)); fd != nil {
+				unit = unitOf(fd)
+			}
+			if !slices.Contains(rule.whenReads, unit) {
+				rule.whenReads = append(rule.whenReads, unit)
+			}
+		}
 	}
 	for j, w := range r.GetWithin() {
 		entry, err := withinEntryOf(fmt.Sprintf("%s within[%d]", where, j), w)
@@ -1240,6 +1326,12 @@ func grantOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions,
 	if slices.ContainsFunc(subjects, func(c subjectCase) bool { return c.fd == role }) {
 		return nil, fmt.Errorf("grant names field %q as both subject and role", role.Name())
 	}
+	for _, fd := range append([]protoreflect.FieldDescriptor{role}, casesOf(subjects)...) {
+		if g := info.access.guardFor(unitOf(fd)); g != nil && g.hides() {
+			return nil, fmt.Errorf("grant field %q is restricted by a guard that can hide it; "+
+				"the subject and role of a grant row are read by every reader of the row", unitOf(fd))
+		}
+	}
 	if len(opt.GetRoles()) == 0 {
 		return nil, fmt.Errorf("grant declares no roles")
 	}
@@ -1414,8 +1506,8 @@ func membersOf(eo *syncplanev1.EntityOptions, access *entityAccess) (string, err
 // buildSubjectIndexes derives an index over each field the access model
 // looks rows up by subject in: each string case of a grant entity's subject,
 // so resolving a caller's grants probes its own rows, and the subject field
-// of each read rule with a caller_is check, so a read narrows to the rows that
-// name the caller. A team case is a reference, which has its reference index
+// of each read rule with a caller_is check, the entity's and its guards', so
+// a read narrows to the rows that name the caller. A team case is a reference, which has its reference index
 // already. Each index has the name an indexed mark on the field would give.
 // It runs after buildDeclaredIndexes, so a field the schema marks indexed
 // already has its index.
@@ -1425,9 +1517,11 @@ func buildSubjectIndexes(info *entityInfo) error {
 		fields = append(fields, info.grant.stringCases()...)
 	}
 	if info.access != nil {
-		for _, o := range info.access.read.checked {
-			if o.callerIs != nil {
-				fields = append(fields, o.callerIs)
+		for _, r := range info.access.readerSets() {
+			for _, o := range r.checked {
+				if o.callerIs != nil && !slices.Contains(fields, o.callerIs) {
+					fields = append(fields, o.callerIs)
+				}
 			}
 		}
 	}
@@ -1452,6 +1546,15 @@ func buildSubjectIndexes(info *entityInfo) error {
 		})
 	}
 	return nil
+}
+
+// casesOf returns the field of each subject case.
+func casesOf(cases []subjectCase) []protoreflect.FieldDescriptor {
+	out := make([]protoreflect.FieldDescriptor, len(cases))
+	for i, c := range cases {
+		out[i] = c.fd
+	}
+	return out
 }
 
 // grantField resolves the field a grant option names for one of its parts.
@@ -1842,9 +1945,11 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 			p, which))
 	}
 	for _, name := range names {
-		for _, p := range c.entities[name].access.read.loose().named() {
-			if !slices.Contains(m.readPerms, p) {
-				m.readPerms = append(m.readPerms, p)
+		for _, r := range c.entities[name].access.readerSets() {
+			for _, p := range r.loose().named() {
+				if !slices.Contains(m.readPerms, p) {
+					m.readPerms = append(m.readPerms, p)
+				}
 			}
 		}
 	}
@@ -1942,6 +2047,20 @@ func (m *accessModel) resolveWithins(names []string) error {
 						return fmt.Errorf("%s caller_is: entity %q: %w", where, w.entity, err)
 					}
 					check.callerIs = fd
+				}
+				reads := conditionHeads(w.when)
+				if w.callerIs != "" {
+					reads = append(reads, w.callerIs)
+				}
+				for _, field := range reads {
+					unit := field
+					if fd := desc.Fields().ByName(protoreflect.Name(field)); fd != nil {
+						unit = unitOf(fd)
+					}
+					if g := target.access.guardFor(unit); g != nil && g.hides() {
+						return fmt.Errorf("%s reads %q of entity %q, which a guard can hide; "+
+							"a field that a within entry checks is one every reader of the row reads", where, field, w.entity)
+					}
 				}
 				if w.when != nil {
 					compiled, err := query.Compile(desc, w.when)
@@ -2161,25 +2280,29 @@ func (m *accessModel) entitiesBelow(anchor string) []string {
 }
 
 // readersBelow returns who may read some row of each entity whose rows can
-// sit below rows of the named entity, with checks on the row dropped (see
-// readers.loose), sorted by key and without repeats.
+// sit below rows of the named entity, and who may read the units of each
+// guard of such an entity that can hide them, with checks on the row dropped
+// (see readers.loose), sorted by key and without repeats.
 func (m *accessModel) readersBelow(name string) []readers {
 	var out []readers
 	seen := map[string]bool{}
 	for _, below := range m.below[name] {
-		r := m.entities[below].access.read.loose()
-		if k := r.key(); !seen[k] {
-			seen[k] = true
-			out = append(out, r)
+		for _, set := range m.entities[below].access.readerSets() {
+			r := set.loose()
+			if k := r.key(); !seen[k] {
+				seen[k] = true
+				out = append(out, r)
+			}
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].key() < out[j].key() })
 	return out
 }
 
-// readRuleOf renders what decides which rows of an entity a caller reads, in
-// a canonical form: two entities with equal rules read the same rows from the
-// same anchors. An entity outside the model reads every row.
+// readRuleOf renders what decides which rows of an entity a caller reads, and
+// which of their fields, in a canonical form: two entities with equal rules
+// read the same rows and fields from the same anchors. An entity outside the
+// model reads every row.
 func readRuleOf(info *entityInfo) string {
 	a := info.access
 	if a == nil {
@@ -2188,6 +2311,16 @@ func readRuleOf(info *entityInfo) string {
 	rule := "read=" + a.read.key()
 	if a.hasParent() {
 		rule += " parent=" + a.parentRule()
+	}
+	var guards []string
+	for _, g := range a.guards {
+		if g.hides() {
+			guards = append(guards, strings.Join(g.units, ",")+"{"+g.read.key()+"}")
+		}
+	}
+	if len(guards) > 0 {
+		sort.Strings(guards)
+		rule += " hide=" + strings.Join(guards, ";")
 	}
 	return rule
 }

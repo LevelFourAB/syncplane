@@ -382,9 +382,9 @@ A caller holds a permission at an **anchor**: the workspace root, or one row tha
 | `access.allow[].within[]`      | `entity`    | The entity of the row the row must sit within, by name: an entity whose rows the rule's rows can sit below, or the rule's own entity when its rows sit below rows of their own.                                                                                                                                                                                                                                                                |
 | `access.allow[].within[]`      | `caller_is` | A check: the named top-level, singular `string` field of that row holds one of the caller's subjects. An empty value never matches.                                                                                                                                                                                                                                                                                                            |
 | `access.allow[].within[]`      | `when`      | A check: that row matches this `syncplane.v1.Condition`, with paths from that row. A `rel` or `match` condition is refused.                                                                                                                                                                                                                                                                                                                    |
-| `access`                       | `guard`     | The field guards (`syncplane.v1.FieldGuard`). Each restricts who writes a set of fields. See [Field guards](#field-guards).                                                                                                                                                                                                                                                                                                                    |
+| `access`                       | `guard`     | The field guards (`syncplane.v1.FieldGuard`). Each restricts who reads and who writes a set of fields. See [Field guards](#field-guards).                                                                                                                                                                                                                                                                                                      |
 | `access.guard[]`               | `fields`    | The top-level fields and oneofs the guard restricts. At least one. Cannot name a key field, an access parent or a `creator` field, or a field another guard names.                                                                                                                                                                                                                                                                             |
-| `access.guard[]`               | `allow`     | The guard's rules, with the fields of `access.allow[]` except `delete` and `fields`. Exactly one rule names `read`, as `{ read: true admitted: {} }`.                                                                                                                                                                                                                                                                                          |
+| `access.guard[]`               | `allow`     | The guard's rules, with the fields of `access.allow[]` except `delete` and `fields`. Without a rule that names `read`, the guard hides its fields from every client. Can be empty.                                                                                                                                                                                                                                                             |
 | `grant`                        | `subject`   | The name of the field or oneof that holds the subject the row grants to. A field is top-level and singular: a `string` field names one caller, and a reference to an entity with `members` names a team. See [Teams](#teams).                                                                                                                                                                                                                  |
 | `grant`                        | `role`      | The name of the field that holds the role the row grants: a top-level, singular `string` or enum field outside any oneof. An enum value names the role with the same name as the value.                                                                                                                                                                                                                                                        |
 | `grant`                        | `roles`     | The roles rows can grant. Each role has a `name`, the permissions it `grants`, and the names of the roles of the same `grant` it `includes`. A role grants every permission of each role it includes, through any number of steps.                                                                                                                                                                                                             |
@@ -567,7 +567,7 @@ A read rule with a `within` entry narrows bootstrap, resync and `Query` to the r
 
 ### Field guards
 
-The rules in `allow` decide whole rows. A **field guard** takes a set of fields away from every rule, and gives them back to the callers its own rules admit. A write that sets a guarded field needs a rule in `allow` that admits the write, and a rule of the guard that admits the field operation: `create` for the value a create stores, `update` for a change to a row that exists. `write` admits both. A field operation that no rule of the guard names is open only to trusted writes.
+The rules in `allow` decide whole rows. A **field guard** takes a set of fields away from every rule, and gives them back to the callers its own rules admit, for reading and for writing each. A write that sets a guarded field needs a rule in `allow` that admits the write, and a rule of the guard that admits the field operation: `create` for the value a create stores, `update` for a change to a row that exists. `write` admits both. A field operation that no rule of the guard names is open only to trusted writes.
 
 ```proto
 message Expense {
@@ -622,9 +622,66 @@ A guard rule admits a field operation as a rule in `allow` admits a row operatio
 
 A mask path matches a guard by its first segment: a guard on `audit` covers `audit.size`. A guard on a oneof covers each of its members. A `PATCH` that names a field whose guard has no rule for `update` is refused before the row is read, and before `Permissions.CanMutate` runs.
 
-Every caller that reads the row reads its guarded fields: each guard declares the read rule `{ read: true admitted: {} }`, and registration refuses a guard without it, or with a read rule that has another source or a check.
-
 Clients edit a guarded collaborative-text field only where a guard rule admits an update: a `PUT` keeps the stored document.
+
+#### Who reads a guarded field
+
+A caller reads a guarded field of a row when a rule in `allow` admits reading the row, and a rule of the guard that names `read` admits reading the row too. A guard rule admits a read as a rule in `allow` does: its source holds where the row sits, and each check holds on the row. The rule `{ read: true admitted: {} }` shows the field to every caller that reads the row. A guard without a read rule hides its fields from every client.
+
+```proto
+message Staff {
+	option (syncplane.v1.entity) = {
+		name: "staff"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_staff" },
+				{ write: true requires: "edit_staff" }
+			]
+			guard: [
+				// Only HR reads and writes the salary.
+				{ fields: [ "salary" ] allow: [ { read: true write: true requires: "hr" } ] },
+				// Only the person a record is about reads the review.
+				{
+					fields: [ "review" ]
+					allow: [
+						{ read: true admitted: {} caller_is: "person_id" },
+						{ write: true requires: "hr" }
+					]
+				},
+				// No client reads or writes the bonus.
+				{ fields: [ "bonus" ] }
+			]
+		}
+	};
+	string id = 1;
+	string name = 2;
+	int64 salary = 3;
+	string review = 4;
+	string person_id = 5;
+	int64 bonus = 6;
+}
+```
+
+A guard decides per row and per caller. The server clears each field the caller may not read before the row leaves it, and names the field in `RowChange.hidden`. A cleared field reads as its zero value; the list tells it apart from a stored zero value. This applies to every path that sends a row: pull, bootstrap, `Subscribe`, `Query`, field history and the in-process `View` and `Apply` reads. In a field history record, a hidden field leaves the mask and the prior value, and a record of hidden fields alone is not shown.
+
+| Change                                                                         | What the client receives                                                  |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| A grant, a role or a move above the row shows or hides a field                 | The row again, with its new `hidden` list. A text field arrives whole.    |
+| A write changes a field that a guard read rule checks, such as its `caller_is` | The row, as for any write.                                                |
+| A write changes a hidden field                                                 | The row, with the field still cleared. No text delta state for the field. |
+
+A request may not name a field that the caller does not read on every row it reads: a read rule of the guard that needs no permission and sets no check, or whose permissions the caller holds at the workspace root. Otherwise the server refuses it with `PermissionDenied`:
+
+- a `Query` predicate, `order_by`, `group_by` or facet, including the inner condition of a `rel` on the target entity;
+- a subscription predicate, a window's `order_by`, or a reference that a `follow` path walks;
+- a `match` condition or a relevance order, when the guard restricts a search field.
+
+A subscription that a grant change makes refused fails on the next pull.
+
+Reading and writing are separate, so a caller can write a field it may not read. A `PATCH` whose mask names the field sets it. A `PUT` that updates a row keeps the stored value of each such field that it leaves unset, so a client that writes back a row it received does not clear what it never saw. A `PUT` that sets such a field writes it, when a guard rule admits the caller. To clear a field the caller may not read, use a `PATCH`.
+
+Registration refuses a guard that can hide a field a client needs to decide access: a field that a rule in `allow` checks with `caller_is` or `when`, a field that a `within` entry of any rule reads, and the subject and role fields of a grant entity. A guard can hide a field only when some read rule of the guard does not admit every reader with no check.
 
 A rule's `fields` list and a guard work in opposite directions:
 
@@ -633,10 +690,12 @@ A rule's `fields` list and a guard work in opposite directions:
 | A caller who can change only some fields of a row, such as an assignee who sets the status | `fields` on an `update` rule in `allow`  |
 | A field that only some callers can change, whatever rule admits the update                 | A guard on the field                     |
 | A field that only server code changes                                                      | A guard whose only rule is the read rule |
+| A field that only some callers read                                                        | A guard with a narrower read rule        |
+| A field that no client reads                                                               | A guard without a read rule              |
 
 A `PUT` that updates a row also keeps the stored value of each field outside the `fields` lists of the update rules that admit the caller at the stored row, when each of those rules has a list. A `PATCH` that names such a field is refused, as before.
 
-The TypeScript client refuses at the call site a `patch()` that names a field whose guard has no rule for `update`, and keeps the local value of such a field on `put()`. Whether a guard rule admits the caller is decided on the server; `can()` predicts it. For a field that depends on facts outside the workspace's rows, use the server's `FieldPermissions` hook; see [Authentication and permissions](../how-to/authentication-and-permissions.md#protecting-fields-per-caller).
+The TypeScript client refuses at the call site a `patch()` that names a field whose guard has no rule for `update`, and keeps the local value of such a field on `put()`. Whether a guard rule admits the caller is decided on the server; `can()` predicts it, for an update and for a read that names `fields`. A row the client holds lists its hidden fields in `Row.hidden`; see the [TypeScript client reference](typescript-client.md). For a field that depends on facts outside the workspace's rows, use the server's `FieldPermissions` hook; see [Authentication and permissions](../how-to/authentication-and-permissions.md#protecting-fields-per-caller).
 
 ### Operations no rule admits
 
@@ -847,7 +906,8 @@ Registration refuses a schema that uses the model when:
 - A rule sets no operation flag, sets neither `requires` nor `admitted`, sets both, or names one permission twice in `requires`.
 - An entity marks an `access_parent` field that is a map, not a reference, nested inside a message field, or a workspace-qualified reference.
 - A guard names no field, names a field that does not exist, a member of a oneof, a key field, an access parent, a `creator` field or a field another guard names.
-- A guard has no read rule, a read rule other than `{ read: true admitted: {} }`, a rule that names `delete` or sets `fields`, two rules with the same operation flags, source and checks, or a rule whose `caller_is` or `when` reads a guarded field.
+- A guard has a rule that names `delete` or sets `fields`, two rules with the same operation flags, source and checks, or a rule whose `caller_is` or `when` reads a guarded field.
+- A guard that can hide its fields names a field that a rule in `allow` checks with `caller_is` or `when`, a field that a `within` entry of any rule reads, or the subject or role field of a grant entity.
 - A grant entity marks more than one `access_parent` field, other than the members of one oneof, or marks a repeated one.
 - An entity marks some members of a oneof `access_parent` but not all of them.
 - A case of an `access_parent` points at an entity that is not registered or declares no `access`.

@@ -125,6 +125,24 @@ describe('undo/redo', () => {
 		expect(inv?.expectedVersion).toBe(0n);
 	});
 
+	it('leaves a field the server did not send out of a PATCH inverse', () => {
+		const patch = (paths: string[]) =>
+			create(CrudMutationSchema, {
+				entity: 'staff',
+				key: 's1',
+				op: CrudOp.PATCH,
+				fieldMask: { paths },
+			});
+		const prev = new Uint8Array([ 1, 2, 3 ]);
+		expect(invertCrud(patch([ 'name', 'pin' ]), prev, [ 'pin', 'salary' ])?.fieldMask?.paths).toEqual(
+			[
+				'name',
+			],
+		);
+		// Nothing left to restore: the caller never read the value it wrote.
+		expect(invertCrud(patch([ 'pin' ]), prev, [ 'pin' ])).toBeUndefined();
+	});
+
 	it('deleting a missing row records nothing to undo', async () => {
 		const c = newLocalClient();
 		await c.mutate.del(TodoSchema, 'never-existed');

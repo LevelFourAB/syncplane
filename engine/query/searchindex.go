@@ -23,6 +23,7 @@ package query
 
 import (
 	"fmt"
+	"slices"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -83,6 +84,18 @@ func (d *SearchDecl) SearchEntries(msg protoreflect.Message, rowKey string) [][]
 // and rebuilds, exactly like a value index.
 func (d *SearchDecl) SearchSpecHash() string {
 	return fingerprint(fmt.Sprintf("searchv%d|%s|cap:%d", searchIndexEncodingVersion, d.spec, SearchTermsPerRow))
+}
+
+// Heads returns the top-level field of each search field, in declaration
+// order and without repeats.
+func (d *SearchDecl) Heads() []protoreflect.FieldDescriptor {
+	var out []protoreflect.FieldDescriptor
+	for _, f := range d.fields {
+		if len(f.steps) > 0 && !slices.Contains(out, f.steps[0].fd) {
+			out = append(out, f.steps[0].fd)
+		}
+	}
+	return out
 }
 
 // MaskTouches reports whether a field-mask path could change any searchable

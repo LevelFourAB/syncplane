@@ -225,6 +225,40 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 	return st, nil
 }
 
+// hiddenDiff returns the change that sends row as the new side shows it, and
+// whether the two sides hide different fields of it. Both sides show the
+// row.
+func hiddenDiff(oldEm, newEm *rowEmitter, row storage.Row) (*syncplanev1.RowChange, bool, error) {
+	info, ok := newEm.srv.catalogPtr().entities[row.Entity]
+	if !ok || !info.access.hidesFields() {
+		return nil, false, nil
+	}
+	oldHides, err := oldEm.mayHide(info)
+	if err != nil {
+		return nil, false, err
+	}
+	newHides, err := newEm.mayHide(info)
+	if err != nil || (!oldHides && !newHides) {
+		return nil, false, err
+	}
+	msg, err := info.decode(row.Value)
+	if err != nil {
+		// classify quarantines a row that does not decode, so neither side
+		// shows it.
+		return nil, false, nil
+	}
+	was, err := oldEm.hiddenUnits(info, row.Key, msg)
+	if err != nil {
+		return nil, false, err
+	}
+	now, err := newEm.hiddenUnits(info, row.Key, msg)
+	if err != nil || slices.Equal(was, now) {
+		return nil, false, err
+	}
+	rc, err := newEm.rowChange(row)
+	return rc, err == nil, err
+}
+
 // resyncScanBatch is the number of rows one storage scan call in a resync
 // returns at a time. It caps how many rows are held at once, independently of
 // how many a pull may examine in total (Limits.MaxResyncScan).
@@ -284,7 +318,19 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 			patch.Changes = append(patch.Changes, hiddenChange(row))
 			emitted++
 		case !oldVis && newVis:
-			patch.Changes = append(patch.Changes, rowChange(row))
+			rc, err := newEm.rowChange(row)
+			if err != nil {
+				return err
+			}
+			patch.Changes = append(patch.Changes, rc)
+			emitted++
+		case oldVis && !row.Deleted:
+			// Visible on both sides, but a guard can hide other fields on each.
+			rc, changed, err := hiddenDiff(oldEm, newEm, row)
+			if err != nil || !changed {
+				return err
+			}
+			patch.Changes = append(patch.Changes, rc)
 			emitted++
 		}
 		return nil

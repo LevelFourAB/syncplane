@@ -627,10 +627,55 @@ message Task {
 
 - **A guarded write needs both rules.** An editor without `approve_tasks` changes the title, and a `PATCH` of the status is refused. An approver without `edit_tasks` changes nothing, because no rule in `allow` admits the update.
 - **A `PUT` keeps what the caller may not write.** An editor who sends the whole row with a new title and a new status changes the title, and the status keeps its stored value.
-- **Every reader reads the field.** Each guard declares `{ read: true admitted: {} }`. To keep a field from some readers, put it in an entity of its own below the row.
+- **Every reader reads the field.** Each guard declares `{ read: true admitted: {} }`. To keep a field from some readers, see the next section.
 - **Use `fields` on a rule for the opposite case.** A rule `{ update: true requires: "view_tasks" caller_is: "assignee_id" fields: [ "status" ] }` lets an assignee change the status and nothing else, beside the editors' rule.
 
 Add the guard permission to the `grants` of each role that gives it, as for a rule. On the client, `can(schema, key, 'update', { fields: [ 'status' ] })` predicts the guard. See [Field guards](../reference/proto-options.md#field-guards).
+
+### Let only some callers read a field
+
+Give the field's guard a read rule narrower than `{ read: true admitted: {} }`. Here every staff reader reads the name, only a caller with `hr` reads and sets the salary, only the person a record is about reads the review, and no client reads the bonus:
+
+```proto
+message Staff {
+	option (syncplane.v1.entity) = {
+		name: "staff"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_staff" },
+				{ write: true requires: "edit_staff" }
+			]
+			guard: [
+				{ fields: [ "salary" ] allow: [ { read: true write: true requires: "hr" } ] },
+				{
+					fields: [ "review" ]
+					allow: [
+						{ read: true admitted: {} caller_is: "person_id" },
+						{ write: true requires: "hr" }
+					]
+				},
+				{ fields: [ "bonus" ] }
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string name = 3;
+	int64 salary = 4;
+	string review = 5;
+	string person_id = 6;
+	int64 bonus = 7;
+}
+```
+
+- **The client receives the field cleared.** A reader without `hr` receives each staff row with `salary` at its zero value, and `Row.hidden` lists `salary`. Show such a field as hidden, not as empty.
+- **A query cannot name it.** A `queryServer` filter, order or facet on `salary`, or a subscription on it, fails with `PermissionDenied` for a caller that does not hold `hr` at the workspace root. A role held at a project shows the salary of that project's rows, and still does not let the caller query by it.
+- **A grant change resends the rows.** Give a caller `hr` and the next pull sends the rows again with the salary in them.
+- **A `PUT` keeps what the caller did not read.** An editor who writes back a whole row changes the name and keeps the stored salary, review and bonus.
+- **A field that decides access stays readable.** Registration refuses to hide a field that a rule checks with `caller_is` or `when`, so `person_id` stays visible here.
+
+On the client, `can(schema, key, 'read', { fields: [ 'salary' ] })` predicts whether the caller reads the field. See [Who reads a guarded field](../reference/proto-options.md#who-reads-a-guarded-field).
 
 ### Put a row below several parents
 

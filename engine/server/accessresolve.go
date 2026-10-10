@@ -658,18 +658,25 @@ func grantRoleOf(g *grantSpec, msg protoreflect.Message) string {
 // a row up its parent chain, and the row passes that rule's subject, when and
 // within checks.
 func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
-	a := info.access
-	if a == nil {
+	if info.access == nil {
 		return nil
 	}
-	anchors := e.access.readAnchors(a.read)
+	return e.readersFilter(info, info.access.read)
+}
+
+// readersFilter returns the filter that r puts on rows of info for the bound
+// caller: nil when r admits the caller on every row, denyAll when it admits
+// the caller on none, and a check per row otherwise. modelReadFilter
+// describes when r admits a row.
+func (e *rowEmitter) readersFilter(info *entityInfo, r readers) readFilter {
+	anchors := e.access.readAnchors(r)
 	if anchors != nil && anchors.root {
 		return nil
 	}
 	if anchors != nil && len(anchors.rows) == 0 {
 		anchors = nil
 	}
-	checked := checkedReadsOf(a.read, e.caller, e.access)
+	checked := checkedReadsOf(r, e.caller, e.access)
 	if anchors == nil && len(checked) == 0 {
 		return denyAll
 	}
