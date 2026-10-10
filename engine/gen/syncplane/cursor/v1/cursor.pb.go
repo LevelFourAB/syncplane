@@ -141,16 +141,25 @@ type Cursor struct {
 	// a later change of access then resets the client.
 	AccessRef *StateRef `protobuf:"bytes,17,opt,name=access_ref,json=accessRef,proto3" json:"access_ref,omitempty"`
 	// Hash of the CallerAccess the client last received: every permission the
-	// caller holds, not only the ones entities read by. A response carries a
-	// new CallerAccess when the hash differs. 0 for a schema without the model.
+	// caller holds, not only the ones entities read by. It is the summary's
+	// CallerAccess.version. A client that sends no
+	// PullRequest.caller_access_version receives a new CallerAccess when the
+	// hash differs. 0 for a schema without the model.
 	CallerAccessHash uint64 `protobuf:"fixed64,18,opt,name=caller_access_hash,json=callerAccessHash,proto3" json:"caller_access_hash,omitempty"`
 	// The sequence through which the rows the client holds reflect every
 	// access move (see AccessMove). A pull compares the client's rows with
 	// the moves after the greater of seq and this, so the pull that follows a
 	// resync does not resync the same moves again. 0 when seq alone says it.
 	AccessMovesThrough uint64 `protobuf:"varint,19,opt,name=access_moves_through,json=accessMovesThrough,proto3" json:"access_moves_through,omitempty"`
-	unknownFields      protoimpl.UnknownFields
-	sizeCache          protoimpl.SizeCache
+	// Reference to the stored syncplane.v1.CallerAccess whose version is
+	// caller_access_hash, with seq 0. A pull whose client holds that version
+	// is sent the change from it as a CallerAccessDelta. It has its own
+	// lineage, apart from access_ref's, so a change to only one of the two
+	// writes only one entry. Absent when the store could not take the entry,
+	// and on cursors of clients that apply no CallerAccessDelta.
+	CallerAccessRef *StateRef `protobuf:"bytes,20,opt,name=caller_access_ref,json=callerAccessRef,proto3" json:"caller_access_ref,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Cursor) Reset() {
@@ -314,6 +323,13 @@ func (x *Cursor) GetAccessMovesThrough() uint64 {
 		return x.AccessMovesThrough
 	}
 	return 0
+}
+
+func (x *Cursor) GetCallerAccessRef() *StateRef {
+	if x != nil {
+		return x.CallerAccessRef
+	}
+	return nil
 }
 
 // AccessMove is one change of the access parent of a row that other rows sit
@@ -1214,7 +1230,7 @@ var File_syncplane_cursor_v1_cursor_proto protoreflect.FileDescriptor
 
 const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\n" +
-	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\"\xd0\x06\n" +
+	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\"\x9b\a\n" +
 	"\x06Cursor\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\bsub_hash\x18\x02 \x01(\x06R\asubHash\x12!\n" +
@@ -1239,7 +1255,8 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\n" +
 	"access_ref\x18\x11 \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\taccessRef\x12,\n" +
 	"\x12caller_access_hash\x18\x12 \x01(\x06R\x10callerAccessHash\x120\n" +
-	"\x14access_moves_through\x18\x13 \x01(\x04R\x12accessMovesThrough\"\xd3\x02\n" +
+	"\x14access_moves_through\x18\x13 \x01(\x04R\x12accessMovesThrough\x12I\n" +
+	"\x11caller_access_ref\x18\x14 \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\x0fcallerAccessRef\"\xd3\x02\n" +
 	"\n" +
 	"AccessMove\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x10\n" +
@@ -1343,25 +1360,26 @@ var file_syncplane_cursor_v1_cursor_proto_depIdxs = []int32{
 	9,  // 4: syncplane.cursor.v1.Cursor.windows:type_name -> syncplane.cursor.v1.WindowState
 	7,  // 5: syncplane.cursor.v1.Cursor.sets_ref:type_name -> syncplane.cursor.v1.StateRef
 	7,  // 6: syncplane.cursor.v1.Cursor.access_ref:type_name -> syncplane.cursor.v1.StateRef
-	3,  // 7: syncplane.cursor.v1.AccessMove.from:type_name -> syncplane.cursor.v1.AnchorRef
-	3,  // 8: syncplane.cursor.v1.AccessMove.to:type_name -> syncplane.cursor.v1.AnchorRef
-	3,  // 9: syncplane.cursor.v1.AccessMove.more_from:type_name -> syncplane.cursor.v1.AnchorRef
-	3,  // 10: syncplane.cursor.v1.AccessMove.more_to:type_name -> syncplane.cursor.v1.AnchorRef
-	2,  // 11: syncplane.cursor.v1.AccessMove.from_within:type_name -> syncplane.cursor.v1.WithinState
-	13, // 12: syncplane.cursor.v1.WithinState.subjects:type_name -> syncplane.cursor.v1.WithinState.SubjectsEntry
-	6,  // 13: syncplane.cursor.v1.ReadAccess.permissions:type_name -> syncplane.cursor.v1.PermissionAnchors
-	5,  // 14: syncplane.cursor.v1.ReadAccess.rules:type_name -> syncplane.cursor.v1.EntityReadRule
-	14, // 15: syncplane.cursor.v1.PermissionAnchors.rows:type_name -> syncplane.cursor.v1.ClosureSet.Entry
-	15, // 16: syncplane.cursor.v1.StoredSets.subscriptions:type_name -> syncplane.v1.Subscription
-	10, // 17: syncplane.cursor.v1.StoredSets.closure:type_name -> syncplane.cursor.v1.ClosureSet
-	9,  // 18: syncplane.cursor.v1.StoredSets.windows:type_name -> syncplane.cursor.v1.WindowState
-	10, // 19: syncplane.cursor.v1.StoredSets.window:type_name -> syncplane.cursor.v1.ClosureSet
-	14, // 20: syncplane.cursor.v1.ClosureSet.entries:type_name -> syncplane.cursor.v1.ClosureSet.Entry
-	21, // [21:21] is the sub-list for method output_type
-	21, // [21:21] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	7,  // 7: syncplane.cursor.v1.Cursor.caller_access_ref:type_name -> syncplane.cursor.v1.StateRef
+	3,  // 8: syncplane.cursor.v1.AccessMove.from:type_name -> syncplane.cursor.v1.AnchorRef
+	3,  // 9: syncplane.cursor.v1.AccessMove.to:type_name -> syncplane.cursor.v1.AnchorRef
+	3,  // 10: syncplane.cursor.v1.AccessMove.more_from:type_name -> syncplane.cursor.v1.AnchorRef
+	3,  // 11: syncplane.cursor.v1.AccessMove.more_to:type_name -> syncplane.cursor.v1.AnchorRef
+	2,  // 12: syncplane.cursor.v1.AccessMove.from_within:type_name -> syncplane.cursor.v1.WithinState
+	13, // 13: syncplane.cursor.v1.WithinState.subjects:type_name -> syncplane.cursor.v1.WithinState.SubjectsEntry
+	6,  // 14: syncplane.cursor.v1.ReadAccess.permissions:type_name -> syncplane.cursor.v1.PermissionAnchors
+	5,  // 15: syncplane.cursor.v1.ReadAccess.rules:type_name -> syncplane.cursor.v1.EntityReadRule
+	14, // 16: syncplane.cursor.v1.PermissionAnchors.rows:type_name -> syncplane.cursor.v1.ClosureSet.Entry
+	15, // 17: syncplane.cursor.v1.StoredSets.subscriptions:type_name -> syncplane.v1.Subscription
+	10, // 18: syncplane.cursor.v1.StoredSets.closure:type_name -> syncplane.cursor.v1.ClosureSet
+	9,  // 19: syncplane.cursor.v1.StoredSets.windows:type_name -> syncplane.cursor.v1.WindowState
+	10, // 20: syncplane.cursor.v1.StoredSets.window:type_name -> syncplane.cursor.v1.ClosureSet
+	14, // 21: syncplane.cursor.v1.ClosureSet.entries:type_name -> syncplane.cursor.v1.ClosureSet.Entry
+	22, // [22:22] is the sub-list for method output_type
+	22, // [22:22] is the sub-list for method input_type
+	22, // [22:22] is the sub-list for extension type_name
+	22, // [22:22] is the sub-list for extension extendee
+	0,  // [0:22] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_cursor_v1_cursor_proto_init() }

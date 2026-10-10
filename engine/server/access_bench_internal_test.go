@@ -294,21 +294,29 @@ func (ab *accessBench) resolve(b *testing.B) *accessSet {
 	return set
 }
 
-// pull pulls as the caller from cursor until no page remains, and returns the
-// last cursor and every page.
-func (ab *accessBench) pull(b *testing.B, cursor []byte) ([]byte, []*syncplanev1.PullResponse) {
+// pull pulls as the caller from cursor until no page remains, as a client
+// that holds the CallerAccess whose version is held (0 for none) and applies
+// CallerAccessDelta. It returns the last cursor, the version the client then
+// holds, and every page.
+func (ab *accessBench) pull(b *testing.B, cursor []byte, held uint64) ([]byte, uint64, []*syncplanev1.PullResponse) {
 	var pages []*syncplanev1.PullResponse
 	for {
 		resp, err := ab.srv.Pull(ab.as, connect.NewRequest(&syncplanev1.PullRequest{
 			WorkspaceId: "ws", ClientId: "c-me", Cursor: cursor,
+			CallerAccessVersion: proto.Uint64(held),
 		}))
 		if err != nil {
 			b.Fatal(err)
 		}
 		pages = append(pages, resp.Msg)
 		cursor = resp.Msg.GetNextCursor()
+		if ca := resp.Msg.GetCallerAccess(); ca != nil {
+			held = ca.GetVersion()
+		} else if d := resp.Msg.GetCallerAccessDelta(); d != nil {
+			held = d.GetVersion()
+		}
 		if !resp.Msg.GetHasMore() {
-			return cursor, pages
+			return cursor, held, pages
 		}
 	}
 }
@@ -329,13 +337,13 @@ func (ab *accessBench) grantExtra(b *testing.B, repos int, grant bool) {
 	}
 }
 
-// reportPages reports the encoded size of pages and of the CallerAccess they
-// carry.
+// reportPages reports the encoded size of pages and of the CallerAccess, or
+// the delta to it, they carry.
 func reportPages(b *testing.B, pages []*syncplanev1.PullResponse) {
 	var total, ca int
 	for _, p := range pages {
 		total += proto.Size(p)
-		ca += proto.Size(p.GetCallerAccess())
+		ca += proto.Size(p.GetCallerAccess()) + proto.Size(p.GetCallerAccessDelta())
 	}
 	b.ReportMetric(float64(total), "resp-B")
 	b.ReportMetric(float64(ca), "caller-access-B")
@@ -468,10 +476,10 @@ func BenchmarkPullAccessIdle(b *testing.B) {
 		c := accessBenchCase{repos: repos}
 		b.Run(c.name(), func(b *testing.B) {
 			ab := newAccessBench(b, c)
-			cursor, _ := ab.pull(b, nil)
+			cursor, held, _ := ab.pull(b, nil, 0)
 			var pages []*syncplanev1.PullResponse
 			for b.Loop() {
-				_, pages = ab.pull(b, cursor)
+				_, _, pages = ab.pull(b, cursor, held)
 			}
 			reportPages(b, pages)
 		})
@@ -479,15 +487,15 @@ func BenchmarkPullAccessIdle(b *testing.B) {
 }
 
 // BenchmarkPullAccessChange measures a pull after one of the caller's grants
-// changed: it resyncs the rows below the moved repo and sends the whole
-// CallerAccess. Each iteration grants or revokes a role at one more repo,
-// and only the pull is timed.
+// changed: it resyncs the rows below the moved repo and sends a
+// CallerAccessDelta. Each iteration grants or revokes a role at one more
+// repo, and only the pull is timed.
 func BenchmarkPullAccessChange(b *testing.B) {
 	for _, repos := range accessScales {
 		c := accessBenchCase{repos: repos}
 		b.Run(c.name(), func(b *testing.B) {
 			ab := newAccessBench(b, c)
-			cursor, _ := ab.pull(b, nil)
+			cursor, held, _ := ab.pull(b, nil, 0)
 			var pages []*syncplanev1.PullResponse
 			grant := true
 			for b.Loop() {
@@ -495,9 +503,9 @@ func BenchmarkPullAccessChange(b *testing.B) {
 				ab.grantExtra(b, repos, grant)
 				grant = !grant
 				b.StartTimer()
-				cursor, pages = ab.pull(b, cursor)
-				if !slices.ContainsFunc(pages, func(p *syncplanev1.PullResponse) bool { return p.GetCallerAccess() != nil }) {
-					b.Fatal("a pull after a grant change sent no CallerAccess")
+				cursor, held, pages = ab.pull(b, cursor, held)
+				if !slices.ContainsFunc(pages, func(p *syncplanev1.PullResponse) bool { return p.GetCallerAccessDelta() != nil }) {
+					b.Fatal("a pull after a grant change sent no CallerAccessDelta")
 				}
 			}
 			reportPages(b, pages)
@@ -514,7 +522,7 @@ func BenchmarkPullAccessBootstrap(b *testing.B) {
 			ab := newAccessBench(b, c)
 			var pages []*syncplanev1.PullResponse
 			for b.Loop() {
-				_, pages = ab.pull(b, nil)
+				_, _, pages = ab.pull(b, nil, 0)
 			}
 			reportPages(b, pages)
 		})

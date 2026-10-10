@@ -186,6 +186,16 @@ export const metaCallerAccess = (workspaceId: string): string =>
 	`${metaWsPrefix(workspaceId)}callerAccess`;
 
 /**
+ * The CallerAccess.version of one workspace's {@link metaCallerAccess}, as a
+ * decimal string, so a pull can name the summary it holds
+ * (PullRequest.caller_access_version) without decoding it. Written and
+ * deleted in the same transaction as the summary. Absent when the summary
+ * is, and when the server sent the summary without a version.
+ */
+export const metaCallerAccessVersion = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}callerAccessVersion`;
+
+/**
  * How many mutations of one workspace's pending queue can change the
  * caller's grants (see access.ts pendingChangesAccess), counted when its
  * {@link metaLastMutationId} held the value the record names. Written in the

@@ -1,0 +1,103 @@
+{
+	"comment": "Shared conformance vectors for the change from one CallerAccess to another: engine/server/accesssync.go (callerAccessDeltaOf) must find `delta` from `base` to `want`, and client/src/access.ts (applyAccessDelta) must turn `base` into `want` with it. A summary gives the caller's `subjects`, its `root` permissions, and `rows`, which maps each row, as \"entity/key\", to the permissions held there and not at the root. A delta gives `set`, each row whose permissions changed or that is new, with all the permissions it now holds, and `removed`, the rows that `want` does not list. Its wire form groups and sorts them as CallerAccessDelta documents. A null delta means no delta can carry the change, and the server sends the whole summary.",
+	"cases": [
+		{
+			"name": "a row gains a permission",
+			"base": {
+				"subjects": ["u"],
+				"root": [],
+				"rows": { "project/p1": ["a"], "project/p2": ["a"] }
+			},
+			"want": {
+				"subjects": ["u"],
+				"root": [],
+				"rows": { "project/p1": ["a", "b"], "project/p2": ["a"] }
+			},
+			"delta": { "set": { "project/p1": ["a", "b"] }, "removed": [] }
+		},
+		{
+			"name": "a row is new",
+			"base": { "subjects": ["u"], "root": ["r"], "rows": { "project/p1": ["a"] } },
+			"want": {
+				"subjects": ["u"],
+				"root": ["r"],
+				"rows": { "project/p1": ["a"], "project/p2": ["b"] }
+			},
+			"delta": { "set": { "project/p2": ["b"] }, "removed": [] }
+		},
+		{
+			"name": "a row holds nothing any more",
+			"base": {
+				"subjects": ["u"],
+				"root": [],
+				"rows": { "project/p1": ["a"], "project/p2": ["b"] }
+			},
+			"want": { "subjects": ["u"], "root": [], "rows": { "project/p1": ["a"] } },
+			"delta": { "set": {}, "removed": ["project/p2"] }
+		},
+		{
+			"name": "a row moves to another group and the group it leaves empties",
+			"base": {
+				"subjects": ["u"],
+				"root": [],
+				"rows": { "project/p1": ["a"], "task/t1": ["c"], "project/p2": ["b"] }
+			},
+			"want": {
+				"subjects": ["u"],
+				"root": [],
+				"rows": { "project/p1": ["a"], "task/t1": ["b"], "project/p2": ["b"] }
+			},
+			"delta": { "set": { "task/t1": ["b"] }, "removed": [] }
+		},
+		{
+			"name": "rows of several entities change in several groups",
+			"base": {
+				"subjects": ["u", "team"],
+				"root": [],
+				"rows": {
+					"project/p1": ["a"],
+					"project/p3": ["a"],
+					"task/t1": ["a"],
+					"task/t2": ["a", "b"],
+					"project/p2": ["b"]
+				}
+			},
+			"want": {
+				"subjects": ["u", "team"],
+				"root": [],
+				"rows": {
+					"project/p1": ["a", "b"],
+					"project/p3": ["a"],
+					"task/t1": ["a", "b"],
+					"project/p4": ["b"]
+				}
+			},
+			"delta": {
+				"set": { "project/p1": ["a", "b"], "task/t1": ["a", "b"], "project/p4": ["b"] },
+				"removed": ["project/p2", "task/t2"]
+			}
+		},
+		{
+			"name": "every row goes",
+			"base": {
+				"subjects": ["u"],
+				"root": [],
+				"rows": { "task/t2": ["a"], "project/p3": ["a"], "project/p1": ["b"] }
+			},
+			"want": { "subjects": ["u"], "root": [], "rows": {} },
+			"delta": { "set": {}, "removed": ["project/p1", "project/p3", "task/t2"] }
+		},
+		{
+			"name": "the root permissions change",
+			"base": { "subjects": ["u"], "root": [], "rows": { "project/p1": ["a"] } },
+			"want": { "subjects": ["u"], "root": ["a"], "rows": {} },
+			"delta": null
+		},
+		{
+			"name": "the subjects change",
+			"base": { "subjects": ["u"], "root": [], "rows": { "project/p1": ["a"] } },
+			"want": { "subjects": ["u", "team"], "root": [], "rows": { "project/p1": ["a"] } },
+			"delta": null
+		}
+	]
+}

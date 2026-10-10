@@ -16,7 +16,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/service.proto.
  */
 export const file_syncplane_v1_service: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvc2VydmljZS5wcm90bxIMc3luY3BsYW5lLnYxIlEKDldvcmtzcGFjZUJhdGNoEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIpCgltdXRhdGlvbnMYAiADKAsyFi5zeW5jcGxhbmUudjEuTXV0YXRpb24iPAoLUHVzaFJlcXVlc3QSLQoHYmF0Y2hlcxgBIAMoCzIcLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VCYXRjaCKLAQoOTXV0YXRpb25SZXN1bHQSEwoLbXV0YXRpb25faWQYASABKAQSLAoGc3RhdHVzGAIgASgOMhwuc3luY3BsYW5lLnYxLk11dGF0aW9uU3RhdHVzEgsKA3NlcRgDIAEoBBISCgplcnJvcl9jb2RlGAQgASgJEhUKDWVycm9yX21lc3NhZ2UYBSABKAkiggEKEFdvcmtzcGFjZVJlc3VsdHMSFAoMd29ya3NwYWNlX2lkGAEgASgJEi0KB3Jlc3VsdHMYAiADKAsyHC5zeW5jcGxhbmUudjEuTXV0YXRpb25SZXN1bHQSEgoKZXJyb3JfY29kZRgDIAEoCRIVCg1lcnJvcl9tZXNzYWdlGAQgASgJIlgKDFB1c2hSZXNwb25zZRIvCgdyZXN1bHRzGAEgAygLMh4uc3luY3BsYW5lLnYxLldvcmtzcGFjZVJlc3VsdHMSFwoPc2NoZW1hX3JldmlzaW9uGAIgASgJIrQBCgtQdWxsUmVxdWVzdBIUCgx3b3Jrc3BhY2VfaWQYASABKAkSEQoJY2xpZW50X2lkGAIgASgJEg4KBmN1cnNvchgDIAEoDBIxCg1zdWJzY3JpcHRpb25zGAQgAygLMhouc3luY3BsYW5lLnYxLlN1YnNjcmlwdGlvbhINCgVsaW1pdBgFIAEoDRIZChFub19kZWx0YV9lbnRpdGllcxgGIAMoCRIPCgdtaW5fc2VxGAcgASgEIuEBCgxQdWxsUmVzcG9uc2USIgoFcGF0Y2gYASABKAsyEy5zeW5jcGxhbmUudjEuUGF0Y2gSEwoLbmV4dF9jdXJzb3IYAiABKAwSHgoWbGFzdF9hY2tlZF9tdXRhdGlvbl9pZBgDIAEoBBINCgVyZXNldBgEIAEoCBIQCghoYXNfbW9yZRgFIAEoCBILCgNzZXEYBiABKAQSFwoPc2NoZW1hX3JldmlzaW9uGAcgASgJEjEKDWNhbGxlcl9hY2Nlc3MYCCABKAsyGi5zeW5jcGxhbmUudjEuQ2FsbGVyQWNjZXNzInkKDENhbGxlckFjY2VzcxILCgNzZXEYAiABKAQSEAoIc3ViamVjdHMYAyADKAkSGAoQcm9vdF9wZXJtaXNzaW9ucxgEIAMoCRIwCg1hbmNob3JfZ3JvdXBzGAUgAygLMhkuc3luY3BsYW5lLnYxLkFuY2hvckdyb3VwIk0KC0FuY2hvckdyb3VwEhMKC3Blcm1pc3Npb25zGAEgAygJEikKB2FuY2hvcnMYAiADKAsyGC5zeW5jcGxhbmUudjEuQW5jaG9yUm93cyIqCgpBbmNob3JSb3dzEg4KBmVudGl0eRgBIAEoCRIMCgRrZXlzGAIgAygJIrgBChBCb290c3RyYXBSZXF1ZXN0EhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIRCgljbGllbnRfaWQYAiABKAkSMQoNc3Vic2NyaXB0aW9ucxgDIAMoCzIaLnN5bmNwbGFuZS52MS5TdWJzY3JpcHRpb24SGQoRcHJpb3JpdHlfZW50aXRpZXMYBCADKAkSLQoGcmVzdW1lGAUgASgLMh0uc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3VtZSIwCg9Cb290c3RyYXBSZXN1bWUSDgoGY3Vyc29yGAEgASgMEg0KBXRva2VuGAIgASgMIsIDChFCb290c3RyYXBSZXNwb25zZRI2CgViZWdpbhgBIAEoCzIlLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXNwb25zZS5CZWdpbkgAEjYKBWNodW5rGAIgASgLMiUuc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3BvbnNlLkNodW5rSAASMgoDZW5kGAMgASgLMiMuc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3BvbnNlLkVuZEgAGrMBCgVCZWdpbhIOCgZjdXJzb3IYASABKAwSHgoWbGFzdF9hY2tlZF9tdXRhdGlvbl9pZBgCIAEoBBILCgNzZXEYAyABKAQSFwoPc2NoZW1hX3JldmlzaW9uGAQgASgJEhAKCGVudGl0aWVzGAUgAygJEg8KB3Jlc3VtZWQYBiABKAgSMQoNY2FsbGVyX2FjY2VzcxgHIAEoCzIaLnN5bmNwbGFuZS52MS5DYWxsZXJBY2Nlc3MaRAoFQ2h1bmsSJQoEcm93cxgBIAMoCzIXLnN5bmNwbGFuZS52MS5Sb3dDaGFuZ2USFAoMcmVzdW1lX3Rva2VuGAIgASgMGgUKA0VuZEIGCgRib2R5Iu8CCgxRdWVyeVJlcXVlc3QSFAoMd29ya3NwYWNlX2lkGAEgASgJEg4KBmVudGl0eRgDIAEoCRIqCglwcmVkaWNhdGUYBCABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uEigKCG9yZGVyX2J5GAUgAygLMhYuc3luY3BsYW5lLnYxLk9yZGVyS2V5Eg0KBWxpbWl0GAYgASgNEg4KBm9mZnNldBgHIAEoDRINCgVhZnRlchgIIAEoDBIOCgZiZWZvcmUYCSABKAwSEAoIZ3JvdXBfYnkYCiADKAkSLAoJYWdncmVnYXRlGAsgASgOMhkuc3luY3BsYW5lLnYxLkFnZ3JlZ2F0ZU9wEhEKCXBlcl9ncm91cBgMIAEoDRIXCg9wZXJfZ3JvdXBfdG90YWwYDSABKAgSKAoGZmFjZXRzGA4gAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5RmFjZXRKBAgCEANSCWNsaWVudF9pZCKQAgoNUXVlcnlSZXNwb25zZRIlCgRyb3dzGAEgAygLMhcuc3luY3BsYW5lLnYxLlJvd0NoYW5nZRIXCg9zY2hlbWFfcmV2aXNpb24YAiABKAkSFAoMc3RhcnRfY3Vyc29yGAMgASgMEhIKCmVuZF9jdXJzb3IYBCABKAwSEAoIaGFzX21vcmUYBSABKAgSKAoGZ3JvdXBzGAYgAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5R3JvdXASLwoKcm93X2dyb3VwcxgHIAMoCzIbLnN5bmNwbGFuZS52MS5RdWVyeVJvd0dyb3VwEigKBmZhY2V0cxgIIAMoCzIYLnN5bmNwbGFuZS52MS5RdWVyeUZhY2V0IoABCg1RdWVyeVJvd0dyb3VwEicKBXZhbHVlGAEgASgLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUSJQoEcm93cxgCIAMoCzIXLnN5bmNwbGFuZS52MS5Sb3dDaGFuZ2USDQoFdG90YWwYAyABKAQSEAoIaGFzX21vcmUYBCABKAgiegoOV29ya3NwYWNlU2NvcGUSFAoMd29ya3NwYWNlX2lkGAEgASgJEg4KBmN1cnNvchgCIAEoDBIxCg1zdWJzY3JpcHRpb25zGAMgAygLMhouc3luY3BsYW5lLnYxLlN1YnNjcmlwdGlvbhIPCgdtaW5fc2VxGAQgASgEIpQBChBTdWJzY3JpYmVSZXF1ZXN0EhEKCWNsaWVudF9pZBgBIAEoCRIsCgZzY29wZXMYAiADKAsyHC5zeW5jcGxhbmUudjEuV29ya3NwYWNlU2NvcGUSDQoFbGltaXQYAyABKA0SGQoRbm9fZGVsdGFfZW50aXRpZXMYBCADKAkSFQoNc3BhcnNlX2N1cnNvchgFIAEoCCLRAQoQV29ya3NwYWNlRHJvcHBlZBI1CgZyZWFzb24YASABKA4yJS5zeW5jcGxhbmUudjEuV29ya3NwYWNlRHJvcHBlZC5SZWFzb24SDwoHbWVzc2FnZRgCIAEoCSJ1CgZSZWFzb24SFgoSUkVBU09OX1VOU1BFQ0lGSUVEEAASEAoMUkVBU09OX1JFU0VUEAESGQoVUkVBU09OX0FDQ0VTU19SRVZPS0VEEAISEAoMUkVBU09OX0VSUk9SEAMSFAoQUkVBU09OX05PX0FDQ0VTUxAEItMBChFTdWJzY3JpYmVSZXNwb25zZRIUCgx3b3Jrc3BhY2VfaWQYASABKAkSFwoPc2NoZW1hX3JldmlzaW9uGAIgASgJEioKBHBhZ2UYAyABKAsyGi5zeW5jcGxhbmUudjEuUHVsbFJlc3BvbnNlSAASEwoJY2F1Z2h0X3VwGAQgASgISAASMQoHZHJvcHBlZBgFIAEoCzIeLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VEcm9wcGVkSAASEwoJaGVhcnRiZWF0GAYgASgISABCBgoEYm9keSqRAQoOTXV0YXRpb25TdGF0dXMSHwobTVVUQVRJT05fU1RBVFVTX1VOU1BFQ0lGSUVEEAASGwoXTVVUQVRJT05fU1RBVFVTX0FQUExJRUQQARIjCh9NVVRBVElPTl9TVEFUVVNfQUxSRUFEWV9BUFBMSUVEEAISHAoYTVVUQVRJT05fU1RBVFVTX1JFSkVDVEVEEAMy7QIKC1N5bmNTZXJ2aWNlEj0KBFB1c2gSGS5zeW5jcGxhbmUudjEuUHVzaFJlcXVlc3QaGi5zeW5jcGxhbmUudjEuUHVzaFJlc3BvbnNlEj0KBFB1bGwSGS5zeW5jcGxhbmUudjEuUHVsbFJlcXVlc3QaGi5zeW5jcGxhbmUudjEuUHVsbFJlc3BvbnNlEk4KCUJvb3RzdHJhcBIeLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXF1ZXN0Gh8uc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3BvbnNlMAESTgoJU3Vic2NyaWJlEh4uc3luY3BsYW5lLnYxLlN1YnNjcmliZVJlcXVlc3QaHy5zeW5jcGxhbmUudjEuU3Vic2NyaWJlUmVzcG9uc2UwARJACgVRdWVyeRIaLnN5bmNwbGFuZS52MS5RdWVyeVJlcXVlc3QaGy5zeW5jcGxhbmUudjEuUXVlcnlSZXNwb25zZUJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_syncplane_v1_mutation, file_syncplane_v1_patch, file_syncplane_v1_query]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvc2VydmljZS5wcm90bxIMc3luY3BsYW5lLnYxIlEKDldvcmtzcGFjZUJhdGNoEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIpCgltdXRhdGlvbnMYAiADKAsyFi5zeW5jcGxhbmUudjEuTXV0YXRpb24iPAoLUHVzaFJlcXVlc3QSLQoHYmF0Y2hlcxgBIAMoCzIcLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VCYXRjaCKLAQoOTXV0YXRpb25SZXN1bHQSEwoLbXV0YXRpb25faWQYASABKAQSLAoGc3RhdHVzGAIgASgOMhwuc3luY3BsYW5lLnYxLk11dGF0aW9uU3RhdHVzEgsKA3NlcRgDIAEoBBISCgplcnJvcl9jb2RlGAQgASgJEhUKDWVycm9yX21lc3NhZ2UYBSABKAkiggEKEFdvcmtzcGFjZVJlc3VsdHMSFAoMd29ya3NwYWNlX2lkGAEgASgJEi0KB3Jlc3VsdHMYAiADKAsyHC5zeW5jcGxhbmUudjEuTXV0YXRpb25SZXN1bHQSEgoKZXJyb3JfY29kZRgDIAEoCRIVCg1lcnJvcl9tZXNzYWdlGAQgASgJIlgKDFB1c2hSZXNwb25zZRIvCgdyZXN1bHRzGAEgAygLMh4uc3luY3BsYW5lLnYxLldvcmtzcGFjZVJlc3VsdHMSFwoPc2NoZW1hX3JldmlzaW9uGAIgASgJIvIBCgtQdWxsUmVxdWVzdBIUCgx3b3Jrc3BhY2VfaWQYASABKAkSEQoJY2xpZW50X2lkGAIgASgJEg4KBmN1cnNvchgDIAEoDBIxCg1zdWJzY3JpcHRpb25zGAQgAygLMhouc3luY3BsYW5lLnYxLlN1YnNjcmlwdGlvbhINCgVsaW1pdBgFIAEoDRIZChFub19kZWx0YV9lbnRpdGllcxgGIAMoCRIPCgdtaW5fc2VxGAcgASgEEiIKFWNhbGxlcl9hY2Nlc3NfdmVyc2lvbhgIIAEoBkgAiAEBQhgKFl9jYWxsZXJfYWNjZXNzX3ZlcnNpb24inwIKDFB1bGxSZXNwb25zZRIiCgVwYXRjaBgBIAEoCzITLnN5bmNwbGFuZS52MS5QYXRjaBITCgtuZXh0X2N1cnNvchgCIAEoDBIeChZsYXN0X2Fja2VkX211dGF0aW9uX2lkGAMgASgEEg0KBXJlc2V0GAQgASgIEhAKCGhhc19tb3JlGAUgASgIEgsKA3NlcRgGIAEoBBIXCg9zY2hlbWFfcmV2aXNpb24YByABKAkSMQoNY2FsbGVyX2FjY2VzcxgIIAEoCzIaLnN5bmNwbGFuZS52MS5DYWxsZXJBY2Nlc3MSPAoTY2FsbGVyX2FjY2Vzc19kZWx0YRgJIAEoCzIfLnN5bmNwbGFuZS52MS5DYWxsZXJBY2Nlc3NEZWx0YSKKAQoMQ2FsbGVyQWNjZXNzEgsKA3NlcRgCIAEoBBIQCghzdWJqZWN0cxgDIAMoCRIYChByb290X3Blcm1pc3Npb25zGAQgAygJEjAKDWFuY2hvcl9ncm91cHMYBSADKAsyGS5zeW5jcGxhbmUudjEuQW5jaG9yR3JvdXASDwoHdmVyc2lvbhgGIAEoBiKkAQoRQ2FsbGVyQWNjZXNzRGVsdGESCwoDc2VxGAEgASgEEhQKDGJhc2VfdmVyc2lvbhgCIAEoBhIPCgd2ZXJzaW9uGAMgASgGEjAKDWFuY2hvcl9ncm91cHMYBCADKAsyGS5zeW5jcGxhbmUudjEuQW5jaG9yR3JvdXASKQoHcmVtb3ZlZBgFIAMoCzIYLnN5bmNwbGFuZS52MS5BbmNob3JSb3dzIk0KC0FuY2hvckdyb3VwEhMKC3Blcm1pc3Npb25zGAEgAygJEikKB2FuY2hvcnMYAiADKAsyGC5zeW5jcGxhbmUudjEuQW5jaG9yUm93cyIqCgpBbmNob3JSb3dzEg4KBmVudGl0eRgBIAEoCRIMCgRrZXlzGAIgAygJIrgBChBCb290c3RyYXBSZXF1ZXN0EhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIRCgljbGllbnRfaWQYAiABKAkSMQoNc3Vic2NyaXB0aW9ucxgDIAMoCzIaLnN5bmNwbGFuZS52MS5TdWJzY3JpcHRpb24SGQoRcHJpb3JpdHlfZW50aXRpZXMYBCADKAkSLQoGcmVzdW1lGAUgASgLMh0uc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3VtZSIwCg9Cb290c3RyYXBSZXN1bWUSDgoGY3Vyc29yGAEgASgMEg0KBXRva2VuGAIgASgMIsIDChFCb290c3RyYXBSZXNwb25zZRI2CgViZWdpbhgBIAEoCzIlLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXNwb25zZS5CZWdpbkgAEjYKBWNodW5rGAIgASgLMiUuc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3BvbnNlLkNodW5rSAASMgoDZW5kGAMgASgLMiMuc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3BvbnNlLkVuZEgAGrMBCgVCZWdpbhIOCgZjdXJzb3IYASABKAwSHgoWbGFzdF9hY2tlZF9tdXRhdGlvbl9pZBgCIAEoBBILCgNzZXEYAyABKAQSFwoPc2NoZW1hX3JldmlzaW9uGAQgASgJEhAKCGVudGl0aWVzGAUgAygJEg8KB3Jlc3VtZWQYBiABKAgSMQoNY2FsbGVyX2FjY2VzcxgHIAEoCzIaLnN5bmNwbGFuZS52MS5DYWxsZXJBY2Nlc3MaRAoFQ2h1bmsSJQoEcm93cxgBIAMoCzIXLnN5bmNwbGFuZS52MS5Sb3dDaGFuZ2USFAoMcmVzdW1lX3Rva2VuGAIgASgMGgUKA0VuZEIGCgRib2R5Iu8CCgxRdWVyeVJlcXVlc3QSFAoMd29ya3NwYWNlX2lkGAEgASgJEg4KBmVudGl0eRgDIAEoCRIqCglwcmVkaWNhdGUYBCABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uEigKCG9yZGVyX2J5GAUgAygLMhYuc3luY3BsYW5lLnYxLk9yZGVyS2V5Eg0KBWxpbWl0GAYgASgNEg4KBm9mZnNldBgHIAEoDRINCgVhZnRlchgIIAEoDBIOCgZiZWZvcmUYCSABKAwSEAoIZ3JvdXBfYnkYCiADKAkSLAoJYWdncmVnYXRlGAsgASgOMhkuc3luY3BsYW5lLnYxLkFnZ3JlZ2F0ZU9wEhEKCXBlcl9ncm91cBgMIAEoDRIXCg9wZXJfZ3JvdXBfdG90YWwYDSABKAgSKAoGZmFjZXRzGA4gAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5RmFjZXRKBAgCEANSCWNsaWVudF9pZCKQAgoNUXVlcnlSZXNwb25zZRIlCgRyb3dzGAEgAygLMhcuc3luY3BsYW5lLnYxLlJvd0NoYW5nZRIXCg9zY2hlbWFfcmV2aXNpb24YAiABKAkSFAoMc3RhcnRfY3Vyc29yGAMgASgMEhIKCmVuZF9jdXJzb3IYBCABKAwSEAoIaGFzX21vcmUYBSABKAgSKAoGZ3JvdXBzGAYgAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5R3JvdXASLwoKcm93X2dyb3VwcxgHIAMoCzIbLnN5bmNwbGFuZS52MS5RdWVyeVJvd0dyb3VwEigKBmZhY2V0cxgIIAMoCzIYLnN5bmNwbGFuZS52MS5RdWVyeUZhY2V0IoABCg1RdWVyeVJvd0dyb3VwEicKBXZhbHVlGAEgASgLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUSJQoEcm93cxgCIAMoCzIXLnN5bmNwbGFuZS52MS5Sb3dDaGFuZ2USDQoFdG90YWwYAyABKAQSEAoIaGFzX21vcmUYBCABKAgiuAEKDldvcmtzcGFjZVNjb3BlEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIOCgZjdXJzb3IYAiABKAwSMQoNc3Vic2NyaXB0aW9ucxgDIAMoCzIaLnN5bmNwbGFuZS52MS5TdWJzY3JpcHRpb24SDwoHbWluX3NlcRgEIAEoBBIiChVjYWxsZXJfYWNjZXNzX3ZlcnNpb24YBSABKAZIAIgBAUIYChZfY2FsbGVyX2FjY2Vzc192ZXJzaW9uIpQBChBTdWJzY3JpYmVSZXF1ZXN0EhEKCWNsaWVudF9pZBgBIAEoCRIsCgZzY29wZXMYAiADKAsyHC5zeW5jcGxhbmUudjEuV29ya3NwYWNlU2NvcGUSDQoFbGltaXQYAyABKA0SGQoRbm9fZGVsdGFfZW50aXRpZXMYBCADKAkSFQoNc3BhcnNlX2N1cnNvchgFIAEoCCLRAQoQV29ya3NwYWNlRHJvcHBlZBI1CgZyZWFzb24YASABKA4yJS5zeW5jcGxhbmUudjEuV29ya3NwYWNlRHJvcHBlZC5SZWFzb24SDwoHbWVzc2FnZRgCIAEoCSJ1CgZSZWFzb24SFgoSUkVBU09OX1VOU1BFQ0lGSUVEEAASEAoMUkVBU09OX1JFU0VUEAESGQoVUkVBU09OX0FDQ0VTU19SRVZPS0VEEAISEAoMUkVBU09OX0VSUk9SEAMSFAoQUkVBU09OX05PX0FDQ0VTUxAEItMBChFTdWJzY3JpYmVSZXNwb25zZRIUCgx3b3Jrc3BhY2VfaWQYASABKAkSFwoPc2NoZW1hX3JldmlzaW9uGAIgASgJEioKBHBhZ2UYAyABKAsyGi5zeW5jcGxhbmUudjEuUHVsbFJlc3BvbnNlSAASEwoJY2F1Z2h0X3VwGAQgASgISAASMQoHZHJvcHBlZBgFIAEoCzIeLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VEcm9wcGVkSAASEwoJaGVhcnRiZWF0GAYgASgISABCBgoEYm9keSqRAQoOTXV0YXRpb25TdGF0dXMSHwobTVVUQVRJT05fU1RBVFVTX1VOU1BFQ0lGSUVEEAASGwoXTVVUQVRJT05fU1RBVFVTX0FQUExJRUQQARIjCh9NVVRBVElPTl9TVEFUVVNfQUxSRUFEWV9BUFBMSUVEEAISHAoYTVVUQVRJT05fU1RBVFVTX1JFSkVDVEVEEAMy7QIKC1N5bmNTZXJ2aWNlEj0KBFB1c2gSGS5zeW5jcGxhbmUudjEuUHVzaFJlcXVlc3QaGi5zeW5jcGxhbmUudjEuUHVzaFJlc3BvbnNlEj0KBFB1bGwSGS5zeW5jcGxhbmUudjEuUHVsbFJlcXVlc3QaGi5zeW5jcGxhbmUudjEuUHVsbFJlc3BvbnNlEk4KCUJvb3RzdHJhcBIeLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXF1ZXN0Gh8uc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3BvbnNlMAESTgoJU3Vic2NyaWJlEh4uc3luY3BsYW5lLnYxLlN1YnNjcmliZVJlcXVlc3QaHy5zeW5jcGxhbmUudjEuU3Vic2NyaWJlUmVzcG9uc2UwARJACgVRdWVyeRIaLnN5bmNwbGFuZS52MS5RdWVyeVJlcXVlc3QaGy5zeW5jcGxhbmUudjEuUXVlcnlSZXNwb25zZUJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_syncplane_v1_mutation, file_syncplane_v1_patch, file_syncplane_v1_query]);
 
 /**
  * WorkspaceBatch is one workspace's slice of a push. Mutation ids are per
@@ -278,6 +278,17 @@ export type PullRequest = Message<"syncplane.v1.PullRequest"> & {
    * @generated from field: uint64 min_seq = 7;
    */
   minSeq: bigint;
+
+  /**
+   * The CallerAccess.version of the summary the client holds for the
+   * workspace, 0 when it holds none. A client that sets the field can apply
+   * a CallerAccessDelta, and the response carries one only when it applies
+   * to this version. Without the field, the response carries a whole
+   * CallerAccess when the cursor was issued under another one.
+   *
+   * @generated from field: optional fixed64 caller_access_version = 8;
+   */
+  callerAccessVersion?: bigint | undefined;
 };
 
 /**
@@ -364,6 +375,15 @@ export type PullResponse = Message<"syncplane.v1.PullResponse"> & {
    * @generated from field: syncplane.v1.CallerAccess caller_access = 8;
    */
   callerAccess?: CallerAccess | undefined;
+
+  /**
+   * A change to the CallerAccess that PullRequest.caller_access_version
+   * names, in place of caller_access. At most one of the two is present,
+   * and only a request that sets caller_access_version receives this one.
+   *
+   * @generated from field: syncplane.v1.CallerAccessDelta caller_access_delta = 9;
+   */
+  callerAccessDelta?: CallerAccessDelta | undefined;
 };
 
 /**
@@ -384,7 +404,7 @@ export const PullResponseSchema: GenMessage<PullResponse> = /*@__PURE__*/
  * A permission that no list names is held nowhere.
  *
  * Every list except subjects is sorted and holds no duplicates, so equal
- * access has one encoding, apart from seq.
+ * access has one encoding, apart from seq and version.
  *
  * It is advisory. The server decides every read and every write itself, and a
  * client uses this to predict an answer, for example to hide a control the
@@ -426,6 +446,14 @@ export type CallerAccess = Message<"syncplane.v1.CallerAccess"> & {
    * @generated from field: repeated syncplane.v1.AnchorGroup anchor_groups = 5;
    */
   anchorGroups: AnchorGroup[];
+
+  /**
+   * Identifies what the summary holds: equal summaries have equal versions,
+   * whatever their seq. Never 0 in a summary from the server.
+   *
+   * @generated from field: fixed64 version = 6;
+   */
+  version: bigint;
 };
 
 /**
@@ -434,6 +462,67 @@ export type CallerAccess = Message<"syncplane.v1.CallerAccess"> & {
  */
 export const CallerAccessSchema: GenMessage<CallerAccess> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_service, 7);
+
+/**
+ * A change to a CallerAccess: applied to the summary whose version is
+ * base_version, it gives the summary whose version is version. Subjects and
+ * root_permissions do not change.
+ *
+ * To apply it, put each row that anchor_groups lists in the group with the
+ * permissions listed there, and take it out of the group it was in. Then
+ * take each row that removed lists out of every group, and drop the groups
+ * that hold no rows. A client whose summary has another version must not
+ * apply it: when its summary already has version, the delta changes nothing,
+ * and otherwise the client keeps its summary and pulls again with
+ * PullRequest.caller_access_version, which gets it the change from there.
+ *
+ * @generated from message syncplane.v1.CallerAccessDelta
+ */
+export type CallerAccessDelta = Message<"syncplane.v1.CallerAccessDelta"> & {
+  /**
+   * The workspace sequence the new summary is current through.
+   *
+   * @generated from field: uint64 seq = 1;
+   */
+  seq: bigint;
+
+  /**
+   * The version of the summary the delta applies to.
+   *
+   * @generated from field: fixed64 base_version = 2;
+   */
+  baseVersion: bigint;
+
+  /**
+   * The version of the summary the delta gives.
+   *
+   * @generated from field: fixed64 version = 3;
+   */
+  version: bigint;
+
+  /**
+   * The rows whose permissions changed, and rows the caller holds
+   * permissions at for the first time, each with all the permissions it now
+   * holds there. Ordered and grouped as in CallerAccess.anchor_groups.
+   *
+   * @generated from field: repeated syncplane.v1.AnchorGroup anchor_groups = 4;
+   */
+  anchorGroups: AnchorGroup[];
+
+  /**
+   * The rows that are in no group of the new summary. Sorted by entity.
+   *
+   * @generated from field: repeated syncplane.v1.AnchorRows removed = 5;
+   */
+  removed: AnchorRows[];
+};
+
+/**
+ * Describes the message syncplane.v1.CallerAccessDelta.
+ * Use `create(CallerAccessDeltaSchema)` to create a new message.
+ */
+export const CallerAccessDeltaSchema: GenMessage<CallerAccessDelta> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_service, 8);
 
 /**
  * Rows at which the caller holds the same set of permissions.
@@ -463,7 +552,7 @@ export type AnchorGroup = Message<"syncplane.v1.AnchorGroup"> & {
  * Use `create(AnchorGroupSchema)` to create a new message.
  */
 export const AnchorGroupSchema: GenMessage<AnchorGroup> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 8);
+  messageDesc(file_syncplane_v1_service, 9);
 
 /**
  * Rows of one entity, by key.
@@ -489,7 +578,7 @@ export type AnchorRows = Message<"syncplane.v1.AnchorRows"> & {
  * Use `create(AnchorRowsSchema)` to create a new message.
  */
 export const AnchorRowsSchema: GenMessage<AnchorRows> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 9);
+  messageDesc(file_syncplane_v1_service, 10);
 
 /**
  * @generated from message syncplane.v1.BootstrapRequest
@@ -541,7 +630,7 @@ export type BootstrapRequest = Message<"syncplane.v1.BootstrapRequest"> & {
  * Use `create(BootstrapRequestSchema)` to create a new message.
  */
 export const BootstrapRequestSchema: GenMessage<BootstrapRequest> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 10);
+  messageDesc(file_syncplane_v1_service, 11);
 
 /**
  * BootstrapResume names an interrupted snapshot and how far it got, so the next
@@ -578,7 +667,7 @@ export type BootstrapResume = Message<"syncplane.v1.BootstrapResume"> & {
  * Use `create(BootstrapResumeSchema)` to create a new message.
  */
 export const BootstrapResumeSchema: GenMessage<BootstrapResume> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 11);
+  messageDesc(file_syncplane_v1_service, 12);
 
 /**
  * @generated from message syncplane.v1.BootstrapResponse
@@ -613,7 +702,7 @@ export type BootstrapResponse = Message<"syncplane.v1.BootstrapResponse"> & {
  * Use `create(BootstrapResponseSchema)` to create a new message.
  */
 export const BootstrapResponseSchema: GenMessage<BootstrapResponse> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 12);
+  messageDesc(file_syncplane_v1_service, 13);
 
 /**
  * @generated from message syncplane.v1.BootstrapResponse.Begin
@@ -681,7 +770,7 @@ export type BootstrapResponse_Begin = Message<"syncplane.v1.BootstrapResponse.Be
  * Use `create(BootstrapResponse_BeginSchema)` to create a new message.
  */
 export const BootstrapResponse_BeginSchema: GenMessage<BootstrapResponse_Begin> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 12, 0);
+  messageDesc(file_syncplane_v1_service, 13, 0);
 
 /**
  * @generated from message syncplane.v1.BootstrapResponse.Chunk
@@ -709,7 +798,7 @@ export type BootstrapResponse_Chunk = Message<"syncplane.v1.BootstrapResponse.Ch
  * Use `create(BootstrapResponse_ChunkSchema)` to create a new message.
  */
 export const BootstrapResponse_ChunkSchema: GenMessage<BootstrapResponse_Chunk> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 12, 1);
+  messageDesc(file_syncplane_v1_service, 13, 1);
 
 /**
  * @generated from message syncplane.v1.BootstrapResponse.End
@@ -722,7 +811,7 @@ export type BootstrapResponse_End = Message<"syncplane.v1.BootstrapResponse.End"
  * Use `create(BootstrapResponse_EndSchema)` to create a new message.
  */
 export const BootstrapResponse_EndSchema: GenMessage<BootstrapResponse_End> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 12, 2);
+  messageDesc(file_syncplane_v1_service, 13, 2);
 
 /**
  * @generated from message syncplane.v1.QueryRequest
@@ -881,7 +970,7 @@ export type QueryRequest = Message<"syncplane.v1.QueryRequest"> & {
  * Use `create(QueryRequestSchema)` to create a new message.
  */
 export const QueryRequestSchema: GenMessage<QueryRequest> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 13);
+  messageDesc(file_syncplane_v1_service, 14);
 
 /**
  * @generated from message syncplane.v1.QueryResponse
@@ -962,7 +1051,7 @@ export type QueryResponse = Message<"syncplane.v1.QueryResponse"> & {
  * Use `create(QueryResponseSchema)` to create a new message.
  */
 export const QueryResponseSchema: GenMessage<QueryResponse> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 14);
+  messageDesc(file_syncplane_v1_service, 15);
 
 /**
  * QueryRowGroup is one group of a read that answers with rows: the value its
@@ -1010,7 +1099,7 @@ export type QueryRowGroup = Message<"syncplane.v1.QueryRowGroup"> & {
  * Use `create(QueryRowGroupSchema)` to create a new message.
  */
 export const QueryRowGroupSchema: GenMessage<QueryRowGroup> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 15);
+  messageDesc(file_syncplane_v1_service, 16);
 
 /**
  * WorkspaceScope is one workspace's slice of a Subscribe stream: where to
@@ -1052,6 +1141,15 @@ export type WorkspaceScope = Message<"syncplane.v1.WorkspaceScope"> & {
    * @generated from field: uint64 min_seq = 4;
    */
   minSeq: bigint;
+
+  /**
+   * PullRequest.caller_access_version, for the first page of this scope. A
+   * later page sends what changed since the CallerAccess or delta the scope
+   * sent last.
+   *
+   * @generated from field: optional fixed64 caller_access_version = 5;
+   */
+  callerAccessVersion?: bigint | undefined;
 };
 
 /**
@@ -1059,7 +1157,7 @@ export type WorkspaceScope = Message<"syncplane.v1.WorkspaceScope"> & {
  * Use `create(WorkspaceScopeSchema)` to create a new message.
  */
 export const WorkspaceScopeSchema: GenMessage<WorkspaceScope> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 16);
+  messageDesc(file_syncplane_v1_service, 17);
 
 /**
  * @generated from message syncplane.v1.SubscribeRequest
@@ -1122,7 +1220,7 @@ export type SubscribeRequest = Message<"syncplane.v1.SubscribeRequest"> & {
  * Use `create(SubscribeRequestSchema)` to create a new message.
  */
 export const SubscribeRequestSchema: GenMessage<SubscribeRequest> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 17);
+  messageDesc(file_syncplane_v1_service, 18);
 
 /**
  * WorkspaceDropped ends one workspace's participation in a stream. The server
@@ -1151,7 +1249,7 @@ export type WorkspaceDropped = Message<"syncplane.v1.WorkspaceDropped"> & {
  * Use `create(WorkspaceDroppedSchema)` to create a new message.
  */
 export const WorkspaceDroppedSchema: GenMessage<WorkspaceDropped> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 18);
+  messageDesc(file_syncplane_v1_service, 19);
 
 /**
  * @generated from enum syncplane.v1.WorkspaceDropped.Reason
@@ -1202,7 +1300,7 @@ export enum WorkspaceDropped_Reason {
  * Describes the enum syncplane.v1.WorkspaceDropped.Reason.
  */
 export const WorkspaceDropped_ReasonSchema: GenEnum<WorkspaceDropped_Reason> = /*@__PURE__*/
-  enumDesc(file_syncplane_v1_service, 18, 0);
+  enumDesc(file_syncplane_v1_service, 19, 0);
 
 /**
  * SubscribeResponse is one frame of the stream, always naming the workspace it
@@ -1277,7 +1375,7 @@ export type SubscribeResponse = Message<"syncplane.v1.SubscribeResponse"> & {
  * Use `create(SubscribeResponseSchema)` to create a new message.
  */
 export const SubscribeResponseSchema: GenMessage<SubscribeResponse> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 19);
+  messageDesc(file_syncplane_v1_service, 20);
 
 /**
  * @generated from enum syncplane.v1.MutationStatus

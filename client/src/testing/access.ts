@@ -1,6 +1,6 @@
 import { create, type DescMessage } from '@bufbuild/protobuf';
 
-import { accessParentFields } from '../access.js';
+import { accessParentFields, type AnchoredRow, anchorGroupsOf, compareUtf8 } from '../access.js';
 import { type CallerAccess, CallerAccessSchema } from '../gen/syncplane/v1/service_pb.js';
 import { entityOptionsOf, refShapes } from '../mutations.js';
 
@@ -174,38 +174,15 @@ export function callerAccessOf(access: Omit<TestCallerAccess, 'roles'>): CallerA
 			}
 		}
 	}
-	// The permissions of a group, joined, → entity → keys.
-	const groups = new Map<string, { permissions: string[]; anchors: Map<string, string[]> }>();
+	const anchored: AnchoredRow[] = [];
 	for (const [ entity, keys ] of rows) {
 		for (const [ key, held ] of keys) {
-			const permissions = [ ...held ].sort();
-			const id = permissions.join('\u0000');
-			let group = groups.get(id);
-			if (group === undefined) groups.set(id, group = { permissions, anchors: new Map() });
-			let groupKeys = group.anchors.get(entity);
-			if (groupKeys === undefined) group.anchors.set(entity, groupKeys = []);
-			groupKeys.push(key);
+			anchored.push({ entity, key, permissions: [ ...held ].sort(compareUtf8) });
 		}
 	}
 	return create(CallerAccessSchema, {
 		subjects: [ ...(access.subjects ?? []) ],
-		rootPermissions: [ ...root ].sort(),
-		anchorGroups: [ ...groups.values() ]
-			.sort((a, b) => comparePermissions(a.permissions, b.permissions))
-			.map((g) => ({
-				permissions: g.permissions,
-				anchors: [ ...g.anchors.keys() ].sort().map((entity) => ({
-					entity,
-					keys: g.anchors.get(entity)!.sort(),
-				})),
-			})),
+		rootPermissions: [ ...root ].sort(compareUtf8),
+		anchorGroups: anchorGroupsOf(anchored),
 	});
-}
-
-/** Orders two sorted permission lists element by element, a prefix first. */
-function comparePermissions(a: readonly string[], b: readonly string[]): number {
-	for (let i = 0; i < Math.min(a.length, b.length); i++) {
-		if (a[i] !== b[i]) return a[i]! < b[i]! ? -1 : 1;
-	}
-	return a.length - b.length;
 }

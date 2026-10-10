@@ -93,8 +93,13 @@ type cursorState struct {
 	accessGen     uint64
 	accessPending *syncplanecursorv1.ReadAccess
 	// callerAccessHash is the hash of the CallerAccess the client last
-	// received (Cursor.caller_access_hash).
-	callerAccessHash uint64
+	// received (Cursor.caller_access_hash), and callerAccessID/Gen reference
+	// the stored copy of it (Cursor.caller_access_ref). callerAccessPending
+	// is a CallerAccess encodeCursor must store before issuing the cursor.
+	callerAccessHash    uint64
+	callerAccessID      uint64
+	callerAccessGen     uint64
+	callerAccessPending *syncplanev1.CallerAccess
 	// movesThrough is the sequence through which the client's rows reflect
 	// every access move (Cursor.access_moves_through).
 	movesThrough uint64
@@ -184,6 +189,8 @@ func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte, verdic
 		accessID:         c.GetAccessRef().GetId(),
 		accessGen:        c.GetAccessRef().GetGen(),
 		callerAccessHash: c.GetCallerAccessHash(),
+		callerAccessID:   c.GetCallerAccessRef().GetId(),
+		callerAccessGen:  c.GetCallerAccessRef().GetGen(),
 		movesThrough:     c.GetAccessMovesThrough(),
 	}
 	ref := c.GetSetsRef()
@@ -382,6 +389,8 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 		return nil, err
 	}
 	emitter.noDeltaEntities = noDeltaEntitySet(msg.GetNoDeltaEntities())
+	emitter.callerAccessDeltas = msg.CallerAccessVersion != nil
+	emitter.heldCallerAccess = msg.GetCallerAccessVersion()
 	emitter.admit(adm)
 
 	// Resolve every Permissions hook OUTSIDE the read snapshot, mirroring
@@ -805,7 +814,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		next := cur
 		next.subHash, next.epoch, next.storeEpoch, next.subs = wantHash, epoch, storeEpoch, subs
 		emitter.stampAccess(&next, cur)
-		resp.CallerAccess = emitter.callerAccessUpdate(cur, len(rawCursor) > 0, current)
+		resp.CallerAccess, resp.CallerAccessDelta = emitter.callerAccessUpdate(cur, len(rawCursor) > 0, current)
 		resp.NextCursor = s.encodeCursor(emitter.ctx, emitter.ws, &next)
 		resp.Seq = next.seq
 		return resp, next, resetNone, nil
@@ -1011,7 +1020,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 			next.windows = emitter.windowStates()
 		}
 	}
-	resp.CallerAccess = emitter.callerAccessUpdate(cur, len(rawCursor) > 0, current)
+	resp.CallerAccess, resp.CallerAccessDelta = emitter.callerAccessUpdate(cur, len(rawCursor) > 0, current)
 	resp.NextCursor = s.encodeCursor(emitter.ctx, emitter.ws, &next)
 	resp.Seq = next.seq
 	return resp, next, resetNone, nil

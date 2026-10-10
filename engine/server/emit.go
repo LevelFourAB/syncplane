@@ -133,11 +133,19 @@ type rowEmitter struct {
 	// the old side of a resync reads nothing of (see hideOnOldSide).
 	readAccess     *syncplanecursorv1.ReadAccess
 	readAccessHash uint64
-	// callerAccess and callerAccessHash render access for the client, once
-	// per binding (see boundCallerAccess).
+	// callerAccess, callerAccessHash and callerAccessSize render access for
+	// the client, once per binding (see boundCallerAccess).
 	callerAccess     *syncplanev1.CallerAccess
 	callerAccessHash uint64
+	callerAccessSize int
 	hiddenEntities   []string
+	// callerAccessDeltas is set for a client that applies CallerAccessDelta
+	// (PullRequest.caller_access_version); heldCallerAccess is then the
+	// version of the CallerAccess it holds, 0 for none. Each response that
+	// sends the client a summary or a delta moves heldCallerAccess on, which
+	// is what a stream's later pages diff from.
+	callerAccessDeltas bool
+	heldCallerAccess   uint64
 	// accessOnly marks the old side of a resync whose scope and filter epoch
 	// match the new side's, so only the caller's access differs between them.
 	accessOnly bool
@@ -516,7 +524,7 @@ func (e *rowEmitter) useAccess(set *accessSet, chains *accessChains) {
 	e.access = set
 	e.chains = chains
 	e.readAccess, e.readAccessHash = nil, 0
-	e.callerAccess, e.callerAccessHash = nil, 0
+	e.callerAccess, e.callerAccessHash, e.callerAccessSize = nil, 0, 0
 	clear(e.combined)
 	clear(e.guardReads)
 }

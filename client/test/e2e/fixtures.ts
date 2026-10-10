@@ -1,7 +1,11 @@
 import type { BrowserContext, Page } from '@playwright/test';
 
-import { SERVER_URL_ENV } from './global-setup.js';
+import { ACCESS_SERVER_URL_ENV, SERVER_URL_ENV } from './global-setup.js';
 import type {
+	AccessEntity,
+	AccessSamples,
+	AccessView,
+	AccessWireView,
 	MarkView,
 	OpenOptions,
 	PeerView,
@@ -14,6 +18,15 @@ import type {
 export function serverUrl(): string {
 	const url = process.env[SERVER_URL_ENV];
 	if (url === undefined) throw new Error(`${SERVER_URL_ENV} unset — global setup did not run`);
+	return url;
+}
+
+/** Address of the access-model testserver global setup spawned for this run. */
+export function accessServerUrl(): string {
+	const url = process.env[ACCESS_SERVER_URL_ENV];
+	if (url === undefined) {
+		throw new Error(`${ACCESS_SERVER_URL_ENV} unset — global setup did not run`);
+	}
 	return url;
 }
 
@@ -40,20 +53,21 @@ export interface RpcStats {
  *
  * The counters are process-wide, which is why the e2e project runs
  * single-worker; specs still compare against a snapshot taken inside the test
- * rather than against absolute totals.
+ * rather than against absolute totals. `server` defaults to the default-schema
+ * server; the access-model server keeps counters of its own.
  */
-export async function rpcStats(): Promise<RpcStats> {
-	const res = await fetch(new URL('/debug/rpc', serverUrl()));
+export async function rpcStats(server = serverUrl()): Promise<RpcStats> {
+	const res = await fetch(new URL('/debug/rpc', server));
 	if (!res.ok) throw new Error(`/debug/rpc responded ${res.status}`);
 	return await res.json() as RpcStats;
 }
 
-export async function activeCalls(method: string): Promise<number> {
-	return (await rpcStats()).active[method] ?? 0;
+export async function activeCalls(method: string, server = serverUrl()): Promise<number> {
+	return (await rpcStats(server)).active[method] ?? 0;
 }
 
-export async function totalCalls(method: string): Promise<number> {
-	return (await rpcStats()).total[method] ?? 0;
+export async function totalCalls(method: string, server = serverUrl()): Promise<number> {
+	return (await rpcStats(server)).total[method] ?? 0;
 }
 
 /**
@@ -85,6 +99,26 @@ export async function collectGarbage(workspaceId: string): Promise<void> {
 	if (!res.ok) throw new Error(`/debug/gc responded ${res.status}: ${await res.text()}`);
 }
 
+/** One row write or delete for trustedWrite, in testserver's /debug/trusted form. */
+export type TrustedWrite =
+	| { entity: string; value: Record<string, unknown> }
+	| { entity: string; key: string; delete: true };
+
+/**
+ * Writes rows of the access-model schema as a trusted caller, through the
+ * access-model testserver's /debug/trusted, in one transaction. Values are
+ * the entity message in protojson form. This is how a spec seeds and changes
+ * grant rows: a schema that uses the access model admits no client write
+ * before a grant exists.
+ */
+export async function trustedWrite(workspaceId: string, writes: TrustedWrite[]): Promise<void> {
+	const res = await fetch(new URL('/debug/trusted', accessServerUrl()), {
+		method: 'POST',
+		body: JSON.stringify({ workspace: workspaceId, writes }),
+	});
+	if (!res.ok) throw new Error(`/debug/trusted responded ${res.status}: ${await res.text()}`);
+}
+
 /**
  * A browser tab holding one SyncClient — the unit these specs are written in.
  * Two tabs opened on the same BrowserContext share an origin, and therefore
@@ -98,7 +132,8 @@ export class Tab {
 
 	static async open(context: BrowserContext, opts: OpenOptions): Promise<Tab> {
 		const page = await context.newPage();
-		await page.goto(`/?server=${encodeURIComponent(serverUrl())}`);
+		const server = opts.user === undefined ? serverUrl() : accessServerUrl();
+		await page.goto(`/?server=${encodeURIComponent(server)}`);
 		await page.waitForFunction(() => window.harness !== undefined);
 		await page.evaluate((o) => window.harness.open(o), opts);
 		return new Tab(page);
@@ -312,6 +347,28 @@ export class Tab {
 
 	hasWidget(id: string): Promise<boolean> {
 		return this.page.evaluate((i) => window.harness.hasWidget(i), id);
+	}
+
+	hasPermission(entity: AccessEntity, key: string, permission: string): Promise<AccessView> {
+		return this.page.evaluate(
+			(a) => window.harness.hasPermission(a.entity, a.key, a.permission),
+			{ entity, key, permission },
+		);
+	}
+
+	startSampling(entity: AccessEntity, key: string, permission: string): Promise<void> {
+		return this.page.evaluate(
+			(a) => window.harness.startSampling(a.entity, a.key, a.permission),
+			{ entity, key, permission },
+		);
+	}
+
+	stopSampling(): Promise<AccessSamples> {
+		return this.page.evaluate(() => window.harness.stopSampling());
+	}
+
+	accessWire(): Promise<AccessWireView> {
+		return this.page.evaluate(() => window.harness.accessWire());
 	}
 
 	setVisibility(state: 'visible' | 'hidden'): Promise<void> {

@@ -301,6 +301,8 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
 	}
 	emitter.noDeltaEntities = noDeltas
+	emitter.callerAccessDeltas = want.CallerAccessVersion != nil
+	emitter.heldCallerAccess = want.GetCallerAccessVersion()
 	emitter.admit(adm)
 	epoch, err := s.perms.FilterEpoch(ctx, principal, ws)
 	if err != nil {
@@ -346,6 +348,7 @@ func (s *Server) refreshEpoch(ctx context.Context, sc *subScope) error {
 		return err
 	}
 	emitter.noDeltaEntities = sc.emitter.noDeltaEntities
+	emitter.callerAccessDeltas, emitter.heldCallerAccess = sc.emitter.callerAccessDeltas, sc.emitter.heldCallerAccess
 	emitter.caller, emitter.prior = sc.emitter.caller, sc.emitter.prior
 	if err := emitter.warmFilters(); err != nil {
 		return err
@@ -464,14 +467,19 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		sc.rawCursor = page.GetNextCursor()
 		last := !page.GetHasMore()
 		hasRows := len(page.GetPatch().GetChanges()) > 0 || len(page.GetPatch().GetDropEntities()) > 0
-		// sc.cur now records that the client holds this CallerAccess, so a page
-		// carrying one goes out even without rows, or no later page resends it.
-		if hasRows || page.GetCallerAccess() != nil || (keepalive && last) {
+		// The scope now records that the client holds this CallerAccess, so a
+		// page carrying one or a delta to it goes out even without rows, or no
+		// later page resends it.
+		hasAccess := page.GetCallerAccess() != nil || page.GetCallerAccessDelta() != nil
+		if hasRows || hasAccess || (keepalive && last) {
 			// The scope carries its own position, so the cursor on the frame is
 			// the client's resume point and nothing else — it can be left off
-			// when it would cost more than the re-delivery it saves.
+			// when it would cost more than the re-delivery it saves. A frame
+			// that changes the CallerAccess always carries it: the cursor
+			// references the stored copy of that summary, which the next change
+			// is sent as a delta from.
 			pageBytes := proto.Size(page.GetPatch())
-			if sc.checkpointDue(pageBytes, len(page.GetNextCursor())) {
+			if hasAccess || sc.checkpointDue(pageBytes, len(page.GetNextCursor())) {
 				sc.owedBytes = 0
 				sc.cursorSent = true
 			} else {

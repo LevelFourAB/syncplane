@@ -884,8 +884,8 @@ message FieldBehavior {
 	// `CreatorOptions`.
 	CreatorOptions creator = 12;
 
-	reserved 8, 11;
-	reserved "write_policy", "access_parent";
+	reserved 8;
+	reserved "write_policy";
 }
 
 extend google.protobuf.MessageOptions {

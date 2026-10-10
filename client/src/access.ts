@@ -7,6 +7,7 @@
  */
 
 import {
+	create,
 	type DescField,
 	type DescMessage,
 	fromBinary,
@@ -16,7 +17,15 @@ import {
 
 import { type CrudMutation, CrudOp, type Mutation } from './gen/syncplane/v1/mutation_pb.js';
 import type { Condition } from './gen/syncplane/v1/query_pb.js';
-import { type CallerAccess, CallerAccessSchema } from './gen/syncplane/v1/service_pb.js';
+import {
+	type AnchorGroup,
+	AnchorGroupSchema,
+	type AnchorRows,
+	AnchorRowsSchema,
+	type CallerAccess,
+	type CallerAccessDelta,
+	CallerAccessSchema,
+} from './gen/syncplane/v1/service_pb.js';
 import {
 	type AccessRuleDef,
 	type EntityDef,
@@ -192,6 +201,8 @@ export class AccessSummary {
 /** An encoded CallerAccess and the {@link AccessSummary} of it. */
 export interface DecodedAccess {
 	readonly raw: Uint8Array;
+	/** CallerAccess.version; 0 for a summary from a server that sends none. */
+	readonly version: bigint;
 	readonly summary: AccessSummary;
 }
 
@@ -208,9 +219,11 @@ export function encodeAccess(access: CallerAccess): DecodedAccess {
 class EncodedAccess implements DecodedAccess {
 	private access: CallerAccess | undefined;
 	private built: AccessSummary | undefined;
+	readonly version: bigint;
 
 	constructor(readonly raw: Uint8Array, access: CallerAccess) {
 		this.access = access;
+		this.version = access.version;
 	}
 
 	get summary(): AccessSummary {
@@ -234,7 +247,126 @@ class EncodedAccess implements DecodedAccess {
  */
 export function decodeAccess(raw: Uint8Array, last: DecodedAccess | undefined): DecodedAccess {
 	if (last !== undefined && sameBytes(last.raw, raw)) return last;
-	return { raw, summary: new AccessSummary(fromBinary(CallerAccessSchema, raw)) };
+	const access = fromBinary(CallerAccessSchema, raw);
+	return { raw, version: access.version, summary: new AccessSummary(access) };
+}
+
+/**
+ * Applies `delta` to `held`, as CallerAccessDelta documents it, and returns
+ * the new summary with the delta's seq and version. `held` is not changed.
+ * The caller checks that `held.version` is `delta.baseVersion`: the result
+ * is wrong for any other summary.
+ *
+ * The result lists its groups and rows in the order CallerAccess documents,
+ * so a summary equal to one the server sends whole encodes to the same
+ * bytes.
+ */
+export function applyAccessDelta(held: CallerAccess, delta: CallerAccessDelta): CallerAccess {
+	const rows = new Map<string, AnchoredRow>();
+	const put = (groups: AnchorGroup[]) => {
+		for (const group of groups) {
+			for (const anchors of group.anchors) {
+				for (const key of anchors.keys) {
+					rows.set(`${anchors.entity}\u0000${key}`, {
+						entity: anchors.entity,
+						key,
+						permissions: group.permissions,
+					});
+				}
+			}
+		}
+	};
+	put(held.anchorGroups);
+	put(delta.anchorGroups);
+	for (const anchors of delta.removed) {
+		for (const key of anchors.keys) rows.delete(`${anchors.entity}\u0000${key}`);
+	}
+	return create(CallerAccessSchema, {
+		seq: delta.seq,
+		subjects: held.subjects,
+		rootPermissions: held.rootPermissions,
+		anchorGroups: anchorGroupsOf(rows.values()),
+		version: delta.version,
+	});
+}
+
+/** One row and the permissions the caller holds there. */
+export interface AnchoredRow {
+	readonly entity: string;
+	readonly key: string;
+	/** Sorted by {@link compareUtf8}, without duplicates. */
+	readonly permissions: readonly string[];
+}
+
+/**
+ * Groups `rows` by their permissions, ordered as CallerAccess.anchor_groups
+ * documents, so the groups encode to the bytes the server sends for the same
+ * rows. Each row is listed once.
+ */
+export function anchorGroupsOf(rows: Iterable<AnchoredRow>): AnchorGroup[] {
+	const groups = new Map<string, { permissions: readonly string[]; rows: AnchoredRow[] }>();
+	for (const row of rows) {
+		const id = row.permissions.join('\u0000');
+		let group = groups.get(id);
+		if (group === undefined) {
+			group = { permissions: row.permissions, rows: [] };
+			groups.set(id, group);
+		}
+		group.rows.push(row);
+	}
+	return [ ...groups.values() ]
+		.sort((a, b) => comparePermissions(a.permissions, b.permissions))
+		.map((group) =>
+			create(AnchorGroupSchema, {
+				permissions: [ ...group.permissions ],
+				anchors: rowsByEntity(group.rows),
+			})
+		);
+}
+
+/** Orders permission lists element by element, a list before the longer lists it begins. */
+function comparePermissions(a: readonly string[], b: readonly string[]): number {
+	for (let i = 0; i < a.length && i < b.length; i++) {
+		if (a[i] !== b[i]) return compareUtf8(a[i]!, b[i]!);
+	}
+	return a.length - b.length;
+}
+
+/** Orders strings by their UTF-8 bytes, which is how the server sorts. */
+export function compareUtf8(a: string, b: string): number {
+	const n = Math.min(a.length, b.length);
+	for (let i = 0; i < n; i++) {
+		const x = a.charCodeAt(i);
+		const y = b.charCodeAt(i);
+		if (x !== y) return utf8Rank(x) - utf8Rank(y);
+	}
+	return a.length - b.length;
+}
+
+/**
+ * Maps a UTF-16 code unit to a rank in UTF-8 byte order. Code units order as
+ * UTF-8 does, except that a surrogate stands for a code point above U+FFFF,
+ * which sorts after U+E000 to U+FFFF. Comparing ranks does not allocate, as
+ * encoding each key would, and a sort compares each key many times.
+ */
+function utf8Rank(unit: number): number {
+	if (unit >= 0xd800 && unit <= 0xdfff) return unit + 0x2000;
+	if (unit >= 0xe000) return unit - 0x800;
+	return unit;
+}
+
+function rowsByEntity(rows: AnchoredRow[]): AnchorRows[] {
+	rows.sort((a, b) => compareUtf8(a.entity, b.entity) || compareUtf8(a.key, b.key));
+	const out: AnchorRows[] = [];
+	for (const row of rows) {
+		const last = out[out.length - 1];
+		if (last !== undefined && last.entity === row.entity) {
+			last.keys.push(row.key);
+		} else {
+			out.push(create(AnchorRowsSchema, { entity: row.entity, keys: [ row.key ] }));
+		}
+	}
+	return out;
 }
 
 function sameBytes(a: Uint8Array, b: Uint8Array): boolean {

@@ -1970,7 +1970,7 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x04desc\x18\x02 \x01(\bR\x04desc\"I\n" +
 	"\tIndexSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12(\n" +
-	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\xf7\x02\n" +
+	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\xe2\x02\n" +
 	"\rFieldBehavior\x12\x16\n" +
 	"\x06opaque\x18\x01 \x01(\bR\x06opaque\x12\x1b\n" +
 	"\tkey_field\x18\x02 \x03(\tR\bkeyField\x12\x1f\n" +
@@ -1985,7 +1985,7 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\tworkspace\x18\t \x01(\bR\tworkspace\x12)\n" +
 	"\x10reverse_relation\x18\n" +
 	" \x01(\tR\x0freverseRelation\x126\n" +
-	"\acreator\x18\f \x01(\v2\x1c.syncplane.v1.CreatorOptionsR\acreatorJ\x04\b\b\x10\tJ\x04\b\v\x10\fR\fwrite_policyR\raccess_parent:V\n" +
+	"\acreator\x18\f \x01(\v2\x1c.syncplane.v1.CreatorOptionsR\acreatorJ\x04\b\b\x10\tR\fwrite_policy:V\n" +
 	"\x06entity\x12\x1f.google.protobuf.MessageOptions\x18\xb4\x87\x03 \x01(\v2\x1b.syncplane.v1.EntityOptionsR\x06entity:_\n" +
 	"\treference\x12\x1f.google.protobuf.MessageOptions\x18\xb6\x87\x03 \x01(\v2\x1e.syncplane.v1.ReferenceOptionsR\treference:c\n" +
 	"\x0efield_behavior\x12\x1d.google.protobuf.FieldOptions\x18\xb5\x87\x03 \x01(\v2\x1b.syncplane.v1.FieldBehaviorR\rfieldBehaviorBFZDgithub.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1b\x06proto3"

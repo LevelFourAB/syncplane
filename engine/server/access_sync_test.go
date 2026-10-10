@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/descriptorpb"
 
+	"github.com/levelfourab/syncplane/engine/cursorstate"
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/server"
@@ -67,6 +68,30 @@ func (memberHidingPerms) ReadFilter(_ context.Context, _ server.Principal, _ str
 	return func(string, proto.Message) bool { return false }, nil
 }
 
+// puttingCursorState keeps the entries a cursor-state store is given, in
+// the order it is given them.
+type puttingCursorState struct {
+	cursorstate.Store
+	mu   gosync.Mutex
+	puts [][]byte
+}
+
+func (c *puttingCursorState) Put(ctx context.Context, ws string, ref cursorstate.Ref, state []byte) error {
+	c.mu.Lock()
+	c.puts = append(c.puts, state)
+	c.mu.Unlock()
+	return c.Store.Put(ctx, ws, ref, state)
+}
+
+// taken returns the entries put since the last call.
+func (c *puttingCursorState) taken() [][]byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := c.puts
+	c.puts = nil
+	return out
+}
+
 // accessReplica is one client's copy of a workspace, kept by pulling as one
 // caller and applying each page the way a client does.
 type accessReplica struct {
@@ -74,6 +99,11 @@ type accessReplica struct {
 	user   string
 	cursor []byte
 	rows   map[string]bool
+	// access is the CallerAccess the replica holds. A legacy replica sends
+	// no PullRequest.caller_access_version, as a client that applies no
+	// CallerAccessDelta does.
+	access *syncplanev1.CallerAccess
+	legacy bool
 	// drops and resets record what the pulls asked of the client.
 	drops  []string
 	resets int
@@ -89,6 +119,9 @@ func (r *accessReplica) pullOnce(limit uint32) *syncplanev1.PullResponse {
 	req := connect.NewRequest(&syncplanev1.PullRequest{
 		WorkspaceId: ws, ClientId: "c-" + r.user, Cursor: r.cursor, Limit: limit,
 	})
+	if !r.legacy {
+		req.Msg.CallerAccessVersion = proto.Uint64(r.access.GetVersion())
+	}
 	as(r.user, req.Header())
 	resp, err := r.f.sync.Pull(r.f.ctx, req)
 	Expect(err).NotTo(HaveOccurred())
@@ -96,6 +129,7 @@ func (r *accessReplica) pullOnce(limit uint32) *syncplanev1.PullResponse {
 		r.resets++
 		return resp.Msg
 	}
+	r.access = applyCallerAccess(r.access, resp.Msg.GetCallerAccess(), resp.Msg.GetCallerAccessDelta())
 	for _, entity := range resp.Msg.GetPatch().GetDropEntities() {
 		r.drops = append(r.drops, entity)
 		for k := range r.rows {
@@ -127,6 +161,28 @@ func (r *accessReplica) sync() {
 		}
 	}
 	Fail("the pulls did not settle")
+}
+
+// syncDelta syncs like sync, and returns the one CallerAccessDelta the pages
+// carried. It fails the spec when a page carries a whole CallerAccess.
+func (r *accessReplica) syncDelta() *syncplanev1.CallerAccessDelta {
+	GinkgoHelper()
+	var delta *syncplanev1.CallerAccessDelta
+	for range 100 {
+		resp := r.pullOnce(0)
+		Expect(resp.GetReset_()).To(BeFalse(), "the pull reset the client")
+		Expect(resp.GetCallerAccess()).To(BeNil(), "the whole summary was sent")
+		if d := resp.GetCallerAccessDelta(); d != nil {
+			Expect(delta).To(BeNil(), "two pages carried a delta")
+			delta = d
+		}
+		if !resp.GetHasMore() {
+			Expect(delta).NotTo(BeNil(), "no page carried a delta")
+			return delta
+		}
+	}
+	Fail("the pulls did not settle")
+	return nil
 }
 
 func (r *accessReplica) view() []string {
@@ -314,6 +370,7 @@ var _ = Describe("Access model sync", func() {
 			got := newAccessReplica(f, "mia").pullOnce(0).GetCallerAccess()
 			want := &syncplanev1.CallerAccess{
 				Seq:             got.GetSeq(),
+				Version:         got.GetVersion(),
 				Subjects:        []string{"mia"},
 				RootPermissions: []string{"view_labels", "view_projects", "view_tasks"},
 				AnchorGroups: []*syncplanev1.AnchorGroup{
@@ -362,6 +419,209 @@ var _ = Describe("Access model sync", func() {
 			Expect(heldAt(changed)).To(HaveKeyWithValue("view_tasks", []string{"*"}))
 		})
 
+		// widen grants user project_reader at eight more projects. A summary
+		// of a row or two is smaller than any delta, so the server sends it
+		// whole.
+		widen := func(user string) {
+			GinkgoHelper()
+			for i := range 8 {
+				id := fmt.Sprintf("pw%d", i)
+				f.seed(
+					&accessv1.Project{Id: id},
+					&accessv1.ProjectMember{Id: "pm-" + user + "-" + id, Project: project(id), UserId: user, Role: "project_reader"},
+				)
+			}
+		}
+
+		// accessOf is what a pull from an empty cursor shows user.
+		accessOf := func(user string) *syncplanev1.CallerAccess {
+			GinkgoHelper()
+			return newAccessReplica(f, user).pullOnce(0).GetCallerAccess()
+		}
+
+		It("sends only the rows whose permissions changed", func() {
+			widen("writer")
+			writer := newAccessReplica(f, "writer")
+			writer.sync()
+			Expect(writer.access).NotTo(BeNil())
+
+			f.seed(
+				&accessv1.ProjectMember{Id: "pm-writer2", Project: project("p2"), UserId: "writer", Role: "project_admin"},
+				&accessv1.ProjectMember{Id: "pm-writer3", Project: project("p1"), UserId: "writer", Role: "project_reader"},
+			)
+			delta := writer.syncDelta()
+			Expect(delta.GetRemoved()).To(BeEmpty())
+			Expect(heldAt(&syncplanev1.CallerAccess{AnchorGroups: delta.GetAnchorGroups()})).To(Equal(map[string][]string{
+				"edit_tasks":     {"project/p2"},
+				"manage_members": {"project/p2"},
+				"view_members":   {"project/p1", "project/p2"},
+				"view_projects":  {"project/p1", "project/p2"},
+				"view_tasks":     {"project/p1", "project/p2"},
+			}))
+			Expect(sameCallerAccess(writer.access, accessOf("writer"))).To(BeTrue(), "%v", writer.access)
+			Expect(writer.access.GetVersion()).To(Equal(accessOf("writer").GetVersion()))
+		})
+
+		It("removes the rows the caller no longer holds permissions at", func() {
+			widen("writer")
+			f.seed(&accessv1.ProjectMember{Id: "pm-writer3", Project: project("p1"), UserId: "writer", Role: "project_reader"})
+			writer := newAccessReplica(f, "writer")
+			writer.sync()
+
+			revoke("project_member", "pm-writer3")
+			delta := writer.syncDelta()
+			Expect(delta.GetAnchorGroups()).To(BeEmpty())
+			Expect(delta.GetRemoved()).To(HaveExactElements(
+				&syncplanev1.AnchorRows{Entity: "project", Keys: []string{"p1"}},
+			))
+			Expect(sameCallerAccess(writer.access, accessOf("writer"))).To(BeTrue(), "%v", writer.access)
+		})
+
+		It("sends the whole summary when the root permissions change", func() {
+			guest := newAccessReplica(f, "guest")
+			guest.sync()
+			f.seed(&accessv1.OrgMember{Id: "om-guest", UserId: "guest", Role: "org_member"})
+			resp := guest.pullOnce(0)
+			Expect(resp.GetCallerAccessDelta()).To(BeNil())
+			Expect(resp.GetCallerAccess()).NotTo(BeNil())
+		})
+
+		It("sends the whole summary when no cursor-state store holds what the client has", func() {
+			f = newAccessFixture(server.WithCursorStateStore(nil))
+			f.seedOrg()
+			widen("writer")
+			writer := newAccessReplica(f, "writer")
+			writer.sync()
+
+			// manage_members is no read permission, so the rows do not resync.
+			f.seed(&accessv1.ProjectMember{Id: "pm-writer2", Project: project("p2"), UserId: "writer", Role: "project_admin"})
+			resp := writer.pullOnce(0)
+			Expect(resp.GetReset_()).To(BeFalse())
+			Expect(resp.GetCallerAccessDelta()).To(BeNil())
+			Expect(heldAt(resp.GetCallerAccess())).To(HaveKeyWithValue("manage_members", []string{"project/p2"}))
+		})
+
+		It("stores only the summary when a permission no read depends on changes", func() {
+			store := &puttingCursorState{Store: cursorstate.NewMemory(1 << 20)}
+			f = newAccessFixture(server.WithCursorStateStore(store))
+			f.seedOrg()
+			writer := newAccessReplica(f, "writer")
+			writer.sync()
+			legacy := newAccessReplica(f, "writer")
+			legacy.legacy = true
+			legacy.sync()
+			store.taken()
+
+			f.seed(&accessv1.ProjectMember{Id: "pm-writer2", Project: project("p2"), UserId: "writer", Role: "project_admin"})
+			legacy.sync()
+			Expect(store.taken()).To(BeEmpty(), "a client that applies no delta needs no stored summary")
+			writer.sync()
+			puts := store.taken()
+			Expect(puts).To(HaveLen(1))
+			stored := &syncplanev1.CallerAccess{}
+			Expect(proto.Unmarshal(puts[0], stored)).To(Succeed())
+			Expect(stored.GetVersion()).To(Equal(writer.access.GetVersion()))
+		})
+
+		It("stores the summary on the first pull after a bootstrap, not on the bootstrap", func() {
+			store := &puttingCursorState{Store: cursorstate.NewMemory(1 << 20)}
+			f = newAccessFixture(server.WithCursorStateStore(store))
+			f.seedOrg()
+			widen("writer")
+			// summaries counts the stored CallerAccess entries among puts.
+			// Only those carry a version: a ReadAccess entry has no field 6.
+			summaries := func(puts [][]byte) int {
+				n := 0
+				for _, put := range puts {
+					ca := &syncplanev1.CallerAccess{}
+					if proto.Unmarshal(put, ca) == nil && ca.GetVersion() != 0 {
+						n++
+					}
+				}
+				return n
+			}
+
+			req := connect.NewRequest(&syncplanev1.BootstrapRequest{WorkspaceId: ws, ClientId: "c-writer"})
+			as("writer", req.Header())
+			stream, err := f.sync.Bootstrap(f.ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(stream.Receive()).To(BeTrue())
+			begin := stream.Msg().GetBegin()
+			for stream.Receive() {
+			}
+			Expect(stream.Err()).NotTo(HaveOccurred())
+			Expect(summaries(store.taken())).To(BeZero(), "the bootstrap stored a summary")
+
+			writer := newAccessReplica(f, "writer")
+			writer.cursor, writer.access = begin.GetCursor(), begin.GetCallerAccess()
+			writer.sync()
+			Expect(summaries(store.taken())).To(Equal(1))
+
+			f.seed(&accessv1.ProjectMember{Id: "pm-writer2", Project: project("p2"), UserId: "writer", Role: "project_admin"})
+			Expect(writer.syncDelta().GetBaseVersion()).To(Equal(begin.GetCallerAccess().GetVersion()))
+		})
+
+		It("sends the whole summary again to a client that lost it", func() {
+			writer := newAccessReplica(f, "writer")
+			writer.sync()
+			Expect(writer.pullOnce(0).GetCallerAccess()).To(BeNil())
+
+			writer.access = nil
+			got := writer.pullOnce(0).GetCallerAccess()
+			Expect(sameCallerAccess(got, accessOf("writer"))).To(BeTrue(), "%v", got)
+		})
+
+		It("sends the whole summary when the client holds another one than its cursor names", func() {
+			widen("writer")
+			writer := newAccessReplica(f, "writer")
+			writer.sync()
+			behind := writer.cursor
+
+			// The client stores the summary a stream page carried, but not
+			// the cursor of that page.
+			f.seed(&accessv1.ProjectMember{Id: "pm-writer2", Project: project("p2"), UserId: "writer", Role: "project_admin"})
+			writer.syncDelta()
+			writer.cursor = behind
+
+			f.seed(&accessv1.ProjectMember{Id: "pm-writer3", Project: project("p1"), UserId: "writer", Role: "project_reader"})
+			resp := writer.pullOnce(0)
+			Expect(resp.GetCallerAccessDelta()).To(BeNil())
+			Expect(sameCallerAccess(resp.GetCallerAccess(), accessOf("writer"))).To(BeTrue(), "%v", resp.GetCallerAccess())
+		})
+
+		It("sends nothing to a client that holds the current summary under an older cursor", func() {
+			writer := newAccessReplica(f, "writer")
+			writer.sync()
+			behind := writer.cursor
+			f.seed(&accessv1.ProjectMember{Id: "pm-writer2", Project: project("p2"), UserId: "writer", Role: "project_admin"})
+			writer.sync()
+
+			writer.cursor = behind
+			resp := writer.pullOnce(0)
+			Expect(resp.GetCallerAccess()).To(BeNil())
+			Expect(resp.GetCallerAccessDelta()).To(BeNil())
+		})
+
+		It("sends only whole summaries to a client that sends no version", func() {
+			widen("writer")
+			writer := newAccessReplica(f, "writer")
+			writer.legacy = true
+			writer.sync()
+			Expect(writer.pullOnce(0).GetCallerAccess()).To(BeNil())
+
+			f.seed(&accessv1.ProjectMember{Id: "pm-writer2", Project: project("p2"), UserId: "writer", Role: "project_admin"})
+			resp := writer.pullOnce(0)
+			Expect(resp.GetCallerAccessDelta()).To(BeNil())
+			Expect(heldAt(resp.GetCallerAccess())).To(HaveKeyWithValue("manage_members", []string{"project/p2"}))
+		})
+
+		It("sends the version a delta applies to with the whole summary", func() {
+			first := accessOf("writer")
+			Expect(first.GetVersion()).NotTo(BeZero())
+			Expect(accessOf("writer").GetVersion()).To(Equal(first.GetVersion()))
+			Expect(accessOf("guest").GetVersion()).NotTo(Equal(first.GetVersion()))
+		})
+
 		It("rides on the Begin frame of a bootstrap", func() {
 			req := connect.NewRequest(&syncplanev1.BootstrapRequest{WorkspaceId: ws, ClientId: "c-writer"})
 			as("writer", req.Header())
@@ -375,15 +635,58 @@ var _ = Describe("Access model sync", func() {
 			Expect(stream.Err()).NotTo(HaveOccurred())
 		})
 
+		It("lets a snapshot resume when only a permission no read depends on changed", func() {
+			f = newAccessFixture(server.WithChunkSize(1), server.WithPermissions(memberHidingPerms{}))
+			f.seedOrg()
+			// bootstrap takes at most chunks chunks, all of them for 0, and
+			// returns the Begin frame and the resume token of the last chunk.
+			bootstrap := func(resume *syncplanev1.BootstrapResume, chunks int) (*syncplanev1.BootstrapResponse_Begin, []byte) {
+				GinkgoHelper()
+				req := connect.NewRequest(&syncplanev1.BootstrapRequest{WorkspaceId: ws, ClientId: "c-writer", Resume: resume})
+				as("writer", req.Header())
+				stream, err := f.sync.Bootstrap(f.ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+				defer func() { Expect(stream.Close()).To(Succeed()) }()
+				var begin *syncplanev1.BootstrapResponse_Begin
+				var token []byte
+				for seen := 0; stream.Receive(); {
+					if b := stream.Msg().GetBegin(); b != nil {
+						begin = b
+					}
+					if c := stream.Msg().GetChunk(); c != nil {
+						token = c.GetResumeToken()
+						if seen++; seen == chunks {
+							break
+						}
+					}
+				}
+				return begin, token
+			}
+			first, token := bootstrap(nil, 1)
+			Expect(token).NotTo(BeEmpty())
+
+			// manage_members is no read permission, and the new grant row is
+			// hidden from the writer.
+			f.seed(&accessv1.ProjectMember{Id: "pm-writer2", Project: project("p2"), UserId: "writer", Role: "project_admin"})
+			second, _ := bootstrap(&syncplanev1.BootstrapResume{Cursor: first.GetCursor(), Token: token}, 0)
+			Expect(second.GetResumed()).To(BeTrue())
+			Expect(heldAt(second.GetCallerAccess())).To(HaveKeyWithValue("manage_members", []string{"project/p2"}))
+		})
+
 		It("reaches an open Subscribe stream when no row the caller can see changed", func() {
 			f = newAccessFixture(server.WithPermissions(memberHidingPerms{}))
 			f.seedOrg()
+			widen("writer")
 			writer := newAccessReplica(f, "writer")
 			writer.sync()
 
 			req := connect.NewRequest(&syncplanev1.SubscribeRequest{
 				ClientId: "c-writer",
-				Scopes:   []*syncplanev1.WorkspaceScope{{WorkspaceId: ws, Cursor: writer.cursor}},
+				Scopes: []*syncplanev1.WorkspaceScope{{
+					WorkspaceId: ws, Cursor: writer.cursor,
+					CallerAccessVersion: proto.Uint64(writer.access.GetVersion()),
+				}},
+				SparseCursor: true,
 			})
 			as("writer", req.Header())
 			ctx, cancel := context.WithTimeout(f.ctx, 5*time.Second)
@@ -396,12 +699,24 @@ var _ = Describe("Access model sync", func() {
 			// A second grant at p2 adds manage_members there and no read
 			// permission, and its row is hidden from the writer.
 			f.seed(&accessv1.ProjectMember{Id: "pm-writer2", Project: project("p2"), UserId: "writer", Role: "project_admin"})
-			var changed *syncplanev1.CallerAccess
-			for changed == nil && stream.Receive() {
+			var page *syncplanev1.PullResponse
+			for page.GetCallerAccessDelta() == nil && stream.Receive() {
 				Expect(stream.Msg().GetDropped()).To(BeNil(), "the stream dropped the scope")
-				changed = stream.Msg().GetPage().GetCallerAccess()
+				Expect(stream.Msg().GetPage().GetCallerAccess()).To(BeNil(), "the whole summary was sent")
+				page = stream.Msg().GetPage()
 			}
-			Expect(heldAt(changed)).To(HaveKeyWithValue("manage_members", []string{"project/p2"}))
+			changed := page.GetCallerAccessDelta()
+			Expect(changed.GetBaseVersion()).To(Equal(writer.access.GetVersion()))
+			Expect(heldAt(&syncplanev1.CallerAccess{AnchorGroups: changed.GetAnchorGroups()})).To(HaveKeyWithValue("manage_members", []string{"project/p2"}))
+
+			// The frame carries its cursor, so a pull from it gets the next
+			// change as a delta from this summary.
+			Expect(page.GetNextCursor()).NotTo(BeEmpty())
+			cancel()
+			writer.access = applyCallerAccess(writer.access, nil, changed)
+			writer.cursor = page.GetNextCursor()
+			f.seed(&accessv1.ProjectMember{Id: "pm-writer3", Project: project("p1"), UserId: "writer", Role: "project_admin"})
+			Expect(writer.syncDelta().GetBaseVersion()).To(Equal(changed.GetVersion()))
 		})
 	})
 

@@ -25,6 +25,7 @@ import {
 import type { Subscription } from '../gen/syncplane/v1/patch_pb.js';
 import {
 	type CallerAccess,
+	type CallerAccessDelta,
 	MutationStatus,
 	type PullResponse,
 	SyncService,
@@ -34,6 +35,7 @@ import {
 	metaAckedSeq,
 	metaBootstrapGen,
 	metaBootstrapResume,
+	metaCallerAccessVersion,
 	metaCursor,
 	metaLastMutationId,
 	metaPendingAccess,
@@ -69,7 +71,9 @@ import {
 	type ResequenceResult,
 	rollbackRejected,
 	stageServerChanges,
+	storedAccessAt,
 	wipeConfirmedState,
+	withAccessDelta,
 } from '../optimistic/rebase.js';
 import { readMergedRow } from '../read.js';
 import { reportError, safeCall } from '../report.js';
@@ -1102,20 +1106,29 @@ export class Coordinator {
 	}
 
 	/**
-	 * One workspace's resume position: the stored cursor and the acked-seq
+	 * One workspace's resume position: the stored cursor, the acked-seq
 	 * freshness floor that rides beside it as PullRequest.min_seq /
-	 * WorkspaceScope.min_seq. Read together so a pull opened between a push's
-	 * ack and its record cannot pair a fresh cursor with a stale floor.
+	 * WorkspaceScope.min_seq, and the version of the stored CallerAccess
+	 * (PullRequest.caller_access_version, 0 for none). Read together so a pull
+	 * opened between a push's ack and its record cannot pair a fresh cursor
+	 * with a stale floor.
 	 */
 	private async pullPosition(
 		workspaceId: string,
-	): Promise<{ cursor: Uint8Array | undefined; minSeq: bigint }> {
+	): Promise<{ cursor: Uint8Array | undefined; minSeq: bigint; callerAccessVersion: bigint }> {
 		return this.opts.kvMutex.runShared(async () => {
 			const tx = await this.opts.kv.read();
 			try {
-				const cursor = (await tx.get(metaCursor(workspaceId))) as Uint8Array | undefined;
-				const acked = (await tx.get(metaAckedSeq(workspaceId))) as string | undefined;
-				return { cursor, minSeq: acked === undefined ? 0n : BigInt(acked) };
+				const [ cursor, acked, version ] = await tx.getMany([
+					metaCursor(workspaceId),
+					metaAckedSeq(workspaceId),
+					metaCallerAccessVersion(workspaceId),
+				]) as [Uint8Array | undefined, string | undefined, string | undefined];
+				return {
+					cursor,
+					minSeq: acked === undefined ? 0n : BigInt(acked),
+					callerAccessVersion: version === undefined ? 0n : BigInt(version),
+				};
 			} finally {
 				tx.release();
 			}
@@ -2249,8 +2262,13 @@ export class Coordinator {
 		// a mutation-id gap has to be renumbered onto once paging is done.
 		let lastAcked = 0n;
 		const noDeltaEntities = await this.noDeltaEntities();
+		// A CallerAccessDelta for another summary than the stored one leaves
+		// the stored one as it was. One more pull, which names that summary's
+		// version, gets the change from there; a second one could only race
+		// another tab again, and the next cycle covers that.
+		let repulled = false;
 		for (;;) {
-			const { cursor, minSeq } = await this.pullPosition(workspaceId);
+			const { cursor, minSeq, callerAccessVersion } = await this.pullPosition(workspaceId);
 			// Timed from issuing the request to the page being committed locally,
 			// not just the RPC: what a user waits for is the data being readable,
 			// and the rebase is part of that.
@@ -2266,6 +2284,7 @@ export class Coordinator {
 						subscriptions: subs,
 						noDeltaEntities,
 						minSeq,
+						callerAccessVersion,
 					},
 					{ signal: this.abort.signal },
 				);
@@ -2283,7 +2302,7 @@ export class Coordinator {
 			}
 			lastAcked = resp.lastAckedMutationId;
 			const responded = performance.now();
-			const { reset } = await this.applyServerPage(workspaceId, resp, subs);
+			const { reset, accessStale } = await this.applyServerPage(workspaceId, resp, subs);
 			this.emit({
 				type: 'pull',
 				workspaceId,
@@ -2298,7 +2317,9 @@ export class Coordinator {
 			// A reset re-bootstrapped instead of paging, and a bootstrap leaves the
 			// queue alone: the next cycle's push re-reports any gap.
 			if (reset) return;
-			if (!resp.hasMore) break;
+			if (resp.hasMore) continue;
+			if (!accessStale || repulled) break;
+			repulled = true;
 		}
 		await this.recoverGap(workspaceId, lastAcked);
 	}
@@ -2310,8 +2331,9 @@ export class Coordinator {
 	 * and notify watchers. Returns `reset` (the caller must stop / reopen) and, on
 	 * a reset, whether the re-bootstrap actually `committed` — a superseded
 	 * bootstrap left the cursor untouched, so a stream reopening on it would just
-	 * reset again. Shared so the stream applies pages through exactly the path
-	 * Pull does.
+	 * reset again. `accessStale` is RebaseResult.accessStale: the caller pulls
+	 * again. Shared so the stream applies pages through exactly the path Pull
+	 * does.
 	 */
 	private async applyServerPage(
 		workspaceId: string,
@@ -2321,11 +2343,11 @@ export class Coordinator {
 		// shape. Pull and Subscribe stay identical by construction.
 		page: PullResponse,
 		subs: Subscription[],
-	): Promise<{ reset: boolean; committed: boolean }> {
+	): Promise<{ reset: boolean; committed: boolean; accessStale: boolean }> {
 		this.observeServerRevision(page.schemaRevision);
 		if (page.reset) {
 			const committed = await this.doBootstrap(workspaceId, subs);
-			return { reset: true, committed };
+			return { reset: true, committed, accessStale: false };
 		}
 		const state = this.workspaces.get(workspaceId);
 		let applied;
@@ -2340,9 +2362,9 @@ export class Coordinator {
 			// state both sides agree on. Treated exactly like a server-sent
 			// reset, because it is the same verdict reached one layer later.
 			const committed = await this.doBootstrap(workspaceId, subs);
-			return { reset: true, committed };
+			return { reset: true, committed, accessStale: false };
 		}
-		const { touched, pendingCount, skipped } = applied;
+		const { touched, pendingCount, skipped, accessStale = false } = applied;
 		if (state && page.seq > state.serverSeq) state.serverSeq = page.seq;
 		if (!skipped) {
 			this.opts.status.setPendingCount(workspaceId, pendingCount);
@@ -2352,7 +2374,7 @@ export class Coordinator {
 			// entities this page changed.
 			await this.opts.notify(touched);
 		}
-		return { reset: false, committed: false };
+		return { reset: false, committed: false, accessStale };
 	}
 
 	/** One page's rebase transaction; see applyServerPage. */
@@ -2377,8 +2399,13 @@ export class Coordinator {
 	}
 
 	private async rebaseTx(workspaceId: string, page: PullResponse): Promise<RebaseResult> {
-		// Encoded before the lock is taken, which keeps the lock for less time.
+		// Encoded, and a delta applied, before the lock is taken, which keeps
+		// the lock for less time.
 		const access = page.callerAccess === undefined ? undefined : encodeAccess(page.callerAccess);
+		const delta = page.callerAccessDelta;
+		const applied = delta === undefined
+			? undefined
+			: await this.applyAccessDeltaAhead(workspaceId, delta);
 		const result = await this.opts.kvMutex.run(() =>
 			rebase(this.opts.kv, this.opts.registry, this.opts.mirrors, workspaceId, {
 				changes: page.patch?.changes ?? [],
@@ -2402,10 +2429,35 @@ export class Coordinator {
 				// the shared store.
 				serverSeq: page.seq,
 				...(access === undefined ? {} : { callerAccess: access }),
+				...(delta === undefined ? {} : { callerAccessDelta: delta }),
+				...(applied === undefined ? {} : { callerAccessApplied: applied }),
 			}, this.opts.indexes)
 		);
-		if (access !== undefined && !result.skipped) this.opts.onAccessStored?.(workspaceId, access);
+		if (result.callerAccess !== undefined && !result.skipped) {
+			this.opts.onAccessStored?.(workspaceId, result.callerAccess);
+		}
 		return result;
+	}
+
+	/**
+	 * Applies `delta` to the stored CallerAccess when the stored one is the
+	 * summary it applies to, and returns the result without storing it (see
+	 * RebaseInput.callerAccessApplied). Undefined for any other summary.
+	 */
+	private async applyAccessDeltaAhead(
+		workspaceId: string,
+		delta: CallerAccessDelta,
+	): Promise<DecodedAccess | undefined> {
+		const raw = await this.opts.kvMutex.runShared(async () => {
+			const tx = await this.opts.kv.read();
+			try {
+				return await storedAccessAt(tx, workspaceId, delta.baseVersion);
+			} finally {
+				tx.release();
+			}
+		});
+		// Decoded after the lock is released, which keeps the lock for less time.
+		return raw === undefined ? undefined : withAccessDelta(raw, delta);
 	}
 
 	/**
@@ -3255,11 +3307,14 @@ export class Coordinator {
 							workspaceId: ws,
 							changes: body.value.patch?.changes.length ?? 0,
 						});
-						const { reset, committed } = await this.applyServerPage(
+						const { reset, committed, accessStale } = await this.applyServerPage(
 							ws,
 							body.value,
 							planned.subs.get(ws) ?? [],
 						);
+						// A pull names the summary this store holds, which the
+						// stream cannot do once it is open.
+						if (accessStale) this.syncSoon();
 						if (reset) {
 							// The stream never sets reset (a reset arrives as a dropped
 							// frame); handled defensively so a server that does send one
@@ -3361,6 +3416,7 @@ export class Coordinator {
 			cursor: Uint8Array;
 			subscriptions: Subscription[];
 			minSeq: bigint;
+			callerAccessVersion: bigint;
 		}[];
 		subs: Map<string, Subscription[]>;
 		noDeltaEntities: string[];
@@ -3373,17 +3429,19 @@ export class Coordinator {
 			cursor: Uint8Array;
 			subscriptions: Subscription[];
 			minSeq: bigint;
+			callerAccessVersion: bigint;
 		}[] = [];
 		for (const [ ws, subs ] of union) {
 			const state = this.workspaces.get(ws);
 			if (state?.revoked || state?.noAccess) continue;
 			if (scopes.length >= this.maxWorkspacesPerRequest) break;
-			const { cursor, minSeq } = await this.pullPosition(ws);
+			const { cursor, minSeq, callerAccessVersion } = await this.pullPosition(ws);
 			scopes.push({
 				workspaceId: ws,
 				cursor: cursor ?? new Uint8Array(),
 				subscriptions: subs,
 				minSeq,
+				callerAccessVersion,
 			});
 		}
 		return { scopes, subs: union, noDeltaEntities: await this.noDeltaEntities() };

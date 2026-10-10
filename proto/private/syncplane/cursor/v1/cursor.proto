@@ -123,14 +123,23 @@ message Cursor {
 	// a later change of access then resets the client.
 	StateRef access_ref = 17;
 	// Hash of the CallerAccess the client last received: every permission the
-	// caller holds, not only the ones entities read by. A response carries a
-	// new CallerAccess when the hash differs. 0 for a schema without the model.
+	// caller holds, not only the ones entities read by. It is the summary's
+	// CallerAccess.version. A client that sends no
+	// PullRequest.caller_access_version receives a new CallerAccess when the
+	// hash differs. 0 for a schema without the model.
 	fixed64 caller_access_hash = 18;
 	// The sequence through which the rows the client holds reflect every
 	// access move (see AccessMove). A pull compares the client's rows with
 	// the moves after the greater of seq and this, so the pull that follows a
 	// resync does not resync the same moves again. 0 when seq alone says it.
 	uint64 access_moves_through = 19;
+	// Reference to the stored syncplane.v1.CallerAccess whose version is
+	// caller_access_hash, with seq 0. A pull whose client holds that version
+	// is sent the change from it as a CallerAccessDelta. It has its own
+	// lineage, apart from access_ref's, so a change to only one of the two
+	// writes only one entry. Absent when the store could not take the entry,
+	// and on cursors of clients that apply no CallerAccessDelta.
+	StateRef caller_access_ref = 20;
 }
 
 // AccessMove is one change of the access parent of a row that other rows sit

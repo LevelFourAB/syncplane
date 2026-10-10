@@ -90,6 +90,13 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	if err != nil {
 		return err
 	}
+	// callerAccessDeltas stays false, so the Begin cursor stores no
+	// CallerAccess: BootstrapRequest has no caller_access_version, so nothing
+	// says the client applies deltas. A stored summary that the client never
+	// uses can evict a ReadAccess entry from a bounded cursor-state store,
+	// and losing that entry resets a client. The first pull that names a
+	// version stores the summary, so only an access change before that pull
+	// costs the whole summary.
 	emitter.admit(adm)
 	epoch, err := s.perms.FilterEpoch(ctx, principal, msg.GetWorkspaceId())
 	if err != nil {
@@ -203,8 +210,10 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			begin.Seq = current
 		}
 		// Sent on a resumed snapshot too: an earlier attempt's Begin may not
-		// have reached the client's store, and the access is the same.
-		begin.CallerAccess = emitter.callerAccessUpdate(cursorState{}, false, current)
+		// have reached the client's store, and the CallerAccess may have
+		// changed since. The resumed cursor then names an older one, which
+		// only stops a later pull from sending a delta.
+		begin.CallerAccess, _ = emitter.callerAccessUpdate(cursorState{}, false, current)
 		if msg.GetClientId() != "" {
 			acked, err := tx.ClientLastMutationID(watermarkKey(principal, msg.GetClientId()))
 			if err != nil {

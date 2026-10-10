@@ -589,6 +589,20 @@ Without a cursor-state store, every change of a caller's grants resets that call
 
 Every response that changes what the caller holds carries a `CallerAccess` summary (`PullResponse.caller_access`, `BootstrapResponse.Begin.caller_access`), which the TypeScript client stores and answers `can()` from. It lists the permissions held at the workspace root, and each anchor row once, in a group with the other rows that hold the same permissions. Its size is proportional to the number of anchor rows, plus one list of permissions for each distinct set.
 
+A pull sends a `CallerAccessDelta` in its place (`PullResponse.caller_access_delta`) when the request names the summary the client holds (`PullRequest.caller_access_version`, `WorkspaceScope.caller_access_version`) and the cursor-state store recorded that summary for the request's cursor. The delta holds only the anchor rows whose permissions changed, and the rows the caller holds nothing at any more. Its size is proportional to the rows that changed. The response sends the whole summary when:
+
+| Condition                                                         | Reason                                                                        |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| The request names no version                                      | The client applies no delta.                                                  |
+| The request names version 0, or it is a bootstrap                 | The client holds no summary.                                                  |
+| The client holds another summary than the one its cursor names    | The server holds no copy of the client's summary.                             |
+| The server has no cursor-state store, or the store lost the entry | The server holds no copy of the client's summary.                             |
+| No pull has named a version since the client's bootstrap          | A bootstrap stores no copy of the summary.                                    |
+| The caller's subjects or root permissions changed                 | A delta changes only anchor rows, never the subjects or the root permissions. |
+| The delta is not smaller than the whole summary                   | Most rows changed, or the caller holds few.                                   |
+
+The store records the summary only for a client that names a version: on its first pull or stream page after a bootstrap, and when the summary changes. A grant change writes one entry for the summary, and one more only when it also changes what the caller reads. A Subscribe frame that carries a summary or a delta always carries its cursor, so the client's cursor names the summary it holds.
+
 ## Rooms
 
 The ephemeral presence and broadcast plane is served by `PresenceService` alongside sync endpoints:

@@ -8,7 +8,13 @@ import {
 } from '@bufbuild/protobuf';
 import { anyUnpack } from '@bufbuild/protobuf/wkt';
 
-import { ACCESS_TOUCH_ENTITY, type DecodedAccess, touchPendingAccess } from '../access.js';
+import {
+	ACCESS_TOUCH_ENTITY,
+	applyAccessDelta,
+	type DecodedAccess,
+	encodeAccess,
+	touchPendingAccess,
+} from '../access.js';
 import { syncableEntities } from '../entities.js';
 import {
 	type CrudMutation,
@@ -17,12 +23,14 @@ import {
 	MutationSchema,
 } from '../gen/syncplane/v1/mutation_pb.js';
 import type { RowChange } from '../gen/syncplane/v1/patch_pb.js';
+import { type CallerAccessDelta, CallerAccessSchema } from '../gen/syncplane/v1/service_pb.js';
 import {
 	confirmedKey,
 	type ConfirmedRecord,
 	confirmedWsPrefix,
 	metaAckedSeq,
 	metaCallerAccess,
+	metaCallerAccessVersion,
 	metaCursor,
 	metaIndexEntityPrefix,
 	metaIndexPrefix,
@@ -43,7 +51,7 @@ import {
 	stagingKey,
 	stagingPrefix,
 } from '../keys.js';
-import type { KVStore, KVWrite } from '../kv/store.js';
+import type { KVRead, KVStore, KVWrite } from '../kv/store.js';
 import {
 	type EntityDef,
 	type EntityMergers,
@@ -523,6 +531,7 @@ export async function wipeConfirmedState(
 	// replaces it brings its own. Announced like the write that stored it, so
 	// access listeners stop answering from it now.
 	await tx.del(metaCallerAccess(workspaceId));
+	await tx.del(metaCallerAccessVersion(workspaceId));
 	touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 	// The acked floor goes with the cursor: it names a seq in the lineage being
 	// discarded, and carried across a swap it could sit above the new lineage's
@@ -1116,12 +1125,18 @@ export async function finalizeRebase(
 	}
 	if (input.callerAccess !== undefined) {
 		await tx.put(metaCallerAccess(workspaceId), input.callerAccess.raw);
+		if (input.callerAccess.version === 0n) {
+			await tx.del(metaCallerAccessVersion(workspaceId));
+		} else {
+			await tx.put(metaCallerAccessVersion(workspaceId), input.callerAccess.version.toString());
+		}
 		// Announced like a row change, so it reaches this tab's access
 		// listeners and every other tab's on the same channel (see
 		// SyncClient.onAccessChange).
 		touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 	} else if (input.baseline) {
 		await tx.del(metaCallerAccess(workspaceId));
+		await tx.del(metaCallerAccessVersion(workspaceId));
 		touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 	}
 
@@ -1194,6 +1209,18 @@ export interface RebaseInput {
 	serverSeq?: bigint;
 	/** The page's CallerAccess (PullResponse.caller_access); see FinalizeInput. */
 	callerAccess?: DecodedAccess;
+	/**
+	 * The page's change to the stored CallerAccess
+	 * (PullResponse.caller_access_delta), in place of `callerAccess`.
+	 */
+	callerAccessDelta?: CallerAccessDelta;
+	/**
+	 * `callerAccessDelta` applied to the summary whose version is its
+	 * `baseVersion`, made before the transaction. Stored when that summary
+	 * is still the stored one; without it, the transaction applies the delta
+	 * itself.
+	 */
+	callerAccessApplied?: DecodedAccess;
 }
 
 export interface RebaseResult {
@@ -1206,6 +1233,17 @@ export interface RebaseResult {
 	 * `touched` is empty and `pendingCount` is meaningless. See rebase().
 	 */
 	skipped?: boolean;
+	/**
+	 * The CallerAccess the transaction stored: the page's own, or the stored
+	 * one with the page's delta applied. Absent when it stored none.
+	 */
+	callerAccess?: DecodedAccess;
+	/**
+	 * Set when the page's CallerAccessDelta applies to another summary than
+	 * the stored one. The stored summary stays as it was, and a pull, which
+	 * names the version it holds, gets the change from there.
+	 */
+	accessStale?: boolean;
 }
 
 /**
@@ -1246,13 +1284,94 @@ export async function rebase(
 		}
 		await dropConfirmedEntities(tx, workspaceId, input.dropEntities ?? [], touched, indexes);
 		await applyServerChanges(tx, registry, workspaceId, input.changes, touched, indexes);
-		const pendingCount = await finalizeRebase(tx, registry, mirrors, workspaceId, input, touched);
+		let callerAccess = input.callerAccess;
+		let accessStale = false;
+		if (input.callerAccessDelta !== undefined) {
+			const applied = await applyStoredAccessDelta(
+				tx,
+				workspaceId,
+				input.callerAccessDelta,
+				input.callerAccessApplied,
+			);
+			callerAccess = applied.access;
+			accessStale = applied.stale;
+		}
+		const pendingCount = await finalizeRebase(
+			tx,
+			registry,
+			mirrors,
+			workspaceId,
+			callerAccess === input.callerAccess ? input : { ...input, callerAccess },
+			touched,
+		);
 		await tx.commit();
-		return { touched, pendingCount };
+		return {
+			touched,
+			pendingCount,
+			...(callerAccess === undefined ? {} : { callerAccess }),
+			...(accessStale ? { accessStale } : {}),
+		};
 	} catch (err) {
 		tx.release();
 		throw err;
 	}
+}
+
+/**
+ * Applies `delta` to the CallerAccess stored for `workspaceId`. `access` is
+ * the summary for finalizeRebase to store, absent when it stores none.
+ * `applied`, when given, is `delta` applied to the summary whose version is
+ * `delta.baseVersion`.
+ *
+ * A delta for another summary is not applied. It changes nothing when the
+ * stored summary is already the one the delta gives, which happens when a
+ * stream page and another tab's pull both carry the same change. Otherwise
+ * `stale` is set and the stored summary stays: it is older than the server's
+ * but still the best prediction there is, and the next pull names its
+ * version.
+ */
+async function applyStoredAccessDelta(
+	tx: KVWrite,
+	workspaceId: string,
+	delta: CallerAccessDelta,
+	applied: DecodedAccess | undefined,
+): Promise<{ access?: DecodedAccess; stale: boolean }> {
+	const stored = (await tx.get(metaCallerAccessVersion(workspaceId))) as string | undefined;
+	const version = stored === undefined ? 0n : BigInt(stored);
+	if (version === delta.version) return { stale: false };
+	if (version === 0n || version !== delta.baseVersion) return { stale: true };
+	// Equal versions mean equal summaries, so a delta applied before the
+	// transaction to a summary of this version is the result here too.
+	if (applied !== undefined) return { access: applied, stale: false };
+	const raw = await storedAccessAt(tx, workspaceId, delta.baseVersion);
+	if (raw === undefined) return { stale: true };
+	return { access: withAccessDelta(raw, delta), stale: false };
+}
+
+/**
+ * The encoded CallerAccess stored for `workspaceId` when its version is
+ * `version`. Undefined for a summary of any other version, and when no
+ * summary is stored.
+ */
+export async function storedAccessAt(
+	tx: KVRead,
+	workspaceId: string,
+	version: bigint,
+): Promise<Uint8Array | undefined> {
+	const [ stored, raw ] = await tx.getMany([
+		metaCallerAccessVersion(workspaceId),
+		metaCallerAccess(workspaceId),
+	]) as [string | undefined, Uint8Array | undefined];
+	return stored === version.toString() ? raw : undefined;
+}
+
+/**
+ * `delta` applied to the CallerAccess encoded as `raw`, as CallerAccessDelta
+ * documents it. The caller checks that `raw` is the summary whose version is
+ * `delta.baseVersion`.
+ */
+export function withAccessDelta(raw: Uint8Array, delta: CallerAccessDelta): DecodedAccess {
+	return encodeAccess(applyAccessDelta(fromBinary(CallerAccessSchema, raw), delta));
 }
 
 /** Outcome of resequencePending. */

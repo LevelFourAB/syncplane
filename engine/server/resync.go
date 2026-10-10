@@ -200,7 +200,7 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 		if err != nil {
 			return cursorState{}, err
 		}
-		resp.CallerAccess = newEm.callerAccessUpdate(cur, true, current)
+		resp.CallerAccess, resp.CallerAccessDelta = newEm.callerAccessUpdate(cur, true, current)
 		resp.NextCursor = s.encodeCursor(newEm.ctx, newEm.ws, &st)
 	} else {
 		// Mid-resync the cursor keeps the access it was issued under, which

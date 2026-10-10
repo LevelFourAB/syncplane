@@ -117,12 +117,13 @@ func (e *rowEmitter) boundReadAccess() (*syncplanecursorv1.ReadAccess, uint64) {
 // the stored entry it names is reused rather than written again.
 func (e *rowEmitter) stampAccess(st *cursorState, cur cursorState) {
 	st.accessPolicy, st.accessHash, st.accessID, st.accessGen, st.accessPending = 0, 0, 0, 0, nil
-	st.callerAccessHash, st.movesThrough = 0, 0
+	st.callerAccessHash, st.callerAccessID, st.callerAccessGen, st.callerAccessPending = 0, 0, 0, nil
+	st.movesThrough = 0
 	if e.caller == nil {
 		return
 	}
 	st.movesThrough = e.movesThrough
-	_, st.callerAccessHash = e.boundCallerAccess()
+	e.stampCallerAccess(st, cur)
 	ra, hash := e.boundReadAccess()
 	st.accessPolicy = e.caller.model.fingerprint
 	st.accessHash = hash
@@ -135,32 +136,44 @@ func (e *rowEmitter) stampAccess(st *cursorState, cur cursorState) {
 	st.accessPending = ra
 }
 
+// stampCallerAccess records the emitter's bound CallerAccess on st, and the
+// stored copy a later CallerAccessDelta is computed from. Only a client that
+// applies deltas needs that copy, so for any other client a changed
+// CallerAccess writes no entry.
+func (e *rowEmitter) stampCallerAccess(st *cursorState, cur cursorState) {
+	ca, hash := e.boundCallerAccess()
+	st.callerAccessHash = hash
+	st.callerAccessID = cur.callerAccessID
+	if cur.callerAccessHash == hash && cur.callerAccessGen != 0 {
+		st.callerAccessGen = cur.callerAccessGen
+		return
+	}
+	if e.callerAccessDeltas {
+		st.callerAccessPending = ca
+	}
+}
+
 // storeAccess writes a pending ReadAccess to the cursor-state store and
 // stamps its reference onto c. Without a store, or when the write fails, the
 // cursor carries the hash alone, and a later change of access resets the
 // client instead of resyncing it.
 func (s *Server) storeAccess(ctx context.Context, ws string, st *cursorState, c *syncplanecursorv1.Cursor) {
 	if st.accessPending != nil {
-		pending := st.accessPending
-		st.accessPending, st.accessGen = nil, 0
-		if s.cursorState == nil {
-			st.accessID = 0
-		} else {
-			blob, err := proto.MarshalOptions{Deterministic: true}.Marshal(pending)
-			if err != nil {
-				panic(err) // cannot fail for a message of valid in-memory protos
-			}
-			ref := cursorstate.Ref{ID: st.accessID, Gen: randNonZero()}
-			if ref.ID == 0 {
-				ref.ID = randNonZero()
-			}
-			if err := s.cursorState.Put(ctx, ws, ref, blob); err != nil {
-				s.tel().cursorStatePutFailures.Add(ctx, 1)
-				st.accessID = 0
-			} else {
-				st.accessID, st.accessGen = ref.ID, ref.Gen
-			}
+		st.accessID, st.accessGen = s.putAccessEntry(ctx, ws, st.accessID, st.accessPending)
+		st.accessPending = nil
+	}
+	if st.callerAccessPending != nil {
+		// The entry carries its version, so a pull that reads it back can
+		// tell it is the one the cursor names without hashing it again.
+		ca := st.callerAccessPending
+		entry := &syncplanev1.CallerAccess{
+			Subjects:        ca.GetSubjects(),
+			RootPermissions: ca.GetRootPermissions(),
+			AnchorGroups:    ca.GetAnchorGroups(),
+			Version:         st.callerAccessHash,
 		}
+		st.callerAccessID, st.callerAccessGen = s.putAccessEntry(ctx, ws, st.callerAccessID, entry)
+		st.callerAccessPending = nil
 	}
 	c.AccessPolicy = st.accessPolicy
 	c.AccessHash = st.accessHash
@@ -169,6 +182,31 @@ func (s *Server) storeAccess(ctx context.Context, ws string, st *cursorState, c 
 	if st.accessGen != 0 {
 		c.AccessRef = &syncplanecursorv1.StateRef{Id: st.accessID, Gen: st.accessGen}
 	}
+	if st.callerAccessGen != 0 {
+		c.CallerAccessRef = &syncplanecursorv1.StateRef{Id: st.callerAccessID, Gen: st.callerAccessGen}
+	}
+}
+
+// putAccessEntry writes m as a new entry of lineage id, minting the lineage
+// when id is 0, and returns the entry's reference. It returns 0, 0 without a
+// store or when the write fails.
+func (s *Server) putAccessEntry(ctx context.Context, ws string, id uint64, m proto.Message) (uint64, uint64) {
+	if s.cursorState == nil {
+		return 0, 0
+	}
+	blob, err := proto.MarshalOptions{Deterministic: true}.Marshal(m)
+	if err != nil {
+		panic(err) // cannot fail for a message of valid in-memory protos
+	}
+	ref := cursorstate.Ref{ID: id, Gen: randNonZero()}
+	if ref.ID == 0 {
+		ref.ID = randNonZero()
+	}
+	if err := s.cursorState.Put(ctx, ws, ref, blob); err != nil {
+		s.tel().cursorStatePutFailures.Add(ctx, 1)
+		return 0, 0
+	}
+	return ref.ID, ref.Gen
 }
 
 // accessComparison is how the access bound on a request's emitter relates to
@@ -239,7 +277,7 @@ func (s *Server) compareAccess(ctx context.Context, ws string, tx storage.ReadTx
 		return cmp, nil
 	}
 	if cur.accessPolicy != policy || cur.accessHash != cmp.hash {
-		old, err := s.loadReadAccess(ctx, ws, cur, e.caller)
+		old, err := e.loadReadAccess(cur)
 		if err != nil {
 			return cmp, err
 		}
@@ -502,27 +540,39 @@ func (e *rowEmitter) accessUnchanged(cur cursorState) bool {
 // the entry is missing, damaged, does not match the cursor's hashes, or was
 // recorded for other subjects than the caller's: the cursor cannot resync
 // from it.
-func (s *Server) loadReadAccess(ctx context.Context, ws string, cur cursorState, caller *accessCaller) (*syncplanecursorv1.ReadAccess, error) {
-	if s.cursorState == nil || cur.accessGen == 0 {
-		return nil, nil
-	}
-	blob, err := s.cursorState.Get(ctx, ws, cursorstate.Ref{ID: cur.accessID, Gen: cur.accessGen})
+func (e *rowEmitter) loadReadAccess(cur cursorState) (*syncplanecursorv1.ReadAccess, error) {
+	ra := &syncplanecursorv1.ReadAccess{}
+	ok, err := e.loadAccessEntry(cur.accessID, cur.accessGen, ra)
 	if errors.Is(err, cursorstate.ErrNotFound) {
-		s.tel().cursorStateMisses.Add(ctx, 1)
+		// Counted here and not in loadAccessEntry: this miss resets the
+		// client, which is what the metric reports. A missing CallerAccess
+		// entry only costs a whole summary.
+		e.srv.tel().cursorStateMisses.Add(e.ctx, 1)
 		return nil, nil
 	}
-	if err != nil {
+	if !ok || err != nil {
 		return nil, err
 	}
-	var ra syncplanecursorv1.ReadAccess
-	if err := proto.Unmarshal(blob, &ra); err != nil {
-		return nil, nil
-	}
-	if !slices.Equal(ra.GetSubjects(), caller.subjects) || readAccessHash(&ra) != cur.accessHash ||
+	if !slices.Equal(ra.GetSubjects(), e.caller.subjects) || readAccessHash(ra) != cur.accessHash ||
 		readPolicyOf(ra.GetRules()) != cur.accessPolicy {
 		return nil, nil
 	}
-	return &ra, nil
+	return ra, nil
+}
+
+// loadAccessEntry reads the cursor-state entry (id, gen) into m. It reports
+// false when gen is 0, there is no store, or the entry is damaged, and
+// returns cursorstate.ErrNotFound when the store does not hold the entry.
+func (e *rowEmitter) loadAccessEntry(id, gen uint64, m proto.Message) (bool, error) {
+	s := e.srv
+	if s.cursorState == nil || gen == 0 {
+		return false, nil
+	}
+	blob, err := s.cursorState.Get(e.ctx, e.ws, cursorstate.Ref{ID: id, Gen: gen})
+	if err != nil {
+		return false, err
+	}
+	return proto.Unmarshal(blob, m) == nil, nil
 }
 
 // sameAnchors reports whether x and y hold their permissions at the same
@@ -981,29 +1031,143 @@ func callerAccessOf(caller *accessCaller, set *accessSet) *syncplanev1.CallerAcc
 func (e *rowEmitter) boundCallerAccess() (*syncplanev1.CallerAccess, uint64) {
 	if e.callerAccess == nil {
 		e.callerAccess = callerAccessOf(e.caller, e.access)
-		raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(e.callerAccess)
-		if err != nil {
-			panic(err) // cannot fail for a message of valid in-memory protos
-		}
-		sum := sha256.Sum256(raw)
-		e.callerAccessHash = binary.BigEndian.Uint64(sum[:8]) | 1
+		e.callerAccessHash, e.callerAccessSize = callerAccessHash(e.callerAccess)
 	}
 	return e.callerAccess, e.callerAccessHash
 }
 
-// callerAccessUpdate returns the CallerAccess a response sends: the bound
-// one, current through seq, when the client does not hold it yet; nil when it
-// does, and for a schema without the access model. haveCursor is false for a
-// request without a cursor, whose client holds nothing.
-func (e *rowEmitter) callerAccessUpdate(cur cursorState, haveCursor bool, seq uint64) *syncplanev1.CallerAccess {
+// callerAccessHash fingerprints ca, which carries no seq and no version, and
+// returns its encoded size. The hash is never 0, which a cursor reserves for
+// a schema without the access model.
+func callerAccessHash(ca *syncplanev1.CallerAccess) (uint64, int) {
+	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(ca)
+	if err != nil {
+		panic(err) // cannot fail for a message of valid in-memory protos
+	}
+	sum := sha256.Sum256(raw)
+	return binary.BigEndian.Uint64(sum[:8]) | 1, len(raw)
+}
+
+// callerAccessUpdate returns what a response sends of the bound
+// CallerAccess, current through seq. Both are nil for a schema without the
+// access model, and when the client holds the bound one already. A client
+// that applies deltas is sent one when the cursor-state store holds the
+// summary the client has; every other case sends the whole summary.
+// haveCursor is false for a request without a cursor, whose client holds
+// nothing.
+func (e *rowEmitter) callerAccessUpdate(cur cursorState, haveCursor bool, seq uint64) (*syncplanev1.CallerAccess, *syncplanev1.CallerAccessDelta) {
 	if e.caller == nil {
-		return nil
+		return nil, nil
 	}
 	ca, hash := e.boundCallerAccess()
-	if haveCursor && cur.callerAccessHash == hash {
+	held := e.heldCallerAccess
+	if !e.callerAccessDeltas {
+		held = 0
+		if haveCursor {
+			held = cur.callerAccessHash
+		}
+	}
+	if held == hash {
+		return nil, nil
+	}
+	e.heldCallerAccess = hash
+	// The whole summary shares ca's lists, which nothing changes after the
+	// binding renders them, so sending it costs no copy.
+	whole := &syncplanev1.CallerAccess{
+		Seq:             seq,
+		Subjects:        ca.GetSubjects(),
+		RootPermissions: ca.GetRootPermissions(),
+		AnchorGroups:    ca.GetAnchorGroups(),
+		Version:         hash,
+	}
+	if !e.callerAccessDeltas || held == 0 {
+		return whole, nil
+	}
+	base := e.storedCallerAccess(cur, held)
+	if base == nil {
+		return whole, nil
+	}
+	delta := callerAccessDeltaOf(base, ca)
+	if delta == nil {
+		return whole, nil
+	}
+	delta.Seq, delta.BaseVersion, delta.Version = seq, held, hash
+	// When most rows changed, the delta lists most rows, and the rows it
+	// removes on top of them. Its size counts its seq and both versions, and
+	// callerAccessSize leaves out the seq and version of the whole summary,
+	// so a delta must be smaller by more than those few bytes to be sent.
+	if proto.Size(delta) >= e.callerAccessSize {
+		return whole, nil
+	}
+	return nil, delta
+}
+
+// storedCallerAccess returns the CallerAccess cur's caller_access_ref names
+// when its version is version, or nil when the cursor names another one or
+// the cursor-state store does not hold it. A store that fails counts as one
+// without the entry: the whole summary is always a correct answer.
+func (e *rowEmitter) storedCallerAccess(cur cursorState, version uint64) *syncplanev1.CallerAccess {
+	if cur.callerAccessHash != version {
 		return nil
 	}
-	out := proto.CloneOf(ca)
-	out.Seq = seq
-	return out
+	stored := &syncplanev1.CallerAccess{}
+	if ok, err := e.loadAccessEntry(cur.callerAccessID, cur.callerAccessGen, stored); !ok || err != nil {
+		return nil
+	}
+	if stored.GetVersion() != version {
+		return nil
+	}
+	return stored
+}
+
+// callerAccessDeltaOf returns the change from held to now, without seq and
+// versions, or nil when no delta can carry it: the subjects or the root
+// permissions differ.
+func callerAccessDeltaOf(held, now *syncplanev1.CallerAccess) *syncplanev1.CallerAccessDelta {
+	if !slices.Equal(held.GetSubjects(), now.GetSubjects()) ||
+		!slices.Equal(held.GetRootPermissions(), now.GetRootPermissions()) {
+		return nil
+	}
+	before := map[anchorRow][]string{}
+	for _, g := range held.GetAnchorGroups() {
+		for _, rows := range g.GetAnchors() {
+			for _, key := range rows.GetKeys() {
+				before[anchorRow{entity: rows.GetEntity(), key: key}] = g.GetPermissions()
+			}
+		}
+	}
+	delta := &syncplanev1.CallerAccessDelta{}
+	// Walking now's groups in order keeps the delta's groups, and the rows in
+	// each, in the order CallerAccess documents.
+	for _, g := range now.GetAnchorGroups() {
+		var changed []*syncplanev1.AnchorRows
+		for _, rows := range g.GetAnchors() {
+			var keys []string
+			for _, key := range rows.GetKeys() {
+				at := anchorRow{entity: rows.GetEntity(), key: key}
+				perms, ok := before[at]
+				delete(before, at)
+				if !ok || !slices.Equal(perms, g.GetPermissions()) {
+					keys = append(keys, key)
+				}
+			}
+			if len(keys) > 0 {
+				changed = append(changed, &syncplanev1.AnchorRows{Entity: rows.GetEntity(), Keys: keys})
+			}
+		}
+		if len(changed) > 0 {
+			delta.AnchorGroups = append(delta.AnchorGroups, &syncplanev1.AnchorGroup{Permissions: g.GetPermissions(), Anchors: changed})
+		}
+	}
+	if len(before) > 0 {
+		removed := make(map[anchorRow]struct{}, len(before))
+		for at := range before {
+			removed[at] = struct{}{}
+		}
+		entities, keys := anchorRowsByEntity(removed)
+		for _, entity := range entities {
+			delta.Removed = append(delta.Removed, &syncplanev1.AnchorRows{Entity: entity, Keys: keys[entity]})
+		}
+	}
+	return delta
 }

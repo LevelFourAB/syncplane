@@ -1,3 +1,4 @@
+import { fromBinary, toBinary } from '@bufbuild/protobuf';
 import { createConnectTransport } from '@connectrpc/connect-node';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
@@ -41,6 +42,12 @@ import {
 	ThreadSchema,
 	TicketSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
+import {
+	type CallerAccess,
+	CallerAccessSchema,
+	type PullResponse,
+} from '../../src/gen/syncplane/v1/service_pb.js';
+import { metaCallerAccess, metaCallerAccessVersion } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { KVStore } from '../../src/kv/store.js';
 import { decodeTextDoc, encodeTextDoc, plainTextOf, TextDoc } from '../../src/text/index.js';
@@ -106,15 +113,20 @@ function clientAs(
 	workspaceId: string,
 	kvStore: KVStore = new MemoryKVStore(),
 	onMutationRejected?: (info: RejectionInfo) => void,
+	pulls?: PullResponse[],
 ): SyncClient {
 	const client = new SyncClient({
 		onMutationRejected,
 		transport: createConnectTransport({
 			baseUrl: server.url,
 			httpVersion: '1.1',
-			interceptors: [ (next) => (req) => {
+			interceptors: [ (next) => async (req) => {
 				req.header.set('Authorization', `Bearer ${user}`);
-				return next(req);
+				const res = await next(req);
+				if (pulls !== undefined && !res.stream && req.method.name === 'Pull') {
+					pulls.push(res.message as PullResponse);
+				}
+				return res;
 			} ],
 		}),
 		workspaceId,
@@ -152,6 +164,18 @@ async function seed(ws: string): Promise<void> {
 		{ entity: 'task', value: { id: 't1', project: { id: 'p1' }, title: 'one' } },
 		{ entity: 'task', value: { id: 't2', project: { id: 'p2' }, title: 'two' } },
 	]);
+}
+
+/** The CallerAccess stored in kv for ws. */
+async function storedAccess(kv: KVStore, ws: string): Promise<CallerAccess> {
+	const tx = await kv.read();
+	try {
+		const raw = await tx.get(metaCallerAccess(ws));
+		expect(raw).toBeDefined();
+		return fromBinary(CallerAccessSchema, raw as Uint8Array);
+	} finally {
+		tx.release();
+	}
 }
 
 async function synced(client: SyncClient): Promise<SyncClient> {
@@ -277,6 +301,101 @@ describe('access model on the client', () => {
 		await guest.syncNow();
 		expect(await guest.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
 		expect(changed).toContain(ws);
+	});
+
+	it("applies a delta of the caller's grants to the summary it holds", async () => {
+		const ws = freshWorkspace();
+		await seed(ws);
+		// A summary of a row or two is smaller than any delta, and the server
+		// sends it whole.
+		await trusted(
+			ws,
+			Array.from({ length: 8 }, (_, i) => [
+				{ entity: 'project', value: { id: `pw${i}`, name: `wide ${i}` } },
+				{
+					entity: 'project_member',
+					value: {
+						id: `pm-writer-pw${i}`,
+						project: { id: `pw${i}` },
+						userId: 'writer',
+						role: 'project_reader',
+					},
+				},
+			]).flat(),
+		);
+		const kv = new MemoryKVStore();
+		const pulls: PullResponse[] = [];
+		const writer = await synced(clientAs('writer', ws, kv, undefined, pulls));
+		expect(await writer.hasPermission(ProjectSchema, 'p2', 'manage_members')).toBe('no');
+		expect(await writer.hasPermission(ProjectSchema, 'pw0', 'view_members')).toBe('yes');
+
+		await trusted(ws, [
+			{
+				entity: 'project_member',
+				value: {
+					id: 'pm-writer-admin',
+					project: { id: 'p2' },
+					userId: 'writer',
+					role: 'project_admin',
+				},
+			},
+			{ entity: 'project_member', key: 'pm-writer-pw0', delete: true },
+		]);
+		pulls.length = 0;
+		await writer.syncNow();
+
+		expect(pulls.some((p) => p.callerAccessDelta !== undefined)).toBe(true);
+		expect(pulls.every((p) => p.callerAccess === undefined)).toBe(true);
+		expect(await writer.hasPermission(ProjectSchema, 'p2', 'manage_members')).toBe('yes');
+		expect(await writer.hasPermission(ProjectSchema, 'pw0', 'view_members')).toBe('no');
+
+		// What the delta built is what a new client receives whole.
+		const freshKv = new MemoryKVStore();
+		await synced(clientAs('writer', ws, freshKv));
+		const [ held, whole ] = await Promise.all([ storedAccess(kv, ws), storedAccess(freshKv, ws) ]);
+		expect(held.version).toBe(whole.version);
+		expect(toBinary(CallerAccessSchema, { ...held, seq: 0n })).toEqual(
+			toBinary(CallerAccessSchema, { ...whole, seq: 0n }),
+		);
+	});
+
+	it('gets the whole summary when it holds another one than its cursor names', async () => {
+		const ws = freshWorkspace();
+		await seed(ws);
+		const grant = (id: string, project: string) =>
+			trusted(ws, [ {
+				entity: 'project_member',
+				value: { id, project: { id: project }, userId: 'writer', role: 'project_admin' },
+			} ]);
+		const kv = new MemoryKVStore();
+		const pulls: PullResponse[] = [];
+		const writer = await synced(clientAs('writer', ws, kv, undefined, pulls));
+		const tx = await kv.read();
+		const [ olderRaw, olderVersion ] = await tx.getMany([
+			metaCallerAccess(ws),
+			metaCallerAccessVersion(ws),
+		]);
+		tx.release();
+
+		// Another tab's store write leaves an older summary beside a newer
+		// cursor.
+		await grant('pm-writer-admin2', 'p2');
+		await writer.syncNow();
+		const wtx = await kv.write();
+		await wtx.put(metaCallerAccess(ws), olderRaw);
+		await wtx.put(metaCallerAccessVersion(ws), olderVersion);
+		await wtx.commit();
+
+		await grant('pm-writer-admin1', 'p1');
+		pulls.length = 0;
+		await writer.syncNow();
+
+		expect(pulls.some((p) => p.callerAccess !== undefined)).toBe(true);
+		expect(pulls.every((p) => p.callerAccessDelta === undefined)).toBe(true);
+		const freshKv = new MemoryKVStore();
+		await synced(clientAs('writer', ws, freshKv));
+		const [ held, whole ] = await Promise.all([ storedAccess(kv, ws), storedAccess(freshKv, ws) ]);
+		expect(held.version).toBe(whole.version);
 	});
 
 	it('keeps the queue of a caller with no grant yet, and syncs it once the grant exists', async () => {

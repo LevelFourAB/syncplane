@@ -275,3 +275,30 @@ func (t *pageScanCountingTx) ScanEntityAfter(entity, afterKey string, limit int,
 		return fn(row)
 	})
 }
+
+// applyCallerAccess returns the summary a client holds after a response
+// that carries whole or delta, from held, as CallerAccessDelta describes
+// it. It fails the spec on a delta whose base is not held.
+func applyCallerAccess(held, whole *syncplanev1.CallerAccess, delta *syncplanev1.CallerAccessDelta) *syncplanev1.CallerAccess {
+	GinkgoHelper()
+	Expect(whole == nil || delta == nil).To(BeTrue(), "a response carries a summary and a delta")
+	if whole != nil {
+		return whole
+	}
+	if delta == nil {
+		return held
+	}
+	Expect(held).NotTo(BeNil(), "a delta reached a client that holds no summary")
+	Expect(held.GetVersion()).To(Equal(delta.GetBaseVersion()), "a delta for another summary")
+	out := server.ApplyCallerAccessDelta(held, delta)
+	out.Seq, out.Version = delta.GetSeq(), delta.GetVersion()
+	return out
+}
+
+// sameCallerAccess reports whether x and y hold the same permissions at the
+// same rows, apart from seq and version.
+func sameCallerAccess(x, y *syncplanev1.CallerAccess) bool {
+	x, y = proto.CloneOf(x), proto.CloneOf(y)
+	x.Seq, x.Version, y.Seq, y.Version = 0, 0, 0, 0
+	return proto.Equal(x, y)
+}
