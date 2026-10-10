@@ -1096,7 +1096,7 @@ interface HydrationInfo {
 }
 ```
 
-Exported status and rejection constants: `CodePoisonDropped`, `CodeConflict`, `CodeInvalidArgument`, `CodePermissionDenied`.
+Exported status and rejection constants: `CodePoisonDropped`, `CodeConflict`, `CodeInvalidArgument`, `CodePermissionDenied`, `CodeAccessDenied`.
 See [Sync status and failure codes](sync-status-and-codes.md).
 
 ### Devtools

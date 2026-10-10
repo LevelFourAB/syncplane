@@ -190,7 +190,7 @@ var _ = Describe("Within entries", func() {
 	denied := func(r *syncplanev1.MutationResult) {
 		GinkgoHelper()
 		Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
-		Expect(r.GetErrorCode()).To(Equal(server.CodePermissionDenied), r.GetErrorMessage())
+		Expect(r.GetErrorCode()).To(Equal(server.CodeAccessDenied), r.GetErrorMessage())
 	}
 	trusted := func(msgs ...proto.Message) { f.seed(msgs...) }
 

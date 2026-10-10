@@ -13,7 +13,7 @@ import { createConnectTransport } from '@connectrpc/connect-node';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
-import { CodePermissionDenied } from '../../src/codes.js';
+import { CodeAccessDenied } from '../../src/codes.js';
 import { EntrySchema, LabelSchema } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import {
 	CrudMutationSchema,
@@ -176,7 +176,7 @@ describe('entity access rules on writes', () => {
 		) {
 			const raw = await pushRaw(ws, { entity: 'entry', key: 'e1', ...write });
 			expect(raw.status, CrudOp[write.op]).toBe(MutationStatus.REJECTED);
-			expect(raw.errorCode, CrudOp[write.op]).toBe(CodePermissionDenied);
+			expect(raw.errorCode, CrudOp[write.op]).toBe(CodeAccessDenied);
 		}
 
 		// Nothing moved on either side.
@@ -204,7 +204,7 @@ describe('entity access rules on writes', () => {
 			value: entry('e1', 'replaced'),
 		});
 		expect(raw.status).toBe(MutationStatus.REJECTED);
-		expect(raw.errorCode).toBe(CodePermissionDenied);
+		expect(raw.errorCode).toBe(CodeAccessDenied);
 
 		await client.syncNow();
 		expect((await client.get(EntrySchema, 'e1'))?.body).toBe('posted');
@@ -235,7 +235,7 @@ describe('entity access rules on writes', () => {
 		) {
 			const raw = await pushRaw(ws, { entity: 'label', ...write });
 			expect(raw.status, `${CrudOp[write.op]} ${write.key}`).toBe(MutationStatus.REJECTED);
-			expect(raw.errorCode, `${CrudOp[write.op]} ${write.key}`).toBe(CodePermissionDenied);
+			expect(raw.errorCode, `${CrudOp[write.op]} ${write.key}`).toBe(CodeAccessDenied);
 		}
 
 		await client.syncNow();

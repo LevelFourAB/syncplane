@@ -32,6 +32,7 @@ export type {
 	WorkspaceStatus,
 } from './client.js';
 export {
+	CodeAccessDenied,
 	CodeConflict,
 	CodeFormatUpgraded,
 	CodeInternal,

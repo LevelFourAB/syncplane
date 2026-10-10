@@ -308,15 +308,15 @@ var _ = Describe("Access model writes below several access parents", func() {
 
 	It("checks a create through each parent it names", func() {
 		applied(one("pedit", put("story", "n1", story("n1", "p1", ""))))
-		refused(one("pedit", put("story", "n2", story("n2", "p1", "c1"))), server.CodePermissionDenied)
-		refused(one("cedit", put("story", "n3", story("n3", "p1", "c1"))), server.CodePermissionDenied)
+		refused(one("pedit", put("story", "n2", story("n2", "p1", "c1"))), server.CodeAccessDenied)
+		refused(one("cedit", put("story", "n3", story("n3", "p1", "c1"))), server.CodeAccessDenied)
 		applied(one("both", put("story", "n4", story("n4", "p1", "c1"))))
 	})
 
 	It("checks a create through each row its list names", func() {
 		f.seed(laneOnShelf("lm-h1", "h1", "hedit", "lane_editor"))
 		applied(one("hedit", put("leaflet", "n1", leaflet("n1", "h1"))))
-		refused(one("hedit", put("leaflet", "n2", leaflet("n2", "h1", "h2"))), server.CodePermissionDenied)
+		refused(one("hedit", put("leaflet", "n2", leaflet("n2", "h1", "h2"))), server.CodeAccessDenied)
 		f.seed(laneOnShelf("lm-h2", "h2", "hedit", "lane_editor"))
 		applied(one("hedit", put("leaflet", "n3", leaflet("n3", "h1", "h2"))))
 	})
@@ -329,15 +329,15 @@ var _ = Describe("Access model writes below several access parents", func() {
 	})
 
 	It("checks an added parent through that parent", func() {
-		refused(one("pedit", patch("story", "s-p", story("s-p", "p1", "c1"), "cycle")), server.CodePermissionDenied)
-		refused(one("pedit", put("story", "s-p", story("s-p", "p1", "c1"))), server.CodePermissionDenied)
+		refused(one("pedit", patch("story", "s-p", story("s-p", "p1", "c1"), "cycle")), server.CodeAccessDenied)
+		refused(one("pedit", put("story", "s-p", story("s-p", "p1", "c1"))), server.CodeAccessDenied)
 		applied(one("both", patch("story", "s-p", story("s-p", "p1", "c1"), "cycle")))
 		Expect(rowsOf("story", f.pull("cview"))).To(ContainElement("story/s-p"))
 	})
 
 	It("checks a removed parent through that parent", func() {
-		refused(one("pedit", patch("story", "s-pc", story("s-pc", "p1", ""), "cycle")), server.CodePermissionDenied)
-		refused(one("cedit", patch("story", "s-pc", story("s-pc", "", "c1"), "product")), server.CodePermissionDenied)
+		refused(one("pedit", patch("story", "s-pc", story("s-pc", "p1", ""), "cycle")), server.CodeAccessDenied)
+		refused(one("cedit", patch("story", "s-pc", story("s-pc", "", "c1"), "product")), server.CodeAccessDenied)
 		applied(one("both", patch("story", "s-pc", story("s-pc", "p1", ""), "cycle")))
 		Expect(rowsOf("story", f.pull("cview"))).NotTo(ContainElement("story/s-pc"))
 	})
@@ -348,15 +348,15 @@ var _ = Describe("Access model writes below several access parents", func() {
 		// The caller writes s-pc through c1 alone, which is enough to move it
 		// from c1 to c2.
 		applied(one("cedit", patch("story", "s-pc", story("s-pc", "p1", "c2"), "cycle")))
-		refused(one("pedit", patch("story", "s-p", story("s-p", "p1", "c2"), "cycle")), server.CodePermissionDenied)
+		refused(one("pedit", patch("story", "s-p", story("s-p", "p1", "c2"), "cycle")), server.CodeAccessDenied)
 	})
 
 	It("lets a rule with a fields list add and remove the parents it names", func() {
 		// The planner plans in p1 and c1 and only views c2.
 		applied(one("planner", patch("story", "s-p", story("s-p", "p1", "c1"), "cycle")))
 		applied(one("planner", patch("story", "s-pc", story("s-pc", "p1", ""), "cycle")))
-		refused(one("planner", patch("story", "s-p", story("s-p", "p1", "c2"), "cycle")), server.CodePermissionDenied)
-		refused(one("planner", patch("story", "s-p", story("s-p", "p2", "c1"), "product")), server.CodePermissionDenied)
+		refused(one("planner", patch("story", "s-p", story("s-p", "p1", "c2"), "cycle")), server.CodeAccessDenied)
+		refused(one("planner", patch("story", "s-p", story("s-p", "p2", "c1"), "product")), server.CodeAccessDenied)
 	})
 
 	It("adds and removes one row of a list with a PATCH, without the other rows", func() {
@@ -371,7 +371,7 @@ var _ = Describe("Access model writes below several access parents", func() {
 		var got accessv1.Leaflet
 		stored("leaflet", "l-1", &got)
 		Expect(got.GetShelves()).To(HaveLen(3))
-		refused(one("hedit", patch("leaflet", "l-1", leaflet("l-1"), "shelves.h2")), server.CodePermissionDenied)
+		refused(one("hedit", patch("leaflet", "l-1", leaflet("l-1"), "shelves.h2")), server.CodeAccessDenied)
 		applied(one("other", patch("leaflet", "l-1", leaflet("l-1"), "shelves.h2")))
 	})
 

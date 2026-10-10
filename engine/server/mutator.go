@@ -67,7 +67,7 @@ type MutatorOption interface {
 // In a schema that uses the access model, an invocation of a mutator without a
 // MutatorAccess is refused for every caller who is not Trusted. The check runs
 // inside the write transaction before the body, and is refused with
-// CodePermissionDenied. The rows the body writes are not checked unless it
+// CodeAccessDenied. The rows the body writes are not checked unless it
 // writes them through EntityTx.AsCaller; the body can also ask EntityTx.Can.
 //
 // Registration fails, with the rest of the access model, when Permission is
@@ -185,8 +185,9 @@ type EntityTx struct {
 // AsCaller returns a view of this transaction whose writes are checked as the
 // same writes sent by the invoking caller's client would be: by the access
 // rules, the field write policies and the application's row write filters.
-// A refused write returns a Rejection with CodePermissionDenied and writes
-// nothing; the body decides whether to return it and fail the invocation.
+// A refused write returns a Rejection, with CodeAccessDenied for the access
+// rules and CodePermissionDenied for the others, and writes nothing; the body
+// decides whether to return it and fail the invocation.
 // Permissions.CanMutate does not run for these writes, since the verdict on
 // the invocation covers them.
 //

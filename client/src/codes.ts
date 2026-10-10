@@ -11,6 +11,7 @@
  * | Failure                              | Channel                        | Code                       |
  * | ------------------------------------ | ------------------------------ | -------------------------- |
  * | Mutation refused by the app's rules  | `onMutationRejected`           | `permission_denied`, `invalid_argument`, `conflict`, or an app-defined code |
+ * | Mutation refused by the access model | `onMutationRejected`           | `access_denied`            |
  * | Text PATCH's delta state did not fit | (handled internally, re-sent)  | `text_full_state_required` |
  * | Text write predates a compaction     | (handled internally, re-applied) | `text_state_stale`       |
  * | Mutation dropped after repeated      | `onMutationRejected`           | `poison_dropped`           |
@@ -39,6 +40,13 @@
 
 /** The caller may not perform this mutation. */
 export const CodePermissionDenied = 'permission_denied';
+/**
+ * The schema's access model refused this mutation: no access rule admits it
+ * for the caller, or it grants a role the caller does not hold. The app's own
+ * permission policy refuses with CodePermissionDenied instead. The server logs
+ * why at debug level, as "access refused".
+ */
+export const CodeAccessDenied = 'access_denied';
 /** The mutation payload is semantically invalid for the application. */
 export const CodeInvalidArgument = 'invalid_argument';
 /** The mutation lost a business-level conflict (e.g. uniqueness). */

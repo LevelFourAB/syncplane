@@ -335,18 +335,18 @@ var _ = Describe("Access model writes below a polymorphic access parent", func()
 
 	It("checks a create at the row the set case names", func() {
 		applied(one("xeditor", put("card", "n1", cardOnBoard("n1", "x"))))
-		refused(one("xeditor", put("card", "n2", cardInSpace("n2", "x"))), server.CodePermissionDenied)
+		refused(one("xeditor", put("card", "n2", cardInSpace("n2", "x"))), server.CodeAccessDenied)
 		applied(one("xeditor", put("pin", "n3", pinOnBoard("n3", "x"))))
-		refused(one("xeditor", put("pin", "n4", pinInSpace("n4", "x"))), server.CodePermissionDenied)
+		refused(one("xeditor", put("pin", "n4", pinInSpace("n4", "x"))), server.CodeAccessDenied)
 		applied(one("xeditor", put("card_item", "n5", itemOn("n5", "c-bx"))))
-		refused(one("xeditor", put("card_item", "n6", itemOn("n6", "c-sx"))), server.CodePermissionDenied)
+		refused(one("xeditor", put("card_item", "n6", itemOn("n6", "c-sx"))), server.CodeAccessDenied)
 	})
 
 	// The board x and the space x share a key, so only the entity tells the
 	// two places apart.
 	It("checks a move between rows of two entities that share a key at both ends", func() {
-		refused(one("xeditor", patch("card", "c-bx", cardInSpace("c-bx", "x"), "place")), server.CodePermissionDenied)
-		refused(one("xeditor", put("card", "c-bx", cardInSpace("c-bx", "x"))), server.CodePermissionDenied)
+		refused(one("xeditor", patch("card", "c-bx", cardInSpace("c-bx", "x"), "place")), server.CodeAccessDenied)
+		refused(one("xeditor", put("card", "c-bx", cardInSpace("c-bx", "x"))), server.CodeAccessDenied)
 		applied(one("both", patch("card", "c-bx", cardInSpace("c-bx", "x"), "place")))
 		Expect(f.pull("xeditor")).NotTo(ContainElement("card/c-bx"))
 		applied(one("both", patch("pin", "p-sx", pinOnBoard("p-sx", "x"), "place")))
@@ -388,7 +388,7 @@ var _ = Describe("Access model writes below a polymorphic access parent", func()
 		applied(one("admin", put("place_member", "pm-new", memberOnBoard("pm-new", "b2", "newbie", "place_viewer"))))
 		Expect(f.pull("newbie")).To(ContainElements("board/b2", "pin/p-b2"))
 		refused(one("admin", put("place_member", "pm-new2", memberInSpace("pm-new2", "x", "newbie", "place_viewer"))),
-			server.CodePermissionDenied)
+			server.CodeAccessDenied)
 	})
 
 	It("refuses a grant row that names no place, on every write path", func() {

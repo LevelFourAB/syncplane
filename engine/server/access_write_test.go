@@ -3,6 +3,8 @@ package server_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -53,7 +55,7 @@ var _ = Describe("Access model writes", func() {
 	}
 	denied := func(r *syncplanev1.MutationResult) {
 		GinkgoHelper()
-		refused(r, server.CodePermissionDenied)
+		refused(r, server.CodeAccessDenied)
 	}
 
 	task := func(id, projectID string) *accessv1.Task {
@@ -124,6 +126,33 @@ var _ = Describe("Access model writes", func() {
 			applied(patch("admin", "task", "t2", task("t2", "p1"), "project"))
 		})
 
+		It("logs at debug level why no rule admits a refused write", func() {
+			logs := &recordingHandler{}
+			f = newAccessFixture(server.WithLogger(slog.New(logs)))
+			f.seedOrg()
+
+			denied(patch("writer", "task", "t1", &accessv1.Task{Id: "t1", Title: "edited"}, "title"))
+			refusal := refusalLog(logs)
+			Expect(refusal).To(HaveKeyWithValue("entity", "task"))
+			Expect(refusal).To(HaveKeyWithValue("key", "t1"))
+			Expect(refusal).To(HaveKeyWithValue("op", "update"))
+			Expect(refusal).To(HaveKeyWithValue("rules", ContainSubstring(
+				"allow[1] write:requires=edit_tasks: edit_tasks is not held at the root, the row or a row above it")))
+			Expect(refusal["rules"]).NotTo(ContainSubstring("allow[0]"), "a rule that does not name the operation")
+		})
+
+		It("logs a create that no rule admits", func() {
+			logs := &recordingHandler{}
+			f = newAccessFixture(server.WithLogger(slog.New(logs)))
+			f.seedOrg()
+
+			denied(put("guest", "task", "n1", task("n1", "p1")))
+			refusal := refusalLog(logs)
+			Expect(refusal).To(HaveKeyWithValue("op", "create"))
+			Expect(refusal).To(HaveKeyWithValue("rules", ContainSubstring(
+				"allow[1] write:requires=edit_tasks: edit_tasks is not held at the root, the row or a row above it")))
+		})
+
 		It("writes an entity outside the model for every admitted caller", func() {
 			applied(put("guest", "note", "n2", &accessv1.Note{Id: "n2", Body: "hi"}))
 		})
@@ -135,7 +164,7 @@ var _ = Describe("Access model writes", func() {
 			})
 			r, ok := server.AsRejection(err)
 			Expect(ok).To(BeTrue(), "%v", err)
-			Expect(r.Code).To(Equal(server.CodePermissionDenied))
+			Expect(r.Code).To(Equal(server.CodeAccessDenied))
 
 			Expect(f.srv.Apply(writer, ws, func(tx *server.ApplyTx) error {
 				return tx.Put(task("n2", "p2"))
@@ -145,7 +174,7 @@ var _ = Describe("Access model writes", func() {
 			})
 			r, ok = server.AsRejection(err)
 			Expect(ok).To(BeTrue(), "%v", err)
-			Expect(r.Code).To(Equal(server.CodePermissionDenied))
+			Expect(r.Code).To(Equal(server.CodeAccessDenied))
 		})
 	})
 
@@ -284,7 +313,7 @@ var _ = Describe("Access model writes", func() {
 			err := f.srv.Invoke(writer, ws, "rename_task", &accessv1.TaskArgs{TaskId: "t1"})
 			r, ok := server.AsRejection(err)
 			Expect(ok).To(BeTrue(), "%v", err)
-			Expect(r.Code).To(Equal(server.CodePermissionDenied))
+			Expect(r.Code).To(Equal(server.CodeAccessDenied))
 			Expect(f.srv.Invoke(writer, ws, "rename_task", &accessv1.TaskArgs{TaskId: "t2"})).To(Succeed())
 		})
 
@@ -310,11 +339,11 @@ var _ = Describe("Access model writes", func() {
 			err := f.srv.Invoke(guest, ws, "retitle_as_caller", &accessv1.TaskArgs{TaskId: "t1"})
 			r, ok := server.AsRejection(err)
 			Expect(ok).To(BeTrue(), "%v", err)
-			Expect(r.Code).To(Equal(server.CodePermissionDenied))
+			Expect(r.Code).To(Equal(server.CodeAccessDenied))
 			_, err = f.srv.InvokeIdempotent(guest, ws, "k1", "retitle_as_caller", &accessv1.TaskArgs{TaskId: "t1"})
 			r, ok = server.AsRejection(err)
 			Expect(ok).To(BeTrue(), "%v", err)
-			Expect(r.Code).To(Equal(server.CodePermissionDenied))
+			Expect(r.Code).To(Equal(server.CodeAccessDenied))
 			Expect(title("t1")).To(Equal("in one"))
 
 			Expect(f.srv.Invoke(server.Trusted(f.ctx), ws, "retitle_as_caller", &accessv1.TaskArgs{TaskId: "t1"})).
@@ -356,3 +385,30 @@ var _ = Describe("Access model writes", func() {
 			&accessv1.TaskArgs{}, "names an Entity without a KeyField"),
 	)
 })
+
+// refusalLog returns the attributes of the one "access refused" record logs
+// holds, each rendered as text.
+func refusalLog(logs *recordingHandler) map[string]string {
+	GinkgoHelper()
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	var found []map[string]string
+	for _, r := range logs.records {
+		if r.Message != "access refused" {
+			continue
+		}
+		Expect(r.Level).To(Equal(slog.LevelDebug))
+		attrs := map[string]string{}
+		r.Attrs(func(a slog.Attr) bool {
+			if v, ok := a.Value.Any().([]string); ok {
+				attrs[a.Key] = strings.Join(v, "\n")
+			} else {
+				attrs[a.Key] = a.Value.String()
+			}
+			return true
+		})
+		found = append(found, attrs)
+	}
+	Expect(found).To(HaveLen(1))
+	return found[0]
+}

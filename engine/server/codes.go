@@ -7,6 +7,14 @@ package server
 const (
 	// CodePermissionDenied rejects a mutation the caller may not perform.
 	CodePermissionDenied = "permission_denied"
+	// CodeAccessDenied rejects a mutation the schema's access model refuses:
+	// no access rule of the entity admits the write for the caller, the caller
+	// grants a role it does not hold, a move needs a read permission the caller
+	// lacks, a mutator's MutatorAccess does not hold, or the entity has no
+	// rule for the operation. The application's own permission hooks refuse
+	// with CodePermissionDenied. The message names only what the caller sent;
+	// the server logs why at debug level, as "access refused".
+	CodeAccessDenied = "access_denied"
 	// CodeInvalidArgument rejects a mutation whose payload is semantically
 	// invalid for the application.
 	CodeInvalidArgument = "invalid_argument"

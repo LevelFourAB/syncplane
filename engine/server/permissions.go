@@ -649,7 +649,7 @@ func writePolicyOf(info *entityInfo, crud *syncplanev1.CrudMutation) error {
 		return nil
 	}
 	refuse := func(what string) error {
-		return Reject(CodePermissionDenied, fmt.Sprintf(
+		return Reject(CodeAccessDenied, fmt.Sprintf(
 			"entity %q has no access rule that admits %s, so only a trusted write may %s its rows",
 			info.name, what, what))
 	}
@@ -667,7 +667,7 @@ func writePolicyOf(info *entityInfo, crud *syncplanev1.CrudMutation) error {
 			for i, h := range heads {
 				quoted[i] = fmt.Sprintf("%q", h)
 			}
-			return Reject(CodePermissionDenied, fmt.Sprintf(
+			return Reject(CodeAccessDenied, fmt.Sprintf(
 				"entity %q has no access rule that admits an update of %s together, so a PATCH masking them is refused",
 				info.name, strings.Join(quoted, ", ")))
 		}

@@ -583,9 +583,9 @@ describe('owner rules on the client', () => {
 		await ann.syncNow();
 
 		expect(rejections.map((r) => r.errorCode)).toEqual([
-			'permission_denied',
-			'permission_denied',
-			'permission_denied',
+			'access_denied',
+			'access_denied',
+			'access_denied',
 		]);
 		const post = await ann.get(PostSchema, 'po-ann');
 		expect(post?.body).toBe('edited');
@@ -637,7 +637,7 @@ describe('when checks on the client', () => {
 		await ann.mutate.put(ThreadSchema, { id: 'th-new', room: { id: 'r1' }, archived: true });
 		await ann.syncNow();
 
-		expect(rejections.map((r) => r.errorCode)).toEqual([ 'permission_denied', 'permission_denied' ]);
+		expect(rejections.map((r) => r.errorCode)).toEqual([ 'access_denied', 'access_denied' ]);
 		expect((await ann.get(ThreadSchema, 'th-open'))?.title).toBe('renamed');
 		expect((await ann.get(ThreadSchema, 'th-archived'))?.title).toBe('');
 		expect(await ann.get(ThreadSchema, 'th-new')).toBeUndefined();
@@ -695,7 +695,7 @@ describe('within entries on the client', () => {
 		await reg.mutate.patch(MatterSchema, 'm-arch', { title: 'renamed' });
 		await reg.syncNow();
 
-		expect(rejections.map((r) => r.errorCode)).toEqual([ 'permission_denied' ]);
+		expect(rejections.map((r) => r.errorCode)).toEqual([ 'access_denied' ]);
 		expect((await reg.get(MatterSchema, 'm-open'))?.title).toBe('renamed');
 		expect((await reg.get(MatterSchema, 'm-arch'))?.title).toBe('archived');
 	});
@@ -776,7 +776,7 @@ describe('rules that need several permissions on the client', () => {
 		await bob.mutate.put(ChargeSchema, { id: 'c2', invoice: { id: 'i1' } });
 		await bob.syncNow();
 
-		expect(rejections.map((r) => r.errorCode)).toEqual([ 'permission_denied', 'permission_denied' ]);
+		expect(rejections.map((r) => r.errorCode)).toEqual([ 'access_denied', 'access_denied' ]);
 		expect((await bob.get(InvoiceSchema, 'i1'))?.title).toBe('renamed');
 		expect(await bob.get(ChargeSchema, 'c2')).toBeUndefined();
 	});
@@ -831,7 +831,7 @@ describe('several access parents on the client', () => {
 		expect(await ann.canCreate(StorySchema, both)).toBe('no');
 		await ann.mutate.put(StorySchema, both);
 		await ann.syncNow();
-		expect(rejections.map((r) => r.errorCode)).toEqual([ 'permission_denied' ]);
+		expect(rejections.map((r) => r.errorCode)).toEqual([ 'access_denied' ]);
 
 		expect(await bob.canCreate(StorySchema, both)).toBe('yes');
 		await bob.mutate.put(StorySchema, both);

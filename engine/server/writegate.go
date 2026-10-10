@@ -43,6 +43,11 @@ type writeGate struct {
 	// once creatorKnown is.
 	creator      string
 	creatorKnown bool
+	// refusalsLogged holds the writes whose access refusal was logged, by
+	// entity, key and operation. A push runs its batch again under savepoints
+	// after a refusal, and the storage adapter may run a closure again, so the
+	// same refusal can be reached more than once in one request.
+	refusalsLogged map[string]bool
 }
 
 // newWriteGate builds the gate an enforced request carries into its writes, or

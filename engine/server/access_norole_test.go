@@ -56,7 +56,7 @@ var _ = Describe("An access model that declares no role", func() {
 
 		r = f.push("ann", "c2", putMutation("c2", 1, "setting", "bob", &accessv1.Setting{UserId: "bob", Theme: "dark"}))[0]
 		Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
-		Expect(r.GetErrorCode()).To(Equal(server.CodePermissionDenied))
+		Expect(r.GetErrorCode()).To(Equal(server.CodeAccessDenied))
 		Expect(f.pull("bob")).To(ConsistOf("note/n1"))
 	})
 })

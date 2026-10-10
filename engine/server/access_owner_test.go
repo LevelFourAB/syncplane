@@ -250,7 +250,7 @@ var _ = Describe("Owner rules", func() {
 	denied := func(r *syncplanev1.MutationResult) string {
 		GinkgoHelper()
 		Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
-		Expect(r.GetErrorCode()).To(Equal(server.CodePermissionDenied), r.GetErrorMessage())
+		Expect(r.GetErrorCode()).To(Equal(server.CodeAccessDenied), r.GetErrorMessage())
 		return r.GetErrorMessage()
 	}
 	get := func(dst proto.Message, key string) bool {
@@ -296,9 +296,10 @@ var _ = Describe("Owner rules", func() {
 			Expect(post("po-ann").GetBody()).To(Equal("edited"))
 		})
 
-		It("refuses a PATCH that names it", func() {
-			Expect(denied(patch("mod", "post", "po-ann", &accessv1.Post{AuthorId: "mod"}, "author_id"))).
-				To(ContainSubstring(`field "author_id" may not be written by this caller`))
+		It("refuses a PATCH that names it, as a field write policy does", func() {
+			r := patch("mod", "post", "po-ann", &accessv1.Post{AuthorId: "mod"}, "author_id")
+			Expect(r.GetErrorCode()).To(Equal(server.CodePermissionDenied))
+			Expect(r.GetErrorMessage()).To(ContainSubstring(`field "author_id" may not be written by this caller`))
 
 			Expect(post("po-ann").GetAuthorId()).To(Equal("ann"))
 		})
@@ -347,6 +348,20 @@ var _ = Describe("Owner rules", func() {
 			denied(patch("ann", "post", "po-ann", &accessv1.Post{Title: "renamed"}, "title"))
 
 			Expect(post("po-ann").GetTitle()).To(Equal("first"))
+		})
+
+		It("logs the field an update changes outside the rule's list", func() {
+			logs := &recordingHandler{}
+			f = newSchemaFixtureOn(newTestStore(), roomEntities(), server.WithLogger(slog.New(logs)))
+			f.seedRooms()
+
+			denied(patch("ann", "post", "po-ann", &accessv1.Post{Title: "renamed"}, "title"))
+			refusal := refusalLog(logs)
+			Expect(refusal).To(HaveKeyWithValue("op", "update"))
+			Expect(refusal["rules"]).To(ContainSubstring(
+				"allow[2] update:requires=post:subject=author_id:fields=body: the update changes title, and fields lists body"))
+			Expect(refusal["rules"]).To(ContainSubstring(
+				"allow[3] update,delete:requires=moderate_posts: moderate_posts is not held at the root, the row or a row above it"))
 		})
 
 		It("refuses a caller who is not the author", func() {

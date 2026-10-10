@@ -671,7 +671,7 @@ server.WithMutator("complete_task", &taskv1.CompleteTaskArgs{}, completeTask,
 	server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
 ```
 
-`MutatorAccess` checks only that the caller holds the permission. It does not run the entity's rules, such as `when` and `within`, and the body's own writes are not checked. To apply the rules to a write, write it through `tx.AsCaller()`. The server then checks the write as the same write from the caller's client, and the write returns a `CodePermissionDenied` rejection when the rules refuse it:
+`MutatorAccess` checks only that the caller holds the permission. It does not run the entity's rules, such as `when` and `within`, and the body's own writes are not checked. To apply the rules to a write, write it through `tx.AsCaller()`. The server then checks the write as the same write from the caller's client, and the write returns a `CodeAccessDenied` rejection when the rules refuse it:
 
 ```go
 func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) error {

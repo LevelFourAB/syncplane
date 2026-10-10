@@ -60,7 +60,7 @@ var _ = Describe("Access rules", func() {
 	denied := func(r *syncplanev1.MutationResult) string {
 		GinkgoHelper()
 		Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
-		Expect(r.GetErrorCode()).To(Equal(server.CodePermissionDenied), r.GetErrorMessage())
+		Expect(r.GetErrorCode()).To(Equal(server.CodeAccessDenied), r.GetErrorMessage())
 		return r.GetErrorMessage()
 	}
 	get := func(dst proto.Message, key string) bool {
@@ -156,7 +156,7 @@ var _ = Describe("Access rules", func() {
 			} {
 				rej, ok := server.AsRejection(err)
 				Expect(ok).To(BeTrue(), "got %v", err)
-				Expect(rej.Code).To(Equal(server.CodePermissionDenied))
+				Expect(rej.Code).To(Equal(server.CodeAccessDenied))
 			}
 			Expect(labelName("l1")).To(Equal("urgent"))
 		})
@@ -321,7 +321,7 @@ var _ = Describe("Access rules for an entity registered while a push waits", fun
 		result := f.push("member", "c1", patchMutation("c1", 1, "entry", "e1", &accessv1.Entry{Body: "x"}, "body"))[0]
 
 		Expect(result.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
-		Expect(result.GetErrorCode()).To(Equal(server.CodePermissionDenied))
+		Expect(result.GetErrorCode()).To(Equal(server.CodeAccessDenied))
 		Expect(result.GetErrorMessage()).To(ContainSubstring(`entity "entry" has no access rule that admits update`))
 	})
 

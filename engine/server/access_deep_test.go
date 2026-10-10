@@ -301,10 +301,10 @@ var _ = Describe("Access model writes below more than one parent", func() {
 		})
 
 		It("refuses a comment write where the caller does not", func() {
-			refused(one("writer", put("comment", "n1", comment("n1", "t1"))), server.CodePermissionDenied)
-			refused(one("guest", put("comment", "n1", comment("n1", "t1"))), server.CodePermissionDenied)
-			refused(one("writer", del("comment", "c1")), server.CodePermissionDenied)
-			refused(one("writer", put("comment", "c2", comment("c2", "t1"))), server.CodePermissionDenied)
+			refused(one("writer", put("comment", "n1", comment("n1", "t1"))), server.CodeAccessDenied)
+			refused(one("guest", put("comment", "n1", comment("n1", "t1"))), server.CodeAccessDenied)
+			refused(one("writer", del("comment", "c1")), server.CodeAccessDenied)
+			refused(one("writer", put("comment", "c2", comment("c2", "t1"))), server.CodeAccessDenied)
 		})
 
 		It("moves a task with the write permission at both ends and the read permission of the rows below it", func() {
@@ -313,7 +313,7 @@ var _ = Describe("Access model writes below more than one parent", func() {
 		})
 
 		It("refuses a move by a caller who cannot read the rows below the moved row", func() {
-			refused(one("blind", patch("task", "t1", taskIn("t1", "p2"), "project")), server.CodePermissionDenied)
+			refused(one("blind", patch("task", "t1", taskIn("t1", "p2"), "project")), server.CodeAccessDenied)
 			applied(one("blind", patch("task", "t1", &accessv1.Task{Id: "t1", Title: "renamed"}, "title")))
 		})
 
@@ -399,7 +399,7 @@ var _ = Describe("Access model writes below more than one parent", func() {
 			Expect(f.pull("newbie")).To(ContainElements("doc/d-low", "folder/low"))
 			refused(one("viewer", put("folder_member", "fm-new2", &accessv1.FolderMember{
 				Id: "fm-new2", Folder: folder("low"), UserId: "newbie2", Role: "folder_viewer",
-			})), server.CodePermissionDenied)
+			})), server.CodeAccessDenied)
 		})
 	})
 })

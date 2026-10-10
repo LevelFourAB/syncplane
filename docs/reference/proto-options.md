@@ -593,7 +593,7 @@ A read rule with a `within` entry narrows bootstrap, resync and `Query` to the r
 
 ### Operations no rule admits
 
-An operation that no rule of an entity names is open only to trusted writes: in-process writes under `server.Trusted`, connectors, effects, and the bodies of custom mutators. Before the write transaction opens, and before `Permissions.CanMutate` runs, the server refuses with `permission_denied` a write that can only be such an operation. This check reads no row. It classifies the write from its operation and its `expected_version`, where version 0 means that the row does not exist:
+An operation that no rule of an entity names is open only to trusted writes: in-process writes under `server.Trusted`, connectors, effects, and the bodies of custom mutators. Before the write transaction opens, and before `Permissions.CanMutate` runs, the server refuses with `access_denied` a write that can only be such an operation. This check reads no row. It classifies the write from its operation and its `expected_version`, where version 0 means that the row does not exist:
 
 | Write                                  | The write is                                                        | Refused when no rule names  |
 | -------------------------------------- | ------------------------------------------------------------------- | --------------------------- |

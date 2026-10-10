@@ -101,7 +101,13 @@ var _ = Describe("write policy conformance vectors", func() {
 			}
 			rej, ok := AsRejection(err)
 			Expect(ok).To(BeTrue(), "%s: got %v", tc.Name, err)
-			Expect(rej.Code).To(Equal(CodePermissionDenied), tc.Name)
+			// A protected field is a field write policy, which refuses as the
+			// app's hooks do; every other refusal here is the access model's.
+			want := CodeAccessDenied
+			if refuseProtectedMask(info, crud, info.protectedFields) != nil {
+				want = CodePermissionDenied
+			}
+			Expect(rej.Code).To(Equal(want), tc.Name)
 		}
 	})
 })

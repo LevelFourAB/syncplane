@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 
@@ -245,6 +246,106 @@ func (a *txAccess) admitting(tx storage.ReadTx, op accessOp, info *entityInfo, k
 	return out, nil
 }
 
+// accessRefusal is the verdict on a write the access model refuses. Its
+// message names only what the caller sent, and reads the same whether the row
+// is hidden, would not decode, or no rule admits the write.
+func accessRefusal(info *entityInfo, key string) error {
+	return Reject(CodeAccessDenied,
+		fmt.Sprintf("entity %q: row %q may not be changed by this caller", info.name, key))
+}
+
+// opName is the name of one operation, as a rule's spec writes it.
+func opName(op accessOp) string {
+	for _, o := range accessOpNames {
+		if o.op == op {
+			return o.name
+		}
+	}
+	return "unknown"
+}
+
+// explainRules renders, for the refusal log, each rule of info that names op
+// and what it does not admit at the row of info with key, as of tx. row is
+// nil for a row that does not exist.
+func (a *txAccess) explainRules(tx storage.ReadTx, op accessOp, info *entityInfo, key string, row protoreflect.Message) []string {
+	var out []string
+	for i, rule := range info.access.rules {
+		if rule.names(op) {
+			out = append(out, explained(i, rule, a.ruleOutcome(tx, rule, info, key, row)))
+		}
+	}
+	return out
+}
+
+// explained is one entry of the refusal log: the rule, by its place in allow,
+// and why it does not admit the write.
+func explained(i int, rule accessRule, why string) string {
+	return fmt.Sprintf("allow[%d] %s: %s", i, rule.spec(), why)
+}
+
+// ruleOutcome renders why rule does not admit the caller at the row of info
+// with key, as of tx, or "admits" when it does. row is nil for a row that does
+// not exist.
+func (a *txAccess) ruleOutcome(tx storage.ReadTx, rule accessRule, info *entityInfo, key string, row protoreflect.Message) string {
+	var why []string
+	if row == nil && (rule.checksRow() || rule.checksAbove()) {
+		why = append(why, "the row does not exist, and the rule checks it")
+	}
+	if row != nil && rule.subject != nil && !subjectMatches(a.caller.subjects, row.Get(rule.subject).String()) {
+		why = append(why, fmt.Sprintf("%s does not hold a subject of the caller", rule.subject.Name()))
+	}
+	if row != nil && rule.when != nil && !rule.when.Eval(row) {
+		why = append(why, "the row does not match when")
+	}
+	for _, p := range rule.requires {
+		held, err := a.holds(tx, p, info, key, row)
+		if err != nil {
+			return "not decided: " + err.Error()
+		}
+		if !held {
+			why = append(why, p+" is not held at the root, the row or a row above it")
+		}
+	}
+	if row != nil && rule.checksAbove() {
+		ok, err := a.chainsOf(tx).withinAll(rule, a.caller.subjects, info, key, row)
+		if err != nil {
+			return "not decided: " + err.Error()
+		}
+		if !ok {
+			why = append(why, "no row at or above the row passes within")
+		}
+	}
+	if len(why) == 0 {
+		return "admits"
+	}
+	return strings.Join(why, "; ")
+}
+
+// logRefusal records at debug level why the access model refused a write of
+// op to the row of info with key. explain runs only when the record is kept.
+func (g *writeGate) logRefusal(op accessOp, info *entityInfo, key string, explain func() []string) {
+	l := g.srv.log()
+	if !l.Enabled(g.ctx, slog.LevelDebug) {
+		return
+	}
+	id := info.name + "\x00" + key + "\x00" + opName(op)
+	if g.refusalsLogged[id] {
+		return
+	}
+	if g.refusalsLogged == nil {
+		g.refusalsLogged = map[string]bool{}
+	}
+	g.refusalsLogged[id] = true
+	l.LogAttrs(g.ctx, slog.LevelDebug, "access refused",
+		slog.String("component", "access"),
+		slog.String("workspace", g.ws),
+		slog.String("entity", info.name),
+		slog.String("key", key),
+		slog.String("op", opName(op)),
+		slog.Any("subjects", g.access.caller.subjects),
+		slog.Any("rules", explain()))
+}
+
 // grantAnchorOf returns the anchor a grant row applies at, nil for the
 // workspace root. ok is false when the row anchors at nothing.
 func grantAnchorOf(model *accessModel, info *entityInfo, row protoreflect.Message) (*anchorRow, bool) {
@@ -305,7 +406,7 @@ func checkGrantSubset(tx storage.ReadTx, access *txAccess, info *entityInfo, key
 			return err
 		}
 		if !held {
-			return Reject(CodePermissionDenied, fmt.Sprintf(
+			return Reject(CodeAccessDenied, fmt.Sprintf(
 				"entity %q: row %q grants role %q, which holds permissions this caller does not hold where the row applies",
 				info.name, key, role))
 		}
@@ -445,6 +546,7 @@ func (s *Server) checkAccessChain(
 // access model's two checks. A nil accessWrite checks nothing, which is what a
 // write outside the model, an unenforced write and a Trusted one get.
 type accessWrite struct {
+	gate   *writeGate
 	access *txAccess
 	info   *entityInfo
 	key    string
@@ -485,7 +587,7 @@ func (g *writeGate) beginAccessWrite(
 	if g == nil || g.access == nil || info.access == nil {
 		return nil, nil
 	}
-	w := &accessWrite{access: g.access, info: info, key: key, op: op, mask: mask}
+	w := &accessWrite{gate: g, access: g.access, info: info, key: key, op: op, mask: mask}
 	row, live, err := load()
 	if err != nil || !live {
 		return w, err
@@ -495,7 +597,7 @@ func (g *writeGate) beginAccessWrite(
 		// Nothing can show that the caller may change a row nobody can read. A
 		// Trusted write repairs it.
 		g.srv.reportPoison(g.ctx, g.ws, row, err)
-		return nil, refuseRow(info, key)
+		return nil, accessRefusal(info, key)
 	}
 	model := g.access.model()
 	sr := stored.ProtoReflect()
@@ -508,7 +610,8 @@ func (g *writeGate) beginAccessWrite(
 		return nil, err
 	}
 	if len(admitting) == 0 {
-		return nil, refuseRow(info, key)
+		g.logRefusal(want, info, key, func() []string { return g.access.explainRules(tx, want, info, key, sr) })
+		return nil, accessRefusal(info, key)
 	}
 	if touchesGrant(info, op, mask) {
 		if err := checkGrantSubset(tx, g.access, info, key, sr); err != nil {
@@ -589,7 +692,8 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 			}
 		}
 		if !admitted {
-			return refuseRow(w.info, w.key)
+			w.gate.logRefusal(opCreate, w.info, w.key, func() []string { return w.explainCreate(tx, fr, parents.parents) })
+			return accessRefusal(w.info, w.key)
 		}
 	default:
 		var changed []anchorRow
@@ -615,7 +719,8 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 			return err
 		}
 		if !admitted {
-			return refuseRow(w.info, w.key)
+			w.gate.logRefusal(opUpdate, w.info, w.key, func() []string { return w.explainUpdate(tx, fr, moved, changed) })
+			return accessRefusal(w.info, w.key)
 		}
 		// A change of what a within entry reads of the row changes what the rows
 		// below it show, as a move does.
@@ -649,7 +754,7 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 				if rechecked {
 					what = "changing"
 				}
-				return Reject(CodePermissionDenied, fmt.Sprintf(
+				return Reject(CodeAccessDenied, fmt.Sprintf(
 					"entity %q: %s row %q needs one of the permissions %s where it is now, to change what the rows below it show",
 					w.info.name, what, w.key, strings.Join(r.sources(), ", ")))
 			}
@@ -659,6 +764,60 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 		return checkGrantSubset(tx, w.access, w.info, w.key, fr)
 	}
 	return nil
+}
+
+// explainCreate renders, for the refusal log, why no create rule admits row,
+// as of tx: what a rule does not admit, or that its source does not hold
+// through each of parents on its own.
+func (w *accessWrite) explainCreate(tx storage.ReadTx, row protoreflect.Message, parents []anchorRow) []string {
+	var out []string
+	for i, rule := range w.info.access.rules {
+		if !rule.names(opCreate) {
+			continue
+		}
+		why := w.access.ruleOutcome(tx, rule, w.info, w.key, row)
+		if why == "admits" {
+			why = "the source does not hold through each parent the row names"
+		}
+		out = append(out, explained(i, rule, why))
+	}
+	return out
+}
+
+// explainUpdate renders, for the refusal log, why no update rule admits both
+// sides of an update to final, as of tx: a rule that does not admit the
+// stored row, does not list a field the update changes, or does not admit the
+// row as it will be stored or the parents a move adds or removes.
+func (w *accessWrite) explainUpdate(tx storage.ReadTx, final protoreflect.Message, moved bool, changed []anchorRow) []string {
+	units := changedUnits(w.info.msgType.Descriptor(), w.stored, final)
+	var out []string
+	for i, rule := range w.info.access.rules {
+		if !rule.names(opUpdate) {
+			continue
+		}
+		why := w.access.ruleOutcome(tx, rule, w.info, w.key, w.stored)
+		switch {
+		case why != "admits":
+		case !rule.fieldsAllow(units):
+			why = fmt.Sprintf("the update changes %s, and fields lists %s",
+				strings.Join(units, ", "), strings.Join(rule.fields, ", "))
+		default:
+			why = w.access.ruleOutcome(tx, rule, w.info, w.key, final)
+			if why != "admits" {
+				why = "the row as it will be stored: " + why
+			} else if moved {
+				ok, err := w.access.admitsThrough(tx, rule, w.info, w.key, changed)
+				switch {
+				case err != nil:
+					why = "not decided: " + err.Error()
+				case !ok:
+					why = "the source does not hold through each parent the move adds or removes"
+				}
+			}
+		}
+		out = append(out, explained(i, rule, why))
+	}
+	return out
 }
 
 // admitsUpdate reports whether one of rules admits an update, given that each
@@ -798,7 +957,7 @@ func (s *Server) checkInvocation(
 	}
 	ma := mi.access
 	if ma == nil {
-		return Reject(CodePermissionDenied, fmt.Sprintf(
+		return Reject(CodeAccessDenied, fmt.Sprintf(
 			"mutator %q declares no MutatorAccess, so only a trusted caller may invoke it", mi.name))
 	}
 	if ma.Entity == "" {
@@ -809,10 +968,10 @@ func (s *Server) checkInvocation(
 		if held {
 			return nil
 		}
-		return Reject(CodePermissionDenied, fmt.Sprintf("mutator %q may not be invoked by this caller", mi.name))
+		return Reject(CodeAccessDenied, fmt.Sprintf("mutator %q may not be invoked by this caller", mi.name))
 	}
 	refuse := func(key string) error {
-		return Reject(CodePermissionDenied, fmt.Sprintf(
+		return Reject(CodeAccessDenied, fmt.Sprintf(
 			"mutator %q may not be invoked on %s %q by this caller", mi.name, ma.Entity, key))
 	}
 	info, ok := s.catalogPtr().entities[ma.Entity]

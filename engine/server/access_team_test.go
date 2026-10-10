@@ -325,12 +325,12 @@ var _ = Describe("Access model teams", func() {
 	Describe("writes", func() {
 		It("lets a member write where the squad's role allows it", func() {
 			applied(put("dave", "issue", "i-new", issue("i-new", "r1")))
-			rejected(put("olga", "issue", "i-new2", issue("i-new2", "r2")), server.CodePermissionDenied)
+			rejected(put("olga", "issue", "i-new2", issue("i-new2", "r2")), server.CodeAccessDenied)
 		})
 
 		It("lets a repo admin grant a role to a squad only where the admin holds it", func() {
 			applied(put("admin", "repo_member", "rm-ops1", repoForSquad("rm-ops1", "r1", "ops", "repo_writer")))
-			rejected(put("admin", "repo_member", "rm-ops3", repoForSquad("rm-ops3", "r3", "ops", "repo_reader")), server.CodePermissionDenied)
+			rejected(put("admin", "repo_member", "rm-ops3", repoForSquad("rm-ops3", "r3", "ops", "repo_reader")), server.CodeAccessDenied)
 			Expect(f.pull("olga")).To(ContainElement("issue/i1"))
 		})
 
@@ -344,7 +344,7 @@ var _ = Describe("Access model teams", func() {
 		It("lets a squad lead add a member, who then reads what the squad's grants give", func() {
 			applied(put("dana", "squad_member", "sm-nina", squadMember("sm-nina", "design", "nina", "squad_member")))
 			rejected(put("dave", "squad_member", "sm-nils", squadMember("sm-nils", "design", "nils", "squad_member")),
-				server.CodePermissionDenied)
+				server.CodeAccessDenied)
 
 			Expect(f.pull("nina")).To(ContainElements("issue/i1", "issue/i3"))
 		})
@@ -358,7 +358,7 @@ var _ = Describe("Access model teams", func() {
 		})
 
 		It("lets a user leave a repo by deleting their own row, and not a squad's row", func() {
-			rejected(del("dave", "repo_member", "rm-design"), server.CodePermissionDenied)
+			rejected(del("dave", "repo_member", "rm-design"), server.CodeAccessDenied)
 			applied(del("rita", "repo_member", "rm-rita"))
 		})
 	})

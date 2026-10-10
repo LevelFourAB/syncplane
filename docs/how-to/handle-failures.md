@@ -21,6 +21,8 @@ Before you begin, ensure you have a configured `SyncClient` instance.
    				return toast('Someone else changed this first');
    			case CodePermissionDenied:
    				return toast(info.errorMessage);
+   			case CodeAccessDenied:
+   				return toast('You may not make this change');
    			case CodeWorkspacePurged:
    				return; // handled by the code that called removeWorkspace
    			default:
