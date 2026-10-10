@@ -723,10 +723,44 @@ export interface EntitySchema<F extends Fields = Fields> {
  * at the call site.
  *
  * `allow` holds at least one rule, and no two rules the same.
+ *
+ * Within `entity()`, a rule's `subject` and `fields`, and a grant's `subject`
+ * and `role`, accept only the names of the entity's fields. A declaration
+ * annotated as `AccessDecl` takes any name, and does not fit an entity's
+ * options; to share rules between entities, check them with `satisfies`.
+ *
+ * @example
+ * ```ts
+ * const readWrite = {
+ *   allow: [ { read: true, requires: 'view_tasks' }, { write: true, requires: 'edit_tasks' } ],
+ * } satisfies schema.AccessDecl;
+ * const task = schema.entity('task', { id: schema.text().key() }, { access: readWrite });
+ * ```
  */
 export interface AccessDecl<F extends Fields = Fields> {
-	allow: AccessRuleDecl<F>[];
+	allow: readonly AccessRuleDecl<F>[];
 }
+
+/** The accessor names of the fields of F; any string where F is not known. */
+type FieldKeys<F extends Fields> = Fields extends F ? string : Extract<keyof F, string>;
+
+/** The accessor names of the `text()` fields of F; any string where F is not known. */
+type TextKeys<F extends Fields> = Fields extends F ? string
+	: {
+		[K in Extract<keyof F, string>]: F[K] extends Field<string> ? K : never;
+	}[Extract<keyof F, string>];
+
+/**
+ * The accessor names of the fields of F that can hold a grant subject: `text()`
+ * fields and singular references. Any string where F is not known.
+ */
+type SubjectKeys<F extends Fields> = Fields extends F ? string : {
+	[K in Extract<keyof F, string>]: F[K] extends Field<infer T> ? [T] extends [string] ? K
+		: T extends readonly unknown[] | Uint8Array ? never
+		: T extends object ? K
+		: never
+		: never;
+}[Extract<keyof F, string>];
 
 /**
  * One rule of an {@link AccessDecl}, mirroring syncplane.v1.AccessRule: the
@@ -806,8 +840,8 @@ export type AccessRuleDecl<F extends Fields = Fields> =
 		update?: boolean;
 		delete?: boolean;
 		write?: boolean;
-		subject?: string;
-		fields?: string[];
+		subject?: TextKeys<F>;
+		fields?: readonly FieldKeys<F>[];
 		when?(row: QueryRef<RowOf<F>>): Cond;
 		within?: WithinDecl | readonly WithinDecl[];
 	}
@@ -900,17 +934,17 @@ export function within<F extends Fields>(
  * at the row its `.accessParent()` reference points at, or at the workspace
  * root when the entity has no access parent.
  */
-export interface GrantDecl {
+export interface GrantDecl<F extends Fields = Fields> {
 	/**
 	 * Accessor name of the field that holds the subject: a `text()` field,
 	 * which names one caller, or a singular `ref()` to an entity that declares
 	 * `members`, which names a team and grants to every member of it.
 	 */
-	subject: string;
+	subject: SubjectKeys<F>;
 	/** Accessor name of the `text()` field that holds the role. */
-	role: string;
+	role: TextKeys<F>;
 	/** The roles rows can grant. At least one, with names unique across the schema. */
-	roles: RoleDecl[];
+	roles: readonly RoleDecl[];
 }
 
 /**
@@ -940,7 +974,9 @@ export interface MembersDecl {
  * ]
  * ```
  */
-export type RoleDecl = RoleFields & ({ grants: string[] } | { includes: string[] });
+export type RoleDecl =
+	& RoleFields
+	& ({ grants: readonly string[] } | { includes: readonly string[] });
 
 /** The fields of a {@link RoleDecl}. */
 interface RoleFields {
@@ -949,13 +985,13 @@ interface RoleFields {
 	 * The permissions the role grants at its anchor, without duplicates. A
 	 * permission that an included role also grants is accepted.
 	 */
-	grants?: string[];
+	grants?: readonly string[];
 	/**
 	 * The names of roles of the same grant whose permissions this role also
 	 * grants, without duplicates. A role that includes itself, directly or
 	 * through other roles, is refused.
 	 */
-	includes?: string[];
+	includes?: readonly string[];
 }
 
 /**
@@ -1017,7 +1053,7 @@ function assertFields(where: string, fields: Fields): void {
 export function entity<F extends Fields>(
 	name: string,
 	fields: F,
-	options?: EntityOptions<F>,
+	options?: EntityOptions<NoInfer<F>>,
 ): EntitySchema<F> {
 	// The name reaches the wire, storage and the KV key layout, and is lowered to
 	// a proto message name below — the shared rule (naming.ts) covers all of it.
@@ -1044,7 +1080,7 @@ export function entity<F extends Fields>(
 		indexes,
 		...(options?.search === undefined ? {} : { search: options.search }),
 		...(opts?.access === undefined ? {} : { access: opts.access }),
-		...(options?.grant === undefined ? {} : { grant: options.grant }),
+		...(opts?.grant === undefined ? {} : { grant: opts.grant }),
 		...(options?.members === undefined ? {} : { members: options.members }),
 		typeName: `${DYNAMIC_PACKAGE}.${pascalCase(name)}`,
 	};
@@ -1085,7 +1121,7 @@ export interface EntityOptions<F extends Fields = Fields> {
 	 *
 	 * When omitted, the entity is outside the access model: every caller the
 	 * server admits to the workspace reads and writes its rows, subject only
-	 * to the app's permission policy, and `can()` answers `'unknown'` for them.
+	 * to the app's permission policy, and `can()` answers `'yes'` for them.
 	 * A server built with `WithStrictAccess` refuses such an entity in a schema
 	 * where any entity declares `access` or `grant`.
 	 *
@@ -1142,7 +1178,7 @@ export interface EntityOptions<F extends Fields = Fields> {
 	 * });
 	 * ```
 	 */
-	grant?: GrantDecl;
+	grant?: GrantDecl<F>;
 	/**
 	 * Declares the entity's rows as teams; see {@link MembersDecl}. A grant
 	 * whose subject is a `ref()` to this entity grants to every member of the
@@ -1262,8 +1298,8 @@ function assertAccess(
  * engine enforces at registration: each names a role of the same grant, once,
  * and no role includes itself through any chain.
  */
-function assertRoleIncludes(where: string, roles: RoleDecl[], names: Set<string>): void {
-	const includes = new Map<string, string[]>();
+function assertRoleIncludes(where: string, roles: readonly RoleDecl[], names: Set<string>): void {
+	const includes = new Map<string, readonly string[]>();
 	for (const role of roles) {
 		const seen = new Set<string>();
 		for (const inc of role.includes ?? []) {
@@ -1791,7 +1827,11 @@ function entityMessageOf(e: EntitySchema, entities: readonly EntitySchema[]): De
 					subject: snakeCase(e.grant.subject),
 					role: snakeCase(e.grant.role),
 					roles: e.grant.roles.map((r) =>
-						create(RoleSchema, { name: r.name, grants: r.grants ?? [], includes: r.includes ?? [] })
+						create(RoleSchema, {
+							name: r.name,
+							grants: [ ...(r.grants ?? []) ],
+							includes: [ ...(r.includes ?? []) ],
+						})
 					),
 				}),
 			}),

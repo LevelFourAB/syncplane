@@ -29,6 +29,7 @@ import {
 	entity,
 	type EntitySchema,
 	type Field,
+	type Fields,
 	type Infer,
 	int32,
 	int64,
@@ -590,11 +591,13 @@ describe('schema builder — access model', () => {
 
 	describe('validation', () => {
 		const fields = { id: text().key(), userId: text(), role: text() };
-		const access: AccessDecl = {
+		const access = {
 			allow: [ { read: true, requires: 'view' }, { write: true, requires: 'edit' } ],
-		};
+		} satisfies AccessDecl;
 		const roles = [ { name: 'writer', grants: [ 'view', 'edit' ] } ];
-		const allowing = (...allow: AccessRuleDecl[]) => () => entity('e', fields, { access: { allow } });
+		// Untyped on purpose: these cases check what entity() throws at run time.
+		const allowing = (...allow: AccessRuleDecl[]) => () =>
+			entity('e', fields as Fields, { access: { allow } });
 
 		it('rejects accessParent() on anything but a ref() or a refList()', () => {
 			expect(() => text().accessParent()).toThrow(/only valid on a ref\(\) or refList\(\)/);
@@ -612,7 +615,7 @@ describe('schema builder — access model', () => {
 			expect(allowing()).toThrow('entity "e": access.allow declares no rules');
 			// A declaration without `allow` at all, as plain JS can pass.
 			const shapeless = { read: 'view', write: 'edit' } as unknown as AccessDecl;
-			expect(() => entity('e', fields, { access: shapeless })).toThrow(
+			expect(() => entity('e', fields as Fields, { access: shapeless })).toThrow(
 				/access.allow declares no rules/,
 			);
 		});
@@ -698,6 +701,7 @@ describe('schema builder — access model', () => {
 			);
 		});
 		it('rejects a grant field that is not a declared text() field', () => {
+			// @ts-expect-error not a field of the entity
 			expect(() => entity('e', fields, { access, grant: { subject: 'who', role: 'role', roles } }))
 				.toThrow(
 					/grant subject field "who" is not declared/,
@@ -705,6 +709,7 @@ describe('schema builder — access model', () => {
 			expect(() =>
 				entity('e', { ...fields, level: int32() }, {
 					access,
+					// @ts-expect-error a role is a text() field
 					grant: { subject: 'userId', role: 'level', roles },
 				})
 			).toThrow(/grant role field "level" must be a singular text\(\) field/);
@@ -713,6 +718,7 @@ describe('schema builder — access model', () => {
 			expect(() =>
 				entity('e', { ...fields, team: refList(() => project) }, {
 					access,
+					// @ts-expect-error a subject is a text() field or a singular ref()
 					grant: { subject: 'team', role: 'role', roles },
 				})
 			).toThrow(/grant subject field "team" must be a singular text\(\) field or a singular ref\(\)/);
@@ -852,7 +858,9 @@ describe('schema builder — owner rules', () => {
 
 	describe('validation', () => {
 		const fields = { id: text().key(), ownerId: text(), count: int32(), note: text() };
-		const allowing = (...allow: AccessRuleDecl[]) => () => entity('e', fields, { access: { allow } });
+		// Untyped on purpose: these cases check what entity() throws at run time.
+		const allowing = (...allow: AccessRuleDecl[]) => () =>
+			entity('e', fields as Fields, { access: { allow } });
 
 		it('rejects creator() on anything but a singular text() that is not a key or protected', () => {
 			expect(() => int32().creator()).toThrow(/only valid on a singular text\(\) field/);
@@ -1118,5 +1126,117 @@ describe('schema builder — rules that need several permissions', () => {
 				{ read: true, requires: 'p' },
 			)).not.toThrow();
 		});
+	});
+});
+
+describe('schema builder — typed access names', () => {
+	const team = entity('team', { id: text().key() }, {
+		members: { entity: 'team_member' },
+		access: { allow: [ { read: true, requires: 'view_teams' } ] },
+	});
+	const postFields = {
+		id: text().key(),
+		authorId: text(),
+		body: text(),
+		pinned: bool(),
+	};
+
+	it('accepts the names of fields the entity declares', () => {
+		const post = entity('post', postFields, {
+			access: {
+				allow: [
+					{ read: true, requires: 'view_posts' },
+					{ update: true, requires: 'post', subject: 'authorId', fields: [ 'body' ] },
+				],
+			},
+		});
+		expect(post.access?.allow).toHaveLength(2);
+	});
+
+	it('refuses a rule subject or fields entry that is not a matching field, at compile time', () => {
+		const opts = (allow: AccessRuleDecl<typeof postFields>[]) => ({ access: { allow } });
+		opts([
+			// @ts-expect-error not a field of a post
+			{ update: true, requires: 'post', subject: 'authorIdd' },
+		]);
+		opts([
+			// @ts-expect-error a subject is a text() field
+			{ update: true, requires: 'post', subject: 'pinned' },
+		]);
+		opts([
+			// @ts-expect-error not a field of a post
+			{ update: true, requires: 'post', fields: [ 'titel' ] },
+		]);
+	});
+
+	it('refuses a grant subject or role that is not a matching field, at compile time', () => {
+		const memberFields = {
+			id: text().key(),
+			team: ref(() => team).accessParent(),
+			userId: text(),
+			role: text(),
+			active: bool(),
+		};
+		const access = { allow: [ { read: true, requires: 'view_teams' } ] } satisfies AccessDecl;
+		const roles = [ { name: 'team_member', grants: [ 'view_teams' ] } ];
+		entity('team_member', memberFields, {
+			access,
+			grant: { subject: 'userId', role: 'role', roles },
+		});
+		expect(() =>
+			entity('team_member', memberFields, {
+				access,
+				// @ts-expect-error not a field of a team member
+				grant: { subject: 'user', role: 'role', roles },
+			})
+		).toThrow('grant subject field "user" is not declared');
+		expect(() =>
+			entity('team_member', memberFields, {
+				access,
+				// @ts-expect-error a role is a text() field
+				grant: { subject: 'userId', role: 'active', roles },
+			})
+		).toThrow('grant role field "active" must be a singular text() field');
+	});
+
+	it('accepts readonly lists, so a schema can share them', () => {
+		const reader = [ 'view_posts' ] as const;
+		const editable = [ 'body' ] as const;
+		const post = entity('post', postFields, {
+			access: {
+				allow: [
+					{ read: true, requires: 'view_posts' },
+					{ update: true, requires: 'post', fields: editable },
+				],
+			},
+			grant: undefined,
+		});
+		const member = entity('post_reader', {
+			id: text().key(),
+			userId: text(),
+			role: text(),
+		}, {
+			access: { allow: [ { read: true, requires: 'view_posts' } ] },
+			grant: {
+				subject: 'userId',
+				role: 'role',
+				roles: [
+					{ name: 'reader', grants: reader },
+					{ name: 'poster', includes: [ 'reader' ] as const, grants: [ 'post' ] },
+				] as const,
+			},
+		});
+		expect(post.access?.allow).toHaveLength(2);
+		expect(member.grant?.roles).toHaveLength(2);
+	});
+
+	it('takes any name where the entity is not known', () => {
+		const allow: AccessRuleDecl[] = [ {
+			update: true,
+			requires: 'post',
+			subject: 'anyField',
+			fields: [ 'x' ],
+		} ];
+		expect(allow).toHaveLength(1);
 	});
 });

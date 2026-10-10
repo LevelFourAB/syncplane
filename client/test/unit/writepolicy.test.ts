@@ -13,10 +13,16 @@ import {
 	NoteSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
-import { type AccessRuleDecl, defineSchema, entity, text } from '../../src/schema/builder.js';
+import {
+	type AccessRuleDecl,
+	defineSchema,
+	entity,
+	type Fields,
+	text,
+} from '../../src/schema/builder.js';
 
 const ruled = (name: string, ...allow: AccessRuleDecl[]) =>
-	entity(name, { id: text().key(), body: text() }, { access: { allow } });
+	entity(name, { id: text().key(), body: text() } as Fields, { access: { allow } });
 
 const bundle = defineSchema(
 	// Server-owned: clients read its rows, and no rule admits a write.
