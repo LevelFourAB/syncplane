@@ -65,7 +65,7 @@ import { schema } from 'syncplane';
 
    **Note:** If you encounter a TypeScript inference cycle with self-referencing entities, name the recursive field map and annotate the entity type using `type X = Infer<typeof x>`.
 
-2. Configure access rules and protected fields.
+2. Configure access rules and field guards.
 
    To decide who reads and writes the rows of an entity, pass `access` in the options object, the third argument to `schema.entity()`. Each rule admits operations to the callers that hold a permission, or to every admitted caller with `admitted: true`. An operation that no rule admits is open only to trusted server-side writes:
 
@@ -98,18 +98,37 @@ import { schema } from 'syncplane';
 
    In a schema without `access`, refuse such writes in the server's `CanMutate` hook. See [Reserve an operation for trusted writes](authentication-and-permissions.md#reserve-an-operation-for-trusted-writes).
 
-   To restrict specific fields while keeping the entity writable, add `.protected()` to the field definition:
+   To restrict who writes specific fields while keeping the entity writable, add a `guard` to `access`. A guard whose only rule is the read rule keeps its fields from every client:
 
    ```ts
    const task = schema.entity('task', {
    	id: schema.text().key(),
    	title: schema.text(),
-   	// Advanced by a server-side workflow; clients read it, never write it.
-   	status: schema.text().protected(),
+   	status: schema.text(),
+   	priority: schema.int32(),
+   }, {
+   	access: {
+   		allow: [
+   			{ read: true, requires: 'view_tasks' },
+   			{ write: true, requires: 'edit_tasks' },
+   		],
+   		guard: [
+   			// Advanced by a server-side workflow; clients read it, never write it.
+   			{ fields: [ 'status' ], allow: [ { read: true, admitted: true } ] },
+   			// Only a caller with set_priority changes the priority.
+   			{
+   				fields: [ 'priority' ],
+   				allow: [ { read: true, admitted: true }, {
+   					write: true,
+   					requires: 'set_priority',
+   				} ],
+   			},
+   		],
+   	},
    });
    ```
 
-   A `patch` operation that masks a protected field throws an error. A `put` operation succeeds and preserves the existing field value. For more information, see [Protected fields](../reference/proto-options.md#protected-fields).
+   A `patch` operation that masks `status` throws an error. A `put` operation succeeds and keeps the stored value of each guarded field the caller may not write. For more information, see [Field guards](../reference/proto-options.md#field-guards).
 
 3. Create the schema bundle with `schema.defineSchema()`:
 

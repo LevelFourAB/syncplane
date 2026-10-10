@@ -67,7 +67,7 @@ import {
 	EntityOptionsSchema,
 	field_behavior as fieldBehaviorExt,
 	FieldBehaviorSchema,
-	FieldWritePolicy,
+	FieldGuardSchema,
 	file_syncplane_v1_options,
 	GrantOptionsSchema,
 	IndexKeySchema,
@@ -186,8 +186,6 @@ interface FieldSpec {
 	indexed?: boolean;
 	/** Include this field in the entity's full-text search. */
 	searchable?: boolean;
-	/** Put this field out of a client's reach; see Field.protected. */
-	protectedField?: boolean;
 	/** Record who created the row in this field; see Field.creator. */
 	creator?: boolean;
 	/** kind 'ref' — the name of the reverse relation on the target; see Field.reverseRelation. */
@@ -225,12 +223,6 @@ export class Field<T> {
 		if (this.spec.repeated) throw new Error('a key field cannot be repeated');
 		if (this.spec.creator) {
 			throw new Error('a key field cannot be creator(): a key field never changes after the create');
-		}
-		if (this.spec.protectedField) {
-			throw new Error(
-				'a key field cannot be protected(): a patch can never move a key field, and a put that '
-					+ 'changed one would address a different row',
-			);
 		}
 		if (!SCALAR_CAN_KEY[this.spec.scalar!]) {
 			throw new Error(
@@ -334,38 +326,11 @@ export class Field<T> {
 	}
 
 	/**
-	 * Puts this field out of a client's reach while the rest of the row stays
-	 * writable — a status a server-side workflow advances, a counter an effect
-	 * maintains. To record who created the row, use {@link Field.creator}.
-	 *
-	 * A `patch()` whose mask reaches the field throws at the call site and is
-	 * rejected by the server; a `put()` is not refused, and the field keeps the
-	 * value the row already holds (its zero value on a new row). Only writes
-	 * under the server's `Trusted` bypass, and the rows a custom mutator writes,
-	 * can change it.
-	 *
-	 * A key field cannot be protected. To protect a field for some callers only,
-	 * leave it unmarked here and implement the server's `FieldPermissions` hook.
-	 */
-	protected(): Field<T> {
-		if (this.spec.key) {
-			throw new Error(
-				'protected() is not valid on a key field: a patch can never move a key field, and a put '
-					+ 'that changed one would address a different row',
-			);
-		}
-		if (this.spec.creator) {
-			throw new Error('protected() is not valid on a creator() field, which already keeps its value');
-		}
-		return new Field<T>({ ...this.spec, protectedField: true });
-	}
-
-	/**
 	 * Records who created the row in this field: on a create that is not
 	 * trusted, the server stores the caller's primary subject in it, whatever
-	 * value the write carries. Afterwards the field behaves as a
-	 * {@link Field.protected} one: a `patch()` whose mask reaches it throws at
-	 * the call site, and a `put()` keeps the stored value. A trusted
+	 * value the write carries. Afterwards no client changes it: a `patch()`
+	 * whose mask reaches it throws at the call site, and a `put()` keeps the
+	 * stored value. A trusted
 	 * server-side write stores the value it carries.
 	 *
 	 * The local view shows the primary subject from the last access summary
@@ -373,8 +338,8 @@ export class Field<T> {
 	 * summary arrives. An access rule's `callerIs` check can name the field to
 	 * admit only the author.
 	 *
-	 * Throws unless the field is a singular `text()` that is not a key and not
-	 * protected.
+	 * Throws unless the field is a singular `text()` that is not a key. A field
+	 * guard cannot name it.
 	 *
 	 * @example
 	 * ```ts
@@ -400,11 +365,6 @@ export class Field<T> {
 		}
 		if (this.spec.key) {
 			throw new Error('creator() is not valid on a key field, which never changes after the create');
-		}
-		if (this.spec.protectedField) {
-			throw new Error(
-				'creator() is not valid on a protected() field; a creator field already keeps its value',
-			);
 		}
 		return new Field<T>({ ...this.spec, creator: true });
 	}
@@ -448,8 +408,8 @@ export class Field<T> {
 	 * referenced entity must declare `access`; see
 	 * {@link EntityOptions.access}. A grant entity marks one singular field.
 	 *
-	 * Throws unless the field is a `ref()` or a `refList()`. The server also
-	 * refuses the mark on a protected field.
+	 * Throws unless the field is a `ref()` or a `refList()`. A field guard
+	 * cannot name it.
 	 *
 	 * @example
 	 * ```ts
@@ -739,6 +699,71 @@ export interface EntitySchema<F extends Fields = Fields> {
  */
 export interface AccessDecl<F extends Fields = Fields> {
 	allow: readonly AccessRuleDecl<F>[];
+	/**
+	 * The field guards: each one restricts who can write a set of fields,
+	 * whatever rule in `allow` admits the write. A field that no guard names
+	 * follows `allow` alone. See {@link FieldGuardDecl}.
+	 */
+	guard?: readonly FieldGuardDecl<F>[];
+}
+
+/**
+ * Restricts who can write a set of an entity's fields, mirroring
+ * syncplane.v1.FieldGuard.
+ *
+ * A write that sets a guarded field needs a rule in `allow` of the entity that
+ * admits the write, and a rule of the guard that admits the field operation:
+ * `create` for the value a create stores, `update` for a change of a row that
+ * exists, and `write` for both. A guard rule decides as an entity rule does,
+ * on the row as it will be stored and, for an update, on the stored row. A
+ * field operation that no guard rule admits is open only to trusted
+ * server-side writes.
+ *
+ * When the guard does not admit the caller, a `patch()` whose mask names a
+ * guarded field is refused, a `put()` that updates a row keeps the stored
+ * value of each guarded field, and a `put()` that creates a row stores the
+ * zero value. The client refuses a patch at the call site, and keeps or clears
+ * the field on a put, only where no guard rule admits the operation to any
+ * caller; the server decides the rest, and a refused patch comes back as a
+ * rejection ack.
+ *
+ * `fields` names the guarded fields by accessor name. A field is in at most
+ * one guard, and cannot be a key field, a `.creator()` field or an
+ * `.accessParent()` reference. `allow` holds the rule
+ * `{ read: true, admitted: true }`, so that every reader of a row reads its
+ * guarded fields, and rules that name `create`, `update` or `write`. A guard
+ * rule cannot name `delete` or `fields`, and its `callerIs` and `when` cannot
+ * read a guarded field.
+ *
+ * To let a caller change only some fields of a row, set `fields` on an update
+ * rule in `allow` instead: that rule adds a narrow update, and a guard takes a
+ * field away from every rule.
+ *
+ * @example
+ * A total that only server code computes, and a status that only managers
+ * set:
+ * ```ts
+ * const order = schema.entity('order', {
+ *   id: schema.text().key(),
+ *   total: schema.int64(),
+ *   status: schema.text(),
+ * }, {
+ *   access: {
+ *     allow: [ { read: true, requires: 'view_orders' }, { write: true, requires: 'edit_orders' } ],
+ *     guard: [
+ *       { fields: [ 'total' ], allow: [ { read: true, admitted: true } ] },
+ *       {
+ *         fields: [ 'status' ],
+ *         allow: [ { read: true, admitted: true }, { write: true, requires: 'manage_orders' } ],
+ *       },
+ *     ],
+ *   },
+ * });
+ * ```
+ */
+export interface FieldGuardDecl<F extends Fields = Fields> {
+	fields: readonly FieldKeys<F>[];
+	allow: readonly GuardRuleDecl<F>[];
 }
 
 /** The accessor names of the fields of F; any string where F is not known. */
@@ -835,13 +860,22 @@ type SubjectKeys<F extends Fields> = Fields extends F ? string : {
  */
 export type AccessRuleDecl<F extends Fields = Fields> =
 	& {
+		delete?: boolean;
+		fields?: readonly FieldKeys<F>[];
+	}
+	& GuardRuleDecl<F>;
+
+/**
+ * One rule of a {@link FieldGuardDecl}: an {@link AccessRuleDecl} without
+ * `delete` and `fields`. `write` admits `create` and `update`.
+ */
+export type GuardRuleDecl<F extends Fields = Fields> =
+	& {
 		read?: boolean;
 		create?: boolean;
 		update?: boolean;
-		delete?: boolean;
 		write?: boolean;
 		callerIs?: TextKeys<F>;
-		fields?: readonly FieldKeys<F>[];
 		when?(row: QueryRef<RowOf<F>>): Cond;
 		within?: WithinEntry<F> | readonly WithinEntry<F>[];
 	}
@@ -1382,10 +1416,11 @@ function assertRoleIncludes(where: string, roles: readonly RoleDecl[], names: Se
 const ACCESS_OPERATIONS = [ 'read', 'create', 'update', 'delete', 'write' ] as const;
 
 /**
- * Validates the rules of entity `owner`'s access declaration against the rules
- * the engine enforces on syncplane.v1.AccessOptions at registration. A within
- * thunk is called only when `resolve` is set; until then a rule that holds one
- * skips the check for repeated rules, which needs the entity it names.
+ * Validates the rules of entity `owner`'s access declaration, and its field
+ * guards, against the rules the engine enforces on syncplane.v1.AccessOptions
+ * at registration. A within thunk is called only when `resolve` is set; until
+ * then a rule that holds one skips the check for repeated rules, which needs
+ * the entity it names.
  */
 function assertAccessRules(
 	where: string,
@@ -1402,78 +1437,227 @@ function assertAccessRules(
 	const seen = new Map<string, number>();
 	access.allow.forEach((rule, i) => {
 		const at = `${where} access.allow[${i}]`;
-		if (!ACCESS_OPERATIONS.some((op) => rule[op] === true)) {
-			throw new Error(
-				`${at}: the rule admits no operation; set read, create, update, delete or write`,
-			);
-		}
-		const requires = requiresOf(rule);
-		const hasAdmitted = rule.admitted !== undefined;
-		if (requires !== undefined && hasAdmitted) {
-			throw new Error(`${at}: the rule sets both requires and admitted; set exactly one`);
-		}
-		if (requires === undefined && !hasAdmitted) {
-			throw new Error(`${at}: the rule has no source; set requires or admitted: true`);
-		}
-		if (requires !== undefined) {
-			// A plain-JS caller can pass the empty list the types refuse.
-			if (requires.length === 0) throw new Error(`${at}: requires names no permission`);
-			const named = new Set<string>();
-			for (const permission of requires) {
-				validatePermissionName(permission, `${at} requires`);
-				if (named.has(permission)) throw new Error(`${at}: requires "${permission}" twice`);
-				named.add(permission);
-			}
-		} else if (rule.admitted !== true) {
-			throw new Error(`${at}: admitted must be true`);
-		}
-		if (rule.callerIs !== undefined) {
-			const spec = fields[rule.callerIs]?.spec;
-			if (spec === undefined) {
-				throw new Error(`${at}: callerIs field "${rule.callerIs}" is not declared`);
-			}
-			if (spec.kind !== 'scalar' || spec.scalar !== 'string' || spec.repeated) {
-				throw new Error(`${at}: callerIs field "${rule.callerIs}" must be a singular text() field`);
-			}
-		}
-		if (rule.fields !== undefined) {
-			if (
-				ACCESS_OPERATIONS.some((op) => op !== 'update' && rule[op] === true) || rule.update !== true
-			) {
-				throw new Error(`${at}: fields is valid only on a rule whose one operation is update`);
-			}
-			if (rule.fields.length === 0) throw new Error(`${at}: fields lists no field`);
-			const listed = new Set<string>();
-			for (const name of rule.fields) {
-				const spec = fields[name]?.spec;
-				if (spec === undefined) throw new Error(`${at}: fields names "${name}", which is not declared`);
-				if (spec.key) {
-					throw new Error(`${at}: fields names key field "${name}", which no update changes`);
-				}
-				if (listed.has(name)) throw new Error(`${at}: fields names "${name}" twice`);
-				listed.add(name);
-			}
-		}
-		const when = whenOf(at, rule.when, fields);
-		const within = withinKeysOf(at, owner, rule, resolve);
-		if (within === undefined) return;
-		// The key is the rule as the proto message holds it: an operation left
-		// unset and one set to false encode the same, so they must collide, and
-		// the order of a requires, a fields or a within list does not count.
-		const key = JSON.stringify([
-			...ACCESS_OPERATIONS.map((op) => rule[op] === true),
-			requires === undefined ? null : [ ...requires ].sort(),
-			rule.callerIs ?? null,
-			rule.fields === undefined ? null : [ ...rule.fields ].sort(),
-			when === undefined ? null : toJson(ConditionSchema, when),
-			within,
-		]);
+		const key = assertAccessRule(at, owner, rule, fields, resolve);
+		if (key === undefined) return;
 		const first = seen.get(key);
 		if (first !== undefined) {
 			throw new Error(`${at}: the rule repeats access.allow[${first}]`);
 		}
 		seen.set(key, i);
 	});
+	if (access.guard !== undefined) assertGuards(where, owner, access.guard, fields, resolve);
+}
+
+/**
+ * Validates one access rule by itself, and returns a key that is equal for two
+ * rules that are the same, or undefined when a within thunk that `resolve`
+ * does not allow to call leaves the key open. `at` names the rule in an error.
+ */
+function assertAccessRule(
+	at: string,
+	owner: string,
+	rule: AccessRuleDecl,
+	fields: Fields,
+	resolve: boolean,
+): string | undefined {
+	if (!ACCESS_OPERATIONS.some((op) => rule[op] === true)) {
+		throw new Error(
+			`${at}: the rule admits no operation; set read, create, update, delete or write`,
+		);
+	}
+	const requires = requiresOf(rule);
+	const hasAdmitted = rule.admitted !== undefined;
+	if (requires !== undefined && hasAdmitted) {
+		throw new Error(`${at}: the rule sets both requires and admitted; set exactly one`);
+	}
+	if (requires === undefined && !hasAdmitted) {
+		throw new Error(`${at}: the rule has no source; set requires or admitted: true`);
+	}
+	if (requires !== undefined) {
+		// A plain-JS caller can pass the empty list the types refuse.
+		if (requires.length === 0) throw new Error(`${at}: requires names no permission`);
+		const named = new Set<string>();
+		for (const permission of requires) {
+			validatePermissionName(permission, `${at} requires`);
+			if (named.has(permission)) throw new Error(`${at}: requires "${permission}" twice`);
+			named.add(permission);
+		}
+	} else if (rule.admitted !== true) {
+		throw new Error(`${at}: admitted must be true`);
+	}
+	if (rule.callerIs !== undefined) {
+		const spec = fields[rule.callerIs]?.spec;
+		if (spec === undefined) {
+			throw new Error(`${at}: callerIs field "${rule.callerIs}" is not declared`);
+		}
+		if (spec.kind !== 'scalar' || spec.scalar !== 'string' || spec.repeated) {
+			throw new Error(`${at}: callerIs field "${rule.callerIs}" must be a singular text() field`);
+		}
+	}
+	if (rule.fields !== undefined) {
+		if (
+			ACCESS_OPERATIONS.some((op) => op !== 'update' && rule[op] === true) || rule.update !== true
+		) {
+			throw new Error(`${at}: fields is valid only on a rule whose one operation is update`);
+		}
+		if (rule.fields.length === 0) throw new Error(`${at}: fields lists no field`);
+		const listed = new Set<string>();
+		for (const name of rule.fields) {
+			const spec = fields[name]?.spec;
+			if (spec === undefined) throw new Error(`${at}: fields names "${name}", which is not declared`);
+			if (spec.key) {
+				throw new Error(`${at}: fields names key field "${name}", which no update changes`);
+			}
+			if (listed.has(name)) throw new Error(`${at}: fields names "${name}" twice`);
+			listed.add(name);
+		}
+	}
+	const when = whenOf(at, rule.when, fields);
+	const within = withinKeysOf(at, owner, rule, resolve);
+	if (within === undefined) return undefined;
+	// The key is the rule as the proto message holds it: an operation left
+	// unset and one set to false encode the same, so they must collide, and
+	// the order of a requires, a fields or a within list does not count.
+	return JSON.stringify([
+		...ACCESS_OPERATIONS.map((op) => rule[op] === true),
+		requires === undefined ? null : [ ...requires ].sort(),
+		rule.callerIs ?? null,
+		rule.fields === undefined ? null : [ ...rule.fields ].sort(),
+		when === undefined ? null : toJson(ConditionSchema, when),
+		within,
+	]);
+}
+
+/**
+ * Validates the field guards of entity `owner` against the rules the engine
+ * enforces on syncplane.v1.FieldGuard at registration; see
+ * {@link FieldGuardDecl}.
+ */
+function assertGuards(
+	where: string,
+	owner: string,
+	guards: readonly FieldGuardDecl[],
+	fields: Fields,
+	resolve: boolean,
+): void {
+	// A plain-JS caller can pass a shape the types refuse.
+	if (!Array.isArray(guards as unknown)) throw new Error(`${where}: access.guard must be a list`);
+	const guardOf = new Map<string, number>();
+	guards.forEach((guard, i) => {
+		const at = `${where} access.guard[${i}]`;
+		if (!Array.isArray(guard.fields as unknown) || guard.fields.length === 0) {
+			throw new Error(`${at}: names no field; list the fields it restricts`);
+		}
+		const listed = new Set<string>();
+		for (const name of guard.fields) {
+			const spec = fields[name]?.spec;
+			if (spec === undefined) throw new Error(`${at}: fields names "${name}", which is not declared`);
+			if (spec.key) {
+				throw new Error(`${at}: fields names key field "${name}", which no update changes`);
+			}
+			if (listed.has(name)) throw new Error(`${at}: fields names "${name}" twice`);
+			listed.add(name);
+			if (spec.accessParent) {
+				throw new Error(
+					`${at}: names "${name}", which is an access parent; a guard cannot restrict it`,
+				);
+			}
+			if (spec.creator) {
+				throw new Error(`${at}: names "${name}", which is a creator field; a guard cannot restrict it`);
+			}
+			const other = guardOf.get(name);
+			if (other !== undefined) {
+				throw new Error(
+					`${at} and access.guard[${other}] both name "${name}"; a field has at most one guard`,
+				);
+			}
+			guardOf.set(name, i);
+		}
+		if (!Array.isArray(guard.allow as unknown)) throw new Error(`${at}: allow must be a list`);
+		let read = false;
+		const seen = new Map<string, number>();
+		guard.allow.forEach((rule, j) => {
+			const ruleAt = `${at}.allow[${j}]`;
+			// A plain-JS caller can set what the guard rule type leaves out.
+			const plain = rule as AccessRuleDecl;
+			if (plain.delete === true) {
+				throw new Error(
+					`${ruleAt}: names delete; a guard restricts writing a field, and a delete writes none`,
+				);
+			}
+			if (plain.fields !== undefined) {
+				throw new Error(`${ruleAt}: names fields; the guard's own fields are the ones it restricts`);
+			}
+			const key = assertAccessRule(ruleAt, owner, rule, fields, resolve);
+			if (rule.read === true) {
+				// A read rule that narrows needs the server to send a row without
+				// the fields a caller may not read, which it does not do.
+				if (
+					rule.admitted !== true || rule.callerIs !== undefined || rule.when !== undefined
+					|| rule.within !== undefined
+				) {
+					throw new Error(
+						`${ruleAt}: names read with a source or a check other than admitted; `
+							+ 'the read rule of a guard is { read: true, admitted: true }',
+					);
+				}
+				read = true;
+			}
+			if (key === undefined) return;
+			const first = seen.get(key);
+			if (first !== undefined) throw new Error(`${ruleAt}: the rule repeats ${at}.allow[${first}]`);
+			seen.set(key, j);
+		});
+		if (!read) {
+			throw new Error(
+				`${at}: has no read rule; add { read: true, admitted: true }, so that the readers of a row `
+					+ 'read its guarded fields',
+			);
+		}
+	});
+	// Once every guard is known: a check that read a guarded field would depend
+	// on the value a guard decides about.
+	const guarded = new Set([ ...guardOf.keys() ].map(snakeCase));
+	guards.forEach((guard, i) => {
+		guard.allow.forEach((rule, j) => {
+			const reads = rule.callerIs === undefined ? [] : [ snakeCase(rule.callerIs) ];
+			const when = whenOf('', rule.when, fields);
+			if (when !== undefined) reads.push(...conditionHeads(when));
+			for (const name of reads) {
+				if (guarded.has(name)) {
+					throw new Error(
+						`${where} access.guard[${i}].allow[${j}]: reads "${name}", which a guard restricts; `
+							+ "a guard's checks read only fields that no guard restricts",
+					);
+				}
+			}
+		});
+	});
+}
+
+/**
+ * The first segment of each path that `cond` reads on the row. An exists
+ * condition reads the list at its path, and its inner condition reads that
+ * list's elements, so only its path counts.
+ */
+function conditionHeads(cond: Condition): string[] {
+	const out: string[] = [];
+	const walk = (value: unknown): void => {
+		if (value === null || typeof value !== 'object') return;
+		if (Array.isArray(value)) {
+			for (const v of value) walk(v);
+			return;
+		}
+		const rec = value as Record<string, unknown>;
+		const path = rec['path'];
+		if (Array.isArray(path) && typeof path[0] === 'string') out.push(path[0]);
+		if (rec['$typeName'] === 'syncplane.v1.ExistsCond') return;
+		for (const [ k, v ] of Object.entries(rec)) {
+			if (k !== 'path' && k !== '$typeName') walk(v);
+		}
+	};
+	walk(cond);
+	return out;
 }
 
 /** A rule's within entries as a list. */
@@ -1551,9 +1735,18 @@ function validateWithinTargets(entities: readonly EntitySchema[]): void {
 	const byName = new Map(entities.map((e) => [ e.name, e ]));
 	for (const e of entities) {
 		let lazy = false;
-		e.access?.allow.forEach((rule, i) => {
+		const rules: [string, AccessRuleDecl][] = [
+			...(e.access?.allow ?? []).map((
+				rule,
+				i,
+			): [string, AccessRuleDecl] => [ `access.allow[${i}]`, rule ]),
+			...(e.access?.guard ?? []).flatMap((g, i) =>
+				g.allow.map((rule, j): [string, AccessRuleDecl] => [ `access.guard[${i}].allow[${j}]`, rule ])
+			),
+		];
+		rules.forEach(([ at, rule ]) => {
 			withinListOf(rule).forEach((w, j) => {
-				const where = `entity "${e.name}" access.allow[${i}] within[${j}]`;
+				const where = `entity "${e.name}" ${at} within[${j}]`;
 				const name = withinEntityOf(e.name, w, true);
 				const target = name === undefined ? undefined : byName.get(name);
 				if (target === undefined) {
@@ -1980,6 +2173,13 @@ function entityMessageOf(e: EntitySchema, entities: readonly EntitySchema[]): De
 			...(e.access === undefined ? {} : {
 				access: create(AccessOptionsSchema, {
 					allow: e.access.allow.map((r) => accessRuleOf(r, e.name, e.fields, entities)),
+					guard: (e.access.guard ?? []).map((g) =>
+						create(FieldGuardSchema, {
+							// Accessor names lower to proto names, as a rule's fields do.
+							fields: g.fields.map(snakeCase),
+							allow: g.allow.map((r) => accessRuleOf(r, e.name, e.fields, entities)),
+						})
+					),
 				}),
 			}),
 			...(e.grant === undefined ? {} : {
@@ -2086,8 +2286,8 @@ function fieldProtoOf(
 	switch (spec.kind) {
 		case 'scalar': {
 			field.type = SCALAR_TO_TYPE[spec.scalar!];
-			if (spec.opaque) setOpaque(field, spec.indexed ?? false, spec.protectedField);
-			else if (spec.indexed || spec.searchable || spec.protectedField || spec.creator) {
+			if (spec.opaque) setOpaque(field, spec.indexed ?? false);
+			else if (spec.indexed || spec.searchable || spec.creator) {
 				setScalarMarks(field, spec);
 			}
 			break;
@@ -2138,7 +2338,6 @@ function fieldProtoOf(
 			field.label = FieldDescriptorProto_Label.REPEATED;
 			field.type = FieldDescriptorProto_Type.MESSAGE;
 			field.typeName = `.${entryFull}`;
-			setWritePolicy(field, spec);
 			break;
 		}
 	}
@@ -2215,12 +2414,12 @@ function referenceMessageOf(simpleName: string, targetTypeName: string): Descrip
 }
 
 /** Sets (syncplane.v1.field_behavior).opaque on a field. */
-function setOpaque(field: FieldDescriptorProto, indexed = false, isProtected = false): void {
+function setOpaque(field: FieldDescriptorProto, indexed = false): void {
 	const fieldOptions = create(FieldOptionsSchema);
 	setExtension(
 		fieldOptions,
 		fieldBehaviorExt,
-		create(FieldBehaviorSchema, { opaque: true, indexed, writePolicy: writePolicyOf(isProtected) }),
+		create(FieldBehaviorSchema, { opaque: true, indexed }),
 	);
 	field.options = fieldOptions;
 }
@@ -2234,47 +2433,24 @@ function setScalarMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
 		create(FieldBehaviorSchema, {
 			indexed: spec.indexed ?? false,
 			searchable: spec.searchable ?? false,
-			writePolicy: writePolicyOf(spec.protectedField),
 			...(spec.creator ? { creator: create(CreatorOptionsSchema) } : {}),
 		}),
 	);
 	field.options = fieldOptions;
 }
 
-function writePolicyOf(isProtected: boolean | undefined): FieldWritePolicy {
-	return isProtected ? FieldWritePolicy.TRUSTED_ONLY : FieldWritePolicy.UNSPECIFIED;
-}
-
-/**
- * Sets (syncplane.v1.field_behavior).write_policy alone, for the kinds that
- * carry no other mark. No-op on an unprotected field, which must keep its
- * options unset — a map or reference the builder annotated would be reporting a
- * behaviour it does not have.
- */
-function setWritePolicy(field: FieldDescriptorProto, spec: FieldSpec): void {
-	if (!spec.protectedField) return;
-	const fieldOptions = create(FieldOptionsSchema);
-	setExtension(
-		fieldOptions,
-		fieldBehaviorExt,
-		create(FieldBehaviorSchema, { writePolicy: FieldWritePolicy.TRUSTED_ONLY }),
-	);
-	field.options = fieldOptions;
-}
-
 /**
  * Sets the (syncplane.v1.field_behavior) marks a reference field carries: its
- * write policy, its reverse relation's name and its access-parent mark. No-op
- * when none is set, for the reason setWritePolicy gives.
+ * reverse relation's name and its access-parent mark. No-op when none is set:
+ * a reference the builder annotated would report a behaviour it does not have.
  */
 function setRefMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
-	if (!spec.protectedField && spec.reverseRelation === undefined && !spec.accessParent) return;
+	if (spec.reverseRelation === undefined && !spec.accessParent) return;
 	const fieldOptions = create(FieldOptionsSchema);
 	setExtension(
 		fieldOptions,
 		fieldBehaviorExt,
 		create(FieldBehaviorSchema, {
-			writePolicy: writePolicyOf(spec.protectedField),
 			reverseRelation: spec.reverseRelation ?? '',
 			...(spec.accessParent ? { accessParent: create(AccessParentOptionsSchema) } : {}),
 		}),
@@ -2291,8 +2467,7 @@ function setBehavior(field: FieldDescriptorProto, spec: FieldSpec): void {
 	const keyField = spec.keyField ?? [];
 	const orderField = spec.orderField ?? '';
 	const indexed = spec.indexed ?? false;
-	const isProtected = spec.protectedField ?? false;
-	if (!spec.opaque && !indexed && !isProtected && keyField.length === 0 && orderField === '') return;
+	if (!spec.opaque && !indexed && keyField.length === 0 && orderField === '') return;
 	const fieldOptions = create(FieldOptionsSchema);
 	setExtension(
 		fieldOptions,
@@ -2302,7 +2477,6 @@ function setBehavior(field: FieldDescriptorProto, spec: FieldSpec): void {
 			keyField,
 			orderField,
 			indexed,
-			writePolicy: writePolicyOf(isProtected),
 		}),
 	);
 	field.options = fieldOptions;

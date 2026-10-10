@@ -30,6 +30,7 @@ import {
 	DocSchema,
 	DossierSchema,
 	DraftSchema,
+	ExpenseSchema,
 	FolderSchema,
 	InvoiceSchema,
 	LeafletSchema,
@@ -892,6 +893,91 @@ describe('can() with a when check', () => {
 	it('answers unknown where the row is not held', async () => {
 		const t = await threadClient(inR1('view_posts', 'post'));
 		expect(await t.client.can(ThreadSchema, 'th-gone', 'read')).toBe('unknown');
+		await t.client.close();
+	});
+});
+
+/**
+ * A test client over an expense of padmin's in project p1, as `subject`: the
+ * guards of "expense" keep `total` from every client, `status` for edit_projects,
+ * `notes` for the reporter, and `estimate` changeable only while open. e-open
+ * is open and e-closed closed.
+ */
+async function expenseClient(subject: string, ...perms: string[]) {
+	const t = await createTestClient({ entities: [ ProjectSchema, ExpenseSchema ] });
+	t.server.put(ProjectSchema, { id: 'p1' });
+	t.server.put(ExpenseSchema, {
+		id: 'e-open',
+		project: { id: 'p1' },
+		reporterId: 'padmin',
+		estimate: 3,
+	});
+	t.server.put(ExpenseSchema, {
+		id: 'e-closed',
+		project: { id: 'p1' },
+		reporterId: 'padmin',
+		closed: true,
+	});
+	t.server.setCallerAccess({
+		subjects: [ subject ],
+		permissions: perms.map((permission) => ({
+			permission,
+			anchors: [ { entity: 'project', keys: [ 'p1' ] } ],
+		})),
+	});
+	await t.sync();
+	return t;
+}
+
+describe('can() with a field guard', () => {
+	it('answers no for a field whose guard admits no update', async () => {
+		const t = await expenseClient('padmin', 'view_tasks', 'edit_tasks', 'edit_projects');
+		expect(await t.client.can(ExpenseSchema, 'e-open', 'update', { fields: [ 'total' ] })).toBe('no');
+		expect(await t.client.can(ExpenseSchema, 'e-open', 'update', { fields: [ 'title', 'total' ] }))
+			.toBe('no');
+		expect(await t.client.can(ExpenseSchema, 'e-open', 'update', { fields: [ 'title' ] })).toBe(
+			'yes',
+		);
+		await t.client.close();
+	});
+
+	it('needs a guard rule for the caller as well as an entity rule', async () => {
+		const writer = await expenseClient('padmin', 'view_tasks', 'edit_tasks');
+		expect(await writer.client.can(ExpenseSchema, 'e-open', 'update', { fields: [ 'status' ] }))
+			.toBe('no');
+		await writer.client.close();
+
+		const owner = await expenseClient('owner', 'view_tasks', 'edit_tasks', 'edit_projects');
+		expect(await owner.client.can(ExpenseSchema, 'e-open', 'update', { fields: [ 'status' ] }))
+			.toBe('yes');
+		await owner.client.close();
+	});
+
+	it("checks a guard rule's callerIs and when on the row held locally", async () => {
+		const reporter = await expenseClient('padmin', 'view_tasks', 'edit_tasks');
+		expect(await reporter.client.can(ExpenseSchema, 'e-open', 'update', { fields: [ 'notes' ] }))
+			.toBe('yes');
+		expect(await reporter.client.can(ExpenseSchema, 'e-open', 'update', { fields: [ 'estimate' ] }))
+			.toBe('yes');
+		expect(await reporter.client.can(ExpenseSchema, 'e-closed', 'update', { fields: [ 'estimate' ] }))
+			.toBe('no');
+		// The new value of `closed` decides the final side of the guard rule.
+		expect(
+			await reporter.client.can(ExpenseSchema, 'e-open', 'update', {
+				fields: [ 'estimate', 'closed' ],
+			}),
+		).toBe('unknown');
+		await reporter.client.close();
+
+		const other = await expenseClient('owner', 'view_tasks', 'edit_tasks');
+		expect(await other.client.can(ExpenseSchema, 'e-open', 'update', { fields: [ 'notes' ] }))
+			.toBe('no');
+		await other.client.close();
+	});
+
+	it('answers for some update without the guarded fields', async () => {
+		const t = await expenseClient('padmin', 'view_tasks', 'edit_tasks');
+		expect(await t.client.can(ExpenseSchema, 'e-open', 'update')).toBe('yes');
 		await t.client.close();
 	});
 });

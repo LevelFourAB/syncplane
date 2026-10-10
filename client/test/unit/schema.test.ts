@@ -5,7 +5,6 @@ import { CrudOp } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import {
 	entity as entityExt,
 	field_behavior as fieldBehaviorExt,
-	FieldWritePolicy,
 } from '../../src/gen/syncplane/v1/options_pb.js';
 import {
 	assertWritePolicy,
@@ -29,6 +28,7 @@ import {
 	entity,
 	type EntitySchema,
 	type Field,
+	type FieldGuardDecl,
 	type Fields,
 	type Infer,
 	int32,
@@ -123,36 +123,6 @@ describe('schema builder', () => {
 		expect(writeAccessOf(comment)).toEqual({ create: true, update: true, delete: true });
 
 		expect(entityDefOf(bundle.descMessage('todo')).writeAccess).toBeUndefined();
-	});
-
-	it('lowers .protected() onto every field kind that can carry it', () => {
-		const person = entity('person', { id: text().key() });
-		const task = entity('task', {
-			id: text().key(),
-			title: text(),
-			status: text().protected(),
-			audit: message({ at: text() }).protected(),
-			labels: map('string', text()).protected(),
-			owner: ref(() => person).protected(),
-		});
-		const desc = defineSchema(person, task).descMessage('task');
-		const policyOf = (name: string) => {
-			const field = desc.fields.find((f) => f.name === name)!;
-			return hasOption(field, fieldBehaviorExt)
-				? getOption(field, fieldBehaviorExt).writePolicy
-				: FieldWritePolicy.UNSPECIFIED;
-		};
-
-		for (const name of [ 'status', 'audit', 'labels', 'owner' ]) {
-			expect(policyOf(name), name).toBe(FieldWritePolicy.TRUSTED_ONLY);
-		}
-		expect(policyOf('title')).toBe(FieldWritePolicy.UNSPECIFIED);
-		expect(entityDefOf(desc).protectedFields).toEqual([ 'status', 'audit', 'labels', 'owner' ]);
-	});
-
-	it('refuses a protected key field, whichever order it is declared in', () => {
-		expect(() => text().key().protected()).toThrow(/not valid on a key field/);
-		expect(() => text().protected().key()).toThrow(/key field cannot be protected/);
 	});
 
 	it('round-trips a value through the runtime descriptor', () => {
@@ -394,19 +364,6 @@ describe('schema builder — full parity', () => {
 			expect(() => ref(() => project).reverseRelation('owned.issues')).toThrow(
 				'reverseRelation(): reverse relation name "owned.issues" is not an identifier',
 			);
-		});
-		it('keeps both marks on a protected reference with a named reverse relation', () => {
-			const person = entity('person', { id: text().key() });
-			const task = entity('task', {
-				id: text().key(),
-				owner: ref(() => person).protected().reverseRelation('ownedTasks'),
-			});
-			const owner = defineSchema(person, task).descMessage('task').fields.find((f) =>
-				f.name === 'owner'
-			)!;
-			const fb = getOption(owner, fieldBehaviorExt);
-			expect(fb.writePolicy).toBe(FieldWritePolicy.TRUSTED_ONLY);
-			expect(fb.reverseRelation).toBe('ownedTasks');
 		});
 		it('rejects opaque on a map', () => {
 			expect(() => map('string', text()).opaque()).toThrow(/bytes\(\) or message\(\)/);
@@ -866,12 +823,10 @@ describe('schema builder — owner rules', () => {
 		const allowing = (...allow: AccessRuleDecl[]) => () =>
 			entity('e', fields as Fields, { access: { allow } });
 
-		it('rejects creator() on anything but a singular text() that is not a key or protected', () => {
+		it('rejects creator() on anything but a singular text() that is not a key', () => {
 			expect(() => int32().creator()).toThrow(/only valid on a singular text\(\) field/);
 			expect(() => text().key().creator()).toThrow(/not valid on a key field/);
 			expect(() => text().creator().key()).toThrow(/cannot be creator\(\)/);
-			expect(() => text().protected().creator()).toThrow(/not valid on a protected\(\) field/);
-			expect(() => text().creator().protected()).toThrow(/not valid on a creator\(\) field/);
 		});
 		it('rejects a callerIs that is not a declared text() field', () => {
 			expect(allowing({ read: true, requires: 'p', callerIs: 'who' })).toThrow(
@@ -987,6 +942,186 @@ describe('schema builder — when checks', () => {
 				{ read: true, requires: 'p', when: (e) => e.note.eq('a') },
 				{ read: true, requires: 'p', when: (e) => e.note.eq('a') },
 			)).toThrow('entity "e" access.allow[1]: the rule repeats access.allow[0]');
+		});
+	});
+});
+
+describe('schema builder — field guards', () => {
+	const project = entity('project', { id: text().key() }, {
+		access: { allow: [ { read: true, write: true, requires: 'edit_tasks' } ] },
+	});
+	const expense = entity('expense', {
+		id: text().key(),
+		project: ref(() => project).accessParent(),
+		title: text(),
+		status: text(),
+		total: int64(),
+		reporterId: text().creator(),
+		notes: text(),
+		estimate: int32(),
+		closed: bool(),
+	}, {
+		access: {
+			allow: [ { read: true, requires: 'view_tasks' }, { write: true, requires: 'edit_tasks' } ],
+			guard: [
+				{ fields: [ 'total' ], allow: [ { read: true, admitted: true } ] },
+				{
+					fields: [ 'status' ],
+					allow: [ { read: true, admitted: true }, { write: true, requires: 'edit_projects' } ],
+				},
+				{
+					fields: [ 'notes' ],
+					allow: [ { read: true, admitted: true }, {
+						write: true,
+						requires: 'edit_tasks',
+						callerIs: 'reporterId',
+					} ],
+				},
+				{
+					fields: [ 'estimate' ],
+					allow: [
+						{ read: true, admitted: true },
+						{ create: true, requires: 'edit_tasks' },
+						{ update: true, requires: 'edit_tasks', when: (e) => e.closed.eq(false) },
+					],
+				},
+			],
+		},
+	});
+	const bundle = defineSchema(project, expense);
+
+	it('lowers each guard with proto field names', () => {
+		const guards = getOption(bundle.descMessage('expense'), entityExt).access!.guard;
+		expect(guards.map((g) => g.fields)).toEqual([ [ 'total' ], [ 'status' ], [ 'notes' ], [
+			'estimate',
+		] ]);
+		expect(guards[0]!.allow).toHaveLength(1);
+		expect(guards[0]!.allow[0]).toMatchObject({ read: true });
+		expect(guards[0]!.allow[0]!.admitted).toBeDefined();
+		expect(guards[2]!.allow[1]).toMatchObject({
+			write: true,
+			requires: [ 'edit_tasks' ],
+			callerIs: 'reporter_id',
+		});
+		expect(condFromProto(guards[3]!.allow[2]!.when!)).toEqual({
+			kind: 'cmp',
+			path: [ 'closed' ],
+			op: 'eq',
+			value: false,
+		});
+	});
+
+	it('reads the guards onto the EntityDef', () => {
+		const def = entityDefOf(bundle.descMessage('expense'));
+		expect(def.guards.map((g) => g.units)).toEqual([ [ 'total' ], [ 'status' ], [ 'notes' ], [
+			'estimate',
+		] ]);
+		expect(def.guards[1]!.rules[1]).toMatchObject({ create: true, update: true, delete: false });
+		// A guard with no update rule keeps its fields after the create, as a
+		// creator field does; one with no create rule clears them on a create.
+		expect(def.protectedFields).toEqual([ 'reporter_id', 'total' ]);
+		expect(def.clearedOnCreate).toEqual([ 'total' ]);
+	});
+
+	it('refuses locally a patch of a field that no guard rule admits updating', () => {
+		const def = entityDefOf(bundle.descMessage('expense'));
+		expect(() => assertWritePolicy(def, CrudOp.PATCH, undefined, [ 'total' ])).toThrow(
+			'entity "expense": field "total" may not be written by a client',
+		);
+		// The server decides a guard that has an update rule.
+		expect(() => assertWritePolicy(def, CrudOp.PATCH, undefined, [ 'status' ])).not.toThrow();
+		expect(() => assertWritePolicy(def, CrudOp.PATCH, undefined, [ 'title' ])).not.toThrow();
+	});
+
+	describe('validation', () => {
+		const fields = {
+			id: text().key(),
+			parent: ref(() => project).accessParent(),
+			authorId: text().creator(),
+			ownerId: text(),
+			total: int64(),
+			note: text(),
+		};
+		const guarding = (...guard: FieldGuardDecl<typeof fields>[]) => () =>
+			entity('e', fields, {
+				access: { allow: [ { read: true, write: true, admitted: true } ], guard },
+			});
+		const read = { read: true, admitted: true } as const;
+
+		it('accepts a guard that admits reading and no write', () => {
+			expect(guarding({ fields: [ 'total' ], allow: [ read ] })).not.toThrow();
+		});
+		it('rejects a guard without fields', () => {
+			expect(guarding({ fields: [], allow: [ read ] })).toThrow(
+				'entity "e" access.guard[0]: names no field; list the fields it restricts',
+			);
+		});
+		it('rejects a field that cannot be guarded', () => {
+			expect(guarding({ fields: [ 'id' ], allow: [ read ] })).toThrow(
+				'entity "e" access.guard[0]: fields names key field "id"',
+			);
+			expect(guarding({ fields: [ 'parent' ], allow: [ read ] })).toThrow(
+				'entity "e" access.guard[0]: names "parent", which is an access parent',
+			);
+			expect(guarding({ fields: [ 'authorId' ], allow: [ read ] })).toThrow(
+				'entity "e" access.guard[0]: names "authorId", which is a creator field',
+			);
+			expect(guarding({ fields: [ 'nope' ] as never, allow: [ read ] })).toThrow(
+				'entity "e" access.guard[0]: fields names "nope", which is not declared',
+			);
+		});
+		it('rejects a field that two guards name', () => {
+			expect(
+				guarding({ fields: [ 'total' ], allow: [ read ] }, {
+					fields: [ 'note', 'total' ],
+					allow: [ read ],
+				}),
+			)
+				.toThrow('entity "e" access.guard[1] and access.guard[0] both name "total"');
+		});
+		it('rejects a guard without the admitted read rule', () => {
+			expect(guarding({ fields: [ 'total' ], allow: [ { update: true, requires: 'p' } ] })).toThrow(
+				'entity "e" access.guard[0]: has no read rule',
+			);
+			expect(guarding({ fields: [ 'total' ], allow: [ { read: true, requires: 'p' } ] })).toThrow(
+				'entity "e" access.guard[0].allow[0]: names read with a source or a check other than admitted',
+			);
+			expect(guarding({ fields: [ 'total' ], allow: [ { ...read, callerIs: 'ownerId' } ] })).toThrow(
+				'names read with a source or a check other than admitted',
+			);
+		});
+		it('rejects a guard rule with delete or fields', () => {
+			expect(
+				guarding({ fields: [ 'total' ], allow: [ read, { delete: true, requires: 'p' } as never ] }),
+			)
+				.toThrow('entity "e" access.guard[0].allow[1]: names delete');
+			expect(
+				guarding({
+					fields: [ 'total' ],
+					allow: [ read, { update: true, requires: 'p', fields: [ 'note' ] } as never ],
+				}),
+			).toThrow('entity "e" access.guard[0].allow[1]: names fields');
+		});
+		it('rejects a repeated guard rule', () => {
+			expect(guarding({
+				fields: [ 'total' ],
+				allow: [ read, { update: true, requires: 'p' }, { update: true, requires: 'p' } ],
+			})).toThrow(
+				'entity "e" access.guard[0].allow[2]: the rule repeats entity "e" access.guard[0].allow[1]',
+			);
+		});
+		it('rejects a guard rule whose checks read a guarded field', () => {
+			expect(guarding(
+				{ fields: [ 'ownerId' ], allow: [ read ] },
+				{ fields: [ 'total' ], allow: [ read, { update: true, requires: 'p', callerIs: 'ownerId' } ] },
+			)).toThrow('entity "e" access.guard[1].allow[1]: reads "owner_id", which a guard restricts');
+			expect(guarding(
+				{ fields: [ 'note' ], allow: [ read ] },
+				{
+					fields: [ 'total' ],
+					allow: [ read, { update: true, requires: 'p', when: (e) => e.note.eq('x') } ],
+				},
+			)).toThrow('entity "e" access.guard[1].allow[1]: reads "note", which a guard restricts');
 		});
 	});
 });

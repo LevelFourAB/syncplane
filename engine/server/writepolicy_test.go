@@ -49,14 +49,14 @@ var _ = Describe("Field write policy for an entity registered while a push waits
 		return pushResults(resp.Msg)[0]
 	}
 
-	It("refuses a client PATCH whose mask names a TRUSTED_ONLY field", func() {
+	It("refuses a client PATCH whose mask names a field no guard rule admits writing", func() {
 		result := push(batchMutation("c1", 1,
 			crudPut("guarded", "g1", &testdatav1.Guarded{Id: "g1", Label: "x"}),
 			crudPatch("guarded", "g1", &testdatav1.Guarded{Owner: "alice"}, "owner"),
 		))
 
 		Expect(result.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
-		Expect(result.GetErrorCode()).To(Equal(server.CodePermissionDenied))
+		Expect(result.GetErrorCode()).To(Equal(server.CodeAccessDenied))
 		var g testdatav1.Guarded
 		var found bool
 		Expect(srv.View(server.Trusted(context.Background()), ws, func(tx *server.ViewTx) error {

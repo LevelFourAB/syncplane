@@ -113,6 +113,69 @@ message EntityOptions {
 message AccessOptions {
 	// The rules. At least one, and no two the same.
 	repeated AccessRule allow = 1;
+	// The field guards: each one restricts who can write a set of fields,
+	// whatever rule in `allow` admits the write. A field that no guard names
+	// follows `allow` alone. See `FieldGuard`.
+	repeated FieldGuard guard = 2;
+}
+
+// Restricts who can write a set of fields of an entity.
+//
+// A write that sets a guarded field needs a rule in `allow` of the entity that
+// admits the write, and a rule of the guard that admits the field operation:
+// `create` for the value a create stores, `update` for a change of a row that
+// exists. A rule of the guard admits an operation as a rule of the entity
+// does: its source holds for the caller where the row sits, and every check
+// it sets holds on the row as it will be stored and, for an update, on the
+// stored row. A field operation that no rule of the guard admits is open only
+// to trusted writes.
+//
+// A write the guard does not admit for the caller:
+//
+// - a `PATCH` whose mask names a guarded field fails with `access_denied`;
+// - a `PUT` that updates a row keeps the stored value of each guarded field;
+// - a `PUT` that creates a row stores the zero value in each guarded field.
+//
+// Every caller that reads the row reads the guarded fields: each guard admits
+// reading with the rule `{ read: true admitted: {} }`, and registration refuses
+// a guard without it.
+//
+// A total that only server code computes, and a status that only managers
+// set:
+//
+// ```protobuf
+// access: {
+//   allow: [
+//     { read: true requires: "view_orders" },
+//     { write: true requires: "edit_orders" }
+//   ]
+//   guard: [
+//     { fields: ["total"] allow: [{ read: true admitted: {} }] },
+//     { fields: ["status"] allow: [
+//       { read: true admitted: {} },
+//       { write: true requires: "manage_orders" }
+//     ] }
+//   ]
+// }
+// ```
+//
+// To let a caller change only some fields of a row, set `fields` on an update
+// rule in `allow` instead: that rule adds a narrow update, and a guard takes
+// a field away from every rule.
+//
+// Registration refuses a guard without fields or rules, a field that is a key
+// field, an access parent or a `creator` field, a field that two guards name,
+// a rule with `delete` or `fields`, a rule whose `caller_is` or `when` reads a
+// guarded field, and unknown fields inside this message.
+message FieldGuard {
+	// The fields the guard restricts. Each entry names a top-level field
+	// outside any `oneof`, or a `oneof`, which the guard restricts as one
+	// field.
+	repeated string fields = 1;
+	// The rules. A rule names `read`, `create`, `update` or `write`, which
+	// admits `create` and `update`. A rule that names `read` admits every
+	// admitted caller and sets no check.
+	repeated AccessRule allow = 2;
 }
 
 // One way to read or write the rows of an entity.
@@ -210,7 +273,12 @@ message AccessRule {
 	//
 	// A `PATCH` fails before the row is read when every `update` rule of the
 	// entity has a `fields` list and no list names every field the mask
-	// names.
+	// names. When every `update` rule that admits the caller at the stored row
+	// has a `fields` list, a `PUT` that updates the row keeps the stored value
+	// of each field that none of those lists names.
+	//
+	// To take a field away from every caller, whatever rule admits the
+	// update, use a `FieldGuard`.
 	repeated string fields = 9;
 	// Admits only rows that match this condition. The condition uses the query
 	// predicate language with paths from the row, and reads only the row
@@ -484,7 +552,7 @@ message MembersOptions {
 // Each marked field is a top-level field, or a member of a `oneof` whose
 // members are all marked. Each is a reference: its type is an entity message,
 // or a reference message without a `workspace` field. A marked field cannot
-// be a map or carry a `write_policy`.
+// be a map or be named by a `FieldGuard`.
 //
 // An entity can mark several fields, and a marked field can be repeated. A
 // row then sits below every row its marked fields name, and a permission held
@@ -532,7 +600,7 @@ message AccessParentOptions {}
 // trusted write stores the value it carries.
 //
 // The field is a top-level, singular `string` field outside any `oneof`. It
-// cannot be a key field or carry a `write_policy`.
+// cannot be a key field or be named by a `FieldGuard`.
 //
 // Registration refuses unknown fields inside this message.
 message CreatorOptions {}
@@ -552,33 +620,6 @@ message CreatorOptions {}
 // Query history through the `Query` RPC. Deleting a row purges its history
 // records.
 message HistoryOptions {}
-
-// Specifies which callers can write a specific field of an entity.
-//
-// Use it when specific fields must be modified only by the server while the
-// rest of the row remains client-writable.
-//
-// The engine handles write operations as follows:
-// - A `PATCH` request whose field mask includes a protected field fails.
-// - A `PUT` request silently preserves the server value for protected fields
-//   (or the zero value for new rows) and applies the remaining fields.
-//
-// To allow client-initiated changes to protected fields, use a custom mutator
-// with appropriate checks and authorize the mutator invocation by name.
-// Dynamic per-caller permissions belong in the server `FieldPermissions` hook.
-enum FieldWritePolicy {
-	// Allows any caller admitted by the permission policy to write the field.
-	FIELD_WRITE_POLICY_UNSPECIFIED = 0;
-	// Explicitly allows any caller admitted by the permission policy to write
-	// the field.
-	FIELD_WRITE_POLICY_ALLOW = 1;
-	// Only writes made under the engine's Trusted bypass may change the
-	// field — a connector, a migration, an effect, a cron job. A PATCH
-	// naming the field is refused, while a PUT carries the stored value
-	// over and the rest of the write lands. The in-process API is
-	// deliberately held to the same policy as a sync client.
-	FIELD_WRITE_POLICY_TRUSTED_ONLY = 2;
-}
 
 // Declares a message as a reference message: the stored shape of a typed
 // reference that can cross workspace boundaries.
@@ -764,16 +805,6 @@ message FieldBehavior {
 	// `EntityOptions.search`, in field declaration order. Requires a singular
 	// string or collaborative text field. See `SearchSpec`.
 	bool searchable = 7;
-	// Specifies who can write this field.
-	//
-	// When unset, any caller admitted by the application permission policy can
-	// write the field.
-	//
-	// Apply this option to top-level fields only. Protecting a message field
-	// protects all fields within it. Marking any member of a `oneof` protects
-	// the entire `oneof` group. Key fields cannot be marked with a write
-	// policy. See `FieldWritePolicy`.
-	FieldWritePolicy write_policy = 8;
 	// Identifies the workspace field within a reference message.
 	//
 	// Marks a singular string field in a message with
@@ -810,6 +841,9 @@ message FieldBehavior {
 	// Stores the subject of the caller who creates the row. See
 	// `CreatorOptions`.
 	CreatorOptions creator = 12;
+
+	reserved 8;
+	reserved "write_policy";
 }
 
 extend google.protobuf.MessageOptions {

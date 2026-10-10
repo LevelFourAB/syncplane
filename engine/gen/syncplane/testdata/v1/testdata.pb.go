@@ -496,9 +496,9 @@ func (x *StringList) GetValues() []string {
 
 // Fields a client may not write, one per shape the carry-over and the mask
 // refusal have to handle: a scalar, a message a mask can descend into, a
-// collaborative-text field whose union must not run, and a oneof protected as a
+// collaborative-text field whose union must not run, and a oneof guarded as a
 // group. `label` and `settings` stay writable so a test can tell "this write
-// landed except for the protected part" from "this write was refused".
+// landed except for the guarded part" from "this write was refused".
 type Guarded struct {
 	state    protoimpl.MessageState `protogen:"open.v1"`
 	Id       string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -507,8 +507,6 @@ type Guarded struct {
 	Audit    *Settings              `protobuf:"bytes,4,opt,name=audit,proto3" json:"audit,omitempty"`
 	Summary  []byte                 `protobuf:"bytes,5,opt,name=summary,proto3" json:"summary,omitempty"`
 	Settings *Settings              `protobuf:"bytes,6,opt,name=settings,proto3" json:"settings,omitempty"`
-	// Marked on one member; the whole group is protected.
-	//
 	// Types that are valid to be assigned to State:
 	//
 	//	*Guarded_StateName
@@ -715,8 +713,8 @@ func (*OneofKeyEntity_Id) isOneofKeyEntity_Which() {}
 
 func (*OneofKeyEntity_Other) isOneofKeyEntity_Which() {}
 
-// A protected key field: a PATCH can never move a key field and a PUT that
-// changed one would address a different row, so the mark could only mislead.
+// A guarded key field: a PATCH can never move a key field and a PUT that
+// changed one would address a different row, so the guard could only mislead.
 type ProtectedKeyEntity struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -3301,29 +3299,37 @@ const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
 	"\x04kind\"$\n" +
 	"\n" +
 	"StringList\x12\x16\n" +
-	"\x06values\x18\x01 \x03(\tR\x06values\"\xd3\x02\n" +
+	"\x06values\x18\x01 \x03(\tR\x06values\"\xe9\x02\n" +
 	"\aGuarded\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
-	"\x05label\x18\x02 \x01(\tR\x05label\x12\x1c\n" +
-	"\x05owner\x18\x03 \x01(\tB\x06\xaa\xbb\x18\x02@\x02R\x05owner\x12=\n" +
-	"\x05audit\x18\x04 \x01(\v2\x1f.syncplane.testdata.v1.SettingsB\x06\xaa\xbb\x18\x02@\x02R\x05audit\x12\"\n" +
-	"\asummary\x18\x05 \x01(\fB\b\xaa\xbb\x18\x04 \x01@\x02R\asummary\x12;\n" +
-	"\bsettings\x18\x06 \x01(\v2\x1f.syncplane.testdata.v1.SettingsR\bsettings\x12'\n" +
+	"\x05label\x18\x02 \x01(\tR\x05label\x12\x14\n" +
+	"\x05owner\x18\x03 \x01(\tR\x05owner\x125\n" +
+	"\x05audit\x18\x04 \x01(\v2\x1f.syncplane.testdata.v1.SettingsR\x05audit\x12 \n" +
+	"\asummary\x18\x05 \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\asummary\x12;\n" +
+	"\bsettings\x18\x06 \x01(\v2\x1f.syncplane.testdata.v1.SettingsR\bsettings\x12\x1f\n" +
 	"\n" +
-	"state_name\x18\a \x01(\tB\x06\xaa\xbb\x18\x02@\x02H\x00R\tstateName\x12\x1f\n" +
+	"state_name\x18\a \x01(\tH\x00R\tstateName\x12\x1f\n" +
 	"\n" +
-	"state_code\x18\b \x01(\x05H\x00R\tstateCode:\x11\xa2\xbb\x18\r\n" +
-	"\aguarded\x12\x02idB\a\n" +
+	"state_code\x18\b \x01(\x05H\x00R\tstateCode:A\xa2\xbb\x18=\n" +
+	"\aguarded\x12\x02idR.\n" +
+	"\x06\b\x01(\x01:\x00\x12$\n" +
+	"\x05owner\n" +
+	"\x05audit\n" +
+	"\asummary\n" +
+	"\x05state\x12\x04\b\x01:\x00B\a\n" +
 	"\x05state\"X\n" +
 	"\x0eOneofKeyEntity\x12\x10\n" +
 	"\x02id\x18\x01 \x01(\tH\x00R\x02id\x12\x16\n" +
 	"\x05other\x18\x02 \x01(\tH\x00R\x05other:\x13\xa2\xbb\x18\x0f\n" +
 	"\toneof_key\x12\x02idB\a\n" +
-	"\x05which\"[\n" +
-	"\x12ProtectedKeyEntity\x12\x16\n" +
-	"\x02id\x18\x01 \x01(\tB\x06\xaa\xbb\x18\x02@\x02R\x02id\x12\x14\n" +
-	"\x05label\x18\x02 \x01(\tR\x05label:\x17\xa2\xbb\x18\x13\n" +
-	"\rprotected_key\x12\x02id\"v\n" +
+	"\x05which\"i\n" +
+	"\x12ProtectedKeyEntity\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05label\x18\x02 \x01(\tR\x05label:-\xa2\xbb\x18)\n" +
+	"\rprotected_key\x12\x02idR\x14\n" +
+	"\x06\b\x01(\x01:\x00\x12\n" +
+	"\n" +
+	"\x02id\x12\x04\b\x01:\x00\"v\n" +
 	"\x0fOneofTextEntity\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
 	"\x04body\x18\x02 \x01(\fB\x06\xaa\xbb\x18\x02 \x01H\x00R\x04body\x12\x16\n" +

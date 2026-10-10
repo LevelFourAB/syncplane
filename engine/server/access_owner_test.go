@@ -164,11 +164,6 @@ var _ = Describe("Access model registration of owner rules", func() {
 		Entry("a creator mark on a key field", func(file *descriptorpb.FileDescriptorProto) {
 			fieldNamed(messageNamed(file, "Setting"), "user_id").Options = withBehavior(creatorMark())
 		}, `key field "user_id" is marked creator`),
-		Entry("a creator mark beside a write policy", func(file *descriptorpb.FileDescriptorProto) {
-			b := creatorMark()
-			b.WritePolicy = syncplanev1.FieldWritePolicy_FIELD_WRITE_POLICY_TRUSTED_ONLY
-			fieldNamed(messageNamed(file, "Post"), "author_id").Options = withBehavior(b)
-		}, `field "author_id" is marked creator and write_policy`),
 		Entry("a creator mark with fields this server does not know", func(file *descriptorpb.FileDescriptorProto) {
 			b := creatorMark()
 			b.Creator.ProtoReflect().SetUnknown(unknownField())
@@ -436,15 +431,23 @@ var _ = Describe("Owner rules", func() {
 			denied(patch("bob", "ticket", "tk", &accessv1.Ticket{Status: "done"}, "status"))
 		})
 
-		It("compares the fields a PUT changes", func() {
+		It("keeps the stored value of each field a PUT changes outside the list", func() {
 			stored := ticket("tk")
 			stored.Status = "done"
-			applied(put("ann", "ticket", "tk", stored))
 			stored.Title = "renamed"
-			denied(put("ann", "ticket", "tk", stored))
+			applied(put("ann", "ticket", "tk", stored))
 
 			Expect(ticket("tk").GetStatus()).To(Equal("done"))
 			Expect(ticket("tk").GetTitle()).To(Equal("fix"))
+		})
+
+		It("keeps no field of a caller whose admitting rule has no list", func() {
+			stored := ticket("tk")
+			stored.Status = "done"
+			stored.Title = "renamed"
+			applied(put("mod", "ticket", "tk", stored))
+
+			Expect(ticket("tk").GetTitle()).To(Equal("renamed"))
 		})
 
 		It("refuses a PATCH whose mask no list covers before the app's policy", func() {

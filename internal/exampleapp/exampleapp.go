@@ -84,11 +84,13 @@ func (p *Permissions) FilterEpoch(_ context.Context, _ server.Principal, workspa
 }
 
 // ProtectedFields puts the "guarded" entity's `label` out of reach of the
-// subject "viewer", on top of the fields that entity's schema already marks.
+// subject "viewer", on top of the fields that entity's guard already keeps
+// from every client.
 //
 // It is the per-caller half of field protection, and the only half a client
 // cannot predict: the suites assert that such a write enqueues and comes back as
-// a rejection ack, where a schema-marked field is refused at the call site. The
+// a rejection ack, where a field no guard rule admits writing is refused at the
+// call site. The
 // subject comes from the bearer token testserver takes at face value, so a spec
 // chooses which side of the rule it is on by who it authenticates as.
 func (*Permissions) ProtectedFields(
@@ -123,9 +125,12 @@ func Options(perms *Permissions) []server.Option {
 	}, MutatorOptions(perms)...)
 }
 
-// MutatorOptions returns just complete_all, write_then_reject, fail_internal
-// and bump_epoch, for servers that declare the todo entity themselves.
+// MutatorOptions returns just complete_all, write_then_reject, fail_internal,
+// set_owner and bump_epoch, for servers that declare the todo entity
+// themselves. Every caller admitted to the workspace may invoke each of them,
+// in a schema that uses the access model too.
 func MutatorOptions(perms *Permissions) []server.Option {
+	open := server.MutatorAccess{Admitted: true}
 	return []server.Option{
 		server.WithMutator("complete_all", &todov1.CompleteAllArgs{},
 			func(_ context.Context, tx *server.EntityTx, _ proto.Message) error {
@@ -146,7 +151,7 @@ func MutatorOptions(perms *Permissions) []server.Option {
 					}
 				}
 				return nil
-			}),
+			}, open),
 		// write_then_reject writes the given todo and then rejects. It exists so
 		// the Go and TS test suites can verify that a rejection rolls back the
 		// rows the mutator already wrote (push runs mutations in savepoints).
@@ -160,7 +165,7 @@ func MutatorOptions(perms *Permissions) []server.Option {
 					return err
 				}
 				return server.Reject(server.CodeConflict, "write_then_reject always rejects")
-			}),
+			}, open),
 		// fail_internal returns a plain error where it should return a Reject,
 		// which is the app-code mistake that fails a whole batch as "internal"
 		// on every attempt. It exists so the TS suite can prove the client's
@@ -168,17 +173,17 @@ func MutatorOptions(perms *Permissions) []server.Option {
 		server.WithMutator("fail_internal", nil,
 			func(context.Context, *server.EntityTx, proto.Message) error {
 				return errors.New("fail_internal always fails")
-			}),
-		// set_owner is the escape hatch a protected field is designed around: a
+			}, open),
+		// set_owner is the escape hatch a guarded field is designed around: a
 		// mutator's rows are covered by the verdict on its invocation, so this
 		// writes "guarded".owner on behalf of a caller no ordinary write would
-		// let near it. Integration tests use it to give a protected field a
+		// let near it. Integration tests use it to give a guarded field a
 		// value, which is the only way one acquires one.
 		server.WithMutator("set_owner", &testdatav1.Guarded{},
 			func(_ context.Context, tx *server.EntityTx, args proto.Message) error {
 				g := args.(*testdatav1.Guarded)
 				return tx.Patch(g, []string{"owner"}, nil)
-			}),
+			}, open),
 		// bump_epoch lets integration tests exercise filter-epoch revocation
 		// end to end: push bump_epoch, the notifier fires, the next pull resets.
 		server.WithMutator("bump_epoch", nil,
@@ -187,6 +192,6 @@ func MutatorOptions(perms *Permissions) []server.Option {
 					perms.BumpEpoch(tx.Workspace())
 				}
 				return nil
-			}),
+			}, open),
 	}
 }

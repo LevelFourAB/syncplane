@@ -276,6 +276,7 @@ var _ = Describe("Access model writes", func() {
 				server.WithMutator("probe", &accessv1.TaskArgs{}, probe,
 					server.MutatorAccess{Permission: "view_tasks", Entity: "task", KeyField: "task_id"}),
 				server.WithMutator("org_wide", nil, noop, server.MutatorAccess{Permission: "manage_members"}),
+				server.WithMutator("open", nil, noop, server.MutatorAccess{Admitted: true}),
 				server.WithMutator("unguarded", nil, noop),
 			)
 			f.seedOrg()
@@ -302,6 +303,11 @@ var _ = Describe("Access model writes", func() {
 		It("checks an invocation without a row at the workspace root", func() {
 			applied(invoke("admin", "org_wide", nil))
 			denied(invoke("padmin", "org_wide", nil))
+		})
+
+		It("admits every caller admitted to the workspace to an Admitted mutator", func() {
+			applied(invoke("guest", "open", nil))
+			applied(invoke("admin", "open", nil))
 		})
 
 		It("refuses a mutator without MutatorAccess to every caller but a trusted one", func() {
@@ -384,6 +390,10 @@ var _ = Describe("Access model writes", func() {
 			&accessv1.TaskArgs{}, `key field "id" must be a singular string field`),
 		Entry("an entity without a key field", server.MutatorAccess{Permission: "edit_tasks", Entity: "task"},
 			&accessv1.TaskArgs{}, "names an Entity without a KeyField"),
+		Entry("Admitted with a permission", server.MutatorAccess{Admitted: true, Permission: "edit_tasks"}, nil,
+			"sets Admitted together with a Permission"),
+		Entry("Admitted with a row", server.MutatorAccess{Admitted: true, Entity: "task", KeyField: "task_id"},
+			&accessv1.TaskArgs{}, "sets Admitted together with a Permission, Entity or KeyField"),
 	)
 })
 

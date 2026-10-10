@@ -1,7 +1,8 @@
 // Fields a client may not write, across the wire. Two halves that behave
-// differently from this side: the schema's own marks, which the client knows
-// and refuses at the call site, and the ones testserver's policy adds for the
-// subject "viewer", which it cannot know and learns as a rejection ack.
+// differently from this side: the fields the schema's field guard keeps from
+// every client, which the client knows and refuses at the call site, and the
+// ones testserver's policy adds for the subject "viewer", which it cannot know
+// and learns as a rejection ack.
 //
 // The substitution a PUT gets is the part only a real server can show. The unit
 // suite pins what this client puts in the mutation; only here is there a stored
@@ -13,7 +14,7 @@ import { createConnectTransport } from '@connectrpc/connect-node';
 import { describe, expect, inject, it } from 'vitest';
 
 import type { RejectionInfo } from '../../src/client.js';
-import { CodePermissionDenied } from '../../src/codes.js';
+import { CodeAccessDenied, CodePermissionDenied } from '../../src/codes.js';
 import { GuardedSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import {
 	CrudMutationSchema,
@@ -92,7 +93,7 @@ describe('protected fields', () => {
 		await other.close();
 	});
 
-	it('refuses a patch of a marked field locally, and the server refuses it too', async () => {
+	it('refuses a patch of a guarded field locally, and the server refuses it too', async () => {
 		const ws = freshWorkspace();
 		const client = newClient(ws, { entities: [ GuardedSchema ] });
 		await client.start();
@@ -105,7 +106,7 @@ describe('protected fields', () => {
 
 		const raw = await patchRaw(ws, 'g1', [ 'owner' ], 'mallory');
 		expect(raw.status).toBe(MutationStatus.REJECTED);
-		expect(raw.errorCode).toBe(CodePermissionDenied);
+		expect(raw.errorCode).toBe(CodeAccessDenied);
 
 		await client.syncNow();
 		expect((await client.get(GuardedSchema, 'g1'))?.owner).toBe('alice');
@@ -168,7 +169,7 @@ describe('protected fields', () => {
 			await client.close();
 		});
 
-		it('carries a per-caller field over on a put, the same as a marked one', async () => {
+		it('carries a per-caller field over on a put, the same as a guarded one', async () => {
 			const ws = freshWorkspace();
 			const client = newClient(ws, {
 				entities: [ GuardedSchema ],

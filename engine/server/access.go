@@ -46,6 +46,67 @@ type entityAccess struct {
 	// each marked field, and each oneof whose members are cases. A grant
 	// entity has at most one.
 	parentUnits []string
+	// guards are the entity's field guards, in declaration order.
+	guards []fieldGuard
+	// guardOf maps each unit a guard restricts to that guard's index in
+	// guards. Nil when the entity declares no guard.
+	guardOf map[string]int
+}
+
+// fieldGuard is one field guard of an entity: the units it restricts and the
+// rules that admit writing them.
+type fieldGuard struct {
+	// units are the units the guard restricts, sorted: the names of top-level
+	// fields outside a oneof, and of oneofs.
+	units []string
+	// rules are the guard's rules that admit a write, in declaration order.
+	// The read rule each guard carries admits every caller that reads the row,
+	// so it decides nothing and is not kept.
+	rules []accessRule
+	// named holds opCreate and opUpdate when at least one rule names them.
+	named accessOp
+}
+
+// spec renders the guard in a canonical form: two guards with equal specs
+// restrict the same units for the same callers.
+func (g fieldGuard) spec() string {
+	rules := make([]string, len(g.rules))
+	for i, r := range g.rules {
+		rules[i] = r.spec()
+	}
+	sort.Strings(rules)
+	return strings.Join(g.units, ",") + "{" + strings.Join(rules, ";") + "}"
+}
+
+// guardFor returns the guard that restricts unit, or nil when no guard does.
+func (a *entityAccess) guardFor(unit string) *fieldGuard {
+	i, ok := a.guardOf[unit]
+	if !ok {
+		return nil
+	}
+	return &a.guards[i]
+}
+
+// labeledRule is a rule of an entity together with where the access option
+// declares it, for errors and warnings.
+type labeledRule struct {
+	where string
+	rule  accessRule
+}
+
+// allRules returns the entity's rules and the rules of its guards, each with
+// where the access option declares it.
+func (a *entityAccess) allRules() []labeledRule {
+	out := make([]labeledRule, 0, len(a.rules))
+	for i, r := range a.rules {
+		out = append(out, labeledRule{where: fmt.Sprintf("access allow[%d]", i), rule: r})
+	}
+	for i, g := range a.guards {
+		for _, r := range g.rules {
+			out = append(out, labeledRule{where: fmt.Sprintf("access guard[%d]", i), rule: r})
+		}
+	}
+	return out
 }
 
 // accessOp is a set of the operations an access rule admits.
@@ -263,6 +324,20 @@ func (a *entityAccess) maskCovered(info *entityInfo, paths []string) (heads []st
 		}
 	}
 	return heads, false
+}
+
+// maskClosed returns the first unit a PATCH with the mask paths writes into
+// whose guard admits no update to any caller, and whether there is one. A
+// guard with an update rule is decided on the row; see
+// accessWrite.checkGuardedMask.
+func (a *entityAccess) maskClosed(paths []string) (string, bool) {
+	for _, path := range paths {
+		head := protectedHead(path)
+		if g := a.guardFor(head); g != nil && g.named&opUpdate == 0 {
+			return head, true
+		}
+	}
+	return "", false
 }
 
 // readers is who may read the rows of an entity: a caller that holds one of
@@ -583,7 +658,157 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 		sort.Strings(a.read.perms)
 		sort.Slice(a.read.checked, func(i, j int) bool { return a.read.checked[i].spec() < a.read.checked[j].spec() })
 	}
+	if err := a.guardsOf(desc, info.keyFields, opt.GetGuard()); err != nil {
+		return nil, err
+	}
 	return a, nil
+}
+
+// guardsOf checks the field guards of an access option and records them on a.
+// It runs after accessParentOf, which a.parentUnits come from.
+func (a *entityAccess) guardsOf(desc protoreflect.MessageDescriptor, keyFields []protoreflect.FieldDescriptor, guards []*syncplanev1.FieldGuard) error {
+	for i, g := range guards {
+		where := fmt.Sprintf("access guard[%d]", i)
+		if err := refuseUnknownOptionFields(where, g); err != nil {
+			return err
+		}
+		if len(g.GetFields()) == 0 {
+			return fmt.Errorf("%s names no field; list the fields it restricts", where)
+		}
+		units, err := ruleFieldsOf(desc, keyFields, g.GetFields())
+		if err != nil {
+			return fmt.Errorf("%s fields: %w", where, err)
+		}
+		for _, u := range units {
+			if j, dup := a.guardOf[u]; dup {
+				return fmt.Errorf("%s and access guard[%d] both name %q; a field has at most one guard", where, j, u)
+			}
+			// A client could then create rows only without a parent, and every
+			// row it created would anchor at nothing.
+			if slices.Contains(a.parentUnits, u) {
+				return fmt.Errorf("%s names %q, which is an access parent; a guard cannot restrict it", where, u)
+			}
+			// The create stamps a creator field and no write changes it later,
+			// so a guard could not take effect.
+			if fd := desc.Fields().ByName(protoreflect.Name(u)); fd != nil && fieldBehaviorOf(fd).GetCreator() != nil {
+				return fmt.Errorf("%s names %q, which is a creator field; a guard cannot restrict it", where, u)
+			}
+		}
+		guard := fieldGuard{units: units}
+		read := false
+		seen := map[string]int{}
+		for j, r := range g.GetAllow() {
+			rw := fmt.Sprintf("%s allow[%d]", where, j)
+			rule, err := accessRuleOf(j, r, desc, keyFields)
+			if err != nil {
+				return fmt.Errorf("%s: %w", where, err)
+			}
+			switch {
+			case rule.ops&opDelete != 0:
+				return fmt.Errorf("%s names delete; a guard restricts writing a field, and a delete writes none", rw)
+			case rule.fields != nil:
+				return fmt.Errorf("%s names fields; the guard's own fields are the ones it restricts", rw)
+			}
+			spec := rule.spec()
+			if k, dup := seen[spec]; dup {
+				return fmt.Errorf("%s allow[%d] and allow[%d] are the same rule", where, k, j)
+			}
+			seen[spec] = j
+			if rule.ops&opRead != 0 {
+				// A read rule that narrows needs the read path, sync and Query
+				// alike, to send a row without the fields a caller may not read,
+				// which this build does not do.
+				if !rule.admitted() || rule.checksRow() || rule.checksAbove() {
+					return fmt.Errorf("%s names read with a source or a check other than admitted; "+
+						"the read rule of a guard is { read: true admitted: {} }", rw)
+				}
+				read = true
+				rule.ops &^= opRead
+				if rule.ops == 0 {
+					continue
+				}
+			}
+			guard.rules = append(guard.rules, rule)
+			for _, op := range []accessOp{opCreate, opUpdate} {
+				if rule.names(op) {
+					guard.named |= op
+				}
+			}
+		}
+		if !read {
+			return fmt.Errorf("%s has no read rule; add { read: true admitted: {} }, so that the readers of a row read its guarded fields", where)
+		}
+		if a.guardOf == nil {
+			a.guardOf = map[string]int{}
+		}
+		for _, u := range units {
+			a.guardOf[u] = len(a.guards)
+		}
+		a.guards = append(a.guards, guard)
+	}
+	// Once every guard is known: a check that read a guarded field would depend
+	// on the value a guard decides about.
+	for i, g := range guards {
+		for j, r := range g.GetAllow() {
+			reads := slices.Clone(conditionHeads(r.GetWhen()))
+			if name := r.GetCallerIs(); name != "" {
+				reads = append(reads, name)
+			}
+			for _, name := range reads {
+				unit := name
+				if fd := desc.Fields().ByName(protoreflect.Name(name)); fd != nil {
+					unit = unitOf(fd)
+				}
+				if _, guarded := a.guardOf[unit]; guarded {
+					return fmt.Errorf("access guard[%d] allow[%d] reads %q, which a guard restricts; "+
+						"a guard's checks read only fields that no guard restricts", i, j, name)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// conditionHeads returns the first segment of each path that cond reads on
+// the row, in the order cond names them. An exists condition reads the list
+// at its path, and its inner condition reads that list's elements, so only
+// its path counts.
+func conditionHeads(cond *syncplanev1.Condition) []string {
+	if cond == nil {
+		return nil
+	}
+	var out []string
+	var walk func(m protoreflect.Message)
+	walk = func(m protoreflect.Message) {
+		m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+			switch {
+			case fd.Name() == "path" && fd.IsList() && fd.Kind() == protoreflect.StringKind:
+				if v.List().Len() > 0 {
+					out = append(out, v.List().Get(0).String())
+				}
+			case fd.Message() == nil:
+			case m.Descriptor().FullName() == "syncplane.v1.ExistsCond":
+			case fd.IsList():
+				for i := 0; i < v.List().Len(); i++ {
+					walk(v.List().Get(i).Message())
+				}
+			default:
+				walk(v.Message())
+			}
+			return true
+		})
+	}
+	walk(cond.ProtoReflect())
+	return out
+}
+
+// unitOf returns the unit a top-level field belongs to: its oneof's name, or
+// its own name outside a oneof.
+func unitOf(fd protoreflect.FieldDescriptor) string {
+	if od := lww.OneofOf(fd); od != nil {
+		return string(od.Name())
+	}
+	return string(fd.Name())
 }
 
 // accessRuleOf checks the rule at index i of an access option's allow list.
@@ -912,12 +1137,6 @@ func accessParentOf(desc protoreflect.MessageDescriptor, info *entityInfo) ([]pa
 		if refs[0].Workspace != nil {
 			return nil, nil, fmt.Errorf("access_parent field %q is a reference message with a workspace field; "+
 				"an access parent is a row of the holder's own workspace", fd.Name())
-		}
-		// A protected field keeps its stored value on a PUT and the zero value on
-		// a create, so every row a client created would anchor at nothing.
-		if b.GetWritePolicy() == syncplanev1.FieldWritePolicy_FIELD_WRITE_POLICY_TRUSTED_ONLY {
-			return nil, nil, fmt.Errorf("access_parent field %q is marked write_policy TRUSTED_ONLY; "+
-				"a client could then create rows only without a parent", fd.Name())
 		}
 		unit := string(fd.Name())
 		if od := lww.OneofOf(fd); od != nil {
@@ -1497,8 +1716,8 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 			m.anchors[target.name] = true
 			m.children[target.name] = append(m.children[target.name], e)
 		}
-		for _, r := range a.rules {
-			for _, p := range r.requires {
+		for _, r := range a.allRules() {
+			for _, p := range r.rule.requires {
 				if !slices.Contains(used[p], name) {
 					used[p] = append(used[p], name)
 				}
@@ -1570,7 +1789,7 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 		if err := checkMutatorAccess(c, mutators[name], ma); err != nil {
 			return nil, err
 		}
-		if !slices.Contains(used[ma.Permission], "mutator "+name) {
+		if !ma.Admitted && !slices.Contains(used[ma.Permission], "mutator "+name) {
 			used[ma.Permission] = append(used[ma.Permission], "mutator "+name)
 		}
 	}
@@ -1698,9 +1917,9 @@ func (m *accessModel) resolveWithins(names []string) error {
 	m.withins = map[string]*withinCheck{}
 	m.withinOn = map[string][]*withinCheck{}
 	for _, name := range names {
-		for i, r := range m.entities[name].access.rules {
-			for j, w := range r.within {
-				where := fmt.Sprintf("server: entity %q access allow[%d] within[%d]", name, i, j)
+		for _, r := range m.entities[name].access.allRules() {
+			for j, w := range r.rule.within {
+				where := fmt.Sprintf("server: entity %q %s within[%d]", name, r.where, j)
 				target, ok := m.entities[w.entity]
 				switch {
 				case !ok:
@@ -2028,9 +2247,16 @@ func entitiesOnly(users []string) []string {
 }
 
 // checkMutatorAccess checks one mutator's MutatorAccess against the catalog:
-// its row entity is in the model, and its key field is a singular string
-// field of the args.
+// it sets Admitted alone, or a permission whose row entity is in the model and
+// whose key field is a singular string field of the args.
 func checkMutatorAccess(c *catalog, mi *mutatorInfo, ma *MutatorAccess) error {
+	if ma.Admitted {
+		if ma.Permission != "" || ma.Entity != "" || ma.KeyField != "" {
+			return fmt.Errorf("server: mutator %q MutatorAccess sets Admitted together with a Permission, Entity or KeyField; "+
+				"set Admitted alone, or a Permission", mi.name)
+		}
+		return nil
+	}
 	if err := naming.ValidatePermissionName(ma.Permission); err != nil {
 		return fmt.Errorf("server: mutator %q MutatorAccess: %w", mi.name, err)
 	}
@@ -2074,6 +2300,14 @@ func accessSpecOf(info *entityInfo) string {
 		}
 		sort.Strings(rules)
 		b.WriteString(" allow=" + strings.Join(rules, ";"))
+		if len(a.guards) > 0 {
+			guards := make([]string, len(a.guards))
+			for i, g := range a.guards {
+				guards[i] = g.spec()
+			}
+			sort.Strings(guards)
+			b.WriteString(" guard=" + strings.Join(guards, ";"))
+		}
 		if a.hasParent() {
 			b.WriteString(" parent=" + a.parentRule())
 		}

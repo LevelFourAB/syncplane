@@ -1641,3 +1641,83 @@ message Sheet {
 	Binder binder = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
 	string title = 3;
 }
+
+// An expense below a project, whose field guards restrict who writes four of
+// its fields: `total` only trusted writes set, `status` only a caller with
+// edit_projects sets, `notes` only the reporter sets, and `estimate` changes
+// only while the expense is open. `title` follows the entity rules alone.
+message Expense {
+	option (syncplane.v1.entity) = {
+		name: "expense"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
+			]
+			guard: [
+				{
+					fields: [ "total" ]
+					allow: [ {
+						read: true
+						admitted: {}
+					} ]
+				},
+				{
+					fields: [ "status" ]
+					allow: [
+						{
+							read: true
+							admitted: {}
+						},
+						{ write: true requires: "edit_projects" }
+					]
+				},
+				{
+					fields: [ "notes" ]
+					allow: [
+						{
+							read: true
+							admitted: {}
+						},
+						{
+							write: true
+							requires: "edit_tasks"
+							caller_is: "reporter_id"
+						}
+					]
+				},
+				{
+					fields: [ "estimate" ]
+					allow: [
+						{
+							read: true
+							admitted: {}
+						},
+						{ create: true requires: "edit_tasks" },
+						{
+							update: true
+							requires: "edit_tasks"
+							when: {
+								cmp: {
+									path: [ "closed" ]
+									op: CMP_OP_EQ
+									value: { bool_value: false }
+								}
+							}
+						}
+					]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string title = 3;
+	string status = 4;
+	int64 total = 5;
+	string reporter_id = 6 [(syncplane.v1.field_behavior) = { creator: {} }];
+	string notes = 7;
+	int32 estimate = 8;
+	bool closed = 9;
+}

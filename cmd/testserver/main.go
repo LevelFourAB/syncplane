@@ -182,10 +182,11 @@ func defaultOptions() []server.Option {
 			// entity into the catalog: integration tests read it back through
 			// queryServer and restore from it with an ordinary PATCH.
 			&testdatav1.Historied{},
-			// Guarded marks fields TRUSTED_ONLY, and exampleapp's policy
-			// protects one more for the subject "viewer": integration tests
-			// verify that a PUT keeps the stored value of a protected field and
-			// that the half only the server knows arrives as a rejection ack.
+			// Guarded keeps fields from every client with a field guard, and
+			// exampleapp's policy protects one more for the subject "viewer":
+			// integration tests verify that a PUT keeps the stored value of a
+			// guarded field and that the half only the server knows arrives as
+			// a rejection ack.
 			&testdatav1.Guarded{},
 			// Article declares full-text search (a searchable mark plus an
 			// EntityOptions.search spec): integration tests verify a match

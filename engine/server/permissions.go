@@ -277,24 +277,22 @@ type EpochReadFilters interface {
 }
 
 // FieldPermissions is an optional Permissions extension covering per-caller
-// field protection. A schema says which fields NO authorized caller may write
-// (see the FieldWritePolicy proto option); this says which further fields THIS
-// caller may not, so the two together answer "the owner may reassign a task, a
-// viewer may not" — a rule a schema enum cannot state.
+// field protection that depends on facts outside the workspace's rows. A schema
+// states which callers may write a field with the access model's field guards
+// (see the FieldGuard proto option); this says which further fields THIS
+// caller may not write.
 //
-// It widens, never narrows. The effective set for a write is the schema's marks
-// plus whatever this returns, so a policy cannot hand a caller a field the
-// schema reserved for trusted writes.
+// It only takes fields away. A field it returns is protected in addition to
+// what the guards keep from the caller, so a policy cannot hand a caller a
+// field a guard keeps from them.
 //
-// Both halves are enforced identically once resolved: a PATCH whose mask reaches
-// a protected field is rejected, and a PUT keeps the stored value for one. What
-// differs is what a client can predict — the TypeScript client mirrors the
-// schema's marks and refuses such a PATCH at the call site, while a field this
-// hook adds is only known to the server, so the client learns of it as a
-// REJECTED ack.
+// A field it returns is enforced as a guarded field is: a PATCH whose mask
+// reaches it is rejected with CodePermissionDenied, and a PUT keeps the stored
+// value for it, or the zero value on a create. A client cannot predict this
+// hook, so it learns of such a field as a REJECTED ack.
 //
-// A Permissions that does not implement it protects exactly what the schemas
-// mark, which for almost every entity is nothing.
+// A Permissions that does not implement it protects only what the schema's
+// guards and creator fields keep from the caller.
 type FieldPermissions interface {
 	// ProtectedFields returns the top-level field names this caller may not
 	// write in the named entity, beyond the ones its schema marks. Return nil
@@ -587,14 +585,14 @@ func (s *Server) checkFieldPolicy(g *writeGate, w Write) error {
 
 // checkWritePolicy enforces the schema's own write rules that need no row on
 // a CRUD write: the operations that no (syncplane.v1.entity).access rule
-// admits, which only trusted writes may perform, and the
-// (syncplane.v1.field_behavior) write_policy marks that put a field out of a
-// client's reach.
+// admits, which only trusted writes may perform, the field guards that admit
+// no update, and the creator fields that no write changes after the create.
 //
-// The field rule refuses PATCH and nothing else. A mask naming a protected field
+// The field rules refuse PATCH and nothing else. A mask naming such a field
 // asks outright to change it; a PUT names no field, so it is not refused — the
-// write path substitutes the stored value instead (see carryProtectedFields),
-// which is a decision that needs the row and so cannot be made here.
+// write path substitutes the stored value instead (see carryProtectedFields
+// and accessWrite.carryGuarded), which is a decision that needs the row and so
+// cannot be made here.
 //
 // It runs BEFORE the app's policy so a schema-level "no" does not depend on
 // that policy having an opinion, and it refuses with a Rejection because the
@@ -670,6 +668,11 @@ func writePolicyOf(info *entityInfo, crud *syncplanev1.CrudMutation) error {
 			return Reject(CodeAccessDenied, fmt.Sprintf(
 				"entity %q has no access rule that admits an update of %s together, so a PATCH masking them is refused",
 				info.name, strings.Join(quoted, ", ")))
+		}
+		if unit, closed := a.maskClosed(crud.GetFieldMask().GetPaths()); closed {
+			return Reject(CodeAccessDenied, fmt.Sprintf(
+				"entity %q: the guard of field %q admits no update, so only a trusted write may change it and a PATCH masking it is refused",
+				info.name, unit))
 		}
 	case syncplanev1.CrudOp_CRUD_OP_PUT:
 		switch {

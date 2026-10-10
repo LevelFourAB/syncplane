@@ -24,6 +24,7 @@ import {
 	type EntityRegistry,
 	fieldBehaviorOf,
 	fieldValueOf,
+	type GuardDef,
 	keyOf,
 	refShapes,
 	refStub,
@@ -332,6 +333,32 @@ export function decideRules(
 		}
 		if (ruleAnswer === 'yes') return 'yes';
 		if (ruleAnswer !== 'no' && answer === 'no') answer = ruleAnswer;
+	}
+	return answer;
+}
+
+/**
+ * Decides whether an update that changes the units in `changed` is admitted:
+ * one of the entity's `rules` admits it as {@link decideRules} decides, and for
+ * each of `guards` that restricts a unit in `changed`, one of its rules admits
+ * the update on `row`, the stored row, and on `final`. A guard with no update
+ * rule admits no update. `null` in `changed` stands for fields that no fields
+ * list covers, which no guard is taken to restrict.
+ */
+export function decideUpdate(
+	rules: readonly AccessRuleDef[],
+	guards: readonly GuardDef[],
+	subjects: readonly string[],
+	row: RuleRow,
+	final: RuleRow,
+	changed: readonly string[] | null,
+): Verdict {
+	let answer = decideRules(rules, 'update', subjects, row, final, changed);
+	if (changed === null) return answer;
+	for (const guard of guards) {
+		if (answer === 'no') return answer;
+		if (!guard.units.some((u) => changed.includes(u))) continue;
+		answer = and(answer, decideRules(guard.rules, 'update', subjects, row, final, changed));
 	}
 	return answer;
 }

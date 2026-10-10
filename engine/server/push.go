@@ -1035,6 +1035,11 @@ func (s *Server) applyCrud(
 				stampCreatorFields(info, msg, g.creatorSubject())
 			}
 		}
+		// The fields the access model keeps from this caller get the same
+		// treatment, which depends on the caller and the row.
+		if err := aw.carryGuarded(tx, msg, nil); err != nil {
+			return err
+		}
 		var prevText map[string][]byte
 		if len(info.textFields) > 0 {
 			// Ingress guard: text bytes a client sends must decode as full

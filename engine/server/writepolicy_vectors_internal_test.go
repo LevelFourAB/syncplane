@@ -38,8 +38,14 @@ type writePolicyCase struct {
 	} `json:"access"`
 	KeyFields []string `json:"keyFields"`
 	Protected []string `json:"protected"`
-	Mask      []string `json:"mask"`
-	Want      string   `json:"want"`
+	// Guards are the entity's field guards: the units each restricts, and
+	// whether one of its rules names update.
+	Guards []struct {
+		Fields []string `json:"fields"`
+		Update bool     `json:"update"`
+	} `json:"guards"`
+	Mask []string `json:"mask"`
+	Want string   `json:"want"`
 }
 
 var _ = Describe("write policy conformance vectors", func() {
@@ -82,6 +88,20 @@ var _ = Describe("write policy conformance vectors", func() {
 					}
 				}
 			}
+			for _, g := range tc.Guards {
+				Expect(info.access).NotTo(BeNil(), "%s: a guard needs access", tc.Name)
+				guard := fieldGuard{units: slices.Sorted(slices.Values(g.Fields))}
+				if g.Update {
+					guard.named = opUpdate
+				}
+				if info.access.guardOf == nil {
+					info.access.guardOf = map[string]int{}
+				}
+				for _, u := range guard.units {
+					info.access.guardOf[u] = len(info.access.guards)
+				}
+				info.access.guards = append(info.access.guards, guard)
+			}
 			srv.cat.Store(&catalog{entities: map[string]*entityInfo{info.name: info}})
 
 			crud := &syncplanev1.CrudMutation{Entity: info.name, Key: "k", Op: opFromVector(tc.Op)}
@@ -101,8 +121,8 @@ var _ = Describe("write policy conformance vectors", func() {
 			}
 			rej, ok := AsRejection(err)
 			Expect(ok).To(BeTrue(), "%s: got %v", tc.Name, err)
-			// A protected field is a field write policy, which refuses as the
-			// app's hooks do; every other refusal here is the access model's.
+			// A protected field is a creator field, which refuses as the app's
+			// hooks do; every other refusal here is the access model's.
 			want := CodeAccessDenied
 			if refuseProtectedMask(info, crud, info.protectedFields) != nil {
 				want = CodePermissionDenied

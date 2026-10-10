@@ -55,10 +55,13 @@ type MutatorOption interface {
 	applyMutator(*mutatorInfo)
 }
 
-// MutatorAccess states the permission an invocation of a mutator needs in the
-// access model, and where the caller must hold it.
+// MutatorAccess states which callers may invoke a mutator in the access model:
+// every caller admitted to the workspace, or the callers that hold a
+// permission where the access names.
 //
-// With Entity and KeyField set, the caller must hold Permission at the row of
+// With Admitted set, every caller admitted to the workspace may invoke the
+// mutator, and Permission, Entity and KeyField stay empty. With Entity and
+// KeyField set, the caller must hold Permission at the row of
 // Entity whose key the KeyField of the args holds: at the row itself, at the
 // row its access parent points at, or at the workspace root. A row that does
 // not exist refuses the invocation. With both empty, the caller must hold
@@ -70,17 +73,20 @@ type MutatorOption interface {
 // CodeAccessDenied. The rows the body writes are not checked unless it
 // writes them through EntityTx.AsCaller; the body can also ask EntityTx.Can.
 //
-// Registration fails, with the rest of the access model, when Permission is
-// granted by no role, Entity is not in the model, or KeyField is not a singular
-// string field of the args. In a schema without the access model, it has no
-// effect.
+// Registration fails, with the rest of the access model, when Admitted is set
+// together with another field, Permission is granted by no role, Entity is not
+// in the model, or KeyField is not a singular string field of the args. In a
+// schema without the access model, it has no effect.
 //
 //	server.WithMutator("complete_task", &taskv1.CompleteTaskArgs{}, completeTask,
 //		server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
+//	server.WithMutator("send_feedback", &feedbackv1.SendArgs{}, sendFeedback,
+//		server.MutatorAccess{Admitted: true})
 type MutatorAccess struct {
 	Permission string
 	Entity     string
 	KeyField   string
+	Admitted   bool
 }
 
 func (ma MutatorAccess) applyMutator(mi *mutatorInfo) {
@@ -460,7 +466,7 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 		return err
 	}
 	if len(info.textFields) > 0 || len(o.texts) > 0 || info.history != nil || o.expected != nil ||
-		len(protected) > 0 {
+		len(protected) > 0 || aw != nil {
 		if _, _, err := currentRow(); err != nil {
 			return err
 		}
@@ -500,6 +506,13 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 		}
 		if base == nil && e.gate != nil && len(info.creatorFields) > 0 {
 			stampCreatorFields(info, msg, e.gate.creatorSubject())
+		}
+		named := make([]string, 0, len(o.texts))
+		for path := range o.texts {
+			named = append(named, protectedHead(path))
+		}
+		if err := aw.carryGuarded(e.tx, msg, named); err != nil {
+			return err
 		}
 		texts, err := takePlainStrings(info, msg, nil, o)
 		if err != nil {

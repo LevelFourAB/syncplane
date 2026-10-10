@@ -4207,6 +4207,118 @@ func (x *Sheet) GetTitle() string {
 	return ""
 }
 
+// An expense below a project, whose field guards restrict who writes four of
+// its fields: `total` only trusted writes set, `status` only a caller with
+// edit_projects sets, `notes` only the reporter sets, and `estimate` changes
+// only while the expense is open. `title` follows the entity rules alone.
+type Expense struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Project       *Project               `protobuf:"bytes,2,opt,name=project,proto3" json:"project,omitempty"`
+	Title         string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	Status        string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
+	Total         int64                  `protobuf:"varint,5,opt,name=total,proto3" json:"total,omitempty"`
+	ReporterId    string                 `protobuf:"bytes,6,opt,name=reporter_id,json=reporterId,proto3" json:"reporter_id,omitempty"`
+	Notes         string                 `protobuf:"bytes,7,opt,name=notes,proto3" json:"notes,omitempty"`
+	Estimate      int32                  `protobuf:"varint,8,opt,name=estimate,proto3" json:"estimate,omitempty"`
+	Closed        bool                   `protobuf:"varint,9,opt,name=closed,proto3" json:"closed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Expense) Reset() {
+	*x = Expense{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[63]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Expense) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Expense) ProtoMessage() {}
+
+func (x *Expense) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[63]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Expense.ProtoReflect.Descriptor instead.
+func (*Expense) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{63}
+}
+
+func (x *Expense) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Expense) GetProject() *Project {
+	if x != nil {
+		return x.Project
+	}
+	return nil
+}
+
+func (x *Expense) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *Expense) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *Expense) GetTotal() int64 {
+	if x != nil {
+		return x.Total
+	}
+	return 0
+}
+
+func (x *Expense) GetReporterId() string {
+	if x != nil {
+		return x.ReporterId
+	}
+	return ""
+}
+
+func (x *Expense) GetNotes() string {
+	if x != nil {
+		return x.Notes
+	}
+	return ""
+}
+
+func (x *Expense) GetEstimate() int32 {
+	if x != nil {
+		return x.Estimate
+	}
+	return 0
+}
+
+func (x *Expense) GetClosed() bool {
+	if x != nil {
+		return x.Closed
+	}
+	return false
+}
+
 var File_syncplane_testdata_access_v1_access_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
@@ -4819,7 +4931,32 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x10\b\x012\fview_binders\n" +
 	"\x10(\x012\fedit_binders\n" +
 	"\x1a\b\x01(\x01:\x00Z\x12\n" +
-	"\x06binder\x12\bowner_id*Q\n" +
+	"\x06binder\x12\bowner_id\"\xf3\x03\n" +
+	"\aExpense\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
+	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectB\x06\xaa\xbb\x18\x02Z\x00R\aproject\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title\x12\x16\n" +
+	"\x06status\x18\x04 \x01(\tR\x06status\x12\x14\n" +
+	"\x05total\x18\x05 \x01(\x03R\x05total\x12'\n" +
+	"\vreporter_id\x18\x06 \x01(\tB\x06\xaa\xbb\x18\x02b\x00R\n" +
+	"reporterId\x12\x14\n" +
+	"\x05notes\x18\a \x01(\tR\x05notes\x12\x1a\n" +
+	"\bestimate\x18\b \x01(\x05R\bestimate\x12\x16\n" +
+	"\x06closed\x18\t \x01(\bR\x06closed:\xd7\x01\xa2\xbb\x18\xd2\x01\n" +
+	"\aexpense\x12\x02idR\xc2\x01\n" +
+	"\x0e\b\x012\n" +
+	"view_tasks\n" +
+	"\x0e(\x012\n" +
+	"edit_tasks\x12\r\n" +
+	"\x05total\x12\x04\b\x01:\x00\x12!\n" +
+	"\x06status\x12\x04\b\x01:\x00\x12\x11(\x012\redit_projects\x12*\n" +
+	"\x05notes\x12\x04\b\x01:\x00\x12\x1b(\x012\n" +
+	"edit_tasksB\vreporter_id\x12B\n" +
+	"\bestimate\x12\x04\b\x01:\x00\x12\x0e\x10\x012\n" +
+	"edit_tasks\x12 \x18\x012\n" +
+	"edit_tasksR\x10\n" +
+	"\x0e\n" +
+	"\x06closed\x10\x01\x1a\x02(\x00*Q\n" +
 	"\bTeamRole\x12\x19\n" +
 	"\x15TEAM_ROLE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TEAM_ROLE_VIEWER\x10\x01\x12\x14\n" +
@@ -4838,7 +4975,7 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 63)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 64)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(TeamRole)(0),            // 0: syncplane.testdata.access.v1.TeamRole
 	(*OrgMember)(nil),        // 1: syncplane.testdata.access.v1.OrgMember
@@ -4904,6 +5041,7 @@ var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(*Memo)(nil),             // 61: syncplane.testdata.access.v1.Memo
 	(*Binder)(nil),           // 62: syncplane.testdata.access.v1.Binder
 	(*Sheet)(nil),            // 63: syncplane.testdata.access.v1.Sheet
+	(*Expense)(nil),          // 64: syncplane.testdata.access.v1.Expense
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	2,  // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
@@ -4957,11 +5095,12 @@ var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	59, // 48: syncplane.testdata.access.v1.Memo.matter:type_name -> syncplane.testdata.access.v1.Matter
 	62, // 49: syncplane.testdata.access.v1.Binder.parent:type_name -> syncplane.testdata.access.v1.Binder
 	62, // 50: syncplane.testdata.access.v1.Sheet.binder:type_name -> syncplane.testdata.access.v1.Binder
-	51, // [51:51] is the sub-list for method output_type
-	51, // [51:51] is the sub-list for method input_type
-	51, // [51:51] is the sub-list for extension type_name
-	51, // [51:51] is the sub-list for extension extendee
-	0,  // [0:51] is the sub-list for field type_name
+	2,  // 51: syncplane.testdata.access.v1.Expense.project:type_name -> syncplane.testdata.access.v1.Project
+	52, // [52:52] is the sub-list for method output_type
+	52, // [52:52] is the sub-list for method input_type
+	52, // [52:52] is the sub-list for extension type_name
+	52, // [52:52] is the sub-list for extension extendee
+	0,  // [0:52] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_access_v1_access_proto_init() }
@@ -5001,7 +5140,7 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   63,
+			NumMessages:   64,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

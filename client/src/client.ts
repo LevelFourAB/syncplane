@@ -24,6 +24,7 @@ import {
 	canAt,
 	type CanDetail,
 	decideRules,
+	decideUpdate,
 	decodeAccess,
 	type DecodedAccess,
 	detailOf,
@@ -852,6 +853,9 @@ export interface CanOptions<D extends DescMessage = DescMessage> extends DetailO
 	 * the answer is for some update: `'yes'` when a rule admits an update of
 	 * one field its `fields` list names, or a rule without a list admits an
 	 * update of fields that keeps the access parent and every subject field.
+	 * An update of a field that a field guard restricts also needs a rule of
+	 * that guard, so naming such a field answers `'no'` when no rule of the
+	 * guard admits the caller.
 	 *
 	 * `can` rejects with an `Error` for a name that is not a top-level field
 	 * or oneof of the entity.
@@ -2451,7 +2455,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					}
 				}
 				let msg = create(schema, init as MessageInitShape<typeof schema>);
-				if (def.protectedFields.length > 0) {
+				if (
+					def.protectedFields.length > 0 || def.clearedOnCreate.length > 0
+					|| def.creatorFields.length > 0
+				) {
 					const base = await read(schema, keyOf(def, msg));
 					msg = carryProtectedFields(def, schema, msg, base);
 					if (base === undefined && def.creatorFields.length > 0) {
@@ -3599,7 +3606,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 								? newValue
 								: stored.within(rule),
 					};
-					const one = decideRules(rules, 'update', summary.subjects, stored, final, changed);
+					const one = decideUpdate(rules, def.guards, summary.subjects, stored, final, changed);
 					if (one === 'yes') return 'yes';
 					if (one !== 'no' && answer === 'no') answer = one;
 				}

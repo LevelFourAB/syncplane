@@ -591,6 +591,47 @@ In the TypeScript schema builder, `requires` takes one name or a list:
 
 `can()` answers `'yes'` only when the client can place every permission of the rule on the row's chain.
 
+### Let only some callers change a field
+
+A rule in `allow` decides whole rows. To restrict who changes one field of a row that others edit, add a field guard. Here every task editor edits the title, only a caller with `approve_tasks` sets the status, and only server code sets the cost:
+
+```proto
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
+			]
+			guard: [
+				{
+					fields: [ "status" ]
+					allow: [
+						{ read: true admitted: {} },
+						{ write: true requires: "approve_tasks" }
+					]
+				},
+				{ fields: [ "cost" ] allow: [ { read: true admitted: {} } ] }
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string title = 3;
+	string status = 4;
+	int64 cost = 5;
+}
+```
+
+- **A guarded write needs both rules.** An editor without `approve_tasks` changes the title, and a `PATCH` of the status is refused. An approver without `edit_tasks` changes nothing, because no rule in `allow` admits the update.
+- **A `PUT` keeps what the caller may not write.** An editor who sends the whole row with a new title and a new status changes the title, and the status keeps its stored value.
+- **Every reader reads the field.** Each guard declares `{ read: true admitted: {} }`. To keep a field from some readers, put it in an entity of its own below the row.
+- **Use `fields` on a rule for the opposite case.** A rule `{ update: true requires: "view_tasks" caller_is: "assignee_id" fields: [ "status" ] }` lets an assignee change the status and nothing else, beside the editors' rule.
+
+Add the guard permission to the `grants` of each role that gives it, as for a rule. On the client, `can(schema, key, 'update', { fields: [ 'status' ] })` predicts the guard. See [Field guards](../reference/proto-options.md#field-guards).
+
 ### Put a row below several parents
 
 Mark each reference that places the row, or mark a repeated reference. Here a task sits below its project and below its milestone, and a milestone planner attaches tasks to milestones without the right to edit them:
@@ -674,6 +715,8 @@ In a schema that uses the model, a mutator without `MutatorAccess` can only be i
 server.WithMutator("complete_task", &taskv1.CompleteTaskArgs{}, completeTask,
 	server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
 ```
+
+To let every caller that enters the workspace invoke a mutator, declare `server.MutatorAccess{Admitted: true}`.
 
 `MutatorAccess` checks only that the caller holds the permission. It does not run the entity's rules, such as `when` and `within`, and the body's own writes are not checked. To apply the rules to a write, write it through `tx.AsCaller()`. The server then checks the write as the same write from the caller's client, and the write returns a `CodeAccessDenied` rejection when the rules refuse it:
 

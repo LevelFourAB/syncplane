@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the schema-level write check: engine/server/permissions.go (Server.checkWritePolicy) and client/src/mutations.ts must reach the same verdict on every case. The check is a pure function of the write — op, and whether it asserts an expected_version — because it runs before the write transaction opens and never reads the row. `expectedVersion` is a decimal string (uint64 in Go, bigint in TS) or null for a write that asserts none. `access` says, for an entity whose schema uses the access model, whether at least one rule of the entity's (syncplane.v1.entity).access admits each write operation, whatever the rule's source; it is omitted for an entity without access rules, whose writes this check never refuses for their op. An operation no rule admits is open only to trusted writes, so the check refuses a write that can only be that operation: PATCH is an update, DELETE a delete, PUT asserting version 0 a create, PUT asserting any other version an update. A PUT that asserts no version is a create when the row is absent and an update when it is present; the check refuses it only where no rule admits either, and the write path decides on the stored row. Whether the caller holds a rule's permission is also decided on the stored row, inside the write transaction, and is outside these vectors. `want` is \"allow\" when the write passes the schema-level check on to the app's permission policy, and \"refuse\" when it is rejected before that policy is consulted. Every case here is an UNTRUSTED write: a trusted one skips the check entirely. `protected` gives the entity's protected fields — the ones marked (syncplane.v1.field_behavior).write_policy TRUSTED_ONLY, a oneof named by its group, and the ones marked creator — and `mask` the paths a PATCH names; both default to empty. Only PATCH is refused over them: a PUT names no field, so the write path substitutes the stored value instead, which needs the row and so is not classified here. Fields the server's FieldPermissions hook adds per caller are outside these vectors: the client cannot know them, and the two sides are not meant to agree on them. `access.updateFields` gives the `fields` lists of the entity's update rules when every update rule has one; it is omitted when some update rule has none. A PATCH is then refused when no single list names every unit its mask writes into, the unit of a path being its first segment; a unit that is one of the entity's `keyFields` is left out, since a PATCH that changes a key field is refused anyway. Whether the write changes the listed fields, and the rule's subject check, are decided on the stored row and are outside these vectors.",
+	"comment": "Shared conformance vectors for the schema-level write check: engine/server/permissions.go (Server.checkWritePolicy) and client/src/mutations.ts must reach the same verdict on every case. The check is a pure function of the write — op, and whether it asserts an expected_version — because it runs before the write transaction opens and never reads the row. `expectedVersion` is a decimal string (uint64 in Go, bigint in TS) or null for a write that asserts none. `access` says, for an entity whose schema uses the access model, whether at least one rule of the entity's (syncplane.v1.entity).access admits each write operation, whatever the rule's source; it is omitted for an entity without access rules, whose writes this check never refuses for their op. An operation no rule admits is open only to trusted writes, so the check refuses a write that can only be that operation: PATCH is an update, DELETE a delete, PUT asserting version 0 a create, PUT asserting any other version an update. A PUT that asserts no version is a create when the row is absent and an update when it is present; the check refuses it only where no rule admits either, and the write path decides on the stored row. Whether the caller holds a rule's permission is also decided on the stored row, inside the write transaction, and is outside these vectors. `want` is \"allow\" when the write passes the schema-level check on to the app's permission policy, and \"refuse\" when it is rejected before that policy is consulted. Every case here is an UNTRUSTED write: a trusted one skips the check entirely. `protected` gives the entity's protected fields, the ones marked (syncplane.v1.field_behavior).creator, and `mask` the paths a PATCH names; both default to empty. `guards` gives the entity's field guards, which need `access`: for each, the units it restricts (`fields`, a oneof named by its group) and whether at least one of its rules names update or write (`update`), whatever the rule's source and checks. A PATCH is refused when its mask writes into a unit whose guard has no such rule; whether a guard rule admits the caller is decided on the stored row, inside the write transaction, and is outside these vectors. Only PATCH is refused over protected and guarded fields: a PUT names no field, so the write path substitutes the stored value instead, which needs the row and so is not classified here. Fields the server's FieldPermissions hook adds per caller are outside these vectors: the client cannot know them, and the two sides are not meant to agree on them. `access.updateFields` gives the `fields` lists of the entity's update rules when every update rule has one; it is omitted when some update rule has none. A PATCH is then refused when no single list names every unit its mask writes into, the unit of a path being its first segment; a unit that is one of the entity's `keyFields` is left out, since a PATCH that changes a key field is refused anyway. Whether the write changes the listed fields, and the rule's subject check, are decided on the stored row and are outside these vectors.",
 	"cases": [
 		{
 			"name": "an entity without access rules allows PUT",
@@ -448,6 +448,178 @@
 				"author_id"
 			],
 			"want": "refuse"
+		},
+		{
+			"name": "a mask naming a field whose guard admits no update is refused",
+			"op": "PATCH",
+			"expectedVersion": null,
+			"access": {
+				"create": true,
+				"update": true,
+				"delete": true
+			},
+			"guards": [
+				{
+					"fields": [
+						"total"
+					],
+					"update": false
+				}
+			],
+			"mask": [
+				"total"
+			],
+			"want": "refuse"
+		},
+		{
+			"name": "a mask reaching into a field whose guard admits no update is refused",
+			"op": "PATCH",
+			"expectedVersion": null,
+			"access": {
+				"create": true,
+				"update": true,
+				"delete": true
+			},
+			"guards": [
+				{
+					"fields": [
+						"audit"
+					],
+					"update": false
+				}
+			],
+			"mask": [
+				"audit.size"
+			],
+			"want": "refuse"
+		},
+		{
+			"name": "a mask naming a oneof whose guard admits no update is refused",
+			"op": "PATCH",
+			"expectedVersion": null,
+			"access": {
+				"create": true,
+				"update": true,
+				"delete": true
+			},
+			"guards": [
+				{
+					"fields": [
+						"state"
+					],
+					"update": false
+				}
+			],
+			"mask": [
+				"state"
+			],
+			"want": "refuse"
+		},
+		{
+			"name": "one guarded path refuses the whole mask",
+			"op": "PATCH",
+			"expectedVersion": null,
+			"access": {
+				"create": true,
+				"update": true,
+				"delete": true
+			},
+			"guards": [
+				{
+					"fields": [
+						"owner",
+						"total"
+					],
+					"update": false
+				}
+			],
+			"mask": [
+				"label",
+				"total"
+			],
+			"want": "refuse"
+		},
+		{
+			"name": "a mask naming a field whose guard has an update rule passes: the row decides",
+			"op": "PATCH",
+			"expectedVersion": null,
+			"access": {
+				"create": true,
+				"update": true,
+				"delete": true
+			},
+			"guards": [
+				{
+					"fields": [
+						"status"
+					],
+					"update": true
+				}
+			],
+			"mask": [
+				"status"
+			],
+			"want": "allow"
+		},
+		{
+			"name": "a guarded field is matched whole, not by prefix",
+			"op": "PATCH",
+			"expectedVersion": null,
+			"access": {
+				"create": true,
+				"update": true,
+				"delete": true
+			},
+			"guards": [
+				{
+					"fields": [
+						"total"
+					],
+					"update": false
+				}
+			],
+			"mask": [
+				"total_label"
+			],
+			"want": "allow"
+		},
+		{
+			"name": "a PUT is not refused by a guard: the write path carries the stored value over",
+			"op": "PUT",
+			"expectedVersion": "4",
+			"access": {
+				"create": true,
+				"update": true,
+				"delete": true
+			},
+			"guards": [
+				{
+					"fields": [
+						"total"
+					],
+					"update": false
+				}
+			],
+			"want": "allow"
+		},
+		{
+			"name": "a DELETE is not refused by a guard, which guards a value and not the row",
+			"op": "DELETE",
+			"expectedVersion": null,
+			"access": {
+				"create": true,
+				"update": true,
+				"delete": true
+			},
+			"guards": [
+				{
+					"fields": [
+						"total"
+					],
+					"update": false
+				}
+			],
+			"want": "allow"
 		}
 	]
 }

@@ -28,12 +28,11 @@ import {
 	CustomMutationSchema,
 } from './gen/syncplane/v1/mutation_pb.js';
 import {
-	type AccessOptions,
+	type AccessRule,
 	entity as entityExt,
 	type EntityOptions,
 	field_behavior as fieldBehaviorExt,
 	type FieldBehavior,
-	FieldWritePolicy,
 	reference as referenceExt,
 } from './gen/syncplane/v1/options_pb.js';
 import type { Condition } from './gen/syncplane/v1/query_pb.js';
@@ -142,17 +141,27 @@ export interface EntityDef {
 	 */
 	accessRules: readonly AccessRuleDef[] | undefined;
 	/**
-	 * Top-level field names no client write may change, from
-	 * `(syncplane.v1.field_behavior).write_policy` — a oneof named by its group —
-	 * and from `creator`.
+	 * The entity's field guards, from `(syncplane.v1.entity).access.guard`, in
+	 * declaration order. Empty when the entity declares none.
+	 */
+	guards: readonly GuardDef[];
+	/**
+	 * Top-level units, by proto name, that no client write changes after the
+	 * create: the `creator` fields, and each unit whose guard has no rule that
+	 * names update, a oneof named by its group.
 	 *
 	 * A `patch()` masking one is refused at the call site; a `put()` carries the
 	 * stored value over instead, which is what the server does with the row it
-	 * has. The server may protect further fields per caller (its
-	 * `FieldPermissions` hook), and those are unknowable here: such a write
-	 * enqueues and comes back as a rejection ack.
+	 * has. The server decides a guard that has an update rule for each caller,
+	 * and may protect further fields per caller (its `FieldPermissions` hook):
+	 * such a write enqueues and comes back as a rejection ack.
 	 */
 	protectedFields: string[];
+	/**
+	 * Top-level units, by proto name, that a client create stores as the zero
+	 * value: each unit whose guard has no rule that names create.
+	 */
+	clearedOnCreate: string[];
 	/**
 	 * The fields marked `(syncplane.v1.field_behavior).creator`: a create
 	 * stores the caller's primary subject in each, so a local put of a row
@@ -209,6 +218,17 @@ export interface AccessRuleDef {
 }
 
 /**
+ * One field guard of an entity, from `(syncplane.v1.entity).access.guard`,
+ * resolved against the entity's schema.
+ */
+export interface GuardDef {
+	/** The units the guard restricts, by proto name: fields, and oneofs by group. */
+	units: readonly string[];
+	/** The guard's rules. `write` is spread over `create` and `update`. */
+	rules: readonly AccessRuleDef[];
+}
+
+/**
  * One entry of an access rule's `within`: the row must itself be, or sit below,
  * a row of `entity` that passes the entry's checks.
  */
@@ -255,15 +275,33 @@ export function entityDefOf(schema: DescMessage): EntityDef {
 		}
 		return field;
 	});
-	const accessRules = accessRulesOf(schema, opts.access);
+	const accessRules = accessRulesOf(schema, opts.access?.allow);
+	// A guarded key field is a schema mistake rather than a rule: a patch can
+	// never move one, and a put that changed one would address a different row.
+	(opts.access?.guard ?? []).forEach((g, i) => {
+		const key = g.fields.find((name) => keyFields.some((f) => f.name === name));
+		if (key !== undefined) {
+			throw new Error(
+				`${schema.typeName}: access guard[${i}] fields: "${key}" is a key field, which no update changes`,
+			);
+		}
+	});
+	const guards = (opts.access?.guard ?? []).map((g) => ({
+		units: [ ...g.fields ],
+		// A guard rule's write admits create and update only.
+		rules: accessRulesOf(schema, g.allow)!.map((r) => ({ ...r, delete: false })),
+	}));
+	const creatorFields = schema.fields.filter((f) => fieldBehaviorOf(f)?.creator !== undefined);
 	return {
 		schema,
 		name: opts.name,
 		keyFields,
 		indexes: indexesOf(schema, opts),
 		serverOnly: opts.serverOnly,
-		protectedFields: protectedFieldsOf(schema, keyFields),
-		creatorFields: schema.fields.filter((f) => fieldBehaviorOf(f)?.creator !== undefined),
+		guards,
+		protectedFields: [ ...creatorFields.map((f) => f.name), ...closedUnits(guards, 'update') ],
+		clearedOnCreate: closedUnits(guards, 'create'),
+		creatorFields,
 		grant: opts.grant !== undefined,
 		writeAccess: writeAccessOf(accessRules),
 		accessRules,
@@ -277,10 +315,10 @@ export function entityDefOf(schema: DescMessage): EntityDef {
  */
 function accessRulesOf(
 	schema: DescMessage,
-	access: AccessOptions | undefined,
+	rules: readonly AccessRule[] | undefined,
 ): AccessRuleDef[] | undefined {
-	if (access === undefined) return undefined;
-	return access.allow.map((rule) => ({
+	if (rules === undefined) return undefined;
+	return rules.map((rule) => ({
 		read: rule.read,
 		create: rule.write || rule.create,
 		update: rule.write || rule.update,
@@ -320,35 +358,11 @@ function writeAccessOf(rules: readonly AccessRuleDef[] | undefined): WriteAccess
 }
 
 /**
- * The units a client write may not change, matching the engine's
- * protectedFieldsOf: a oneof contributes its group name, because that is the
- * only form a mask names it in, and a marked key field is a schema mistake
- * rather than a rule — a patch can never move one, and a put that changed one
- * would address a different row.
+ * The units of `guards` that no guard rule admits `op` on to any caller,
+ * whatever the rule's source and checks.
  */
-function protectedFieldsOf(schema: DescMessage, keyFields: DescField[]): string[] {
-	const keys = new Set(keyFields.map((f) => f.name));
-	const out: string[] = [];
-	const seen = new Set<string>();
-	for (const field of schema.fields) {
-		const behavior = fieldBehaviorOf(field);
-		// A creator field keeps its value after the create the way a
-		// TRUSTED_ONLY one does; only the create itself differs.
-		if (behavior?.writePolicy !== FieldWritePolicy.TRUSTED_ONLY && behavior?.creator === undefined) {
-			continue;
-		}
-		if (keys.has(field.name)) {
-			throw new Error(
-				`${schema.typeName}: key field "${field.name}" is marked write_policy TRUSTED_ONLY; `
-					+ `a key field can never be modified in place, so the mark cannot take effect`,
-			);
-		}
-		const name = field.oneof?.name ?? field.name;
-		if (seen.has(name)) continue;
-		seen.add(name);
-		out.push(name);
-	}
-	return out;
+export function closedUnits(guards: readonly GuardDef[], op: 'create' | 'update'): string[] {
+	return guards.filter((g) => !g.rules.some((r) => r[op])).flatMap((g) => g.units);
 }
 
 /**
@@ -3220,11 +3234,12 @@ function scalarEquals(a: unknown, b: unknown): boolean {
 }
 
 /**
- * Substitutes what the row currently holds for every protected field of
- * `value`, which is what the server does with a put it authorizes — a put names
- * no field, so a protected one keeps its stored value rather than refusing the
- * write. `base` is the row as this client sees it, `undefined` for one it has
- * none of, where the fields reset to their zero value.
+ * Gives every unit of a put's `value` that this client may not write the value
+ * the server gives it: on a put that updates `base`, the row as this client
+ * sees it, each unit of {@link EntityDef.protectedFields} keeps the value of
+ * `base`; on a put of a row this client has none of, which is a create, each
+ * unit of {@link EntityDef.clearedOnCreate} gets its zero value. A put names no
+ * field, so the server does the same rather than refuse the write.
  *
  * Mutates and returns `value`, which is the freshly built message a put is
  * about to encode. Values taken from `base` are copies, so the caller's row
@@ -3241,10 +3256,11 @@ export function carryProtectedFields<D extends DescMessage>(
 	value: MessageShape<D>,
 	base: MessageShape<D> | undefined,
 ): MessageShape<D> {
-	if (def.protectedFields.length === 0) return value;
+	const units = base === undefined ? def.clearedOnCreate : def.protectedFields;
+	if (units.length === 0) return value;
 	const src = (base === undefined ? create(schema) : clone(schema, base)) as unknown as Rec;
 	const out = value as unknown as Rec;
-	for (const name of def.protectedFields) {
+	for (const name of units) {
 		const localName = schema.oneofs.find((o) => o.name === name)?.localName
 			?? schema.fields.find((f) => f.name === name)?.localName;
 		if (localName === undefined) continue;

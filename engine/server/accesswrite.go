@@ -696,6 +696,11 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 			return accessRefusal(w.info, w.key)
 		}
 	default:
+		if w.op == syncplanev1.CrudOp_CRUD_OP_PATCH {
+			if err := w.checkGuardedMask(tx, fr); err != nil {
+				return err
+			}
+		}
 		var changed []anchorRow
 		if moved {
 			changed = symmetricDifference(w.storedParents.parents, parents.parents)
@@ -762,6 +767,167 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 	}
 	if touchesGrant(w.info, w.op, w.mask) {
 		return checkGrantSubset(tx, w.access, w.info, w.key, fr)
+	}
+	return nil
+}
+
+// guardAdmits reports whether a rule of g admits op, opCreate or opUpdate, to
+// the caller at the row of the write, as of tx: on final, the row as it will
+// be stored, and for an update on the stored row as well.
+func (w *accessWrite) guardAdmits(tx storage.ReadTx, g *fieldGuard, op accessOp, final protoreflect.Message) (bool, error) {
+	for _, rule := range g.rules {
+		if !rule.names(op) {
+			continue
+		}
+		if op == opUpdate {
+			ok, err := w.access.admits(tx, rule, w.info, w.key, w.stored)
+			if err != nil {
+				return false, err
+			}
+			if !ok {
+				continue
+			}
+		}
+		ok, err := w.access.admits(tx, rule, w.info, w.key, final)
+		if err != nil || ok {
+			return ok, err
+		}
+	}
+	return false, nil
+}
+
+// guardRefusal is the verdict on a write that names a guarded field its guard
+// does not admit for the caller.
+func guardRefusal(info *entityInfo, key, unit string) error {
+	return Reject(CodeAccessDenied, fmt.Sprintf(
+		"entity %q: field %q of row %q may not be changed by this caller", info.name, unit, key))
+}
+
+// carryGuarded makes a PUT land for the fields the caller may write and change
+// nothing else. It runs on msg, the row the PUT will store, after the
+// creator stamp and before the text handling and finish.
+//
+// On an update, when every update rule that admitted the caller at the stored
+// row has a fields list, each unit that none of those lists names keeps its
+// stored value. Then, on a create or an update, each guarded unit whose guard
+// does not admit the caller keeps its stored value, or gets the zero value on
+// a create. A guard decides on msg after the first step: its checks read only
+// fields that no guard restricts.
+//
+// named are units the write names outright, as a PATCH mask does; a guarded
+// one the caller may not write is refused rather than carried over.
+func (w *accessWrite) carryGuarded(tx storage.ReadTx, msg proto.Message, named []string) error {
+	if w == nil {
+		return nil
+	}
+	var base proto.Message
+	if w.live {
+		base = w.stored.Interface()
+		if units := w.unlistedUnits(); len(units) > 0 {
+			if err := carryProtectedFields(w.info, units, base, msg); err != nil {
+				return err
+			}
+		}
+	}
+	if len(w.info.access.guards) == 0 {
+		return nil
+	}
+	op := opCreate
+	if w.live {
+		op = opUpdate
+	}
+	fr := msg.ProtoReflect()
+	for i := range w.info.access.guards {
+		g := &w.info.access.guards[i]
+		ok, err := w.guardAdmits(tx, g, op, fr)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		for _, unit := range named {
+			if slices.Contains(g.units, unit) {
+				w.gate.logRefusal(op, w.info, w.key, func() []string {
+					return []string{fmt.Sprintf("guard of %q admits no %s of the field by this caller", unit, opName(op))}
+				})
+				return guardRefusal(w.info, w.key, unit)
+			}
+		}
+		if err := carryProtectedFields(w.info, g.units, base, msg); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// unlistedUnits returns the units an update may not change because no update
+// rule that admitted the caller at the stored row lists them, or nil when one
+// of those rules has no fields list.
+func (w *accessWrite) unlistedUnits() []string {
+	var listed []string
+	for _, rule := range w.updating {
+		if rule.fields == nil {
+			return nil
+		}
+		listed = append(listed, rule.fields...)
+	}
+	if len(w.updating) == 0 {
+		return nil
+	}
+	var out []string
+	for _, unit := range entityUnits(w.info) {
+		if !slices.Contains(listed, unit) {
+			out = append(out, unit)
+		}
+	}
+	return out
+}
+
+// entityUnits returns the units of an entity's rows other than its key
+// fields, in field order: the top-level fields outside a oneof, and the
+// oneofs, each by name.
+func entityUnits(info *entityInfo) []string {
+	desc := info.msgType.Descriptor()
+	var out []string
+	fields := desc.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if slices.Contains(info.keyFields, fd) {
+			continue
+		}
+		if unit := unitOf(fd); !slices.Contains(out, unit) {
+			out = append(out, unit)
+		}
+	}
+	return out
+}
+
+// checkGuardedMask refuses a PATCH whose mask writes into a guarded unit that
+// its guard does not admit the caller to update, at the stored row and at
+// final, the row as it will be stored.
+func (w *accessWrite) checkGuardedMask(tx storage.ReadTx, final protoreflect.Message) error {
+	if len(w.info.access.guards) == 0 {
+		return nil
+	}
+	var checked []string
+	for _, path := range w.mask {
+		unit := protectedHead(path)
+		g := w.info.access.guardFor(unit)
+		if g == nil || slices.Contains(checked, unit) {
+			continue
+		}
+		checked = append(checked, unit)
+		ok, err := w.guardAdmits(tx, g, opUpdate, final)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			w.gate.logRefusal(opUpdate, w.info, w.key, func() []string {
+				return []string{fmt.Sprintf("guard of %q admits no update of the field by this caller", unit)}
+			})
+			return guardRefusal(w.info, w.key, unit)
+		}
 	}
 	return nil
 }
@@ -959,6 +1125,9 @@ func (s *Server) checkInvocation(
 	if ma == nil {
 		return Reject(CodeAccessDenied, fmt.Sprintf(
 			"mutator %q declares no MutatorAccess, so only a trusted caller may invoke it", mi.name))
+	}
+	if ma.Admitted {
+		return nil
 	}
 	if ma.Entity == "" {
 		held, err := access.holdsAt(tx, ma.Permission, nil)

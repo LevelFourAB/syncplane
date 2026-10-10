@@ -172,6 +172,13 @@ message Project {
 }
 ```
 
+In a schema that uses the access model, a client can invoke only a mutator that declares a `MutatorAccess`. Without roles, declare `server.MutatorAccess{Admitted: true}` to let every caller that enters the workspace invoke it:
+
+```go
+server.WithMutator("send_feedback", &appv1.SendFeedbackArgs{}, sendFeedback,
+	server.MutatorAccess{Admitted: true})
+```
+
 If you later add a grant entity, the schema declares its first role, and the workspace gate then refuses every caller that holds no permission. Registration refuses that change unless you allow it; see [Changing the access model](../reference/proto-options.md#changing-the-access-model).
 
 In a schema that does not use the access model, refuse the operation in `CanMutate`. The hook receives each CRUD write of a batch on its own, with its entity and its operation:
@@ -191,7 +198,26 @@ func (myPermissions) CanMutate(_ context.Context, p server.Principal, ws string,
 
 `CanMutate` cannot enforce a rule that depends on the stored row, such as "only edit your own comment". An access rule can when a field of the row names the caller: set `caller_is` on the rule to that field. For other rules, use a write filter if the rule depends on the stored row's fields, or a custom mutator if it depends on who last wrote the row. For more information, see [Check writes against the stored row](#check-writes-against-the-stored-row) and [Check ownership in a mutator](#check-ownership-in-a-mutator).
 
-To protect individual fields on a writable row, use `(syncplane.v1.field_behavior).write_policy`. A `PATCH` request that includes a protected field in its field mask is rejected. A `PUT` request preserves the existing stored value of the protected field and applies the remaining updates. For more information, see [Protected fields](../reference/proto-options.md#protected-fields).
+To keep individual fields of a writable row from clients, give the entity a field guard whose only rule is the read rule. A `PATCH` whose mask names a guarded field is rejected with `access_denied`. A `PUT` keeps the stored value of the guarded field and applies the rest of the row:
+
+```proto
+// Clients edit the title. Only the server sets the total.
+message Order {
+	option (syncplane.v1.entity) = {
+		name: "order"
+		key_fields: [ "id" ]
+		access: {
+			allow: [ { read: true write: true admitted: {} } ]
+			guard: [ { fields: [ "total" ] allow: [ { read: true admitted: {} } ] } ]
+		}
+	};
+	string id = 1;
+	string title = 2;
+	int64 total = 3;
+}
+```
+
+A guard can also give a field back to some callers, such as a status that only managers set. For more information, see [Field guards](../reference/proto-options.md#field-guards).
 
 ## Check writes against the stored row
 
@@ -256,13 +282,13 @@ server.WithMutator("editComment", &appv1.EditComment{},
 
 Check and reject anonymous callers before comparing subjects. Unauthenticated callers and rows written without an authenticated actor both have an empty `Actor.Subject`, which evaluates as a match if unchecked.
 
-`meta.Actor` reflects the last writer of the row. If a moderator edits a comment created by an author, `meta.Actor` reports the moderator. To restrict edits to the original creator, store the creator's identity in a field on creation and set `write_policy: FIELD_WRITE_POLICY_TRUSTED_ONLY` to prevent subsequent client modifications.
+`meta.Actor` reflects the last writer of the row. If a moderator edits a comment created by an author, `meta.Actor` reports the moderator. To restrict edits to the original creator, mark a field of the row `(syncplane.v1.field_behavior).creator`: the server stores the caller's subject in it on the create, and no client write changes it later. An access rule with `caller_is` on that field then admits only the creator, and needs no mutator. See [Access model](../reference/proto-options.md#access-model).
 
 `meta.Version` contains the row version. Because a mutator holds the workspace write lock, read-then-write operations within a mutator are serializable. When performing the same check in an `Apply` closure, pass the version to `server.WithExpectedVersion` so the write fails if the row changes concurrently. To read metadata in a read-only transaction, call `ViewTx.GetMeta` inside a `View`.
 
 ## Protecting fields per caller
 
-To restrict field writes based on the identity of the caller, implement `FieldPermissions` on your `Permissions` struct:
+A [field guard](../reference/proto-options.md#field-guards) restricts a field to the callers that hold a permission where the row sits, or that a field of the row names. The client predicts a guard with `can()`. When the rule depends on facts outside the workspace's rows, such as a billing plan, implement `FieldPermissions` on your `Permissions` struct:
 
 ```go
 func (p *policy) ProtectedFields(
@@ -275,18 +301,18 @@ func (p *policy) ProtectedFields(
 }
 ```
 
-The effective protected set combines the schema definitions with the fields returned by `ProtectedFields`. This hook widens restrictions and cannot remove protections defined in the schema. Both schema rules and hook returns are enforced identically: a `PATCH` targeting a protected field is rejected, and a `PUT` preserves the stored field value.
+The hook only takes fields away: a field is writable when the schema's guards admit the caller and the hook does not return it. A `PATCH` targeting a field the hook returns is rejected with `permission_denied`, and a `PUT` preserves the stored field value.
 
 Return names of top-level fields or oneof group names. Returning an invalid field name or a key field causes the request to fail rather than silently permitting access.
 
 `ProtectedFields` must execute quickly and without side effects. The engine calls `ProtectedFields` at most once per entity per request before opening the write transaction and reuses the result during application. Place expensive lookups, such as membership checks, in middleware that attaches results to the context.
 
-Clients handle schema protections and dynamic protections differently:
+Clients handle guards and the hook differently:
 
-- The TypeScript client checks schema annotations locally and prevents protected writes before sending requests.
-- Protections returned by `ProtectedFields` are evaluated on the server. The client enqueues the write and reverts it when receiving the server rejection.
+- The TypeScript client refuses a `patch()` of a field whose guard admits no update to any caller before it sends the request, and `can()` predicts the other guard rules.
+- Fields returned by `ProtectedFields` are evaluated on the server. The client enqueues the write and reverts it when receiving the server rejection.
 
-Prefer schema definitions when a field protection applies to all callers.
+Prefer a guard when the rule depends only on permissions and the row.
 
 ## Unauthenticated services
 

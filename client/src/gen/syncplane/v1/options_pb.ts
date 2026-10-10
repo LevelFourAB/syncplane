@@ -2,8 +2,8 @@
 // @generated from file syncplane/v1/options.proto (package syncplane.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenEnum, GenExtension, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
-import { enumDesc, extDesc, fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenExtension, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
+import { extDesc, fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
 import type { FieldOptions, MessageOptions } from "@bufbuild/protobuf/wkt";
 import { file_google_protobuf_descriptor } from "@bufbuild/protobuf/wkt";
 import type { Condition } from "./query_pb.js";
@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSI4Cg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUikQIKCkFjY2Vzc1J1bGUSDAoEcmVhZBgBIAEoCBIOCgZjcmVhdGUYAiABKAgSDgoGdXBkYXRlGAMgASgIEg4KBmRlbGV0ZRgEIAEoCBINCgV3cml0ZRgFIAEoCBIQCghyZXF1aXJlcxgGIAMoCRIuCghhZG1pdHRlZBgHIAEoCzIcLnN5bmNwbGFuZS52MS5BZG1pdHRlZENhbGxlchIRCgljYWxsZXJfaXMYCCABKAkSDgoGZmllbGRzGAkgAygJEiUKBHdoZW4YCiABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uEioKBndpdGhpbhgLIAMoCzIaLnN5bmNwbGFuZS52MS5BY2Nlc3NXaXRoaW4iWAoMQWNjZXNzV2l0aGluEg4KBmVudGl0eRgBIAEoCRIRCgljYWxsZXJfaXMYAiABKAkSJQoEd2hlbhgDIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24iEAoOQWRtaXR0ZWRDYWxsZXIiUAoMR3JhbnRPcHRpb25zEg8KB3N1YmplY3QYASABKAkSDAoEcm9sZRgCIAEoCRIhCgVyb2xlcxgDIAMoCzISLnN5bmNwbGFuZS52MS5Sb2xlIjYKBFJvbGUSDAoEbmFtZRgBIAEoCRIOCgZncmFudHMYAiADKAkSEAoIaW5jbHVkZXMYAyADKAkiIAoOTWVtYmVyc09wdGlvbnMSDgoGZW50aXR5GAEgASgJIhUKE0FjY2Vzc1BhcmVudE9wdGlvbnMiEAoOQ3JlYXRvck9wdGlvbnMiEAoOSGlzdG9yeU9wdGlvbnMiEgoQUmVmZXJlbmNlT3B0aW9ucyIbCgtTZWFyY2hGaWVsZBIMCgRwYXRoGAEgASgJIk8KClNlYXJjaFNwZWMSKAoFZmllbGQYASADKAsyGS5zeW5jcGxhbmUudjEuU2VhcmNoRmllbGQSFwoPa2VlcF9kaWFjcml0aWNzGAIgASgIIiYKCEluZGV4S2V5EgwKBHBhdGgYASABKAkSDAoEZGVzYxgCIAEoCCI+CglJbmRleFNwZWMSDAoEbmFtZRgBIAEoCRIjCgNrZXkYAiADKAsyFi5zeW5jcGxhbmUudjEuSW5kZXhLZXki1wIKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCBISCgpzZWFyY2hhYmxlGAcgASgIEjQKDHdyaXRlX3BvbGljeRgIIAEoDjIeLnN5bmNwbGFuZS52MS5GaWVsZFdyaXRlUG9saWN5EhEKCXdvcmtzcGFjZRgJIAEoCBIYChByZXZlcnNlX3JlbGF0aW9uGAogASgJEjgKDWFjY2Vzc19wYXJlbnQYCyABKAsyIS5zeW5jcGxhbmUudjEuQWNjZXNzUGFyZW50T3B0aW9ucxItCgdjcmVhdG9yGAwgASgLMhwuc3luY3BsYW5lLnYxLkNyZWF0b3JPcHRpb25zKnkKEEZpZWxkV3JpdGVQb2xpY3kSIgoeRklFTERfV1JJVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASHAoYRklFTERfV1JJVEVfUE9MSUNZX0FMTE9XEAESIwofRklFTERfV1JJVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpfCglyZWZlcmVuY2USHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtocDIAEoCzIeLnN5bmNwbGFuZS52MS5SZWZlcmVuY2VPcHRpb25zUglyZWZlcmVuY2U6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor, file_syncplane_v1_query]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSJhCg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUSJwoFZ3VhcmQYAiADKAsyGC5zeW5jcGxhbmUudjEuRmllbGRHdWFyZCJFCgpGaWVsZEd1YXJkEg4KBmZpZWxkcxgBIAMoCRInCgVhbGxvdxgCIAMoCzIYLnN5bmNwbGFuZS52MS5BY2Nlc3NSdWxlIpECCgpBY2Nlc3NSdWxlEgwKBHJlYWQYASABKAgSDgoGY3JlYXRlGAIgASgIEg4KBnVwZGF0ZRgDIAEoCBIOCgZkZWxldGUYBCABKAgSDQoFd3JpdGUYBSABKAgSEAoIcmVxdWlyZXMYBiADKAkSLgoIYWRtaXR0ZWQYByABKAsyHC5zeW5jcGxhbmUudjEuQWRtaXR0ZWRDYWxsZXISEQoJY2FsbGVyX2lzGAggASgJEg4KBmZpZWxkcxgJIAMoCRIlCgR3aGVuGAogASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbhIqCgZ3aXRoaW4YCyADKAsyGi5zeW5jcGxhbmUudjEuQWNjZXNzV2l0aGluIlgKDEFjY2Vzc1dpdGhpbhIOCgZlbnRpdHkYASABKAkSEQoJY2FsbGVyX2lzGAIgASgJEiUKBHdoZW4YAyABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uIhAKDkFkbWl0dGVkQ2FsbGVyIlAKDEdyYW50T3B0aW9ucxIPCgdzdWJqZWN0GAEgASgJEgwKBHJvbGUYAiABKAkSIQoFcm9sZXMYAyADKAsyEi5zeW5jcGxhbmUudjEuUm9sZSI2CgRSb2xlEgwKBG5hbWUYASABKAkSDgoGZ3JhbnRzGAIgAygJEhAKCGluY2x1ZGVzGAMgAygJIiAKDk1lbWJlcnNPcHRpb25zEg4KBmVudGl0eRgBIAEoCSIVChNBY2Nlc3NQYXJlbnRPcHRpb25zIhAKDkNyZWF0b3JPcHRpb25zIhAKDkhpc3RvcnlPcHRpb25zIhIKEFJlZmVyZW5jZU9wdGlvbnMiGwoLU2VhcmNoRmllbGQSDAoEcGF0aBgBIAEoCSJPCgpTZWFyY2hTcGVjEigKBWZpZWxkGAEgAygLMhkuc3luY3BsYW5lLnYxLlNlYXJjaEZpZWxkEhcKD2tlZXBfZGlhY3JpdGljcxgCIAEoCCImCghJbmRleEtleRIMCgRwYXRoGAEgASgJEgwKBGRlc2MYAiABKAgiPgoJSW5kZXhTcGVjEgwKBG5hbWUYASABKAkSIwoDa2V5GAIgAygLMhYuc3luY3BsYW5lLnYxLkluZGV4S2V5IrUCCg1GaWVsZEJlaGF2aW9yEg4KBm9wYXF1ZRgBIAEoCBIRCglrZXlfZmllbGQYAiADKAkSEwoLb3JkZXJfZmllbGQYAyABKAkSDAoEdGV4dBgEIAEoCBIPCgdpbmRleGVkGAUgASgIEg8KB2hpc3RvcnkYBiABKAgSEgoKc2VhcmNoYWJsZRgHIAEoCBIRCgl3b3Jrc3BhY2UYCSABKAgSGAoQcmV2ZXJzZV9yZWxhdGlvbhgKIAEoCRI4Cg1hY2Nlc3NfcGFyZW50GAsgASgLMiEuc3luY3BsYW5lLnYxLkFjY2Vzc1BhcmVudE9wdGlvbnMSLQoHY3JlYXRvchgMIAEoCzIcLnN5bmNwbGFuZS52MS5DcmVhdG9yT3B0aW9uc0oECAgQCVIMd3JpdGVfcG9saWN5OlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpfCglyZWZlcmVuY2USHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtocDIAEoCzIeLnN5bmNwbGFuZS52MS5SZWZlcmVuY2VPcHRpb25zUglyZWZlcmVuY2U6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor, file_syncplane_v1_query]);
 
 /**
  * Declares a message as a syncable entity.
@@ -182,6 +182,15 @@ export type AccessOptions = Message<"syncplane.v1.AccessOptions"> & {
    * @generated from field: repeated syncplane.v1.AccessRule allow = 1;
    */
   allow: AccessRule[];
+
+  /**
+   * The field guards: each one restricts who can write a set of fields,
+   * whatever rule in `allow` admits the write. A field that no guard names
+   * follows `allow` alone. See `FieldGuard`.
+   *
+   * @generated from field: repeated syncplane.v1.FieldGuard guard = 2;
+   */
+  guard: FieldGuard[];
 };
 
 /**
@@ -190,6 +199,85 @@ export type AccessOptions = Message<"syncplane.v1.AccessOptions"> & {
  */
 export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 1);
+
+/**
+ * Restricts who can write a set of fields of an entity.
+ *
+ * A write that sets a guarded field needs a rule in `allow` of the entity that
+ * admits the write, and a rule of the guard that admits the field operation:
+ * `create` for the value a create stores, `update` for a change of a row that
+ * exists. A rule of the guard admits an operation as a rule of the entity
+ * does: its source holds for the caller where the row sits, and every check
+ * it sets holds on the row as it will be stored and, for an update, on the
+ * stored row. A field operation that no rule of the guard admits is open only
+ * to trusted writes.
+ *
+ * A write the guard does not admit for the caller:
+ *
+ * - a `PATCH` whose mask names a guarded field fails with `access_denied`;
+ * - a `PUT` that updates a row keeps the stored value of each guarded field;
+ * - a `PUT` that creates a row stores the zero value in each guarded field.
+ *
+ * Every caller that reads the row reads the guarded fields: each guard admits
+ * reading with the rule `{ read: true admitted: {} }`, and registration refuses
+ * a guard without it.
+ *
+ * A total that only server code computes, and a status that only managers
+ * set:
+ *
+ * ```protobuf
+ * access: {
+ *   allow: [
+ *     { read: true requires: "view_orders" },
+ *     { write: true requires: "edit_orders" }
+ *   ]
+ *   guard: [
+ *     { fields: ["total"] allow: [{ read: true admitted: {} }] },
+ *     { fields: ["status"] allow: [
+ *       { read: true admitted: {} },
+ *       { write: true requires: "manage_orders" }
+ *     ] }
+ *   ]
+ * }
+ * ```
+ *
+ * To let a caller change only some fields of a row, set `fields` on an update
+ * rule in `allow` instead: that rule adds a narrow update, and a guard takes
+ * a field away from every rule.
+ *
+ * Registration refuses a guard without fields or rules, a field that is a key
+ * field, an access parent or a `creator` field, a field that two guards name,
+ * a rule with `delete` or `fields`, a rule whose `caller_is` or `when` reads a
+ * guarded field, and unknown fields inside this message.
+ *
+ * @generated from message syncplane.v1.FieldGuard
+ */
+export type FieldGuard = Message<"syncplane.v1.FieldGuard"> & {
+  /**
+   * The fields the guard restricts. Each entry names a top-level field
+   * outside any `oneof`, or a `oneof`, which the guard restricts as one
+   * field.
+   *
+   * @generated from field: repeated string fields = 1;
+   */
+  fields: string[];
+
+  /**
+   * The rules. A rule names `read`, `create`, `update` or `write`, which
+   * admits `create` and `update`. A rule that names `read` admits every
+   * admitted caller and sets no check.
+   *
+   * @generated from field: repeated syncplane.v1.AccessRule allow = 2;
+   */
+  allow: AccessRule[];
+};
+
+/**
+ * Describes the message syncplane.v1.FieldGuard.
+ * Use `create(FieldGuardSchema)` to create a new message.
+ */
+export const FieldGuardSchema: GenMessage<FieldGuard> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 2);
 
 /**
  * One way to read or write the rows of an entity.
@@ -329,7 +417,12 @@ export type AccessRule = Message<"syncplane.v1.AccessRule"> & {
    *
    * A `PATCH` fails before the row is read when every `update` rule of the
    * entity has a `fields` list and no list names every field the mask
-   * names.
+   * names. When every `update` rule that admits the caller at the stored row
+   * has a `fields` list, a `PUT` that updates the row keeps the stored value
+   * of each field that none of those lists names.
+   *
+   * To take a field away from every caller, whatever rule admits the
+   * update, use a `FieldGuard`.
    *
    * @generated from field: repeated string fields = 9;
    */
@@ -376,7 +469,7 @@ export type AccessRule = Message<"syncplane.v1.AccessRule"> & {
  * Use `create(AccessRuleSchema)` to create a new message.
  */
 export const AccessRuleSchema: GenMessage<AccessRule> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 2);
+  messageDesc(file_syncplane_v1_options, 3);
 
 /**
  * Admits only rows that sit within a row of an entity that passes a check.
@@ -469,7 +562,7 @@ export type AccessWithin = Message<"syncplane.v1.AccessWithin"> & {
  * Use `create(AccessWithinSchema)` to create a new message.
  */
 export const AccessWithinSchema: GenMessage<AccessWithin> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 3);
+  messageDesc(file_syncplane_v1_options, 4);
 
 /**
  * Selects every caller admitted to the workspace as the source of an
@@ -489,7 +582,7 @@ export type AdmittedCaller = Message<"syncplane.v1.AdmittedCaller"> & {
  * Use `create(AdmittedCallerSchema)` to create a new message.
  */
 export const AdmittedCallerSchema: GenMessage<AdmittedCaller> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 4);
+  messageDesc(file_syncplane_v1_options, 5);
 
 /**
  * Declares an entity whose rows grant roles.
@@ -590,7 +683,7 @@ export type GrantOptions = Message<"syncplane.v1.GrantOptions"> & {
  * Use `create(GrantOptionsSchema)` to create a new message.
  */
 export const GrantOptionsSchema: GenMessage<GrantOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 5);
+  messageDesc(file_syncplane_v1_options, 6);
 
 /**
  * Declares one role and the permissions it grants.
@@ -641,7 +734,7 @@ export type Role = Message<"syncplane.v1.Role"> & {
  * Use `create(RoleSchema)` to create a new message.
  */
 export const RoleSchema: GenMessage<Role> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 6);
+  messageDesc(file_syncplane_v1_options, 7);
 
 /**
  * Declares the entity whose rows say who the members of each team are.
@@ -713,7 +806,7 @@ export type MembersOptions = Message<"syncplane.v1.MembersOptions"> & {
  * Use `create(MembersOptionsSchema)` to create a new message.
  */
 export const MembersOptionsSchema: GenMessage<MembersOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 7);
+  messageDesc(file_syncplane_v1_options, 8);
 
 /**
  * Marks a reference that places each row of an entity below another row in
@@ -726,7 +819,7 @@ export const MembersOptionsSchema: GenMessage<MembersOptions> = /*@__PURE__*/
  * Each marked field is a top-level field, or a member of a `oneof` whose
  * members are all marked. Each is a reference: its type is an entity message,
  * or a reference message without a `workspace` field. A marked field cannot
- * be a map or carry a `write_policy`.
+ * be a map or be named by a `FieldGuard`.
  *
  * An entity can mark several fields, and a marked field can be repeated. A
  * row then sits below every row its marked fields name, and a permission held
@@ -773,7 +866,7 @@ export type AccessParentOptions = Message<"syncplane.v1.AccessParentOptions"> & 
  * Use `create(AccessParentOptionsSchema)` to create a new message.
  */
 export const AccessParentOptionsSchema: GenMessage<AccessParentOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 8);
+  messageDesc(file_syncplane_v1_options, 9);
 
 /**
  * Marks a field that records who created the row.
@@ -786,7 +879,7 @@ export const AccessParentOptionsSchema: GenMessage<AccessParentOptions> = /*@__P
  * trusted write stores the value it carries.
  *
  * The field is a top-level, singular `string` field outside any `oneof`. It
- * cannot be a key field or carry a `write_policy`.
+ * cannot be a key field or be named by a `FieldGuard`.
  *
  * Registration refuses unknown fields inside this message.
  *
@@ -800,7 +893,7 @@ export type CreatorOptions = Message<"syncplane.v1.CreatorOptions"> & {
  * Use `create(CreatorOptionsSchema)` to create a new message.
  */
 export const CreatorOptionsSchema: GenMessage<CreatorOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 9);
+  messageDesc(file_syncplane_v1_options, 10);
 
 /**
  * Enables server-side field history tracking for an entity.
@@ -828,7 +921,7 @@ export type HistoryOptions = Message<"syncplane.v1.HistoryOptions"> & {
  * Use `create(HistoryOptionsSchema)` to create a new message.
  */
 export const HistoryOptionsSchema: GenMessage<HistoryOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 10);
+  messageDesc(file_syncplane_v1_options, 11);
 
 /**
  * Declares a message as a reference message: the stored shape of a typed
@@ -906,7 +999,7 @@ export type ReferenceOptions = Message<"syncplane.v1.ReferenceOptions"> & {
  * Use `create(ReferenceOptionsSchema)` to create a new message.
  */
 export const ReferenceOptionsSchema: GenMessage<ReferenceOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 11);
+  messageDesc(file_syncplane_v1_options, 12);
 
 /**
  * Specifies a single field read during full-text search.
@@ -930,7 +1023,7 @@ export type SearchField = Message<"syncplane.v1.SearchField"> & {
  * Use `create(SearchFieldSchema)` to create a new message.
  */
 export const SearchFieldSchema: GenMessage<SearchField> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 12);
+  messageDesc(file_syncplane_v1_options, 13);
 
 /**
  * Configures full-text search over an entity, specifying searchable fields in
@@ -976,7 +1069,7 @@ export type SearchSpec = Message<"syncplane.v1.SearchSpec"> & {
  * Use `create(SearchSpecSchema)` to create a new message.
  */
 export const SearchSpecSchema: GenMessage<SearchSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 13);
+  messageDesc(file_syncplane_v1_options, 14);
 
 /**
  * Specifies one field component of an index and its sort order.
@@ -1011,7 +1104,7 @@ export type IndexKey = Message<"syncplane.v1.IndexKey"> & {
  * Use `create(IndexKeySchema)` to create a new message.
  */
 export const IndexKeySchema: GenMessage<IndexKey> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 14);
+  messageDesc(file_syncplane_v1_options, 15);
 
 /**
  * Defines a secondary index for an entity.
@@ -1044,7 +1137,7 @@ export type IndexSpec = Message<"syncplane.v1.IndexSpec"> & {
  * Use `create(IndexSpecSchema)` to create a new message.
  */
 export const IndexSpecSchema: GenMessage<IndexSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 15);
+  messageDesc(file_syncplane_v1_options, 16);
 
 /**
  * Configures merge, indexing, and authorization behavior for a field.
@@ -1141,21 +1234,6 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
   searchable: boolean;
 
   /**
-   * Specifies who can write this field.
-   *
-   * When unset, any caller admitted by the application permission policy can
-   * write the field.
-   *
-   * Apply this option to top-level fields only. Protecting a message field
-   * protects all fields within it. Marking any member of a `oneof` protects
-   * the entire `oneof` group. Key fields cannot be marked with a write
-   * policy. See `FieldWritePolicy`.
-   *
-   * @generated from field: syncplane.v1.FieldWritePolicy write_policy = 8;
-   */
-  writePolicy: FieldWritePolicy;
-
-  /**
    * Identifies the workspace field within a reference message.
    *
    * Marks a singular string field in a message with
@@ -1217,58 +1295,7 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
  * Use `create(FieldBehaviorSchema)` to create a new message.
  */
 export const FieldBehaviorSchema: GenMessage<FieldBehavior> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 16);
-
-/**
- * Specifies which callers can write a specific field of an entity.
- *
- * Use it when specific fields must be modified only by the server while the
- * rest of the row remains client-writable.
- *
- * The engine handles write operations as follows:
- * - A `PATCH` request whose field mask includes a protected field fails.
- * - A `PUT` request silently preserves the server value for protected fields
- *   (or the zero value for new rows) and applies the remaining fields.
- *
- * To allow client-initiated changes to protected fields, use a custom mutator
- * with appropriate checks and authorize the mutator invocation by name.
- * Dynamic per-caller permissions belong in the server `FieldPermissions` hook.
- *
- * @generated from enum syncplane.v1.FieldWritePolicy
- */
-export enum FieldWritePolicy {
-  /**
-   * Allows any caller admitted by the permission policy to write the field.
-   *
-   * @generated from enum value: FIELD_WRITE_POLICY_UNSPECIFIED = 0;
-   */
-  UNSPECIFIED = 0,
-
-  /**
-   * Explicitly allows any caller admitted by the permission policy to write
-   * the field.
-   *
-   * @generated from enum value: FIELD_WRITE_POLICY_ALLOW = 1;
-   */
-  ALLOW = 1,
-
-  /**
-   * Only writes made under the engine's Trusted bypass may change the
-   * field — a connector, a migration, an effect, a cron job. A PATCH
-   * naming the field is refused, while a PUT carries the stored value
-   * over and the rest of the write lands. The in-process API is
-   * deliberately held to the same policy as a sync client.
-   *
-   * @generated from enum value: FIELD_WRITE_POLICY_TRUSTED_ONLY = 2;
-   */
-  TRUSTED_ONLY = 2,
-}
-
-/**
- * Describes the enum syncplane.v1.FieldWritePolicy.
- */
-export const FieldWritePolicySchema: GenEnum<FieldWritePolicy> = /*@__PURE__*/
-  enumDesc(file_syncplane_v1_options, 0);
+  messageDesc(file_syncplane_v1_options, 17);
 
 /**
  * Field numbers 50100, 50101 and 50102 are unregistered; fine for

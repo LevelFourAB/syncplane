@@ -1406,23 +1406,6 @@ const article = schema.entity('article', {
 `.searchable()` throws an error on non-string fields.
 See [proto options](proto-options.md#full-text-search) and [Search data](../how-to/search.md).
 
-### Protected fields
-
-`.protected()` prevents client writes from altering specific fields:
-
-```ts
-const task = schema.entity('task', {
-	id: schema.text().key(),
-	title: schema.text(),
-	status: schema.text().protected(),
-});
-```
-
-Calling `patch` or `update` on a protected field throws an error.
-Calling `put` ignores the incoming protected field value and preserves the existing stored value.
-Key fields cannot be protected.
-See [Protected fields](proto-options.md#protected-fields).
-
 ### Access model
 
 The `access`, `grant` and `members` entity options and the `.accessParent()` field mark declare who can read and write rows:
@@ -1475,11 +1458,14 @@ const label = schema.entity('label', { id: schema.text().key() }, {
 Each rule in `access.allow` sets one or more of `read`, `create`, `update`, `delete` and `write`, and exactly one source: `requires: '<name>'` or `requires: [ '<name>', ... ]`, which needs every permission it names, or `admitted: true`. The rules lower to `syncplane.v1.AccessRule`; see [Access model](proto-options.md#access-model) for how they admit each operation.
 A rule can also set checks on the row: `callerIs` names a `text()` field by accessor name, `fields` lists accessor names, and `when` is a function that takes the row's field proxy, as a query's `where` does, and returns the condition the row must match, such as `when: (t) => t.archived.eq(false)`. `entity()` throws on a `when` that uses `matches()` or `match()`. `within` holds one entry or a list, each `{ entity, callerIs?, when? }`: `entity` names an entity of the schema by name, or as a thunk that returns it, and `callerIs` a `text()` field of it by accessor name. Build an entry with `when` with `schema.within(target, { when })`, which types the condition against `target`'s fields, such as `within: schema.within(project, { when: (p) => p.archived.eq(false) })`. `target` can be a thunk, `schema.within(() => project, { ... })`, for an entity declared later; `defineSchema()` calls it. For the rule's own entity, in an entity whose rows sit below rows of their own, write `{ self: true, callerIs?, when? }`, which types `callerIs` and `when` against the entity's own fields. `defineSchema()` throws on an entry whose entity is not in the schema or whose `callerIs` is not a singular `text()` field of it. See [Checks on the rows above](proto-options.md#checks-on-the-rows-above).
 `grant.subject` and `grant.role` name fields by accessor name. `grant.role` names a `text()` field. `grant.subject` names a `text()` field, or a singular `ref()` to an entity whose `members` option names its member entity, which grants to every member of the team the row names. See [Teams](proto-options.md#teams). `.accessParent()` is valid on a `ref()` or a `refList()`, and an entity can mark several fields; see [Several access parents](proto-options.md#several-access-parents). A grant entity marks one singular `ref()`.
+`access.guard` lists field guards, each `{ fields, allow }`: `fields` names the fields the guard restricts by accessor name, and `allow` holds rules with the shape of `access.allow` except `delete` and `fields`. Each guard has exactly one read rule, `{ read: true, admitted: true }`, without checks. A guard lowers to `syncplane.v1.FieldGuard`; see [Field guards](proto-options.md#field-guards). `entity()` throws on a guard that names a key field, an `.accessParent()` field, a `.creator()` field or a field another guard names, that has no read rule, and on a guard rule whose `callerIs` or `when` reads a guarded field.
 Each role sets `grants`, `includes` or both. `includes` names roles of the same `grant`, and the role grants every permission of each of them.
 `entity()` throws on the rules that concern one entity. `defineSchema()` also throws on an `.accessParent()` reference to an entity without `access`, a `grant.subject` reference to an entity without `members`, and a `members` option that does not name a grant entity of the schema whose one access parent is the team entity and whose subject is a `text()` field. The server checks the remaining rules that span entities, such as permission coverage and unique role names, when the schema is registered.
 TypeScript checks the field names in `subject`, `fields`, `grant.subject` and `grant.role` against the entity's fields: `subject` and `grant.role` take a `text()` field, and `grant.subject` a `text()` field or a singular reference. Lists such as `grants`, `includes` and `fields` take `readonly` arrays. To share rules between entities, declare them with `satisfies schema.AccessDecl`, not with an `AccessDecl` annotation, which takes any name and does not fit an entity's options.
 
 `put`, `patch`, `update` and `del` reject with an `Error` before they change local state when the write can only be an operation that no rule of the entity names: `del` without a delete rule, `patch` and `update` without an update rule, `put` with `expectedVersion: 0n` without a create rule, `put` with another `expectedVersion` without an update rule, and `put` with no `expectedVersion` when no rule names create or update. See [Operations no rule admits](proto-options.md#operations-no-rule-admits).
+
+`patch` and `update` also reject with an `Error` when they name a field whose guard has no rule for `update`, or a `.creator()` field. `put` keeps the local value of such a field in the optimistic row, and the zero value of a guarded field whose guard has no rule for `create` on a new row. A guard rule that admits only some callers is decided by the server: the write is queued, and a refused `patch` comes back as a rejection ack.
 
 #### Predicting access
 
@@ -1517,7 +1503,7 @@ const canComment = await client.canCreate(CommentSchema, {
 ```
 
 - `can` predicts for the row with `key`. `canCreate` predicts for `row` as the server would store it, with each `.creator()` field holding the caller's primary subject.
-- For `'update'`, `fields` names the fields the update changes, by accessor name, with a oneof named by its own name, as a patch init object names them. A rule with a `fields` list counts only when its list names each of them. `can` rejects with an `Error` for a name that is not a field of the entity.
+- For `'update'`, `fields` names the fields the update changes, by accessor name, with a oneof named by its own name, as a patch init object names them. A rule with a `fields` list counts only when its list names each of them, and each guarded field among them needs a rule of its guard that admits the update. `can` rejects with an `Error` for a name that is not a field of the entity.
 - Without `fields`, the answer is for some update: `'yes'` when a rule admits an update of one field its `fields` list names, or a rule without a list admits an update. Use it for an Edit control, and pass `fields` to decide each input of a form.
 - For an entity that declares no `access`, both answer `'yes'`. Such an entity is open to every caller in the workspace.
 

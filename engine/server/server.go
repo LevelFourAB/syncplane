@@ -71,11 +71,10 @@ type entityInfo struct {
 	// separately on the recorded prior value — see the field option's doc for
 	// why a mask must never name one.
 	historyFields []string
-	// protectedFields are the top-level units no authorized caller may write:
-	// the fields marked (field_behavior).write_policy TRUSTED_ONLY, with a
-	// oneof contributing its group name, and the creator fields. Empty for
-	// almost every entity, which is what keeps the check off the hot path —
-	// see writeGate.
+	// protectedFields are the top-level units no caller may change after the
+	// create: the creator fields. Empty for almost every entity, which is what
+	// keeps the check off the hot path — see writeGate. The access model's
+	// field guards are per caller and per row; see accessWrite.carryGuarded.
 	protectedFields []string
 	// creatorFields are the fields marked (field_behavior).creator, in field
 	// order: an enforced create stores the caller's primary subject in each.
@@ -1530,20 +1529,15 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 			info.mergers[tf.path] = lww.Merger{Fn: text.Merge, MergeAbsentBase: true}
 		}
 	}
-	protected, err := protectedFieldsOf(desc, info.keyFields)
-	if err != nil {
-		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
-	}
 	if info.creatorFields, err = creatorFieldsOf(desc, info.keyFields); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
-	// After the create, a creator field changes like a TRUSTED_ONLY one: a
-	// PATCH naming it is refused and a PUT keeps the stored value. Only the
-	// create differs, where the gate stamps it instead of clearing it.
+	// After the create, no caller changes a creator field: a PATCH naming it is
+	// refused and a PUT keeps the stored value. Only the create differs, where
+	// the gate stamps it instead of clearing it.
 	for _, fd := range info.creatorFields {
-		protected = append(protected, string(fd.Name()))
+		info.protectedFields = append(info.protectedFields, string(fd.Name()))
 	}
-	info.protectedFields = protected
 	if info.history != nil {
 		info.historyFields = historyFieldsOf(desc, info.keyFields)
 		if len(info.historyFields) == 0 {
@@ -1644,58 +1638,9 @@ func historyFieldsOf(desc protoreflect.MessageDescriptor, keyFields []protorefle
 	return marked
 }
 
-// protectedFieldsOf resolves an entity's protected set: the top-level units a
-// client-authorized write may not change, which are exactly the fields marked
-// (field_behavior).write_policy TRUSTED_ONLY.
-//
-// A oneof contributes its GROUP name, once, however many members are marked.
-// That is the only form a mask may name it in (see engine/internal/lww), and a
-// group is replaced whole, so protecting one member and not its siblings would
-// be a rule no write could observe. Marking any member therefore marks the
-// group.
-//
-// A marked key field is refused rather than dropped. History drops one because
-// a capture set that cannot be masked is still a coherent thing to ask for; here
-// the mark states a restriction, and one that can never take effect — a PATCH
-// may not move a key field, and a PUT that changed one would address a different
-// row — is a schema mistake worth naming.
-func protectedFieldsOf(
-	desc protoreflect.MessageDescriptor,
-	keyFields []protoreflect.FieldDescriptor,
-) ([]string, error) {
-	isKey := make(map[protoreflect.Name]bool, len(keyFields))
-	for _, fd := range keyFields {
-		isKey[fd.Name()] = true
-	}
-	fields := desc.Fields()
-	var marked []string
-	seen := make(map[string]bool, fields.Len())
-	for i := 0; i < fields.Len(); i++ {
-		fd := fields.Get(i)
-		if fieldBehaviorOf(fd).GetWritePolicy() != syncplanev1.FieldWritePolicy_FIELD_WRITE_POLICY_TRUSTED_ONLY {
-			continue
-		}
-		if isKey[fd.Name()] {
-			return nil, fmt.Errorf("key field %q is marked (syncplane.v1.field_behavior).write_policy "+
-				"TRUSTED_ONLY; a key field can never be modified in place, so the mark cannot take effect", fd.Name())
-		}
-		name := string(fd.Name())
-		if od := lww.OneofOf(fd); od != nil {
-			name = string(od.Name())
-		}
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		marked = append(marked, name)
-	}
-	return marked, nil
-}
-
 // creatorFieldsOf returns the fields marked (field_behavior).creator, in field
 // order. A marked field must be a top-level, singular string field outside any
-// oneof, and cannot be a key field or carry a write_policy: a key field never
-// changes, and a write_policy would contradict the stamp.
+// oneof, and cannot be a key field, which never changes.
 func creatorFieldsOf(desc protoreflect.MessageDescriptor, keyFields []protoreflect.FieldDescriptor) ([]protoreflect.FieldDescriptor, error) {
 	var out []protoreflect.FieldDescriptor
 	fields := desc.Fields()
@@ -1713,9 +1658,6 @@ func creatorFieldsOf(desc protoreflect.MessageDescriptor, keyFields []protorefle
 		}
 		if slices.Contains(keyFields, fd) {
 			return nil, fmt.Errorf("key field %q is marked creator; a key field never changes after the create", fd.Name())
-		}
-		if b.GetWritePolicy() != syncplanev1.FieldWritePolicy_FIELD_WRITE_POLICY_UNSPECIFIED {
-			return nil, fmt.Errorf("field %q is marked creator and write_policy; a creator field already keeps its value after the create", fd.Name())
 		}
 		out = append(out, fd)
 	}
