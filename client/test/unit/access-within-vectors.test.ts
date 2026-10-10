@@ -20,6 +20,7 @@ interface WithinCase {
 	within: string;
 	graph: { entity: string; key: string; parents: AccessRow[] | 'unknown' }[];
 	passes: { entity: string; key: string; passes: boolean | null }[];
+	entitiesAbove?: Record<string, string[]>;
 	want: CanAnswer;
 }
 
@@ -30,6 +31,16 @@ const vectorsPath = join(
 const vectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as { cases: WithinCase[] };
 
 const id = (row: AccessRow) => JSON.stringify([ row.entity, row.key ]);
+
+/** The entitiesAbove of a case's chain: an entity the case does not list is not known. */
+function entitiesAboveOf(
+	listed: Record<string, string[]> | undefined,
+): (entity: string) => ReadonlySet<string> | undefined {
+	return (entity) => {
+		const names = listed?.[entity];
+		return names === undefined ? undefined : new Set(names);
+	};
+}
 
 describe('access within conformance vectors', () => {
 	it('has cases', () => {
@@ -42,7 +53,11 @@ describe('access within conformance vectors', () => {
 			const parents = new Map<string, readonly AccessRow[] | undefined>();
 			for (const g of c.graph) parents.set(id(g), g.parents === 'unknown' ? undefined : g.parents);
 			const above = (row: AccessRow) => (parents.has(id(row)) ? parents.get(id(row)) : []);
-			const chain: AccessChain = { parents: above({ entity: c.entity, key: c.key }), above };
+			const chain: AccessChain = {
+				parents: above({ entity: c.entity, key: c.key }),
+				above,
+				entitiesAbove: entitiesAboveOf(c.entitiesAbove),
+			};
 			// A row of the entry's entity the case does not list does not exist.
 			const passes = (at: AccessRow): CanAnswer => {
 				const p = c.passes.find((x) => x.entity === at.entity && x.key === at.key);

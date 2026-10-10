@@ -68,6 +68,8 @@ export class AccessSummary {
 	private readonly groups: readonly ReadonlySet<string>[];
 	/** The index of the anchor group of each row, by entity and key. */
 	private readonly rows = new Map<string, Map<string, number>>();
+	/** The permissions held at one or more rows of each entity, by entity. */
+	private readonly entities = new Map<string, Set<string>>();
 	/** The caller's subjects, the primary subject first. */
 	readonly subjects: readonly string[];
 
@@ -83,6 +85,10 @@ export class AccessSummary {
 				let keys = this.rows.get(a.entity);
 				if (keys === undefined) this.rows.set(a.entity, keys = new Map());
 				for (const key of a.keys) keys.set(key, i);
+				if (a.keys.length === 0) continue;
+				let held = this.entities.get(a.entity);
+				if (held === undefined) this.entities.set(a.entity, held = new Set());
+				for (const permission of this.groups[i]!) held.add(permission);
 			}
 		}
 	}
@@ -100,6 +106,18 @@ export class AccessSummary {
 		if (this.roots.has(permission)) return true;
 		const group = this.rows.get(entity)?.get(key);
 		return group !== undefined && this.groups[group]!.has(permission);
+	}
+
+	/**
+	 * Whether the caller holds `permission` at the root, or at one or more
+	 * rows of an entity in `entities`.
+	 */
+	holdsAtAny(permission: string, entities: Iterable<string>): boolean {
+		if (this.roots.has(permission)) return true;
+		for (const entity of entities) {
+			if (this.entities.get(entity)?.has(permission)) return true;
+		}
+		return false;
 	}
 }
 
@@ -273,11 +291,17 @@ export type ParentRefs = readonly (AccessRow & { def: EntityDef })[] | undefined
  * `undefined` for a row the client does not hold, so the rows further up
  * that path are not known. `row` gives the value of a row above it, and is
  * `undefined`, or absent, where the client does not know it.
+ *
+ * `entitiesAbove` gives the entities whose rows can sit above a row of an
+ * entity, and is `undefined`, or absent, where the client does not know
+ * them. Where a path stops at a row the client does not hold, they decide
+ * whether a row further up can change the answer.
  */
 export interface AccessChain {
 	readonly parents: readonly AccessRow[] | undefined;
 	above(row: AccessRow): readonly AccessRow[] | undefined;
 	row?(row: AccessRow): { def: EntityDef; row: Message } | undefined;
+	entitiesAbove?(entity: string): ReadonlySet<string> | undefined;
 }
 
 /** A chain whose rows the client does not know. */
@@ -298,7 +322,11 @@ export function canAt(
 ): CanAnswer {
 	if (summary === undefined) return 'unknown';
 	if (summary.holds(permission, entity, key)) return 'yes';
-	if (chain.parents === undefined) return 'unknown';
+	if (chain.parents === undefined) {
+		return heldAbove(summary, permission, entity, chain)
+			? 'unknown'
+			: 'no';
+	}
 	return reach(summary, permission, chain.parents, chain);
 }
 
@@ -318,7 +346,11 @@ export function canAtEach(
 ): CanAnswer {
 	if (summary === undefined) return 'unknown';
 	if (summary.holds(permission, entity, key)) return 'yes';
-	if (chain.parents === undefined) return 'unknown';
+	if (chain.parents === undefined) {
+		return heldAbove(summary, permission, entity, chain)
+			? 'unknown'
+			: 'no';
+	}
 	if (chain.parents.length === 0) return 'no';
 	let answer: CanAnswer = 'yes';
 	for (const parent of chain.parents) {
@@ -354,13 +386,34 @@ function reach(
 		const next: AccessRow[] = [];
 		for (const row of level) {
 			const up = chain.above(row);
-			if (up === undefined) complete = false;
-			else next.push(...fresh(up));
+			if (up === undefined) {
+				if (heldAbove(summary, permission, row.entity, chain)) complete = false;
+			} else next.push(...fresh(up));
 		}
 		if (hops >= MAX_ACCESS_CHAIN && next.length > 0) return 'unknown';
 		level = next;
 	}
 	return complete ? 'no' : 'unknown';
+}
+
+/**
+ * Whether the caller can hold `permission` at a row above a row of `entity`:
+ * it holds the permission at the root or at a row of an entity whose rows can
+ * sit above, or the chain does not know those entities.
+ */
+function heldAbove(
+	summary: AccessSummary,
+	permission: string,
+	entity: string,
+	chain: AccessChain,
+): boolean {
+	const above = chain.entitiesAbove?.(entity);
+	return above === undefined || summary.holdsAtAny(permission, above);
+}
+
+/** Whether a row of `entity` can sit above a row of `below`, or the chain does not know. */
+function canSitAbove(entity: string, below: string, chain: AccessChain): boolean {
+	return chain.entitiesAbove?.(below)?.has(entity) ?? true;
 }
 
 /** A string that names `row` alone, for maps keyed by row. */
@@ -454,7 +507,9 @@ export function withinReach(
 		return answer === 'yes';
 	};
 	if (row.entity === entity && decide(row)) return 'yes';
-	if (chain.parents === undefined) return 'unknown';
+	if (chain.parents === undefined) {
+		return complete && !canSitAbove(entity, row.entity, chain) ? 'no' : 'unknown';
+	}
 	const seen = new Set<string>();
 	const fresh = (rows: readonly AccessRow[]) =>
 		rows.filter((at) => {
@@ -471,8 +526,9 @@ export function withinReach(
 		const next: AccessRow[] = [];
 		for (const at of level) {
 			const up = chain.above(at);
-			if (up === undefined) complete = false;
-			else next.push(...fresh(up));
+			if (up === undefined) {
+				if (canSitAbove(entity, at.entity, chain)) complete = false;
+			} else next.push(...fresh(up));
 		}
 		if (hops >= MAX_ACCESS_CHAIN && next.length > 0) return 'unknown';
 		level = next;
@@ -684,6 +740,49 @@ export function parentRefsOf(def: EntityDef, row: Message | undefined): ParentRe
 	}
 	const order = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 	return out.sort((a, b) => order(a.entity, b.entity) || order(a.key, b.key));
+}
+
+const entityGraphs = new WeakMap<DescMessage, ReadonlyMap<string, ReadonlySet<string>>>();
+
+/**
+ * The entities whose rows can sit above a row of each entity a chain from
+ * `def` reaches, `def` included, by entity: the entities its access parents
+ * point at, the entities their access parents point at, and so on. An entity
+ * is above itself when a chain of its access parents leads back to it. Give
+ * the result's `get` to {@link AccessChain.entitiesAbove}.
+ */
+export function entitiesAboveOf(def: EntityDef): ReadonlyMap<string, ReadonlySet<string>> {
+	let graph = entityGraphs.get(def.schema);
+	if (graph === undefined) {
+		const parents = new Map<string, Set<string>>();
+		const queue = [ def ];
+		for (let at = queue.shift(); at !== undefined; at = queue.shift()) {
+			if (parents.has(at.name)) continue;
+			const names = new Set<string>();
+			parents.set(at.name, names);
+			for (const field of accessParentFields(at.schema)) {
+				for (const shape of refShapes(field)) {
+					const target = targetDefOf(shape.targetSchema);
+					names.add(target.name);
+					queue.push(target);
+				}
+			}
+		}
+		const out = new Map<string, ReadonlySet<string>>();
+		for (const [ name, direct ] of parents) {
+			const above = new Set<string>();
+			const todo = [ ...direct ];
+			for (let up = todo.pop(); up !== undefined; up = todo.pop()) {
+				if (above.has(up)) continue;
+				above.add(up);
+				todo.push(...parents.get(up)!);
+			}
+			out.set(name, above);
+		}
+		graph = out;
+		entityGraphs.set(def.schema, graph);
+	}
+	return graph;
 }
 
 const targetDefs = new WeakMap<DescMessage, EntityDef>();

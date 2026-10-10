@@ -29,6 +29,7 @@ interface AccessCase {
 	chain?: (AccessRow | 'unknown')[];
 	graph?: { entity: string; key: string; parents: AccessRow[] | 'unknown' }[];
 	each?: boolean;
+	entitiesAbove?: Record<string, string[]>;
 	want: CanAnswer;
 }
 
@@ -67,7 +68,21 @@ function chainOf(c: AccessCase): AccessChain {
 		parents.set(id(node), node.parents === 'unknown' ? undefined : node.parents);
 	}
 	const above = (row: AccessRow) => (parents.has(id(row)) ? parents.get(id(row)) : []);
-	return { parents: above({ entity: c.entity, key: c.key }), above };
+	return {
+		parents: above({ entity: c.entity, key: c.key }),
+		above,
+		entitiesAbove: entitiesAboveOf(c.entitiesAbove),
+	};
+}
+
+/** The entitiesAbove of a case's chain: an entity the case does not list is not known. */
+function entitiesAboveOf(
+	listed: Record<string, string[]> | undefined,
+): (entity: string) => ReadonlySet<string> | undefined {
+	return (entity) => {
+		const names = listed?.[entity];
+		return names === undefined ? undefined : new Set(names);
+	};
 }
 
 describe('access conformance vectors', () => {

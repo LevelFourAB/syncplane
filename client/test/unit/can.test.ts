@@ -12,7 +12,7 @@
 import { create, type DescMessage, type MessageInitShape, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, it, vi } from 'vitest';
 
-import { type CanAnswer, countAccessChanges } from '../../src/access.js';
+import { type CanAnswer, countAccessChanges, entitiesAboveOf } from '../../src/access.js';
 import { SyncClient } from '../../src/client.js';
 import {
 	AccountSchema,
@@ -59,6 +59,7 @@ import {
 } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { GenerationOf, KVRead, KVStore, KVWrite } from '../../src/kv/store.js';
+import { entityDefOf } from '../../src/mutations.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { compactPending } from '../../src/optimistic/compact.js';
 import { pendingAccessOf, readPending } from '../../src/optimistic/queue.js';
@@ -391,6 +392,61 @@ describe('hasPermission()', () => {
 		expect(await t.client.hasPermission(FolderSchema, 'low', 'view_folders')).toBe('yes');
 		expect(await t.client.hasPermission(FolderSchema, 'top', 'view_folders')).toBe('no');
 		await t.client.close();
+	});
+});
+
+describe('a row the client does not hold', () => {
+	it('ends a path when the caller holds the permission at no entity above it', async () => {
+		const t = await createTestClient({ entities: [ TaskSchema, CommentSchema ] });
+		t.server.put(CommentSchema, { id: 'c9', task: { id: 't9' } });
+		t.server.setCallerAccess({
+			permissions: [
+				{ permission: 'view_tasks', anchors: [ { entity: 'task', keys: [ 't3' ] } ] },
+				{ permission: 'edit_tasks', anchors: [ { entity: 'project', keys: [ 'p1' ] } ] },
+			],
+		});
+		await t.sync();
+		// Only a project can sit above the task t9, and the caller holds
+		// view_tasks at no project.
+		expect(await t.client.hasPermission(CommentSchema, 'c9', 'view_tasks')).toBe('no');
+		expect(await t.client.can(CommentSchema, 'c9', 'read')).toBe('no');
+		expect(await t.client.hasPermission(TaskSchema, 't8', 'view_tasks')).toBe('no');
+		// The project p1 can be the one above.
+		expect(await t.client.hasPermission(CommentSchema, 'c9', 'edit_tasks')).toBe('unknown');
+		expect(await t.client.hasPermission(TaskSchema, 't8', 'edit_tasks')).toBe('unknown');
+		await t.client.close();
+	});
+
+	it('keeps a recursive chain unknown where the caller holds the permission at another row of the entity', async () => {
+		const t = await createTestClient({ entities: [ FolderSchema ] });
+		t.server.put(FolderSchema, { id: 'low', parent: { id: 'mid' } });
+		t.server.setCallerAccess({
+			permissions: [ {
+				permission: 'view_folders',
+				anchors: [ { entity: 'folder', keys: [ 'far' ] } ],
+			} ],
+		});
+		await t.sync();
+		expect(await t.client.hasPermission(FolderSchema, 'low', 'view_folders')).toBe('unknown');
+		expect(await t.client.hasPermission(FolderSchema, 'low', 'edit_folders')).toBe('no');
+		await t.client.close();
+	});
+
+	it('knows the entities that can sit above each entity a chain reaches', () => {
+		const sets = (graph: ReadonlyMap<string, ReadonlySet<string>>) =>
+			Object.fromEntries([ ...graph ].map(([ entity, above ]) => [ entity, [ ...above ].sort() ]));
+		expect(sets(entitiesAboveOf(entityDefOf(CommentSchema)))).toEqual({
+			comment: [ 'project', 'task' ],
+			task: [ 'project' ],
+			project: [],
+		});
+		expect(sets(entitiesAboveOf(entityDefOf(DocSchema)))).toEqual({
+			doc: [ 'folder' ],
+			folder: [ 'folder' ],
+		});
+		expect(sets(entitiesAboveOf(entityDefOf(CardSchema)))).toMatchObject({
+			card: expect.arrayContaining([ 'board', 'space' ]),
+		});
 	});
 });
 
@@ -1039,7 +1095,7 @@ describe('predictions asked together', () => {
 			[ () => c.hasPermission(TaskSchema, 't4', 'view_tasks'), 'no' ],
 			[ () => c.canCreate(CommentSchema, { id: 'n1', task: { id: 't1' } }), 'no' ],
 			[ () => c.canCreate(CommentSchema, { id: 'n3', task: { id: 't3' } }), 'yes' ],
-			[ () => c.canCreate(CommentSchema, { id: 'n9', task: { id: 't9' } }), 'unknown' ],
+			[ () => c.canCreate(CommentSchema, { id: 'n9', task: { id: 't9' } }), 'no' ],
 			[ () => c.canCreate(DocSchema, { id: 'nd', folder: { id: 'side' } }), 'yes' ],
 		];
 		const expected = cases.map(([ , answer ]) => answer);
@@ -1053,7 +1109,12 @@ describe('predictions asked together', () => {
 		const kv = new MemoryKVStore();
 		const p1 = [ { permission: 'view_tasks', anchors: [ { entity: 'project', keys: [ 'p1' ] } ] } ];
 		await storeSummary(kv, { permissions: p1 }, A);
-		await storeSummary(kv, { permissions: [ { permission: 'view_tasks', root: true } ] }, B);
+		await storeSummary(kv, {
+			permissions: [
+				{ permission: 'view_tasks', root: true },
+				{ permission: 'edit_tasks', anchors: [ { entity: 'project', keys: [ 'p2' ] } ] },
+			],
+		}, B);
 		const c = new SyncClient({
 			accountId: 'acct',
 			workspaces: [ A, B, C ],

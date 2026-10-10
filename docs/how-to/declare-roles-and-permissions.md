@@ -533,7 +533,7 @@ In the TypeScript schema builder, an entry with `subject` is a plain object. Bui
 { read: true, write: true, admitted: true, within: { entity: 'project', subject: 'ownerId' } },
 ```
 
-`can()` reads the rows above the row from the rows the client holds. It answers `'unknown'` when a row of the named entity on the way is not held, and for an update that moves the row.
+`can()` reads the rows above the row from the rows the client holds. It answers `'unknown'` when a row on the way is not held and a row of the named entity can be that row or sit above it, and for an update that moves the row.
 
 ### Require two permissions together
 

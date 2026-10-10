@@ -24,6 +24,7 @@ import {
 	decideRules,
 	decodeAccess,
 	type DecodedAccess,
+	entitiesAboveOf,
 	MAX_ACCESS_CHAIN,
 	type ParentRefs,
 	parentRefsOf,
@@ -3248,10 +3249,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * write queued against it until that ack arrives.
 	 *
 	 * Resolves to `'unknown'` before the first summary arrives, for an entity
-	 * outside the access model, when the row is not held locally, when the
-	 * answer depends on a row up the chain that is not held locally, and while
-	 * a local write to a grant row, or a delete of a row other rows sit below,
-	 * waits for its ack.
+	 * outside the access model, when a rule's subject check or condition reads
+	 * a row that is not held locally, when a permission depends on a row of the
+	 * chain that is not held locally, the row itself included, and the caller
+	 * holds that permission at a row of an entity that can sit above it, and
+	 * while a local write to a grant row, or a delete of a row other rows sit
+	 * below, waits for its ack.
 	 *
 	 * @example
 	 * ```ts
@@ -3553,6 +3556,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						const row = rowOf(def, walk.workspaceId, at.key);
 						return row === undefined ? undefined : { def, row };
 					},
+					entitiesAbove: (entity) => entitiesAboveOf(walk.plan.def).get(entity),
 				};
 				out[walk.at] = { answer: walk.plan.decide(walk.row, chain) };
 			});

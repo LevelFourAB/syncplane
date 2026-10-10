@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the walk of an access rule's within entry: engine/server/accesschain.go (accessChains.withinAll and withinAllAt) and client/src/access.ts (withinReach) must reach the same verdict on every case both can decide. An entry holds for a row when the row itself, or a row above it on any path, is a row of the entry's entity that passes the entry's checks. `entity` and `key` name the row and `within` the entry's entity. `graph` lists the rows that have parents, each with `parents`, the rows its access parents name, or the string \"unknown\" for a row the client does not hold; a row the graph does not list has no parents. `passes` says, for rows of the entry's entity, whether each passes the entry's checks, null for a row the client does not hold; a row of that entity it does not list does not exist, and passes nothing. testdata/queryeval and testdata/access/rules.json pin the checks themselves. The server never lacks a row. `want` is \"yes\", \"no\" or \"unknown\"; the engine checks the cases that name no \"unknown\" row and no null.",
+	"comment": "Shared conformance vectors for the walk of an access rule's within entry: engine/server/accesschain.go (accessChains.withinAll and withinAllAt) and client/src/access.ts (withinReach) must reach the same verdict on every case both can decide. An entry holds for a row when the row itself, or a row above it on any path, is a row of the entry's entity that passes the entry's checks. `entity` and `key` name the row and `within` the entry's entity. `graph` lists the rows that have parents, each with `parents`, the rows its access parents name, or the string \"unknown\" for a row the client does not hold; a row the graph does not list has no parents. `passes` says, for rows of the entry's entity, whether each passes the entry's checks, null for a row the client does not hold; a row of that entity it does not list does not exist, and passes nothing. testdata/queryeval and testdata/access/rules.json pin the checks themselves. `entitiesAbove`, where a case gives it, maps an entity to the entities whose rows can sit above a row of it, on any path and at any depth: a path that stops at a row the client does not hold answers \"no\" when the entry's entity is not one of them. Without it, or for an entity it does not list, such a path is \"unknown\". The server never lacks a row. `want` is \"yes\", \"no\" or \"unknown\"; the engine checks the cases that name no \"unknown\" row and no null.",
 	"cases": [
 		{
 			"name": "the row itself passes",
@@ -445,6 +445,130 @@
 					"parents": "unknown"
 				}
 			],
+			"passes": [
+				{
+					"entity": "doc",
+					"key": "d1",
+					"passes": null
+				}
+			],
+			"want": "unknown"
+		},
+		{
+			"name": "a row above that the client does not hold answers no when the entity cannot sit above it",
+			"entity": "comment",
+			"key": "c1",
+			"within": "team",
+			"graph": [
+				{
+					"entity": "comment",
+					"key": "c1",
+					"parents": [
+						{
+							"entity": "task",
+							"key": "t1"
+						}
+					]
+				},
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": "unknown"
+				}
+			],
+			"entitiesAbove": {
+				"comment": [
+					"project",
+					"task"
+				],
+				"task": [
+					"project"
+				],
+				"project": []
+			},
+			"passes": [],
+			"want": "no"
+		},
+		{
+			"name": "a row above that the client does not hold stays unknown when the entity can sit above it",
+			"entity": "comment",
+			"key": "c1",
+			"within": "project",
+			"graph": [
+				{
+					"entity": "comment",
+					"key": "c1",
+					"parents": [
+						{
+							"entity": "task",
+							"key": "t1"
+						}
+					]
+				},
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": "unknown"
+				}
+			],
+			"entitiesAbove": {
+				"comment": [
+					"project",
+					"task"
+				],
+				"task": [
+					"project"
+				],
+				"project": []
+			},
+			"passes": [],
+			"want": "unknown"
+		},
+		{
+			"name": "the row itself the client does not hold answers no when the entity cannot sit above it",
+			"entity": "comment",
+			"key": "c1",
+			"within": "team",
+			"graph": [
+				{
+					"entity": "comment",
+					"key": "c1",
+					"parents": "unknown"
+				}
+			],
+			"entitiesAbove": {
+				"comment": [
+					"project",
+					"task"
+				],
+				"task": [
+					"project"
+				],
+				"project": []
+			},
+			"passes": [],
+			"want": "no"
+		},
+		{
+			"name": "the row itself of the entity the client does not hold stays unknown",
+			"entity": "doc",
+			"key": "d1",
+			"within": "doc",
+			"graph": [
+				{
+					"entity": "doc",
+					"key": "d1",
+					"parents": "unknown"
+				}
+			],
+			"entitiesAbove": {
+				"doc": [
+					"folder"
+				],
+				"folder": [
+					"folder"
+				]
+			},
 			"passes": [
 				{
 					"entity": "doc",
