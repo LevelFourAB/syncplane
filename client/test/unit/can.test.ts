@@ -47,6 +47,7 @@ import {
 	TicketSchema,
 	TopicSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
+import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { CrudOp, MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import { CallerAccessSchema } from '../../src/gen/syncplane/v1/service_pb.js';
 import {
@@ -582,14 +583,56 @@ describe('can()', () => {
 		await t.client.close();
 	});
 
-	it('counts only rules without a fields list for an update that names no fields', async () => {
+	it('answers for some update when the update names no fields', async () => {
+		// The author may change only the body, which is an update.
 		const t = await roomClient(inR1('view_posts', 'post'));
-		expect(await t.client.can(PostSchema, 'po-ann', 'update')).toBe('no');
+		expect(await t.client.can(PostSchema, 'po-ann', 'update')).toBe('yes');
+		expect(await t.client.can(PostSchema, 'po-bob', 'update')).toBe('no');
 		await t.client.close();
+
+		const assignee = await roomClient(inR1('view_posts'));
+		expect(await assignee.client.can(TicketSchema, 'tk-ann', 'update')).toBe('yes');
+		expect(await assignee.client.can(TicketSchema, 'tk-bob', 'update')).toBe('no');
+		await assignee.client.close();
 
 		const mod = await roomClient(inR1('view_posts', 'post', 'moderate_posts'));
 		expect(await mod.client.can(PostSchema, 'po-bob', 'update')).toBe('yes');
 		await mod.client.close();
+	});
+
+	it('names fields by accessor name and a oneof member by its oneof', async () => {
+		const t = await roomClient(inR1('view_posts'));
+		expect(await t.client.can(DraftSchema, 'd-ann', 'update', { fields: [ 'authorId' ] })).toBe(
+			'unknown',
+		);
+		await t.client.close();
+
+		const cards = await createTestClient({ entities: [ CardSchema, CardItemSchema ] });
+		cards.server.put(CardSchema, { id: 'c-b', place: { case: 'board', value: { id: 'x' } } });
+		cards.server.setCallerAccess({
+			permissions: [ { permission: 'edit_cards', anchors: [ { entity: 'board', keys: [ 'x' ] } ] } ],
+		});
+		await cards.sync();
+		// A change of the access parent's oneof is a move. A caller that does not
+		// know the schema's type can name one of its members instead.
+		expect(await cards.client.can(CardSchema, 'c-b', 'update', { fields: [ 'place' ] })).toBe(
+			'unknown',
+		);
+		const untyped: DescMessage = CardSchema;
+		expect(await cards.client.can(untyped, 'c-b', 'update', { fields: [ 'space' ] })).toBe('unknown');
+		expect(await cards.client.can(CardSchema, 'c-b', 'update', { fields: [ 'title' ] })).toBe('yes');
+		await cards.client.close();
+	});
+
+	it('rejects a field the entity does not have, and points a proto name at its accessor name', async () => {
+		const t = await roomClient(inR1('view_posts', 'post'));
+		// @ts-expect-error: not a field of a post
+		await expect(t.client.can(PostSchema, 'po-ann', 'update', { fields: [ 'bodyy' ] })).rejects
+			.toThrow('unknown field "bodyy"');
+		// @ts-expect-error: a proto name, not the accessor name
+		await expect(t.client.can(PostSchema, 'po-ann', 'update', { fields: [ 'author_id' ] })).rejects
+			.toThrow('"authorId"');
+		await t.client.close();
 	});
 
 	it('still checks the subject of a caller who holds the permission at the root', async () => {
@@ -611,7 +654,7 @@ describe('can()', () => {
 
 	it('answers unknown where the new value of a subject field or the access parent decides', async () => {
 		const t = await roomClient(inR1('view_posts'));
-		expect(await t.client.can(DraftSchema, 'd-ann', 'update', { fields: [ 'author_id' ] })).toBe(
+		expect(await t.client.can(DraftSchema, 'd-ann', 'update', { fields: [ 'authorId' ] })).toBe(
 			'unknown',
 		);
 		expect(await t.client.can(DraftSchema, 'd-ann', 'update', { fields: [ 'room' ] })).toBe(
@@ -635,11 +678,22 @@ describe('can()', () => {
 		await t.client.close();
 	});
 
-	it('answers unknown before any summary arrives and for an entity outside the model', async () => {
+	it('answers unknown before any summary arrives', async () => {
 		const t = await createTestClient({ entities: roomEntities });
 		t.server.put(PostSchema, { id: 'po-ann', room: { id: 'r1' }, authorId: 'ann' });
 		await t.sync();
 		expect(await t.client.can(PostSchema, 'po-ann', 'read')).toBe('unknown');
+		await t.client.close();
+	});
+
+	it('answers yes for an entity outside the model, before any summary arrives too', async () => {
+		const t = await createTestClient({ entities: [ ...roomEntities, WidgetSchema ] });
+		t.server.put(WidgetSchema, { id: 'w1' });
+		await t.sync();
+		expect(await t.client.can(WidgetSchema, 'w1', 'read')).toBe('yes');
+		expect(await t.client.can(WidgetSchema, 'w1', 'update', { fields: [ 'label' ] })).toBe('yes');
+		expect(await t.client.can(WidgetSchema, 'w1', 'delete')).toBe('yes');
+		expect(await t.client.canCreate(WidgetSchema, { id: 'w2' })).toBe('yes');
 		await t.client.close();
 	});
 });
@@ -824,7 +878,7 @@ describe('can() with a within entry', () => {
 		);
 		await t.client.close();
 		const bea = await dossierClient('bea', atRoot('view_open_matters'));
-		expect(await bea.client.can(BinderSchema, 'b-top', 'update', { fields: [ 'owner_id' ] })).toBe(
+		expect(await bea.client.can(BinderSchema, 'b-top', 'update', { fields: [ 'ownerId' ] })).toBe(
 			'unknown',
 		);
 		expect(await bea.client.can(BinderSchema, 'b-top', 'update', { fields: [ 'title' ] })).toBe(
@@ -1213,7 +1267,7 @@ describe('predictions asked together', () => {
 		const settled = await Promise.allSettled([
 			c.can(CommentSchema, 'c1', 'read'),
 			// Not a list, so deciding the update throws.
-			c.can(CommentSchema, 'c1', 'update', { fields: 42 as unknown as string[] }),
+			c.can(CommentSchema, 'c1', 'update', { fields: 42 as unknown as 'body'[] }),
 			c.hasPermission(CommentSchema, 'c1', 'view_tasks'),
 		]);
 		expect(settled.map((s) => s.status)).toEqual([ 'fulfilled', 'rejected', 'fulfilled' ]);

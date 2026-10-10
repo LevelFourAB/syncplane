@@ -690,6 +690,36 @@ export function accessParentUnits(def: EntityDef): string[] {
 	return [ ...new Set(accessParentFields(def.schema).map((f) => f.oneof?.name ?? f.name)) ];
 }
 
+/**
+ * The units an update changes, by proto name, for fields named by accessor
+ * name: a top-level field outside any oneof names itself, and a oneof or a
+ * member of one names the oneof.
+ *
+ * Throws on a name that is not a top-level field or oneof of `schema`.
+ */
+export function updateUnitsOf(schema: DescMessage, names: readonly string[]): string[] {
+	const units = new Set<string>();
+	for (const name of names) {
+		const field = schema.fields.find((f) => f.localName === name);
+		const oneof = field?.oneof ?? schema.oneofs.find((o) => o.localName === name);
+		if (oneof !== undefined) {
+			units.add(oneof.name);
+		} else if (field !== undefined) {
+			units.add(field.name);
+		} else {
+			// A proto name works in an explicit patch mask, so it is the likely
+			// mistake here.
+			const byProto = schema.fields.find((f) => f.name === name)
+				?? schema.oneofs.find((o) => o.name === name);
+			throw new Error(
+				`can: unknown field "${name}" on ${schema.typeName}`
+					+ (byProto === undefined ? '' : `; name it by its accessor name, "${byProto.localName}"`),
+			);
+		}
+	}
+	return [ ...units ];
+}
+
 const parentFields = new WeakMap<DescMessage, readonly DescField[]>();
 
 /**

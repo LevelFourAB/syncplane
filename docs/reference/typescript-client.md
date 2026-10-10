@@ -1512,8 +1512,9 @@ const canComment = await client.canCreate(CommentSchema, {
 ```
 
 - `can` predicts for the row with `key`. `canCreate` predicts for `row` as the server would store it, with each `.creator()` field holding the caller's primary subject.
-- For `'update'`, `fields` names the fields the update changes, by proto name, as an explicit patch mask names them (`due_date`, not `dueDate`). A rule with a `fields` list counts only when its list names each of them.
-- Without `fields`, only a rule without a `fields` list can admit the update. A caller that may change only some fields gets `'no'` for an update without `fields`.
+- For `'update'`, `fields` names the fields the update changes, by accessor name, with a oneof named by its own name, as a patch init object names them. A rule with a `fields` list counts only when its list names each of them. `can` rejects with an `Error` for a name that is not a field of the entity.
+- Without `fields`, the answer is for some update: `'yes'` when a rule admits an update of one field its `fields` list names, or a rule without a list admits an update. Use it for an Edit control, and pass `fields` to decide each input of a form.
+- For an entity that declares no `access`, both answer `'yes'`. Such an entity is open to every caller in the workspace.
 
 | Answer      | When                                                                      |
 | ----------- | ------------------------------------------------------------------------- |
@@ -1524,7 +1525,6 @@ const canComment = await client.canCreate(CommentSchema, {
 `can` and `canCreate` answer `'unknown'` in these cases:
 
 - No summary has arrived.
-- The entity declares no `access`.
 - A rule's `subject` check or condition reads a row the client does not hold.
 - A permission depends on a row of the chain the client does not hold, the row itself included, and the caller holds that permission at a row of an entity that can sit above it.
 - The chain is longer than 32 rows.

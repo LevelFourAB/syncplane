@@ -15,7 +15,9 @@ import { rowWatchIdentity, rowWatchOf, watchRowCell } from '../row-store.js';
 import type { UseWorkspaceOptions } from '../types.js';
 
 /** Options for {@link useCan}. */
-export interface UseCanOptions extends UseWorkspaceOptions, CanOptions {}
+export interface UseCanOptions<D extends DescMessage = DescMessage>
+	extends UseWorkspaceOptions, CanOptions<D>
+{}
 
 /**
  * Predicts whether the entity's access rules admit `operation` on the row of
@@ -47,7 +49,7 @@ export function useCan<D extends DescMessage>(
 	schema: D,
 	key: string,
 	operation: Exclude<AccessOperation, 'create'>,
-	opts?: UseCanOptions,
+	opts?: UseCanOptions<D>,
 ): CanAnswer {
 	const fields = opts?.fields;
 	// A fields array written inline is a new array on every render.

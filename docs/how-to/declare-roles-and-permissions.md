@@ -683,7 +683,7 @@ function EditButton({ taskId }: { taskId: string }) {
 ```
 
 - For a create, use `canCreate()` or `useCanCreate` with the row the control would create.
-- For an update that a rule allows only for some fields, pass them: `useCan(CommentSchema, id, 'update', { fields: [ 'body' ] })`. Without `fields`, a rule with a `fields` list does not count.
+- Without `fields`, `can()` answers for some update, so a caller that may change only some fields gets `'yes'`. To decide each input of a form, pass the fields it changes: `useCan(CommentSchema, id, 'update', { fields: [ 'body' ] })`.
 - For a permission that no rule checks, such as the one a mutator needs, use `hasPermission()` or `useHasPermission`.
 
 See [Predicting access](../reference/typescript-client.md#predicting-access).

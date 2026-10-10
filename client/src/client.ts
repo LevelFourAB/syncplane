@@ -33,6 +33,7 @@ import {
 	ruleRowOf,
 	touchPendingAccess,
 	UNKNOWN_CHAIN,
+	updateUnitsOf,
 	whenReads,
 	withinEntities,
 	withinReads,
@@ -821,15 +822,26 @@ export interface PatchOptions extends CasOptions {
 	paths?: string[];
 }
 
+/**
+ * The accessor name of a top-level field or oneof of the message `D`
+ * describes; any string when `D` is not known.
+ */
+export type FieldNameOf<D extends DescMessage> = DescMessage extends D ? string
+	: Exclude<keyof MessageShape<D> & string, '$typeName' | '$unknown'>;
+
 /** Options for {@link SyncClient.can}. */
-export interface CanOptions {
+export interface CanOptions<D extends DescMessage = DescMessage> {
 	/**
-	 * For an update, the fields it changes, named as a patch mask names them.
-	 * When omitted, the update changes fields that no rule's `fields` list
-	 * covers and keeps the access parent and every subject field, so only a
-	 * rule without a `fields` list can admit it.
+	 * For an update, the fields it changes, by accessor name, with a oneof
+	 * named by its own name, as a patch init object names them. When omitted,
+	 * the answer is for some update: `'yes'` when a rule admits an update of
+	 * one field its `fields` list names, or a rule without a list admits an
+	 * update of fields that keeps the access parent and every subject field.
+	 *
+	 * `can` rejects with an `Error` for a name that is not a top-level field
+	 * or oneof of the entity.
 	 */
-	fields?: string[];
+	fields?: readonly FieldNameOf<D>[];
 }
 
 /** A PATCH whose mask is given rather than derived — see PatchInit. */
@@ -1112,7 +1124,7 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 		schema: D,
 		key: string,
 		operation: Exclude<AccessOperation, 'create'>,
-		opts?: CanOptions,
+		opts?: CanOptions<D>,
 	): Promise<CanAnswer>;
 	/** Predicts a create in this workspace; see SyncClient.canCreate. */
 	canCreate<D extends DescMessage>(schema: D, row: MessageInitShape<D>): Promise<CanAnswer>;
@@ -1402,7 +1414,7 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 		schema: D,
 		key: string,
 		operation: Exclude<AccessOperation, 'create'>,
-		opts?: CanOptions,
+		opts?: CanOptions<D>,
 	): Promise<CanAnswer> {
 		return this.client.canIn(this.workspaceId, schema, key, operation, opts);
 	}
@@ -3241,20 +3253,28 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * For `'update'`, `opts.fields` names the fields the update changes. A
 	 * rule with a `fields` list counts only when the list names each of them,
 	 * and a rule whose subject field or the access parent is among them
-	 * answers `'unknown'` at best, since the new value decides.
+	 * answers `'unknown'` at best, since the new value decides. Without
+	 * `opts.fields`, the answer is for some update; see {@link CanOptions}.
+	 *
+	 * Resolves to `'yes'` for an entity outside the access model, which is
+	 * open to every caller in the workspace.
 	 *
 	 * The answer is advisory. The server decides every read and write itself,
 	 * and a write this predicts as allowed can still come back as a rejection
 	 * ack. A row the caller has lost access to keeps showing an optimistic
 	 * write queued against it until that ack arrives.
 	 *
-	 * Resolves to `'unknown'` before the first summary arrives, for an entity
-	 * outside the access model, when a rule's subject check or condition reads
-	 * a row that is not held locally, when a permission depends on a row of the
-	 * chain that is not held locally, the row itself included, and the caller
-	 * holds that permission at a row of an entity that can sit above it, and
-	 * while a local write to a grant row, or a delete of a row other rows sit
-	 * below, waits for its ack.
+	 * Resolves to `'unknown'`, unless a rule admits the operation without the
+	 * missing input:
+	 *
+	 * - before the first summary arrives;
+	 * - when a rule's subject check or condition reads a row that is not held
+	 *   locally;
+	 * - when a permission depends on a row of the chain that is not held
+	 *   locally, the row itself included, and the caller holds that permission
+	 *   at a row of an entity that can sit above it;
+	 * - while a local write to a grant row, or a delete of a row other rows sit
+	 *   below, waits for its ack.
 	 *
 	 * @example
 	 * ```ts
@@ -3266,7 +3286,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		schema: D,
 		key: string,
 		operation: Exclude<AccessOperation, 'create'>,
-		opts?: CanOptions,
+		opts?: CanOptions<D>,
 	): Promise<CanAnswer> {
 		return this.canIn(this.defaultScope().workspaceId, schema, key, operation, opts);
 	}
@@ -3311,33 +3331,48 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		schema: D,
 		key: string,
 		operation: Exclude<AccessOperation, 'create'>,
-		opts?: CanOptions,
+		opts?: CanOptions<D>,
 	): Promise<CanAnswer> {
 		this.assertOpen();
 		const def = this.entityRegistry.bySchema(schema);
 		const rules = def.accessRules;
-		if (rules === undefined) return 'unknown';
+		// An entity outside the model is open to every caller in the workspace.
+		if (rules === undefined) return 'yes';
 		return this.askAccess(workspaceId, (summary) => ({
 			def,
 			key,
 			decide: (row, chain) => {
 				const stored = ruleRowOf(summary, def, key, row, chain);
 				if (operation !== 'update') return decideRules(rules, operation, summary.subjects, stored);
-				const changed = opts?.fields ?? null;
-				// The new value of a changed subject field, access parent or field a
-				// condition reads decides the final side, and none is known here.
-				const moves = changed !== null && accessParentUnits(def).some((u) => changed.includes(u));
-				const final: RuleRow = {
-					held: moves ? (p) => canAt(summary, p, def.name, key, UNKNOWN_CHAIN) : stored.held,
-					subject: (field) => (changed?.includes(field) ? undefined : stored.subject(field)),
-					matches: (rule) =>
-						changed !== null && whenReads(def.schema, rule, changed) ? 'unknown' : stored.matches(rule),
-					within: (rule) =>
-						moves || (changed !== null && withinReads(def, rule, changed))
-							? 'unknown'
-							: stored.within(rule),
-				};
-				return decideRules(rules, 'update', summary.subjects, stored, final, changed);
+				// Without named fields the answer is for some update, and the best
+				// answer of the candidates wins: null, for an update that only a rule
+				// without a fields list admits, and each field a list names, alone.
+				// One field is the smallest update a list admits.
+				const candidates: readonly (readonly string[] | null)[] = opts?.fields !== undefined
+					? [ updateUnitsOf(def.schema, opts.fields) ]
+					: [ null, ...new Set(rules.flatMap((r) => (r.update ? r.fields ?? [] : []))) ].map((u) =>
+						u === null ? null : [ u ]
+					);
+				let answer: CanAnswer = 'no';
+				for (const changed of candidates) {
+					// The new value of a changed subject field, access parent or field a
+					// condition reads decides the final side, and none is known here.
+					const moves = changed !== null && accessParentUnits(def).some((u) => changed.includes(u));
+					const final: RuleRow = {
+						held: moves ? (p) => canAt(summary, p, def.name, key, UNKNOWN_CHAIN) : stored.held,
+						subject: (field) => (changed?.includes(field) ? undefined : stored.subject(field)),
+						matches: (rule) =>
+							changed !== null && whenReads(def.schema, rule, changed) ? 'unknown' : stored.matches(rule),
+						within: (rule) =>
+							moves || (changed !== null && withinReads(def, rule, changed))
+								? 'unknown'
+								: stored.within(rule),
+					};
+					const one = decideRules(rules, 'update', summary.subjects, stored, final, changed);
+					if (one === 'yes') return 'yes';
+					if (one === 'unknown') answer = 'unknown';
+				}
+				return answer;
 			},
 		}));
 	}
@@ -3351,7 +3386,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		this.assertOpen();
 		const def = this.entityRegistry.bySchema(schema);
 		const rules = def.accessRules;
-		if (rules === undefined) return 'unknown';
+		if (rules === undefined) return 'yes';
 		return this.askAccess(workspaceId, (summary) => {
 			const row = stampCreatorFields(def, create(schema, init), summary.subjects[0] ?? '');
 			return {
