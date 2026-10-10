@@ -810,7 +810,7 @@ Registration refuses a schema that uses the model when:
 - A role name is declared by two entities. Role names are unique across the schema.
 - A role grants no permissions and includes no role, or grants one permission twice.
 - A role includes a role that its own `grant` does not declare, includes one role twice, or includes itself, directly or through other roles.
-- A permission that a rule's `requires` or a `MutatorAccess` names is granted by no role, or a role grants a permission that no rule and no `MutatorAccess` names.
+- A permission that a rule's `requires` or a `MutatorAccess` names is granted by no role.
 - A permission or role name breaks the [naming rules](naming.md#permission-and-role-names).
 - The `access`, rule, `admitted`, `within`, `grant`, role, `members` or `access_parent` options carry fields the server does not know, which a newer `options.proto` can write.
 
@@ -819,6 +819,8 @@ Registration refuses a schema that uses the model when:
 Registration logs a warning when a rule never decides an operation, because another rule of the entity names it and admits every caller and row the first one admits. A rule that needs `edit_tasks` and `use_billing` never decides beside one that needs `edit_tasks` alone. It also logs a warning when a rule needs two permissions and every role that grants one grants the other: the rule then admits the same callers as a rule that needs the first alone.
 
 Registration logs a warning when one permission governs entities at different depths that do not sit below one another, such as `view_members` on `OrgMember` (at the workspace root) and on `ProjectMember` (below a project). A role that grants such a permission at the workspace root reaches the rows below every anchor. One permission for a row and the rows below it, such as `view_tasks` on `Task` and on a `Comment` below a task, logs nothing.
+
+Registration logs a warning when a role grants a permission that no rule and no `MutatorAccess` names. Only `EntityTx.Can` on the server and `hasPermission` on the client ask about such a permission, so the warning stays for a permission that only code checks. `EntityTx.Can` returns `server.ErrUnknownPermission` for a permission that no role grants.
 
 ### Changing the access model
 

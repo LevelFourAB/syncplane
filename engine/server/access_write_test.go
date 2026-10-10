@@ -9,6 +9,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
 
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
@@ -384,6 +385,64 @@ var _ = Describe("Access model writes", func() {
 		Entry("an entity without a key field", server.MutatorAccess{Permission: "edit_tasks", Entity: "task"},
 			&accessv1.TaskArgs{}, "names an Entity without a KeyField"),
 	)
+})
+
+var _ = Describe("EntityTx.Can for a permission that only code checks", func() {
+	var srv *server.Server
+
+	// The access test proto with project_owner also granting export_projects,
+	// which no rule and no MutatorAccess uses. The rows are planted below the
+	// engine, since a compiled message does not write to an entity registered
+	// from a descriptor set.
+	BeforeEach(func() {
+		f := newSchemaFixtureOn(newTestStore(), server.WithEntities())
+		srv = f.srv
+		_, err := srv.RegisterDescriptorSet(accessFileSet(func(file *descriptorpb.FileDescriptorProto) {
+			m := messageNamed(file, "ProjectMember")
+			roles := proto.GetExtension(m.GetOptions(), syncplanev1.E_Entity).(*syncplanev1.EntityOptions).GetGrant().GetRoles()
+			for _, r := range roles {
+				if r.GetName() == "project_owner" {
+					r.Grants = append(r.Grants, "export_projects")
+				}
+			}
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		f.plant("project", "p1", project("p1"))
+		f.plant("project_member", "pm-owner",
+			&accessv1.ProjectMember{Id: "pm-owner", Project: project("p1"), UserId: "owner", Role: "project_owner"})
+		f.plant("project_member", "pm-padmin",
+			&accessv1.ProjectMember{Id: "pm-padmin", Project: project("p1"), UserId: "padmin", Role: "project_admin"})
+	})
+
+	can := func(ctx context.Context, permission string) (bool, error) {
+		var held bool
+		err := srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+			var err error
+			held, err = tx.Can(permission, &accessv1.Project{}, "p1")
+			return err
+		})
+		return held, err
+	}
+	caller := func(user string) context.Context {
+		return server.WithPrincipal(context.Background(), server.Principal{Subject: user})
+	}
+
+	It("holds for a caller whose role grants it, and not for one whose role does not", func() {
+		Expect(can(caller("owner"), "export_projects")).To(BeTrue())
+		Expect(can(caller("padmin"), "export_projects")).To(BeFalse())
+	})
+
+	It("refuses a permission no role grants", func() {
+		_, err := can(caller("owner"), "export_project")
+		Expect(err).To(MatchError(server.ErrUnknownPermission))
+		Expect(err).To(MatchError(ContainSubstring(`"export_project"`)))
+	})
+
+	It("refuses a permission no role grants in a Trusted transaction too", func() {
+		_, err := can(server.Trusted(context.Background()), "export_project")
+		Expect(err).To(MatchError(server.ErrUnknownPermission))
+		Expect(can(server.Trusted(context.Background()), "export_projects")).To(BeTrue())
+	})
 })
 
 // refusalLog returns the attributes of the one "access refused" record logs

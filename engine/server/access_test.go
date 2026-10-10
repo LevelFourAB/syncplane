@@ -301,6 +301,21 @@ var _ = Describe("Access model registration", func() {
 			Expect(logs.count("access model warning")).To(BeZero())
 		})
 
+		// Only EntityTx.Can and the client's hasPermission ask about such a
+		// permission, and a misspelled one looks the same to registration.
+		It("registers a role that grants a permission no rule or mutator uses, with a warning", func() {
+			logs := &recordingHandler{}
+			srv = newBareServer(server.WithLogger(slog.New(logs)))
+			specs := orgSpecs()
+			g := specNamed(specs, "org_member").Grant
+			g.Roles[0].Grants = append(g.Roles[0].Grants, "delete_org")
+			Expect(register(specs)).To(Succeed())
+			Expect(logs.attrs("access model warning", "finding")).To(ConsistOf(
+				`permission "delete_org", which role "org_admin" grants, is used by no access rule or mutator; ` +
+					`only EntityTx.Can and the client's hasPermission ask about it, so check its spelling if neither does`,
+			))
+		})
+
 		It("registers rules that admit every admitted caller, on an access parent, below one and on a grant entity", func() {
 			specs := orgSpecs()
 			specNamed(specs, "project").Access = &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{
@@ -533,11 +548,6 @@ var _ = Describe("Access model registration", func() {
 			specNamed(s, "task").Access = readWrite("view_tasks", "edit_everything")
 			return s
 		}, `permission "edit_everything" of entity "task" is granted by no role`),
-		Entry("a role that grants a permission no rule uses", func(s []server.DynamicEntity) []server.DynamicEntity {
-			g := specNamed(s, "org_member").Grant
-			g.Roles[0].Grants = append(g.Roles[0].Grants, "delete_org")
-			return s
-		}, `role "org_admin" of entity "org_member" grants permission "delete_org", which no access rule or mutator uses`),
 	)
 
 	Context("compiled entities", func() {

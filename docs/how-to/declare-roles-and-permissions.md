@@ -680,7 +680,7 @@ func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) 
 }
 ```
 
-Write through `tx` itself where the body must do what the caller cannot, such as giving the creator of a project its first admin grant. To ask about a permission that no rule checks, use `tx.Can("approve_tasks", &taskv1.Task{}, key)`.
+Write through `tx` itself where the body must do what the caller cannot, such as giving the creator of a project its first admin grant. To ask about a permission that no rule checks, use `tx.Can("approve_tasks", &taskv1.Task{}, key)`. Add the permission to the `grants` of each role that gives it. Registration logs a warning for a permission that no rule uses. If no role grants the permission, `tx.Can` returns `server.ErrUnknownPermission`.
 
 ## 7. Shape the UI on the client
 

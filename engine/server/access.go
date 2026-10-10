@@ -1271,6 +1271,10 @@ type accessModel struct {
 	// roles maps every declared role name to its definition. Names are unique
 	// across the schema, which is what lets a global role be named alone.
 	roles map[string]*modelRole
+	// granted maps every permission some role grants, directly or through an
+	// include, to the names of those roles, sorted. A permission it lacks is
+	// one no caller can hold.
+	granted map[string][]string
 	// grantEntities are the entities whose rows grant roles, sorted by name.
 	grantEntities []*entityInfo
 	// teamOf maps the name of each member entity to the team entity whose
@@ -1564,10 +1568,15 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 		}
 	}
 
-	granted := map[string]bool{}
-	for _, r := range m.roles {
-		for _, p := range r.perms {
-			granted[p] = true
+	roleNames := make([]string, 0, len(m.roles))
+	for name := range m.roles {
+		roleNames = append(roleNames, name)
+	}
+	sort.Strings(roleNames)
+	m.granted = map[string][]string{}
+	for _, name := range roleNames {
+		for _, p := range m.roles[name].perms {
+			m.granted[p] = append(m.granted[p], name)
 		}
 	}
 	perms := make([]string, 0, len(used))
@@ -1576,23 +1585,35 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	}
 	sort.Strings(perms)
 	for _, p := range perms {
-		if !granted[p] {
+		if m.granted[p] == nil {
 			return nil, fmt.Errorf("server: permission %q of %s is granted by no role; declare a role that grants it",
 				p, usedBy(used[p][0]))
 		}
 	}
-	roleNames := make([]string, 0, len(m.roles))
-	for name := range m.roles {
-		roleNames = append(roleNames, name)
-	}
-	sort.Strings(roleNames)
-	for _, name := range roleNames {
-		for _, p := range m.roles[name].perms {
-			if used[p] == nil {
-				return nil, fmt.Errorf("server: role %q of entity %q grants permission %q, which no access rule or mutator uses",
-					name, m.roles[name].entity, p)
-			}
+	// A permission that only code asks about is valid, so it is not refused.
+	// The warning is what is left of the check against a misspelled grant:
+	// the reverse check above catches it unless another role spells the name
+	// right.
+	unused := make([]string, 0, len(m.granted))
+	for p := range m.granted {
+		if used[p] == nil {
+			unused = append(unused, p)
 		}
+	}
+	sort.Strings(unused)
+	for _, p := range unused {
+		roles := make([]string, len(m.granted[p]))
+		for i, r := range m.granted[p] {
+			roles[i] = strconv.Quote(r)
+		}
+		which := "role " + roles[0] + " grants"
+		if len(roles) > 1 {
+			which = "roles " + strings.Join(roles, ", ") + " grant"
+		}
+		m.warnings = append(m.warnings, fmt.Sprintf(
+			"permission %q, which %s, is used by no access rule or mutator; "+
+				"only EntityTx.Can and the client's hasPermission ask about it, so check its spelling if neither does",
+			p, which))
 	}
 	for _, name := range names {
 		for _, p := range c.entities[name].access.read.loose().named() {

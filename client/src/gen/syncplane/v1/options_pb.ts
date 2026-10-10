@@ -164,9 +164,9 @@ export const EntityOptionsSchema: GenMessage<EntityOptions> = /*@__PURE__*/
  * }
  * ```
  *
- * Registration refuses a permission that no declared role grants, and a role
- * that grants a permission no rule uses, so a misspelled name fails on either
- * side.
+ * Registration refuses a permission that no declared role grants. It logs a
+ * warning for a role that grants a permission no rule uses, because only code
+ * can ask about that permission.
  *
  * The application permission hooks still run, and can refuse what the
  * model allows. They cannot allow what the model refuses.

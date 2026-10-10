@@ -340,12 +340,17 @@ describe('runtime registration of an access-model schema', () => {
 		expect(res.entityNames).toEqual([ 'label', 'org_member', 'project', 'task' ]);
 	});
 
-	it('refuses a role that grants a permission no rule uses', async () => {
-		await expect(
-			registerSchema(adminTransport(), 'access-unused', makeAccessBundle({ unusedGrant: true }), {
+	// Only server code and hasPermission() ask about such a permission.
+	it('registers a role that grants a permission no rule uses', async () => {
+		const res = await registerSchema(
+			adminTransport(),
+			'access-unused',
+			makeAccessBundle({ unusedGrant: true }),
+			{
 				token: TOKEN,
-			}),
-		).rejects.toThrow(/grants permission "delete_org", which no access rule or mutator uses/);
+			},
+		);
+		expect(res.entityNames).toEqual([ 'label', 'org_member', 'project', 'task' ]);
 	});
 
 	it("changes an entity's access model only when the registration allows it", async () => {

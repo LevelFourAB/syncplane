@@ -1129,8 +1129,8 @@ export interface EntityOptions<F extends Fields = Fields> {
 	 * only where a rule admits `update`.
 	 *
 	 * Permission names follow the identifier rule in docs/reference/naming.md.
-	 * The server refuses a permission no role grants, and a role that grants a
-	 * permission no rule uses.
+	 * The server refuses a permission no role grants, and logs a warning for a
+	 * role that grants a permission no rule uses.
 	 *
 	 * @example
 	 * Rows a client can post but not change or delete afterwards. A `put()`

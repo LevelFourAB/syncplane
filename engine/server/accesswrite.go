@@ -1001,6 +1001,10 @@ func (s *Server) checkInvocation(
 	return nil
 }
 
+// ErrUnknownPermission is returned by EntityTx.Can for a permission that no
+// role of the schema grants, which no caller can hold.
+var ErrUnknownPermission = errors.New("server: no role grants the permission")
+
 // Can reports whether the caller of this transaction holds permission at the
 // row of the entity prototype names, with the given key: at the row itself,
 // at a row up its chain of access parents, or at the workspace root. For a
@@ -1012,7 +1016,18 @@ func (s *Server) checkInvocation(
 // apply the model to the rows it writes, which are not checked otherwise.
 //
 // The answer reflects the writes this transaction has made so far.
+//
+// In a schema with the access model, Can returns an error that wraps
+// ErrUnknownPermission for a permission no role grants, in a Trusted
+// transaction too.
 func (e *EntityTx) Can(permission string, prototype proto.Message, key string) (bool, error) {
+	model := e.srv.catalogPtr().access
+	if e.access != nil {
+		model = e.access.caller.model
+	}
+	if model != nil && model.granted[permission] == nil {
+		return false, fmt.Errorf("%w: %q", ErrUnknownPermission, permission)
+	}
 	if e.access == nil {
 		return true, nil
 	}
