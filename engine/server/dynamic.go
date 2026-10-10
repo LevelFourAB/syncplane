@@ -179,15 +179,23 @@ func (f DynamicField) isMap() bool { return f.MapKey != 0 }
 
 // RegisterDynamicEntity builds spec into a dynamicpb message type and registers
 // it as a syncable entity, serving full CRUD through the existing sync
-// machinery. It is the runtime-schema counterpart of RegisterEntity. Use
-// RegisterDynamicEntities when entities reference one another, so they share a
-// single file and the references resolve.
-func (s *Server) RegisterDynamicEntity(spec DynamicEntity) error {
-	return s.RegisterDynamicEntities(spec)
+// machinery. It is the runtime-schema counterpart of RegisterEntity, and takes
+// the same opts. Use RegisterDynamicEntities when entities reference one
+// another, so they share a single file and the references resolve.
+func (s *Server) RegisterDynamicEntity(spec DynamicEntity, opts ...RegisterOption) error {
+	fd, err := BuildDynamicFile(spec)
+	if err != nil {
+		return err
+	}
+	return s.RegisterEntity(dynamicpb.NewMessageType(fd.Messages().Get(0)).New().Interface(), opts...)
 }
 
 // RegisterDynamicEntities builds several entities into one file (so intra-set
-// references resolve) and registers each as a syncable entity.
+// references resolve) and registers each as a syncable entity, in order, as
+// RegisterEntity without options does. It stops at the first entity that fails
+// and keeps the ones registered before it. To declare the first role of a
+// schema that serves callers, use RegisterDescriptorSet with
+// AllowAccessChange.
 func (s *Server) RegisterDynamicEntities(specs ...DynamicEntity) error {
 	fd, err := BuildDynamicFile(specs...)
 	if err != nil {

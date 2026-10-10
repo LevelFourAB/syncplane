@@ -52,7 +52,8 @@ type RegisterResult struct {
 // A change to the access model of an entity that is already registered — its
 // access, grant or access_parent options, or the enum values its grant role
 // field matches — is rejected the same way unless opts include
-// AllowAccessChange.
+// AllowAccessChange. So is a set that declares the first role of a schema
+// that served callers without one, or removes the last role.
 func (s *Server) RegisterDescriptorSet(set []byte, opts ...RegisterOption) ([]string, error) {
 	r, err := s.registerDescriptorSet(set, opts...)
 	if err != nil {
@@ -67,12 +68,20 @@ func (s *Server) RegisterDescriptorSet(set []byte, opts ...RegisterOption) ([]st
 	return r.Entities, nil
 }
 
-// RegisterOption adjusts one call to RegisterDescriptorSet or
-// Manager.Register.
+// RegisterOption adjusts one call to RegisterDescriptorSet, RegisterEntity,
+// RegisterDynamicEntity or Manager.Register.
 type RegisterOption func(*registerConfig)
 
 type registerConfig struct {
 	allowAccessChange bool
+}
+
+func registerConfigOf(opts []RegisterOption) registerConfig {
+	var cfg registerConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
 }
 
 // AllowAccessChange lets a registration change the access model of an entity
@@ -80,8 +89,8 @@ type registerConfig struct {
 // the names of the enum values its grant role field matches. Every client
 // resyncs the rows the change affects.
 //
-// It also lets a registration declare the first role of a schema that uses
-// the access model without one, or remove the last. That decides whether the
+// It also lets a registration declare the first role of a schema that served
+// callers without one, or remove the last. That decides whether the
 // workspace gate refuses a caller that holds no permission, so callers without
 // a grant row lose or gain access to every workspace.
 func AllowAccessChange() RegisterOption {
@@ -92,10 +101,7 @@ func AllowAccessChange() RegisterOption {
 // the Manager share: it also reports the derived revision and whether the
 // catalog changed.
 func (s *Server) registerDescriptorSet(set []byte, opts ...RegisterOption) (RegisterResult, error) {
-	var cfg registerConfig
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+	cfg := registerConfigOf(opts)
 	var fds descriptorpb.FileDescriptorSet
 	if err := proto.Unmarshal(set, &fds); err != nil {
 		return RegisterResult{}, fmt.Errorf("server: decode FileDescriptorSet: %w", err)
@@ -166,7 +172,6 @@ func (s *Server) registerDescriptorSet(set []byte, opts ...RegisterOption) (Regi
 				}
 			}
 		}
-		prev := c.access
 		for _, info := range infos {
 			c.entities[info.name] = info
 			c.byType[info.msgType.Descriptor().FullName()] = info
@@ -181,7 +186,7 @@ func (s *Server) registerDescriptorSet(set []byte, opts ...RegisterOption) (Regi
 		if c.accessErr != nil {
 			return c.accessErr
 		}
-		return validateGateEvolution(prev, c.access, cfg.allowAccessChange)
+		return c.settleGate(cfg.allowAccessChange)
 	})
 	if err != nil {
 		return RegisterResult{}, err

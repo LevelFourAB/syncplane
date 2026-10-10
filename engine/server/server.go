@@ -665,6 +665,10 @@ type catalog struct {
 	// at a time; see accessModelOrErr.
 	access    *accessModel
 	accessErr error
+	// gate is how the workspace gate admits callers, as settleGate last
+	// recorded it. Registration refuses to change it without
+	// AllowAccessChange.
+	gate gateState
 }
 
 // accessModelOrErr returns the catalog's access model, nil when the schema
@@ -724,6 +728,7 @@ func (c *catalog) clone() *catalog {
 		schemaRev: c.schemaRev,
 		access:    c.access,
 		accessErr: c.accessErr,
+		gate:      c.gate,
 	}
 	for k, v := range c.entities {
 		nc.entities[k] = v
@@ -1186,7 +1191,10 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 	// judged once both are in.
 	if err := s.swapCatalog(func(c *catalog) error {
 		c.recompileAccess(s)
-		return c.accessErr
+		if c.accessErr != nil {
+			return c.accessErr
+		}
+		return c.settleGate(true)
 	}); err != nil {
 		return nil, err
 	}
@@ -1217,8 +1225,10 @@ func (s *Server) Leases() lease.Locker {
 // mutators, then mergers. That is what lets an app list its options in
 // whatever order reads best.
 func (s *Server) applyDeclarations() error {
+	// The schema New registers has no schema before it to change, so its
+	// first role is not an access change.
 	for _, msg := range s.pendingEntities {
-		if err := s.RegisterEntity(msg); err != nil {
+		if err := s.RegisterEntity(msg, AllowAccessChange()); err != nil {
 			return err
 		}
 	}
@@ -1326,8 +1336,18 @@ func (s *Server) HTTPHandler() http.Handler {
 }
 
 // RegisterEntity registers a message type carrying syncplane.v1.entity options as
-// a syncable entity.
-func (s *Server) RegisterEntity(msg proto.Message) error {
+// a syncable entity. It returns an error for an entity whose name is already
+// registered.
+//
+// The access model is judged once the schema is complete, so RegisterEntity
+// accepts an entity that leaves the model incomplete; until a later call
+// completes it, every request fails with failed_precondition. An entity that
+// declares the first role of a schema that served callers without one is
+// refused unless opts include AllowAccessChange: it makes the workspace gate
+// refuse every caller that holds no permission. The entities New registers,
+// and those of a server that has none yet, need no flag.
+func (s *Server) RegisterEntity(msg proto.Message, opts ...RegisterOption) error {
+	cfg := registerConfigOf(opts)
 	info, err := buildEntityInfo(msg.ProtoReflect().Type())
 	if err != nil {
 		return err
@@ -1342,7 +1362,7 @@ func (s *Server) RegisterEntity(msg proto.Message) error {
 			return err
 		}
 		c.recompileAccess(s)
-		return nil
+		return c.settleGate(cfg.allowAccessChange)
 	}); err != nil {
 		return err
 	}

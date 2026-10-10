@@ -2097,6 +2097,11 @@ func accessSpecOf(info *entityInfo) string {
 	return b.String()
 }
 
+// allowAccessChangeHint ends a registration error that AllowAccessChange
+// lifts, naming the option on every path that registers a schema.
+const allowAccessChangeHint = "register with server.AllowAccessChange() " +
+	"(allow_access_change on AdminService.Register, allowAccessChange in registerSchema) to apply it"
+
 // validateAccessEvolution refuses a change to the access model of an entity
 // that is already registered, unless the registration allows it. Access
 // decides which rows each client holds, so a change is a decision an operator
@@ -2107,29 +2112,63 @@ func validateAccessEvolution(old, next *entityInfo, allow bool) error {
 		return nil
 	}
 	if accessSpecOf(old) != accessSpecOf(next) {
-		return fmt.Errorf("server: entity %q changes its access model (access, grant or access_parent); "+
-			"register with the access change allowed to apply it", next.name)
+		return fmt.Errorf("server: entity %q changes its access model (access, grant or access_parent); %s",
+			next.name, allowAccessChangeHint)
 	}
 	return nil
 }
 
-// validateGateEvolution refuses, unless allow is set, a schema that changes
-// whether the workspace gate requires a permission (see requiresPermission).
-// prev is the model of the schema registered before, nil when there was none.
-func validateGateEvolution(prev, next *accessModel, allow bool) error {
-	// A schema that adopts the model or leaves it changes the access of an
-	// entity it had, which validateAccessEvolution refuses, so only a schema
-	// that keeps the model needs this check: a new grant entity changes no
-	// entity that was registered before.
-	if allow || prev == nil || prev.requiresPermission() == next.requiresPermission() {
+// gateState is how the workspace gate of a catalog admits callers.
+type gateState uint8
+
+const (
+	// gateUnset is the state of a catalog that has not yet held an entity of
+	// the application's under a valid access model.
+	gateUnset gateState = iota
+	// gateHook admits every caller the application's workspace hook admits.
+	gateHook
+	// gateGrants also refuses a caller that holds no permission (see
+	// requiresPermission).
+	gateGrants
+)
+
+// settleGate records how the workspace gate of c admits callers, once c holds
+// an entity of the application's under a valid access model. Unless allow is
+// set, it refuses a state that differs from the one c recorded before.
+//
+// A catalog whose model is invalid keeps the state recorded before it, so a
+// run of RegisterEntity calls that passes through an incomplete model is
+// judged against the last schema that served callers, not against the
+// incomplete one, which served nobody.
+func (c *catalog) settleGate(allow bool) error {
+	if c.accessErr != nil || !hasAppEntity(c) {
 		return nil
 	}
-	if next.requiresPermission() {
-		return fmt.Errorf("server: the schema declares its first role, so the workspace gate starts to refuse " +
-			"every caller that holds no permission; register with the access change allowed to apply it")
+	next := gateHook
+	if c.access.requiresPermission() {
+		next = gateGrants
 	}
-	return fmt.Errorf("server: the schema declares no role any more, so the workspace gate admits every caller " +
-		"the application's workspace hook admits; register with the access change allowed to apply it")
+	if !allow && c.gate != gateUnset && c.gate != next {
+		if next == gateGrants {
+			return fmt.Errorf("server: the schema declares its first role, so the workspace gate starts to refuse "+
+				"every caller that holds no permission; %s", allowAccessChangeHint)
+		}
+		return fmt.Errorf("server: the schema declares no role any more, so the workspace gate admits every caller "+
+			"the application's workspace hook admits; %s", allowAccessChangeHint)
+	}
+	c.gate = next
+	return nil
+}
+
+// hasAppEntity reports whether c holds an entity that the application
+// registered.
+func hasAppEntity(c *catalog) bool {
+	for _, info := range c.entities {
+		if !isEngineEntity(info) {
+			return true
+		}
+	}
+	return false
 }
 
 // logAccessWarnings logs the findings of a valid access model that are likely

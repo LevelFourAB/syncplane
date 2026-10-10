@@ -199,8 +199,9 @@ server.WithMerger(prototype proto.Message, fieldPath string, fn)  // opaque fiel
 Dynamic schemas can be registered on a running server instance:
 
 ```go
-srv.RegisterEntity(&mycorpv1.Thing{})
+srv.RegisterEntity(msg proto.Message, opts ...server.RegisterOption)
 srv.RegisterDescriptorSet(set []byte, opts ...server.RegisterOption) // the wire form defineSchema(...).toBinary() produces
+srv.RegisterDynamicEntity(spec server.DynamicEntity, opts ...server.RegisterOption)
 srv.RegisterDynamicEntities(specs ...server.DynamicEntity)
 ```
 
@@ -233,7 +234,7 @@ server.DynamicEntity{
 - **Trust**: `RegisterAuthorizer` defaults to deny (`DenyAll`). The built-in `TokenAuthorizer` checks an `Authorization: Bearer <token>` header in constant time. A denied call never touches state.
 - **Persistence**: The descriptor set is stored per app and re-registered on boot before serving. A restart leaves every app immediately syncable.
 - **Idempotence and evolution**: Re-registering an identical set is a no-op. New entities and appended fields upsert. The manager rejects conflicting changes without partially applying them. Conflicting changes include removed, renumbered, or retyped fields, references retargeted to different entities, or changed `key_fields`. Each app's schema revision is a stable hash of its canonical descriptor bytes, surfaced to clients as `schema_revision` so that a schema change causes clients to re-bootstrap.
-- **Access model changes**: A change to the access model of a registered entity, or to whether the schema declares a role, is refused unless the registration passes `server.AllowAccessChange()` (`allow_access_change` on `AdminService.Register`). See [Changing the access model](proto-options.md#changing-the-access-model).
+- **Access model changes**: A change to the access model of a registered entity, or to whether the schema declares a role, is refused unless the registration passes `server.AllowAccessChange()` (`allow_access_change` on `AdminService.Register`). `RegisterEntity` and `RegisterDynamicEntity` take the same option. See [Changing the access model](proto-options.md#changing-the-access-model).
 
 ## In-process writes
 

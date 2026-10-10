@@ -666,6 +666,53 @@ var _ = Describe("Access model registration", func() {
 		})
 	})
 
+	// Whether the schema declares a role decides whether the workspace gate
+	// refuses a caller without a grant, so every registration path that can
+	// add a grant entity to a served schema needs the flag to do it.
+	Context("evolution of the workspace gate", func() {
+		plainNote := server.DynamicEntity{
+			Name: "note", KeyFields: []string{"id"},
+			Fields: []server.DynamicField{{Name: "id", Number: 1, Kind: protoreflect.StringKind}},
+		}
+		members := func() server.DynamicEntity {
+			m := orgSpecs()[0]
+			m.Grant.Roles[0].Grants = []string{"view_members", "manage_members"}
+			return m
+		}
+
+		It("refuses a descriptor set that adds the first grant entity to a schema without the model", func() {
+			Expect(register([]server.DynamicEntity{plainNote})).To(Succeed())
+			Expect(register([]server.DynamicEntity{members()})).To(MatchError(ContainSubstring(
+				"the schema declares its first role")))
+			Expect(register([]server.DynamicEntity{members()}, server.AllowAccessChange())).To(Succeed())
+		})
+
+		It("refuses RegisterEntity that declares the first role of a served schema", func() {
+			Expect(srv.RegisterDynamicEntity(plainNote)).To(Succeed())
+			Expect(srv.RegisterDynamicEntity(members())).To(MatchError(ContainSubstring(
+				"the schema declares its first role")))
+			Expect(srv.RegisterDynamicEntity(members(), server.AllowAccessChange())).To(Succeed())
+		})
+
+		It("names the option that allows the change", func() {
+			Expect(srv.RegisterDynamicEntity(plainNote)).To(Succeed())
+			err := srv.RegisterDynamicEntity(members())
+			Expect(err).To(MatchError(ContainSubstring("server.AllowAccessChange()")))
+			Expect(err).To(MatchError(ContainSubstring("allow_access_change")))
+		})
+
+		It("accepts a grant entity as the first entity of a server without the flag", func() {
+			Expect(srv.RegisterDynamicEntity(members())).To(Succeed())
+			Expect(register([]server.DynamicEntity{plainNote})).To(Succeed())
+		})
+
+		It("accepts a grant entity in the schema New registers", func() {
+			_, err := server.New(newTestStore(), server.WithEntities(&accessv1.Note{}, &accessv1.OrgMember{},
+				&accessv1.Project{}, &accessv1.ProjectMember{}, &accessv1.Task{}, &accessv1.Label{}))
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
 	Context("evolution of an enum role field", func() {
 		BeforeEach(func() {
 			_, err := srv.RegisterDescriptorSet(accessFileSet(nil))
