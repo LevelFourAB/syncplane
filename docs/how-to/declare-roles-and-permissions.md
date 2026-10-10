@@ -669,7 +669,16 @@ server.WithMutator("complete_task", &taskv1.CompleteTaskArgs{}, completeTask,
 	server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
 ```
 
-The body's own writes are not checked. Use `tx.Can("edit_tasks", &taskv1.Task{}, key)` in the body where a write needs the caller's permission.
+`MutatorAccess` checks only that the caller holds the permission. It does not run the entity's rules, such as `when` and `within`, and the body's own writes are not checked. To apply the rules to a write, write it through `tx.AsCaller()`. The server then checks the write as the same write from the caller's client, and the write returns a `CodePermissionDenied` rejection when the rules refuse it:
+
+```go
+func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
+	id := args.(*taskv1.CompleteTaskArgs).GetTaskId()
+	return tx.AsCaller().Patch(&taskv1.Task{Id: id, Done: true}, []string{"done"}, nil)
+}
+```
+
+Write through `tx` itself where the body must do what the caller cannot, such as giving the creator of a project its first admin grant. To ask about a permission that no rule checks, use `tx.Can("approve_tasks", &taskv1.Task{}, key)`.
 
 ## 7. Shape the UI on the client
 

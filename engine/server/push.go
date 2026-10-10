@@ -1346,7 +1346,7 @@ func maskNamesPath(paths []string) func(string) bool {
 // applyCustom runs one custom mutation. g is the push's gate: its access is
 // the invoking caller's, which the invocation is checked against (see
 // MutatorAccess) and which the body's EntityTx.Can answers from. The body's
-// own writes pass no gate.
+// own writes pass no gate, and the writes of its AsCaller view pass g.
 func (s *Server) applyCustom(
 	ctx context.Context,
 	ws string,
@@ -1375,6 +1375,6 @@ func (s *Server) applyCustom(
 		return err
 	}
 	return mi.fn(markWriteTx(ctx), &EntityTx{
-		srv: s, ctx: ctx, ws: ws, tx: tx, seq: seq, actor: actor, access: g.accessOf(),
+		srv: s, ctx: ctx, ws: ws, tx: tx, seq: seq, actor: actor, access: g.accessOf(), caller: g,
 	}, args)
 }

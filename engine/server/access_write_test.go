@@ -213,7 +213,10 @@ var _ = Describe("Access model writes", func() {
 	})
 
 	Context("mutators", func() {
-		var canEdit bool
+		var (
+			canEdit bool
+			seqs    [2]uint64
+		)
 
 		BeforeEach(func() {
 			rename := func(_ context.Context, tx *server.EntityTx, args proto.Message) error {
@@ -225,10 +228,21 @@ var _ = Describe("Access model writes", func() {
 				canEdit, err = tx.Can("edit_tasks", &accessv1.Task{}, args.(*accessv1.TaskArgs).GetTaskId())
 				return err
 			}
+			retitle := func(_ context.Context, tx *server.EntityTx, args proto.Message) error {
+				id := args.(*accessv1.TaskArgs).GetTaskId()
+				caller := tx.AsCaller()
+				if err := caller.Patch(&accessv1.Task{Id: id, Title: "by caller"}, []string{"title"}, nil); err != nil {
+					return err
+				}
+				seqs = [2]uint64{tx.Seq(), caller.Seq()}
+				return nil
+			}
 			noop := func(context.Context, *server.EntityTx, proto.Message) error { return nil }
 			f = newAccessFixture(
 				server.WithMutator("rename_task", &accessv1.TaskArgs{}, rename,
 					server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"}),
+				server.WithMutator("retitle_as_caller", &accessv1.TaskArgs{}, retitle,
+					server.MutatorAccess{Permission: "view_tasks", Entity: "task", KeyField: "task_id"}),
 				server.WithMutator("probe", &accessv1.TaskArgs{}, probe,
 					server.MutatorAccess{Permission: "view_tasks", Entity: "task", KeyField: "task_id"}),
 				server.WithMutator("org_wide", nil, noop, server.MutatorAccess{Permission: "manage_members"}),
@@ -272,6 +286,52 @@ var _ = Describe("Access model writes", func() {
 			Expect(ok).To(BeTrue(), "%v", err)
 			Expect(r.Code).To(Equal(server.CodePermissionDenied))
 			Expect(f.srv.Invoke(writer, ws, "rename_task", &accessv1.TaskArgs{TaskId: "t2"})).To(Succeed())
+		})
+
+		title := func(id string) string {
+			GinkgoHelper()
+			var t accessv1.Task
+			Expect(f.srv.View(server.Trusted(f.ctx), ws, func(tx *server.ViewTx) error {
+				_, _, err := tx.Get(&t, id)
+				return err
+			})).To(Succeed())
+			return t.GetTitle()
+		}
+
+		It("checks a body's write through AsCaller as the caller's own write", func() {
+			denied(invoke("guest", "retitle_as_caller", &accessv1.TaskArgs{TaskId: "t1"}))
+			Expect(title("t1")).To(Equal("in one"))
+			applied(invoke("padmin", "retitle_as_caller", &accessv1.TaskArgs{TaskId: "t1"}))
+			Expect(title("t1")).To(Equal("by caller"))
+		})
+
+		It("checks a write through AsCaller under Invoke too, and not under a Trusted Invoke", func() {
+			guest := server.WithPrincipal(f.ctx, server.Principal{Subject: "guest"})
+			err := f.srv.Invoke(guest, ws, "retitle_as_caller", &accessv1.TaskArgs{TaskId: "t1"})
+			r, ok := server.AsRejection(err)
+			Expect(ok).To(BeTrue(), "%v", err)
+			Expect(r.Code).To(Equal(server.CodePermissionDenied))
+			_, err = f.srv.InvokeIdempotent(guest, ws, "k1", "retitle_as_caller", &accessv1.TaskArgs{TaskId: "t1"})
+			r, ok = server.AsRejection(err)
+			Expect(ok).To(BeTrue(), "%v", err)
+			Expect(r.Code).To(Equal(server.CodePermissionDenied))
+			Expect(title("t1")).To(Equal("in one"))
+
+			Expect(f.srv.Invoke(server.Trusted(f.ctx), ws, "retitle_as_caller", &accessv1.TaskArgs{TaskId: "t1"})).
+				To(Succeed())
+			Expect(title("t1")).To(Equal("by caller"))
+		})
+
+		It("stamps a write through AsCaller with the transaction's sequence", func() {
+			padmin := server.WithPrincipal(f.ctx, server.Principal{Subject: "padmin"})
+			Expect(f.srv.Invoke(padmin, ws, "retitle_as_caller", &accessv1.TaskArgs{TaskId: "t1"})).To(Succeed())
+			Expect(seqs[0]).NotTo(BeZero())
+			Expect(seqs[1]).To(Equal(seqs[0]))
+
+			seqs = [2]uint64{}
+			applied(invoke("padmin", "retitle_as_caller", &accessv1.TaskArgs{TaskId: "t1"}))
+			Expect(seqs[0]).NotTo(BeZero())
+			Expect(seqs[1]).To(Equal(seqs[0]))
 		})
 
 		It("lets a body ask what the invoking caller holds", func() {

@@ -141,32 +141,34 @@ func (s *Server) Invoke(ctx context.Context, workspaceID, mutatorName string, ar
 	if err != nil {
 		return err
 	}
-	access, err := s.authorizeInvoke(ctx, workspaceID, mutatorName, args, true)
+	gate, err := s.authorizeInvoke(ctx, workspaceID, mutatorName, args, true)
 	if err != nil {
 		return err
 	}
 	// The invocation is authorized; the body writes as server-authoritative
 	// logic, so the inner Mutate must not re-gate or authorize per row.
 	err = s.Mutate(Trusted(ctx), workspaceID, func(tx *EntityTx) error {
-		if err := s.beginInvocation(ctx, workspaceID, tx, access, mi, bodyArgs); err != nil {
+		if err := s.beginInvocation(ctx, workspaceID, tx, gate, mi, bodyArgs); err != nil {
 			return err
 		}
 		return mi.fn(markWriteTx(ctx), tx, bodyArgs)
 	})
-	return access.settle(ctx, err)
+	return gate.accessOf().settle(ctx, err)
 }
 
 // beginInvocation checks an authorized invocation against the access model
 // inside its write transaction, and gives the body's EntityTx the invoking
-// caller's access for Can. Shared by Invoke and InvokeIdempotent.
+// caller's access for Can and gate for AsCaller. Shared by Invoke and
+// InvokeIdempotent.
 func (s *Server) beginInvocation(
 	ctx context.Context,
 	workspaceID string,
 	tx *EntityTx,
-	access *txAccess,
+	gate *writeGate,
 	mi *mutatorInfo,
 	args proto.Message,
 ) error {
+	access := gate.accessOf()
 	// Per attempt: the adapter may run the closure again on a new transaction.
 	if err := access.begin(tx.tx); err != nil {
 		return err
@@ -174,20 +176,20 @@ func (s *Server) beginInvocation(
 	if err := s.checkInvocation(ctx, workspaceID, tx.tx, access, mi, args); err != nil {
 		return err
 	}
-	tx.access = access
+	tx.access, tx.caller = access, gate
 	return nil
 }
 
 // authorizeInvoke runs the workspace gate and the single Write{Custom} verdict
 // for a mutator invocation, before any transaction opens. Shared by Invoke and
-// InvokeIdempotent. It returns the caller's access in the access model, which
-// the invocation is checked against inside the transaction; nil for a Trusted
-// call and in a schema without the model.
+// InvokeIdempotent. It returns the caller's write gate, whose access the
+// invocation is checked against inside the transaction and whose checks the
+// body's AsCaller writes pass; nil for a Trusted call.
 //
 // served runs gateServed in place of gate, for a call whose write transaction
 // reaches the access before it reads anything else (see beginInvocation). The
 // caller then passes its outcome through txAccess.settle.
-func (s *Server) authorizeInvoke(ctx context.Context, workspaceID, mutatorName string, args proto.Message, served bool) (*txAccess, error) {
+func (s *Server) authorizeInvoke(ctx context.Context, workspaceID, mutatorName string, args proto.Message, served bool) (*writeGate, error) {
 	gate := s.gate
 	if served {
 		gate = s.gateServed
@@ -213,9 +215,7 @@ func (s *Server) authorizeInvoke(ctx context.Context, workspaceID, mutatorName s
 	if err := s.authorizeWrite(ctx, p, workspaceID, nil, Write{Custom: custom}); err != nil {
 		return nil, adm.verdict.settle(ctx, err)
 	}
-	return newTxAccess(adm, s.limits, func(row storage.Row, err error) {
-		s.reportPoison(ctx, workspaceID, row, err)
-	}), nil
+	return s.newWriteGate(ctx, adm, workspaceID, true), nil
 }
 
 // mutatorFor resolves a registered mutator and returns the args its body is to

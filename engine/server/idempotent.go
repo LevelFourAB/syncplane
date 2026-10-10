@@ -205,7 +205,7 @@ func (s *Server) InvokeIdempotent(
 	}
 	// The ledger is read before the body checks the invocation, so the gate
 	// keeps its own read: a refused caller must not be answered from a record.
-	access, err := s.authorizeInvoke(ctx, workspaceID, mutatorName, args, false)
+	gate, err := s.authorizeInvoke(ctx, workspaceID, mutatorName, args, false)
 	if err != nil {
 		return WriteOutcome{}, err
 	}
@@ -222,7 +222,7 @@ func (s *Server) InvokeIdempotent(
 	key = ledgerKey(principalOf(ctx), !isTrusted(ctx), key)
 	return s.mutateIdempotent(Trusted(ctx), workspaceID, key, admission{}, false,
 		func(tx *EntityTx) ([]byte, error) {
-			if err := s.beginInvocation(ctx, workspaceID, tx, access, mi, bodyArgs); err != nil {
+			if err := s.beginInvocation(ctx, workspaceID, tx, gate, mi, bodyArgs); err != nil {
 				return nil, err
 			}
 			return nil, mi.fn(markWriteTx(ctx), tx, bodyArgs)

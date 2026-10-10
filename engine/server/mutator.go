@@ -67,8 +67,8 @@ type MutatorOption interface {
 // In a schema that uses the access model, an invocation of a mutator without a
 // MutatorAccess is refused for every caller who is not Trusted. The check runs
 // inside the write transaction before the body, and is refused with
-// CodePermissionDenied. The rows the body writes are not checked; the body can
-// ask EntityTx.Can.
+// CodePermissionDenied. The rows the body writes are not checked unless it
+// writes them through EntityTx.AsCaller; the body can also ask EntityTx.Can.
 //
 // Registration fails, with the rest of the access model, when Permission is
 // granted by no role, Entity is not in the model, or KeyField is not a singular
@@ -170,6 +170,48 @@ type EntityTx struct {
 	// a Trusted transaction and in a schema without the model. Can answers
 	// from it, and a write that can change it drops what it resolved.
 	access *txAccess
+	// caller, when non-nil, is the invoking caller's write gate, which the
+	// writes of AsCaller's view pass. Set only on a mutator body invoked by a
+	// caller who is not Trusted.
+	caller *writeGate
+	// root is the transaction an AsCaller view writes for, nil on the
+	// transaction itself. The view stamps its writes with root's sequence and
+	// marks root as written, so that the caller of the body sees every write.
+	root *EntityTx
+	// view is the AsCaller view, kept so that each call returns the same one.
+	view *EntityTx
+}
+
+// AsCaller returns a view of this transaction whose writes are checked as the
+// same writes sent by the invoking caller's client would be: by the access
+// rules, the field write policies and the application's row write filters.
+// A refused write returns a Rejection with CodePermissionDenied and writes
+// nothing; the body decides whether to return it and fail the invocation.
+// Permissions.CanMutate does not run for these writes, since the verdict on
+// the invocation covers them.
+//
+// Reads, Can and Seq answer as on this transaction, and writes through either
+// one share its sequence. In a transaction whose writes are already checked,
+// such as one Server.Mutate runs for a caller who is not Trusted, and in a
+// Trusted transaction, AsCaller returns this transaction itself.
+//
+// A write through the view can call the application's WriteFilter, ReadFilter
+// and FieldPermissions hooks inside the transaction.
+//
+//	func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
+//		id := args.(*taskv1.CompleteTaskArgs).GetTaskId()
+//		return tx.AsCaller().Patch(&taskv1.Task{Id: id, Done: true}, []string{"done"}, nil)
+//	}
+func (e *EntityTx) AsCaller() *EntityTx {
+	if e.caller == nil || e.gate != nil {
+		return e
+	}
+	if e.view == nil {
+		view := *e
+		view.gate, view.caller, view.root, view.view = e.caller, nil, e, nil
+		e.view = &view
+	}
+	return e.view
 }
 
 // authorizeCrud runs the per-write hook for one CRUD write, building the same
@@ -251,6 +293,9 @@ func (e *EntityTx) Workspace() string {
 // stamping its bookkeeping so it can later recognize its own writes in the
 // change feed.
 func (e *EntityTx) Seq() uint64 {
+	if e.root != nil {
+		return e.root.Seq()
+	}
 	if !e.wrote {
 		return 0
 	}
@@ -260,6 +305,9 @@ func (e *EntityTx) Seq() uint64 {
 // writeSeq returns the sequence for a write, allocating it on first use
 // when the tx was created without one (Server.Mutate).
 func (e *EntityTx) writeSeq() (uint64, error) {
+	if e.root != nil {
+		return e.root.writeSeq()
+	}
 	if e.seq == 0 {
 		seq, err := e.tx.NextSeq()
 		if err != nil {
