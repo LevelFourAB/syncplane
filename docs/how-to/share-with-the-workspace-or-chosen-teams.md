@@ -169,11 +169,11 @@ A member who holds `edit_projects` only through the commons row cannot restrict 
 
 To let every member create a restricted project, write a custom mutator. Its body creates the project and a `project_admin` grant for the caller in one transaction. See [Declare who may invoke each mutator](declare-roles-and-permissions.md#6-declare-who-may-invoke-each-mutator).
 
-`can()` answers `'yes'` for `edit_projects` on a shared project to every member, so do not use it to show the share control. Use a permission that only project admins and root admins hold, such as `manage_roster`:
+`can(ProjectSchema, id, 'update')` answers `'yes'` on a shared project to every member, because the commons row gives them `edit_projects`, so do not use it to show the share control. Ask with `useHasPermission` for a permission that only project admins and root admins hold, such as `manage_roster`:
 
 ```tsx
 function ShareToggle({ projectId }: { projectId: string }) {
-	const can = useCan(ProjectSchema, projectId, 'manage_roster');
+	const can = useHasPermission(ProjectSchema, projectId, 'manage_roster');
 	return <ShareSwitch disabled={ can !== 'yes' } />;
 }
 ```

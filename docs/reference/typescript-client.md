@@ -1361,6 +1361,8 @@ Field modifiers:
 - `.indexed()`: Declares a secondary index on the field.
 - `.order(posField)`: Sets the fractional index ordering property on `keyedList`.
 - `.reverseRelation(name)`: Names the reverse relation a reference adds to its target. Valid on `ref`, `refList`, `workspaceRef`, and `workspaceRefList`. See [Reverse relations](proto-options.md#reverse-relations).
+- `.accessParent()`: Places each row below the row the reference names in the access model. Valid on `ref` and `refList`. See [Access model](#access-model).
+- `.creator()`: Records who created the row. On a create that is not trusted, the server stores the caller's primary subject in the field, and later writes that are not trusted cannot change it. Valid on a `text()` field that is not a key field.
 
 ### Secondary indexes
 
@@ -1478,27 +1480,78 @@ Each role sets `grants`, `includes` or both. `includes` names roles of the same 
 
 `put`, `patch`, `update` and `del` reject with an `Error` before they change local state when the write can only be an operation that no rule of the entity names: `del` without a delete rule, `patch` and `update` without an update rule, `put` with `expectedVersion: 0n` without a create rule, `put` with another `expectedVersion` without an update rule, and `put` with no `expectedVersion` when no rule names create or update. See [Operations no rule admits](proto-options.md#operations-no-rule-admits).
 
-#### Predicting permissions
+#### Predicting access
 
 ```ts
 type CanAnswer = 'yes' | 'no' | 'unknown';
 
-client.can(schema, key, permission): Promise<CanAnswer>;
-client.ws(id).can(schema, key, permission): Promise<CanAnswer>;
+client.can(schema, key, operation, opts?): Promise<CanAnswer>; // operation: 'read' | 'update' | 'delete'
+client.canCreate(schema, row): Promise<CanAnswer>;
+client.hasPermission(schema, key, permission): Promise<CanAnswer>;
+client.ws(id).can(...); // also canCreate and hasPermission
 client.onAccessChange((workspaceId) => { ... }): () => void;
 ```
 
-`can` predicts whether the caller holds `permission` at a row: at the workspace root, at the row itself, or at a row up its chain of access parents, which it reads from the rows held locally, queued writes included. It walks at most 32 rows up. It answers from the `CallerAccess` summary the server sends when the caller's grants change; the client stores it with the cursor, so it survives a restart.
-
-| Answer      | When                                                                                                                                                                                                                                                                                                                                                       |
-| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `'yes'`     | The summary holds the permission at the root, the row, or a row up its chain.                                                                                                                                                                                                                                                                              |
-| `'no'`      | It does not, and each path up the chain ends at a row without an access parent or with its reference unset, or at a row the client does not hold where the caller holds the permission at no row of an entity that can sit above it.                                                                                                                       |
-| `'unknown'` | No summary has arrived, the entity declares no `access`, the answer depends on a row of the chain the client does not hold (the row itself included) and the caller holds the permission at a row of an entity that can sit above it, or on a chain longer than 32 rows, or a local write to a grant row (or a delete of an anchor row) waits for its ack. |
+Each method predicts from two inputs: the `CallerAccess` summary the server sends when the caller's grants change, and the rows held locally, queued writes included. The client stores the summary with the cursor, so it survives a restart. A prediction walks at most 32 rows up a chain of access parents.
 
 The answer is advisory. The client does not refuse writes from it: every write is queued, and a write the server refuses comes back as a rejection ack. A row the caller lost access to keeps showing a pending local write until that ack arrives.
 
-`onAccessChange` calls back with the workspace id once for each commit that stores or removes the summary, queues, acks or rolls back a local write to a grant row (or a delete of an anchor row), or writes a row of an entity that other rows sit below, locally or from the server. It runs for commits by this tab and by other tabs sharing the store, and can run when no answer changed. It does not report a change of the row an answer is for unless that row is of such an entity, so to follow the answer for one row, watch that row too. The React hook `useCan(schema, key, permission, opts?)` does both.
+##### Operations: `can` and `canCreate`
+
+Use `can` and `canCreate` to decide whether to show a control that reads, creates, changes or deletes rows. They evaluate the entity's access rules as the server does: the permissions of `requires` on the row's chain, and the `subject`, `when`, `within` and `fields` checks.
+
+```ts
+const canEdit = await client.can(CommentSchema, id, 'update', {
+	fields: [ 'body' ],
+});
+const canDelete = await client.can(CommentSchema, id, 'delete');
+const canComment = await client.canCreate(CommentSchema, {
+	id: 'c1',
+	task: { id: taskId },
+});
+```
+
+- `can` predicts for the row with `key`. `canCreate` predicts for `row` as the server would store it, with each `.creator()` field holding the caller's primary subject.
+- For `'update'`, `fields` names the fields the update changes, by proto name, as an explicit patch mask names them (`due_date`, not `dueDate`). A rule with a `fields` list counts only when its list names each of them.
+- Without `fields`, only a rule without a `fields` list can admit the update. A caller that may change only some fields gets `'no'` for an update without `fields`.
+
+| Answer      | When                                                                      |
+| ----------- | ------------------------------------------------------------------------- |
+| `'yes'`     | At least one rule admits the operation.                                   |
+| `'no'`      | No rule admits it.                                                        |
+| `'unknown'` | No rule admits it for certain, and one of the cases below decides a rule. |
+
+`can` and `canCreate` answer `'unknown'` in these cases:
+
+- No summary has arrived.
+- The entity declares no `access`.
+- A rule's `subject` check or condition reads a row the client does not hold.
+- A permission depends on a row of the chain the client does not hold, the row itself included, and the caller holds that permission at a row of an entity that can sit above it.
+- The chain is longer than 32 rows.
+- A local write to a grant row, or a delete of a row that other rows sit below, waits for its ack.
+- An update changes a field whose new value decides: the access parent, a `subject` field, or a field that a `when` or `within` check reads.
+
+##### Permissions: `hasPermission`
+
+Use `hasPermission` for a permission that no access rule checks, such as the one a custom mutator needs. It predicts whether the caller holds `permission` at the workspace root, at the row itself, or at a row up its chain of access parents. It does not evaluate rules, so a caller can hold a rule's permission and still be refused by its `subject`, `when`, `within` or `fields` check. To ask about an operation, use `can`.
+
+```ts
+const canInvite = await client.hasPermission(
+	ProjectSchema,
+	projectId,
+	'invite_members',
+);
+```
+
+| Answer      | When                                                                                                                                                                                                                                                                                                                      |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'yes'`     | The summary holds the permission at the root, the row, or a row up its chain.                                                                                                                                                                                                                                             |
+| `'no'`      | It does not, and each path up the chain ends at a row without an access parent or with its reference unset, or at a row the client does not hold where the caller holds the permission at no row of an entity that can sit above it.                                                                                      |
+| `'unknown'` | No summary has arrived, the answer depends on a row of the chain the client does not hold (the row itself included) and the caller holds the permission at a row of an entity that can sit above it, or on a chain longer than 32 rows, or a local write to a grant row (or a delete of an anchor row) waits for its ack. |
+
+##### Following changes
+
+`onAccessChange` calls back with the workspace id once for each commit that stores or removes the summary, queues, acks or rolls back a local write to a grant row (or a delete of an anchor row), or writes a row of an entity that other rows sit below, locally or from the server. It runs for commits by this tab and by other tabs sharing the store, and can run when no answer changed. It does not report a change of the row an answer is for unless that row is of such an entity, so to follow the answer for one row, watch that row too. The React hooks `useCan`, `useCanCreate` and `useHasPermission` do both.
 
 ### Schema compilation: defineSchema
 
@@ -1608,6 +1661,8 @@ interface ReactSync<E> {
 	useSyncStatus: typeof useSyncStatus;
 	useWorkspaceStatus: typeof useWorkspaceStatus;
 	useCan: typeof useCan;
+	useCanCreate: typeof useCanCreate;
+	useHasPermission: typeof useHasPermission;
 	useUndo: typeof useUndo;
 }
 ```
@@ -1850,12 +1905,16 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   once the row has synced, so a document outside the declared subscriptions
   can be edited without a scope change.
 
-- **`useCan(schema, key, permission, opts?)`** — `client.can` as a hook: asks again
-  when an access input in the row changes (whether the row is held, its access
-  parent, or a subject field the access rules name) and when `onAccessChange`
-  reports the workspace. A change of any other field of the row does not ask
-  again. `'unknown'` until the first answer resolves. See
-  [Predicting permissions](#predicting-permissions).
+- **`useCan(schema, key, operation, opts?)`** — `client.can` as a hook. `opts`
+  takes `fields` and `workspaceId`. Asks again when an access input in the row
+  changes (whether the row is held, its access parent, or a subject field the
+  access rules name) and when `onAccessChange` reports the workspace. A change
+  of any other field of the row does not ask again. `'unknown'` until the first
+  answer resolves. See [Predicting access](#predicting-access).
+  **`useCanCreate(schema, row, opts?)`** — `client.canCreate` as a hook; asks
+  again when `row` changes by value. **`useHasPermission(schema, key,
+  permission, opts?)`** — `client.hasPermission` as a hook; asks again as
+  `useCan` does, except that a subject field is not an input.
 
 - **`useSyncStatus()`** — the live account-wide status object.
   **`useWorkspaceStatus(opts?)`** — one workspace's slice of it (its pending

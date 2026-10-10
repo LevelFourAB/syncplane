@@ -142,7 +142,7 @@ message ProjectMember {
 			role: "role"
 			roles: [
 				{ name: "project_reader" grants: [ "view_projects", "view_roster", "view_tasks" ] },
-				{ name: "project_admin" grants: [ "view_projects", "view_roster", "manage_roster", "view_tasks", "edit_tasks" ] }
+				{ name: "project_admin" includes: [ "project_reader" ] grants: [ "manage_roster", "edit_tasks" ] }
 			]
 		}
 		access: {
@@ -279,7 +279,7 @@ The comment's rules apply in both cases. Add `view_comments` and `edit_comments`
 
 Registration refuses a schema with a permission no role grants, or a role that grants a permission nothing uses. Read the error: it names the permission and the entity.
 
-The TypeScript schema builder declares the same options with `access`, `grant` and `.accessParent()`; see the [TypeScript client reference](../reference/typescript-client.md#access-model).
+The TypeScript schema builder declares the same options with `access`, `grant` and `.accessParent()`; see the [TypeScript client reference](../reference/typescript-client.md#access-model). The builder has no `oneof` and no enum fields, so a subject that is a user or a team, a polymorphic access parent and an enum role field need a proto schema.
 
 ### Allow some operations and not others
 
@@ -673,13 +673,19 @@ The body's own writes are not checked. Use `tx.Can("edit_tasks", &taskv1.Task{},
 
 ## 7. Shape the UI on the client
 
-Use `can()` or the `useCan` hook to hide a control the caller cannot use. The answer is `'yes'`, `'no'` or `'unknown'`, and it is advisory: the server still decides each write.
+Use `can()` or the `useCan` hook to hide a control the caller cannot use. Ask about the operation the control does, not about a permission: the answer then follows every check of the rules, such as `when` and `within`. The answer is `'yes'`, `'no'` or `'unknown'`, and it is advisory: the server still decides each write.
 
 ```tsx
 function EditButton({ taskId }: { taskId: string }) {
-	const can = useCan(TaskSchema, taskId, 'edit_tasks');
+	const can = useCan(TaskSchema, taskId, 'update');
 	return <button disabled={ can !== 'yes' }>Edit</button>;
 }
 ```
+
+- For a create, use `canCreate()` or `useCanCreate` with the row the control would create.
+- For an update that a rule allows only for some fields, pass them: `useCan(CommentSchema, id, 'update', { fields: [ 'body' ] })`. Without `fields`, a rule with a `fields` list does not count.
+- For a permission that no rule checks, such as the one a mutator needs, use `hasPermission()` or `useHasPermission`.
+
+See [Predicting access](../reference/typescript-client.md#predicting-access).
 
 In tests that use `createTestClient`, set the summary the client receives with `server.setCallerAccess(...)`.

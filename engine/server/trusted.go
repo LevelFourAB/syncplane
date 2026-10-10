@@ -12,7 +12,13 @@ import (
 // bypass must be reachable only through Trusted.
 type trustedKey struct{}
 
-// Trusted marks ctx as system work, exempting it from the permission hooks.
+// Trusted marks ctx as system work, exempting it from the permission hooks
+// and from the access rules.
+//
+// A trusted call holds every permission, and EntityTx.Can reports true for
+// it. Every write path still refuses an invalid grant row, trusted ones
+// included: a row with an empty subject, an undeclared role, or no access
+// parent on a grant entity that declares one.
 //
 // The in-process write and read APIs — Apply, Mutate, Invoke, View — authorize
 // against the ctx principal by default, so an app handler that forgot to
