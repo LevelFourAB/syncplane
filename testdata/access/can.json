@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the access model's permission decision: engine/server/accesschain.go (accessChains.holds) and client/src/access.ts (canAt) must reach the same verdict on every case both can decide. A caller holds a permission at a row when it holds it at the workspace root, at the row itself, or at any row up the row's chain of access parents. `access` maps each permission the caller holds to where: `root` for the workspace root, `anchors` as entity name to row keys; null means no summary has reached the client, which only the client can be missing. `chain` lists the rows above the row, nearest first: the row its access_parent names, the row that row's access_parent names, and so on, until a row whose entity has no access parent or whose reference is unset. A chain that ends in the string \"unknown\" stops at a row the client does not hold, which the server never lacks. `want` is \"yes\", \"no\" or \"unknown\"; the engine checks the cases whose `access` is not null and whose `chain` holds no \"unknown\", where \"yes\" means it holds the permission.",
+	"comment": "Shared conformance vectors for the access model's permission decision: engine/server/accesschain.go (accessChains.holds and accessChains.holdsThroughEach) and client/src/access.ts (canAt) must reach the same verdict on every case both can decide. A caller holds a permission at a row when it holds it at the workspace root, at the row itself, or at any row above the row: a row its access parents name, a row their access parents name, and so on. `access` maps each permission the caller holds to where: `root` for the workspace root, `anchors` as entity name to row keys; null means no summary has reached the client, which only the client can be missing. A case gives the rows above the row in one of two forms. `chain` lists them for a row with one parent at each step, nearest first: the row its access_parent names, the row that row's access_parent names, and so on, until a row whose entity has no access parent or whose reference is unset; a chain that ends in the string \"unknown\" stops at a row the client does not hold. `graph` lists the rows that have parents, each with `parents`, the rows its access parents name, or the string \"unknown\" for a row the client does not hold; a row the graph does not list has no parents. The server never lacks a row. With `each` set, the case asks whether the caller holds the permission through each parent of the row on its own: at the root, at the row itself, or at that parent or a row above it. A create needs a permission through each parent the row names. `want` is \"yes\", \"no\" or \"unknown\"; the engine checks the cases whose `access` is not null and that name no \"unknown\" row, where \"yes\" means it holds the permission.",
 	"cases": [
 		{
 			"name": "a permission held at the root reaches every row",
@@ -447,6 +447,550 @@
 			"entity": "folder",
 			"key": "top",
 			"chain": [],
+			"want": "no"
+		},
+		{
+			"name": "a permission held at either of two parents reaches the row",
+			"access": {
+				"view_tasks": {
+					"anchors": {
+						"milestone": [
+							"m1"
+						]
+					}
+				}
+			},
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": [
+						{
+							"entity": "project",
+							"key": "p1"
+						},
+						{
+							"entity": "milestone",
+							"key": "m1"
+						}
+					]
+				}
+			],
+			"want": "yes"
+		},
+		{
+			"name": "a permission held at neither of two parents does not reach the row",
+			"access": {
+				"view_tasks": {
+					"anchors": {
+						"project": [
+							"p2"
+						],
+						"milestone": [
+							"m2"
+						]
+					}
+				}
+			},
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": [
+						{
+							"entity": "project",
+							"key": "p1"
+						},
+						{
+							"entity": "milestone",
+							"key": "m1"
+						}
+					]
+				}
+			],
+			"want": "no"
+		},
+		{
+			"name": "a permission held above the second parent reaches the row",
+			"access": {
+				"view_tasks": {
+					"anchors": {
+						"initiative": [
+							"i1"
+						]
+					}
+				}
+			},
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": [
+						{
+							"entity": "project",
+							"key": "p1"
+						},
+						{
+							"entity": "milestone",
+							"key": "m1"
+						}
+					]
+				},
+				{
+					"entity": "milestone",
+					"key": "m1",
+					"parents": [
+						{
+							"entity": "initiative",
+							"key": "i1"
+						}
+					]
+				}
+			],
+			"want": "yes"
+		},
+		{
+			"name": "a row reached through two paths holds once",
+			"access": {
+				"view_topics": {
+					"anchors": {
+						"topic": [
+							"top"
+						]
+					}
+				}
+			},
+			"permission": "view_topics",
+			"entity": "topic",
+			"key": "low",
+			"graph": [
+				{
+					"entity": "topic",
+					"key": "low",
+					"parents": [
+						{
+							"entity": "topic",
+							"key": "a"
+						},
+						{
+							"entity": "topic",
+							"key": "b"
+						}
+					]
+				},
+				{
+					"entity": "topic",
+					"key": "a",
+					"parents": [
+						{
+							"entity": "topic",
+							"key": "top"
+						}
+					]
+				},
+				{
+					"entity": "topic",
+					"key": "b",
+					"parents": [
+						{
+							"entity": "topic",
+							"key": "top"
+						}
+					]
+				}
+			],
+			"want": "yes"
+		},
+		{
+			"name": "a cycle of parents ends the walk",
+			"access": {
+				"view_topics": {
+					"anchors": {
+						"topic": [
+							"elsewhere"
+						]
+					}
+				}
+			},
+			"permission": "view_topics",
+			"entity": "topic",
+			"key": "a",
+			"graph": [
+				{
+					"entity": "topic",
+					"key": "a",
+					"parents": [
+						{
+							"entity": "topic",
+							"key": "b"
+						}
+					]
+				},
+				{
+					"entity": "topic",
+					"key": "b",
+					"parents": [
+						{
+							"entity": "topic",
+							"key": "a"
+						}
+					]
+				}
+			],
+			"want": "no"
+		},
+		{
+			"name": "a parent the client does not hold leaves the answer unknown",
+			"access": {
+				"view_tasks": {
+					"anchors": {
+						"project": [
+							"p2"
+						]
+					}
+				}
+			},
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": [
+						{
+							"entity": "project",
+							"key": "p1"
+						},
+						{
+							"entity": "milestone",
+							"key": "m1"
+						}
+					]
+				},
+				{
+					"entity": "milestone",
+					"key": "m1",
+					"parents": "unknown"
+				}
+			],
+			"want": "unknown"
+		},
+		{
+			"name": "a path that holds decides beside a parent the client does not hold",
+			"access": {
+				"view_tasks": {
+					"anchors": {
+						"project": [
+							"p1"
+						]
+					}
+				}
+			},
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": [
+						{
+							"entity": "project",
+							"key": "p1"
+						},
+						{
+							"entity": "milestone",
+							"key": "m1"
+						}
+					]
+				},
+				{
+					"entity": "milestone",
+					"key": "m1",
+					"parents": "unknown"
+				}
+			],
+			"want": "yes"
+		},
+		{
+			"name": "through each parent needs the permission through every parent",
+			"access": {
+				"edit_tasks": {
+					"anchors": {
+						"project": [
+							"p1"
+						]
+					}
+				}
+			},
+			"permission": "edit_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": [
+						{
+							"entity": "project",
+							"key": "p1"
+						},
+						{
+							"entity": "milestone",
+							"key": "m1"
+						}
+					]
+				}
+			],
+			"each": true,
+			"want": "no"
+		},
+		{
+			"name": "through each parent holds when every parent grants it",
+			"access": {
+				"edit_tasks": {
+					"anchors": {
+						"project": [
+							"p1"
+						],
+						"milestone": [
+							"m1"
+						]
+					}
+				}
+			},
+			"permission": "edit_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": [
+						{
+							"entity": "project",
+							"key": "p1"
+						},
+						{
+							"entity": "milestone",
+							"key": "m1"
+						}
+					]
+				}
+			],
+			"each": true,
+			"want": "yes"
+		},
+		{
+			"name": "through each parent counts a row above each parent",
+			"access": {
+				"edit_tasks": {
+					"anchors": {
+						"project": [
+							"p1"
+						],
+						"initiative": [
+							"i1"
+						]
+					}
+				}
+			},
+			"permission": "edit_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": [
+						{
+							"entity": "project",
+							"key": "p1"
+						},
+						{
+							"entity": "milestone",
+							"key": "m1"
+						}
+					]
+				},
+				{
+					"entity": "milestone",
+					"key": "m1",
+					"parents": [
+						{
+							"entity": "initiative",
+							"key": "i1"
+						}
+					]
+				}
+			],
+			"each": true,
+			"want": "yes"
+		},
+		{
+			"name": "through each parent holds at the root",
+			"access": {
+				"edit_tasks": {
+					"root": true
+				}
+			},
+			"permission": "edit_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": [
+						{
+							"entity": "project",
+							"key": "p1"
+						},
+						{
+							"entity": "milestone",
+							"key": "m1"
+						}
+					]
+				}
+			],
+			"each": true,
+			"want": "yes"
+		},
+		{
+			"name": "through each parent holds at the row itself",
+			"access": {
+				"edit_tasks": {
+					"anchors": {
+						"task": [
+							"t1"
+						]
+					}
+				}
+			},
+			"permission": "edit_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": [
+						{
+							"entity": "project",
+							"key": "p1"
+						},
+						{
+							"entity": "milestone",
+							"key": "m1"
+						}
+					]
+				}
+			],
+			"each": true,
+			"want": "yes"
+		},
+		{
+			"name": "through each parent of a row without parents needs the root or the row",
+			"access": {
+				"edit_tasks": {
+					"anchors": {
+						"project": [
+							"p1"
+						]
+					}
+				}
+			},
+			"permission": "edit_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [],
+			"each": true,
+			"want": "no"
+		},
+		{
+			"name": "through each parent is unknown where the client lacks a parent",
+			"access": {
+				"edit_tasks": {
+					"anchors": {
+						"project": [
+							"p1"
+						]
+					}
+				}
+			},
+			"permission": "edit_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": [
+						{
+							"entity": "project",
+							"key": "p1"
+						},
+						{
+							"entity": "milestone",
+							"key": "m1"
+						}
+					]
+				},
+				{
+					"entity": "milestone",
+					"key": "m1",
+					"parents": "unknown"
+				}
+			],
+			"each": true,
+			"want": "unknown"
+		},
+		{
+			"name": "through each parent fails on a parent that refuses beside one the client does not hold",
+			"access": {
+				"edit_tasks": {
+					"anchors": {
+						"project": [
+							"p2"
+						]
+					}
+				}
+			},
+			"permission": "edit_tasks",
+			"entity": "task",
+			"key": "t1",
+			"graph": [
+				{
+					"entity": "task",
+					"key": "t1",
+					"parents": [
+						{
+							"entity": "project",
+							"key": "p1"
+						},
+						{
+							"entity": "milestone",
+							"key": "m1"
+						}
+					]
+				},
+				{
+					"entity": "milestone",
+					"key": "m1",
+					"parents": "unknown"
+				}
+			],
+			"each": true,
 			"want": "no"
 		}
 	]

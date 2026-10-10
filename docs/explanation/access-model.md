@@ -74,6 +74,14 @@ A row's access parent can also be polymorphic: a comment sits on a task or on a 
 
 A polymorphic entity has one set of rules, not one for each case. The rules that decide whether a caller reads a comment then stay the same for the entity, whatever case the comment holds, and moving a comment from a task to a doc changes where it sits but not what it needs. The cost is that the roles of each tree must grant the permissions of the comment rules. Every member of the oneof must be marked: a row that held an unmarked case would anchor at nothing, and only a caller with the permission at the root could read it. A change of case is a move like any other, and two targets with the same key are two rows, because a row's parent is always an entity and a key together.
 
+A row can also sit below several rows at once: a task in a project and in a milestone, or a doc in several spaces. The entity marks several reference fields, or a repeated one, and the row sits below every row they name. A permission held at any of them, or above any of them, reaches the row. This is the rule that applies to one parent, extended to a set: access only adds, so a second parent can show the row to more callers and never hides it from the readers of the first. The rows above a row are then a graph, not a chain. A read walks it breadth first, reads each row once, and finds an anchor on any path of at most `MaxAccessDepth` hops. The walk down needs no change, because the reference index of a repeated field holds one entry for each element.
+
+A parent is a share. Adding a row below a milestone shows it, and every row below it, to whoever reads the milestone. A caller who edits the task through its project must not be able to show it to an audience it does not manage, so a write that adds a parent needs its rule through that parent on its own. Removing a parent hides the row from that audience, and needs the rule there for the same reason. A create adds every parent it names, so it needs the rule through each of them. Everything else, such as editing a title or deleting the row, needs the rule through any one parent, as a read does. A move from one project to another is one parent removed and one added, so the rule for one parent is a special case of this one and does not change.
+
+A grant row keeps one parent. It applies its role at one anchor, and the checks that stop a caller from granting more than it holds compare one anchor with another. An application that grants a role at two rows writes two grant rows.
+
+`Limits.MaxAccessParents` caps the rows one row can sit below, because every walk and every move of the row pays for each of them. A row named twice in a list counts once. In a recursive entity, a write checks the longest path above the row against `MaxAccessDepth`, since a read can reach an anchor through any path.
+
 There is no stored chain. A stored chain for each row would have to be rewritten for every row below a row that moves, under the write lock, and that write would show the keys of those rows to clients that cannot read them. The engine reads the chain when it needs it instead, and records moves (see below).
 
 ## Reads use one snapshot
@@ -93,10 +101,11 @@ A write needs a rule that admits its operation where the row sits. The engine ch
 - An update or delete is checked against the stored row, before the version check, so a refused caller does not learn the row's version.
 - A create is checked against the new row after merges, carried-over fields and reference projection.
 - An update that moves a row to another parent is checked at both parents, by one rule. Otherwise a caller could move a task into a project it can write and out of one it cannot.
+- On a row with several parents, an update that adds or removes a parent is also checked through each parent it adds or removes, and a create through each parent it names, by the same rule.
 
 A move carries every row below the moved row with it. A move therefore also needs, where the row is before the move, the read permission of every entity whose rows can sit below it. Without that rule, a caller who may edit tasks but not read their comments could move a task to a project where other people read comments.
 
-A client cannot delete a row while a live row names it as its access parent. If it could, the rows below would anchor at nothing, and a caller who creates a row with the same key later would take them over. Trusted writes may delete such a row, because a connector or a mutator body sometimes must. The rows below it then anchor at nothing until a row with that key exists again.
+A client cannot delete a row while a live row names it as an access parent, also when that row has other parents. If it could, the rows below would anchor at nothing, and a caller who creates a row with the same key later would take them over. Trusted writes may delete such a row, because a connector or a mutator body sometimes must. The rows below it then anchor at nothing until a row with that key exists again.
 
 Grant rows have a further rule: a write that can change what a grant row grants needs every permission of the role at the grant's anchor, before and after the write. A caller can therefore only grant or revoke what it holds itself. This stops a caller from raising its own role, from giving a grant to another subject by changing the subject field, from moving a grant to a project it does not manage, and from demoting a caller with a stronger role.
 
@@ -133,7 +142,7 @@ The answer is advisory. The client does not refuse a write when `can()` answers 
 ## Costs and limits
 
 - **Grant resolution.** Each request and each stream drain reads the caller's grant rows: one probe of the subject index for each grant entity, or a scan of the grant entity until the index is built. Team grants add one probe of the team reference index for each team the caller is a member of, and a read of the grant rows found.
-- **Chain walks.** A read below the root reads each row on the chains of the rows it classifies once. A write reads the chain of the row it writes, and a move of a row in a recursive chain reads the chain of the new parent to refuse a cycle.
+- **Chain walks.** A read below the root reads each row on the chains of the rows it classifies once. A write reads the chain of the row it writes, and a move of a row in a recursive chain reads the rows above the new parents to refuse a cycle and a path deeper than `MaxAccessDepth`. A row with several parents costs a walk of each of them.
 - **Moves.** A move of a row that rows sit below writes one log row. Every pull and stream drain reads the moves after its cursor, which is one row read when nothing moved. A delete of such a row probes the reference index of each entity that can sit below it.
 - **Root changes.** Gaining or losing a permission at the root affects every row of the entities that use it, so the resync scans those entities.
 - **Shared permission names.** A permission used at two depths that do not sit below one another, such as `view_members` for org members and for project members, lets a role that grants it at the root read the rosters of every project. Registration logs a warning for this case. A permission shared by a row and the rows below it, such as `view_tasks` for tasks and their comments, is the common case and logs nothing.

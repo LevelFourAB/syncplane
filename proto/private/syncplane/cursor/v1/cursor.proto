@@ -144,12 +144,16 @@ message AccessMove {
 	// The row whose access parent changed.
 	string entity = 1;
 	string key = 2;
-	// The row's access parent before the change, as of the start of the
-	// sequence; absent when the row did not exist or anchored at nothing.
+	// The first of the row's access parents before the change, as of the start
+	// of the sequence, in entity and then key order; absent when the row did
+	// not exist or anchored at nothing. more_from holds the others, in the
+	// same order.
 	AnchorRef from = 3;
-	// The row's access parent after the change; absent when the row was
-	// deleted or anchors at nothing.
+	// The first of the row's access parents after the change; absent when the
+	// row was deleted or anchors at nothing. more_to holds the others.
 	AnchorRef to = 4;
+	repeated AnchorRef more_from = 5;
+	repeated AnchorRef more_to = 6;
 }
 
 // AnchorRef names one row of a workspace.

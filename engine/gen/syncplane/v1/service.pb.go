@@ -2218,12 +2218,12 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\bhas_more\x18\x05 \x01(\bR\ahasMore\x12\x10\n" +
 	"\x03seq\x18\x06 \x01(\x04R\x03seq\x12'\n" +
 	"\x0fschema_revision\x18\a \x01(\tR\x0eschemaRevision\x12?\n" +
-	"\rcaller_access\x18\b \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\"\xba\x01\n" +
+	"\rcaller_access\x18\b \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\"\xa7\x01\n" +
 	"\fCallerAccess\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x1a\n" +
 	"\bsubjects\x18\x03 \x03(\tR\bsubjects\x12)\n" +
 	"\x10root_permissions\x18\x04 \x03(\tR\x0frootPermissions\x12>\n" +
-	"\ranchor_groups\x18\x05 \x03(\v2\x19.syncplane.v1.AnchorGroupR\fanchorGroupsJ\x04\b\x01\x10\x02R\vpermissions\"c\n" +
+	"\ranchor_groups\x18\x05 \x03(\v2\x19.syncplane.v1.AnchorGroupR\fanchorGroups\"c\n" +
 	"\vAnchorGroup\x12 \n" +
 	"\vpermissions\x18\x01 \x03(\tR\vpermissions\x122\n" +
 	"\aanchors\x18\x02 \x03(\v2\x18.syncplane.v1.AnchorRowsR\aanchors\"8\n" +

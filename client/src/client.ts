@@ -13,7 +13,10 @@ import {
 	ACCESS_TOUCH_ENTITY,
 	type AccessChain,
 	type AccessOperation,
+	accessParentFields,
 	accessParentUnits,
+	type AccessRow,
+	accessRowId,
 	type AccessSummary,
 	anchorEntities,
 	type CanAnswer,
@@ -22,12 +25,13 @@ import {
 	decodeAccess,
 	type DecodedAccess,
 	MAX_ACCESS_CHAIN,
-	type ParentRef,
-	parentRefOf,
+	type ParentRefs,
+	parentRefsOf,
 	pendingChangesAccess,
 	type RuleRow,
 	ruleRowOf,
 	touchPendingAccess,
+	UNKNOWN_CHAIN,
 	whenReads,
 } from './access.js';
 import { CodeFormatUpgraded, CodeWatchFailed, CodeWorkspacePurged } from './codes.js';
@@ -1722,7 +1726,7 @@ interface QueryPage<T> {
 /**
  * The row a prediction starts from: the row of `def` stored under `key`, or a
  * `row` the caller supplies. `decide` answers from that row, undefined when the
- * client does not hold it, and the chain of rows above it.
+ * client does not hold it, and the rows above it.
  */
 type AccessPlan =
 	& { def: EntityDef; decide(row: Message | undefined, chain: AccessChain): CanAnswer }
@@ -1747,9 +1751,16 @@ interface AccessWalk {
 	workspaceId: string;
 	plan: AccessPlan;
 	row: Message | undefined;
-	/** The access parent of the row last reached. */
-	parent: ParentRef;
-	rows: { entity: string; key: string }[];
+	/** The rows the row's access parents name, undefined when it is not held. */
+	parents: readonly AccessRow[] | undefined;
+	/**
+	 * The rows the access parents of each row reached above the row name, by
+	 * accessRowId: undefined for a row the client does not hold, or one past
+	 * MAX_ACCESS_CHAIN hops.
+	 */
+	above: Map<string, readonly AccessRow[] | undefined>;
+	/** The rows of the level the walk reads next. */
+	level: NonNullable<ParentRefs>[number][];
 }
 
 /**
@@ -3310,9 +3321,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				// condition reads decides the final side, and none is known here.
 				const moves = changed !== null && accessParentUnits(def).some((u) => changed.includes(u));
 				const final: RuleRow = {
-					held: moves
-						? (p) => canAt(summary, p, def.name, key, { rows: [], complete: false })
-						: stored.held,
+					held: moves ? (p) => canAt(summary, p, def.name, key, UNKNOWN_CHAIN) : stored.held,
 					subject: (field) => (changed?.includes(field) ? undefined : stored.subject(field)),
 					matches: (rule) =>
 						changed !== null && whenReads(def.schema, rule, changed) ? 'unknown' : stored.matches(rule),
@@ -3342,7 +3351,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						rules,
 						'create',
 						summary.subjects,
-						ruleRowOf(summary, def, keyOf(def, row), row, chain),
+						ruleRowOf(summary, def, keyOf(def, row), row, chain, true),
 					),
 			};
 		});
@@ -3444,11 +3453,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 
 	/**
 	 * Decides every prediction in `batch` from `tx`: the summary once per
-	 * workspace, then the chains of access parents level by level, with one
-	 * getMany per level for every distinct row the level reaches. The rows are
-	 * read through the merged view, so a queued move counts where the row will
-	 * be once the server accepts it. A chain stops at a row the client does not
-	 * hold, and after MAX_ACCESS_CHAIN rows.
+	 * workspace, then the rows above each row level by level, with one getMany
+	 * per level for every distinct row the level reaches. The rows are read
+	 * through the merged view, so a queued move counts where the row will be
+	 * once the server accepts it. A path stops at a row the client does not
+	 * hold, and after MAX_ACCESS_CHAIN hops.
 	 *
 	 * An error deciding one prediction is the outcome of that prediction alone.
 	 * An error reading the store rejects.
@@ -3481,8 +3490,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						workspaceId: ask.workspaceId,
 						plan,
 						row: undefined,
-						parent: undefined,
-						rows: [],
+						parents: undefined,
+						above: new Map(),
+						level: [],
 					});
 				}
 			} catch (error) {
@@ -3523,10 +3533,29 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				return false;
 			}
 		};
-		const finish = (walk: AccessWalk, complete: boolean) => {
+		const finish = (walk: AccessWalk) => {
 			step(walk, () => {
-				out[walk.at] = { answer: walk.plan.decide(walk.row, { rows: walk.rows, complete }) };
+				const chain: AccessChain = {
+					parents: walk.parents,
+					above: (row) => walk.above.get(accessRowId(row)),
+				};
+				out[walk.at] = { answer: walk.plan.decide(walk.row, chain) };
 			});
+		};
+		// Moves the rows of `refs`, `hops` above the row, that `walk` has not
+		// reached into its next level. A row past MAX_ACCESS_CHAIN hops is not
+		// read, so the rows above it are not known.
+		const enter = (walk: AccessWalk, refs: NonNullable<ParentRefs>, hops: number) => {
+			for (const ref of refs) {
+				const id = accessRowId(ref);
+				if (walk.above.has(id)) continue;
+				if (accessParentFields(ref.def.schema).length === 0) walk.above.set(id, []);
+				else if (hops > MAX_ACCESS_CHAIN) walk.above.set(id, undefined);
+				else {
+					walk.above.set(id, undefined);
+					walk.level.push(ref);
+				}
+			}
 		};
 
 		await read(
@@ -3538,31 +3567,37 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			step(walk, () => {
 				const { plan } = walk;
 				walk.row = 'key' in plan ? rowOf(plan.def, walk.workspaceId, plan.key) : plan.row;
-				walk.parent = parentRefOf(plan.def, walk.row);
+				const parents = parentRefsOf(plan.def, walk.row);
+				walk.parents = parents;
+				if (parents !== undefined) enter(walk, parents, 1);
 			})
 		);
-		while (climbing.length > 0) {
+		for (let hops = 1; climbing.length > 0; hops++) {
 			const next: AccessWalk[] = [];
 			const refs: EntityRowRef[] = [];
 			for (const walk of climbing) {
-				const parent = walk.parent;
-				if (parent === null) finish(walk, true);
-				else if (parent === undefined || walk.rows.length === MAX_ACCESS_CHAIN) finish(walk, false);
+				if (walk.level.length === 0) finish(walk);
 				else {
-					walk.rows.push({ entity: parent.entity, key: parent.key });
 					next.push(walk);
-					// A parent of an entity this client does not register counts as
-					// a row it does not hold: none of its rows reach the store.
-					if (this.entityRegistry.get(parent.def.name) !== undefined) {
-						refs.push({ entity: parent.def.name, workspaceId: walk.workspaceId, key: parent.key });
+					for (const at of walk.level) {
+						// A parent of an entity this client does not register counts as
+						// a row it does not hold: none of its rows reach the store.
+						if (this.entityRegistry.get(at.def.name) !== undefined) {
+							refs.push({ entity: at.def.name, workspaceId: walk.workspaceId, key: at.key });
+						}
 					}
 				}
 			}
 			await read(refs);
 			climbing = next.filter((walk) =>
 				step(walk, () => {
-					const at = walk.parent!;
-					walk.parent = parentRefOf(at.def, rowOf(at.def, walk.workspaceId, at.key));
+					const level = walk.level;
+					walk.level = [];
+					for (const at of level) {
+						const parents = parentRefsOf(at.def, rowOf(at.def, walk.workspaceId, at.key));
+						walk.above.set(accessRowId(at), parents);
+						if (parents !== undefined) enter(walk, parents, hops + 1);
+					}
 				})
 			);
 		}

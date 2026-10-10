@@ -133,7 +133,7 @@ for (const scenario of SCENARIOS) {
 			const asks = Array.from({ length: LOOKUPS }, (_, i) => ({
 				permission: scenario.permissions[i % scenario.permissions.length]!,
 				key: issueKey(i),
-				chain: { rows: [ { entity: 'repo', key: repoKey(i % (2 * n)) } ], complete: true },
+				chain: { parents: [ { entity: 'repo', key: repoKey(i % (2 * n)) } ], above: () => [] },
 			}));
 			bench(`lookups (${LOOKUPS} canAt over a one-row chain)`, () => {
 				for (const ask of asks) canAt(summary, ask.permission, 'issue', ask.key, ask.chain);

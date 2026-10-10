@@ -338,6 +338,19 @@ var _ = Describe("Access model registration", func() {
 				`entity "comment" can sit 2 access_parent hops below an entity without a parent, more than MaxAccessDepth (1) allows`)))
 		})
 
+		It("accepts two access parents", func() {
+			specs := orgSpecs()
+			task := specNamed(specs, "task")
+			task.Fields = append(task.Fields, server.DynamicField{Name: "other", Number: 3, Ref: "project", AccessParent: true})
+			Expect(register(specs)).To(Succeed())
+		})
+
+		It("accepts a repeated access parent", func() {
+			specs := orgSpecs()
+			specNamed(specs, "task").Fields[1].Repeated = true
+			Expect(register(specs)).To(Succeed())
+		})
+
 		It("accepts a recursive chain whatever MaxAccessDepth is", func() {
 			srv = newBareServer(server.WithLimits(server.Limits{MaxAccessDepth: 1}))
 			Expect(register(withFolders(orgSpecs()))).To(Succeed())
@@ -383,13 +396,12 @@ var _ = Describe("Access model registration", func() {
 		Entry("an access parent on an entity without access", func(s []server.DynamicEntity) {
 			specNamed(s, "task").Access = nil
 		}, `field "project" is marked access_parent, but the entity declares no access option`),
-		Entry("two access parents", func(s []server.DynamicEntity) {
-			task := specNamed(s, "task")
-			task.Fields = append(task.Fields, server.DynamicField{Name: "other", Number: 3, Ref: "project", AccessParent: true})
-		}, `fields "project" and "other" are both marked access_parent`),
-		Entry("a repeated access parent", func(s []server.DynamicEntity) {
-			specNamed(s, "task").Fields[1].Repeated = true
-		}, `access_parent field "project" is repeated`),
+		Entry("a repeated access parent on a grant entity", func(s []server.DynamicEntity) {
+			member := specNamed(s, "org_member")
+			member.Fields = append(member.Fields, server.DynamicField{
+				Name: "projects", Number: 4, Ref: "project", Repeated: true, AccessParent: true,
+			})
+		}, `entity "org_member": a grant entity has one access parent`),
 		Entry("a workspace-qualified access parent", func(s []server.DynamicEntity) {
 			specNamed(s, "task").Fields[1].RefWorkspace = true
 		}, `access_parent field "project" is a reference message with a workspace field`),

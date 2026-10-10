@@ -328,12 +328,16 @@ type AccessMove struct {
 	// The row whose access parent changed.
 	Entity string `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
 	Key    string `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
-	// The row's access parent before the change, as of the start of the
-	// sequence; absent when the row did not exist or anchored at nothing.
+	// The first of the row's access parents before the change, as of the start
+	// of the sequence, in entity and then key order; absent when the row did
+	// not exist or anchored at nothing. more_from holds the others, in the
+	// same order.
 	From *AnchorRef `protobuf:"bytes,3,opt,name=from,proto3" json:"from,omitempty"`
-	// The row's access parent after the change; absent when the row was
-	// deleted or anchors at nothing.
-	To            *AnchorRef `protobuf:"bytes,4,opt,name=to,proto3" json:"to,omitempty"`
+	// The first of the row's access parents after the change; absent when the
+	// row was deleted or anchors at nothing. more_to holds the others.
+	To            *AnchorRef   `protobuf:"bytes,4,opt,name=to,proto3" json:"to,omitempty"`
+	MoreFrom      []*AnchorRef `protobuf:"bytes,5,rep,name=more_from,json=moreFrom,proto3" json:"more_from,omitempty"`
+	MoreTo        []*AnchorRef `protobuf:"bytes,6,rep,name=more_to,json=moreTo,proto3" json:"more_to,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -392,6 +396,20 @@ func (x *AccessMove) GetFrom() *AnchorRef {
 func (x *AccessMove) GetTo() *AnchorRef {
 	if x != nil {
 		return x.To
+	}
+	return nil
+}
+
+func (x *AccessMove) GetMoreFrom() []*AnchorRef {
+	if x != nil {
+		return x.MoreFrom
+	}
+	return nil
+}
+
+func (x *AccessMove) GetMoreTo() []*AnchorRef {
+	if x != nil {
+		return x.MoreTo
 	}
 	return nil
 }
@@ -1151,13 +1169,15 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\n" +
 	"access_ref\x18\x11 \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\taccessRef\x12,\n" +
 	"\x12caller_access_hash\x18\x12 \x01(\x06R\x10callerAccessHash\x120\n" +
-	"\x14access_moves_through\x18\x13 \x01(\x04R\x12accessMovesThrough\"\x9a\x01\n" +
+	"\x14access_moves_through\x18\x13 \x01(\x04R\x12accessMovesThrough\"\x90\x02\n" +
 	"\n" +
 	"AccessMove\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\tR\x03key\x122\n" +
 	"\x04from\x18\x03 \x01(\v2\x1e.syncplane.cursor.v1.AnchorRefR\x04from\x12.\n" +
-	"\x02to\x18\x04 \x01(\v2\x1e.syncplane.cursor.v1.AnchorRefR\x02to\"5\n" +
+	"\x02to\x18\x04 \x01(\v2\x1e.syncplane.cursor.v1.AnchorRefR\x02to\x12;\n" +
+	"\tmore_from\x18\x05 \x03(\v2\x1e.syncplane.cursor.v1.AnchorRefR\bmoreFrom\x127\n" +
+	"\amore_to\x18\x06 \x03(\v2\x1e.syncplane.cursor.v1.AnchorRefR\x06moreTo\"5\n" +
 	"\tAnchorRef\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\tR\x03key\"\xad\x01\n" +
@@ -1245,19 +1265,21 @@ var file_syncplane_cursor_v1_cursor_proto_depIdxs = []int32{
 	6,  // 6: syncplane.cursor.v1.Cursor.access_ref:type_name -> syncplane.cursor.v1.StateRef
 	2,  // 7: syncplane.cursor.v1.AccessMove.from:type_name -> syncplane.cursor.v1.AnchorRef
 	2,  // 8: syncplane.cursor.v1.AccessMove.to:type_name -> syncplane.cursor.v1.AnchorRef
-	5,  // 9: syncplane.cursor.v1.ReadAccess.permissions:type_name -> syncplane.cursor.v1.PermissionAnchors
-	4,  // 10: syncplane.cursor.v1.ReadAccess.rules:type_name -> syncplane.cursor.v1.EntityReadRule
-	12, // 11: syncplane.cursor.v1.PermissionAnchors.rows:type_name -> syncplane.cursor.v1.ClosureSet.Entry
-	13, // 12: syncplane.cursor.v1.StoredSets.subscriptions:type_name -> syncplane.v1.Subscription
-	9,  // 13: syncplane.cursor.v1.StoredSets.closure:type_name -> syncplane.cursor.v1.ClosureSet
-	8,  // 14: syncplane.cursor.v1.StoredSets.windows:type_name -> syncplane.cursor.v1.WindowState
-	9,  // 15: syncplane.cursor.v1.StoredSets.window:type_name -> syncplane.cursor.v1.ClosureSet
-	12, // 16: syncplane.cursor.v1.ClosureSet.entries:type_name -> syncplane.cursor.v1.ClosureSet.Entry
-	17, // [17:17] is the sub-list for method output_type
-	17, // [17:17] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	2,  // 9: syncplane.cursor.v1.AccessMove.more_from:type_name -> syncplane.cursor.v1.AnchorRef
+	2,  // 10: syncplane.cursor.v1.AccessMove.more_to:type_name -> syncplane.cursor.v1.AnchorRef
+	5,  // 11: syncplane.cursor.v1.ReadAccess.permissions:type_name -> syncplane.cursor.v1.PermissionAnchors
+	4,  // 12: syncplane.cursor.v1.ReadAccess.rules:type_name -> syncplane.cursor.v1.EntityReadRule
+	12, // 13: syncplane.cursor.v1.PermissionAnchors.rows:type_name -> syncplane.cursor.v1.ClosureSet.Entry
+	13, // 14: syncplane.cursor.v1.StoredSets.subscriptions:type_name -> syncplane.v1.Subscription
+	9,  // 15: syncplane.cursor.v1.StoredSets.closure:type_name -> syncplane.cursor.v1.ClosureSet
+	8,  // 16: syncplane.cursor.v1.StoredSets.windows:type_name -> syncplane.cursor.v1.WindowState
+	9,  // 17: syncplane.cursor.v1.StoredSets.window:type_name -> syncplane.cursor.v1.ClosureSet
+	12, // 18: syncplane.cursor.v1.ClosureSet.entries:type_name -> syncplane.cursor.v1.ClosureSet.Entry
+	19, // [19:19] is the sub-list for method output_type
+	19, // [19:19] is the sub-list for method input_type
+	19, // [19:19] is the sub-list for extension type_name
+	19, // [19:19] is the sub-list for extension extendee
+	0,  // [0:19] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_cursor_v1_cursor_proto_init() }

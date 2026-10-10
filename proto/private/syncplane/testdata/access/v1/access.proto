@@ -1198,3 +1198,183 @@ message Charge {
 	Invoice invoice = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
 	string memo = 3;
 }
+
+// A product, the top of one of the trees in the multi-parent schema below:
+// Product, Cycle, Shelf, Topic, LaneMember, Story, StoryNote and Leaflet,
+// registered apart from the schemas above. A story sits below its product and
+// below its cycle, a leaflet below each shelf it lists, and a topic below
+// each topic it lists.
+message Product {
+	option (syncplane.v1.entity) = {
+		name: "product"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_lanes" },
+				{ write: true requires: "edit_lanes" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// A cycle, the top of another tree.
+message Cycle {
+	option (syncplane.v1.entity) = {
+		name: "cycle"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_lanes" },
+				{ write: true requires: "edit_lanes" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// A shelf, the top of another tree.
+message Shelf {
+	option (syncplane.v1.entity) = {
+		name: "shelf"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_lanes" },
+				{ write: true requires: "edit_lanes" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// A topic below each topic it lists, so that the topics form a graph.
+message Topic {
+	option (syncplane.v1.entity) = {
+		name: "topic"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_topics" },
+				{ write: true requires: "edit_topics" }
+			]
+		}
+	};
+	string id = 1;
+	repeated Topic parents = 2
+		[(syncplane.v1.field_behavior) = { access_parent: {} }];
+}
+
+// A role on one product, cycle, shelf or topic and the rows below it.
+message LaneMember {
+	option (syncplane.v1.entity) = {
+		name: "lane_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "lane_viewer"
+					grants: [
+						"view_lanes",
+						"view_lane_members",
+						"view_stories",
+						"view_leaflets",
+						"view_topics"
+					]
+				},
+				{
+					name: "lane_editor"
+					includes: [ "lane_viewer" ]
+					grants: [ "edit_stories", "edit_leaflets", "edit_topics" ]
+				},
+				{
+					name: "lane_planner"
+					includes: [ "lane_viewer" ]
+					grants: [ "plan_stories" ]
+				},
+				{
+					name: "lane_admin"
+					includes: [ "lane_editor", "lane_planner" ]
+					grants: [ "edit_lanes", "manage_lane_members" ]
+				}
+			]
+		}
+		access: {
+			allow: [
+				{ read: true requires: "view_lane_members" },
+				{ write: true requires: "manage_lane_members" }
+			]
+		}
+	};
+	string id = 1;
+	oneof lane {
+		Product product = 2
+			[(syncplane.v1.field_behavior) = { access_parent: {} }];
+		Cycle cycle = 3 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+		Shelf shelf = 4 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+		Topic topic = 5 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	}
+	string user_id = 6;
+	string role = 7;
+}
+
+// A story below its product and below its cycle. A planner moves a story
+// between cycles without the right to edit it.
+message Story {
+	option (syncplane.v1.entity) = {
+		name: "story"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_stories" },
+				{ write: true requires: "edit_stories" },
+				{
+					update: true
+					requires: "plan_stories"
+					fields: [ "cycle" ]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Product product = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Cycle cycle = 3 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string title = 4;
+}
+
+// A note on a story, below whichever product and cycle the story sits below.
+message StoryNote {
+	option (syncplane.v1.entity) = {
+		name: "story_note"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_stories" },
+				{ write: true requires: "edit_stories" }
+			]
+		}
+	};
+	string id = 1;
+	Story story = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string body = 3;
+}
+
+// A leaflet below each shelf it lists.
+message Leaflet {
+	option (syncplane.v1.entity) = {
+		name: "leaflet"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_leaflets" },
+				{ write: true requires: "edit_leaflets" }
+			]
+		}
+	};
+	string id = 1;
+	repeated Shelf shelves = 2
+		[(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string title = 3;
+}

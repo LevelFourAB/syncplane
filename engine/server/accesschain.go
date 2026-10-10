@@ -2,17 +2,20 @@ package server
 
 import (
 	"errors"
+	"fmt"
+	"slices"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
-// accessChains walks access_parent chains: from a row to its parent, to the
-// parent's parent, and on until a row without a parent. It reads each row's
-// parent at most once, so a read that classifies many rows below the same
-// ancestors pays one read per distinct ancestor rather than one per row and
-// hop.
+// accessChains walks access_parent chains: from a row to its parents, to
+// their parents, and on until rows without a parent. A row with several
+// parents makes the rows above it a graph, which a walk visits breadth first.
+// It reads each row's parents at most once, so a read that classifies many
+// rows below the same ancestors pays one read per distinct ancestor rather
+// than one per row and hop.
 //
 // A value reads one state of the rows. A read path makes one per read
 // transaction; a write path drops it after a write to a row that can sit on a
@@ -22,7 +25,8 @@ type accessChains struct {
 	// get reads one row, failing with storage.ErrNotFound for a key that has
 	// never held one.
 	get func(entity, key string) (storage.Row, error)
-	// maxDepth is Limits.MaxAccessDepth: a walk stops after this many hops.
+	// maxDepth is Limits.MaxAccessDepth: a walk stops after this many hops on
+	// every path.
 	maxDepth int
 	// report is told about a row on a chain that does not decode. The row
 	// anchors at nothing above itself, so nothing can show that a permission
@@ -35,12 +39,34 @@ type accessChains struct {
 	overrides map[anchorRow]chainEdge
 }
 
-// chainEdge is one row's access parent edge. ok is false when the row anchors
-// at nothing above itself: its entity has no access parent, its reference is
-// unset or names no key, or the row does not exist.
+// chainEdge is one row's access parent edges: the rows its access parents
+// name, sorted by entity and key and without repeats (see edgeTo). It is
+// empty when the row anchors at nothing above itself: its entity has no
+// access parent, every reference is unset or names no key, or the row does
+// not exist. Two edges compare with equal, since the rows are a slice.
 type chainEdge struct {
-	parent anchorRow
-	ok     bool
+	parents []anchorRow
+}
+
+// edgeTo returns the edge to parents, which it does not change.
+func edgeTo(parents ...anchorRow) chainEdge {
+	return chainEdge{parents: compactRows(slices.Clone(parents))}
+}
+
+// ok reports whether the row sits below at least one row.
+func (e chainEdge) ok() bool {
+	return len(e.parents) > 0
+}
+
+// equal reports whether e and o name the same rows.
+func (e chainEdge) equal(o chainEdge) bool {
+	return slices.Equal(e.parents, o.parents)
+}
+
+// key renders the rows e names as a string that equals the key of another
+// edge exactly when the two edges are equal.
+func (e chainEdge) key() string {
+	return fmt.Sprintf("%q", e.parents)
 }
 
 // newAccessChains returns a walker over the rows tx reads.
@@ -64,11 +90,7 @@ func edgeOf(model *accessModel, info *entityInfo, row protoreflect.Message) chai
 	if row == nil {
 		return chainEdge{}
 	}
-	parent, ok := parentOf(row, model.parents[info.name])
-	if !ok {
-		return chainEdge{}
-	}
-	return chainEdge{parent: parent, ok: true}
+	return chainEdge{parents: parentsOf(row, model.parents[info.name])}
 }
 
 // firstEdge returns the parent edge of a row whose value the caller holds.
@@ -111,10 +133,10 @@ func (c *accessChains) edge(at anchorRow) (chainEdge, error) {
 }
 
 // holds reports whether a holds its permission at the row of info with key:
-// at the workspace root, at the row itself, or at a row up its chain within
-// maxDepth hops. row is the row's decoded value, nil for a row that does not
-// exist, which has no parent. It is the rule the client's canAt mirrors;
-// testdata/access/can.json pins both.
+// at the workspace root, at the row itself, or at a row above it on any path
+// of at most maxDepth hops. row is the row's decoded value, nil for a row that
+// does not exist, which has no parent. It is the rule the client's canAt
+// mirrors; testdata/access/can.json pins both.
 func (c *accessChains) holds(a *permAnchors, info *entityInfo, key string, row protoreflect.Message) (bool, error) {
 	if a == nil {
 		return false, nil
@@ -126,7 +148,7 @@ func (c *accessChains) holds(a *permAnchors, info *entityInfo, key string, row p
 }
 
 // holdsAt reports whether a holds its permission at the row at: at the
-// workspace root, at the row itself, or up its chain.
+// workspace root, at the row itself, or at a row above it.
 func (c *accessChains) holdsAt(a *permAnchors, at anchorRow) (bool, error) {
 	if a == nil {
 		return false, nil
@@ -143,7 +165,7 @@ func (c *accessChains) holdsAt(a *permAnchors, at anchorRow) (bool, error) {
 
 // holdsAll reports whether each of anchors holds its permission at the row of
 // info with key, as holds decides it for one. Each can hold at a different
-// row of the chain.
+// row above it.
 func (c *accessChains) holdsAll(anchors []*permAnchors, info *entityInfo, key string, row protoreflect.Message) (bool, error) {
 	for _, a := range anchors {
 		if ok, err := c.holds(a, info, key, row); err != nil || !ok {
@@ -164,20 +186,90 @@ func (c *accessChains) holdsAllAt(anchors []*permAnchors, at anchorRow) (bool, e
 	return true, nil
 }
 
-// holdsAbove reports whether a holds its permission at a row of the chain
-// that starts with e, within maxDepth hops.
+// holdsThroughEach reports whether a holds its permission at the row of info
+// with key through each of the row's parents on its own: at the workspace
+// root, at the row itself, or at that parent or a row above it. A row without
+// a parent needs the root or the row. row is the row's decoded value, nil for
+// a row that does not exist. It is the rule the client's canAtEach mirrors;
+// testdata/access/can.json pins both.
+func (c *accessChains) holdsThroughEach(a *permAnchors, info *entityInfo, key string, row protoreflect.Message) (bool, error) {
+	if a == nil {
+		return false, nil
+	}
+	if a.holds(info.name, key) {
+		return true, nil
+	}
+	return c.holdsAtEach(a, c.firstEdge(info, key, row).parents)
+}
+
+// holdsAtEach reports whether a holds its permission at each of rows, as
+// holdsAt decides it for one. It reports false for no rows.
+func (c *accessChains) holdsAtEach(a *permAnchors, rows []anchorRow) (bool, error) {
+	if len(rows) == 0 {
+		return false, nil
+	}
+	for _, at := range rows {
+		if ok, err := c.holdsAt(a, at); err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// holdsAbove reports whether a holds its permission at a row above the edge
+// e, on any path of at most maxDepth hops.
 func (c *accessChains) holdsAbove(a *permAnchors, e chainEdge) (bool, error) {
 	if len(a.rows) == 0 {
 		return a.root, nil
 	}
-	for hops := 1; e.ok && hops <= c.maxDepth; hops++ {
-		if a.holds(e.parent.entity, e.parent.key) {
-			return true, nil
+	frontier := e.parents
+	// Allocated only once a level holds two rows, so a walk up a row with one
+	// parent at each step allocates nothing. A row that two paths reach is
+	// then walked once.
+	var seen map[anchorRow]struct{}
+	for hops := 1; len(frontier) > 0; hops++ {
+		for _, at := range frontier {
+			if a.holds(at.entity, at.key) {
+				return true, nil
+			}
 		}
-		var err error
-		if e, err = c.edge(e.parent); err != nil {
-			return false, err
+		if hops >= c.maxDepth {
+			break
 		}
+		var next []anchorRow
+		if len(frontier) == 1 {
+			up, err := c.edge(frontier[0])
+			if err != nil {
+				return false, err
+			}
+			next = up.parents
+		} else {
+			for _, at := range frontier {
+				up, err := c.edge(at)
+				if err != nil {
+					return false, err
+				}
+				next = append(next, up.parents...)
+			}
+		}
+		if len(next) > 1 {
+			if seen == nil {
+				seen = make(map[anchorRow]struct{}, len(frontier)+len(next))
+				for _, at := range frontier {
+					seen[at] = struct{}{}
+				}
+			}
+			// A new slice: next can be a row's cached edge.
+			fresh := make([]anchorRow, 0, len(next))
+			for _, at := range next {
+				if _, dup := seen[at]; !dup {
+					seen[at] = struct{}{}
+					fresh = append(fresh, at)
+				}
+			}
+			next = fresh
+		}
+		frontier = next
 	}
 	return a.root, nil
 }

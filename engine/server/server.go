@@ -487,8 +487,16 @@ type Limits struct {
 	// polymorphic access parent. In a recursive chain,
 	// such as a folder inside a folder, a write that would put a row deeper is
 	// refused, and a read stops walking at this depth: a row deeper than it
-	// is read as anchored at nothing above that point. Default 32.
+	// is read as anchored at nothing above that point. A row with several
+	// access parents counts its longest path for a write, and a read reaches
+	// an anchor through any path of at most this many hops. Default 32.
 	MaxAccessDepth int
+	// Maximum distinct rows that the access parents of one row may name, in
+	// a schema that uses the access model. A write that changes a row's access
+	// parents to more rows than this fails with CodeInvalidArgument, on every
+	// write path. A row that holds more from before the limit was lowered
+	// keeps them until a write changes them. Default 64.
+	MaxAccessParents int
 	// Maximum facet axes one Query may carry. Each axis costs a bucket per
 	// distinct value and a lookup per matching row, and a request carrying any
 	// walks every match rather than the page. Default 8.
@@ -537,6 +545,13 @@ func (l Limits) maxAccessDepth() int {
 		return 32
 	}
 	return l.MaxAccessDepth
+}
+
+func (l Limits) maxAccessParents() int {
+	if l.MaxAccessParents <= 0 {
+		return 64
+	}
+	return l.MaxAccessParents
 }
 
 func (l Limits) maxRelKeys() int {

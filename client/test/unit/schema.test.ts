@@ -594,9 +594,9 @@ describe('schema builder — access model', () => {
 		const roles = [ { name: 'writer', grants: [ 'view', 'edit' ] } ];
 		const allowing = (...allow: AccessRuleDecl[]) => () => entity('e', fields, { access: { allow } });
 
-		it('rejects accessParent() on anything but a singular ref()', () => {
-			expect(() => text().accessParent()).toThrow(/only valid on a ref\(\)/);
-			expect(() => refList(() => project).accessParent()).toThrow(/only valid on a ref\(\)/);
+		it('rejects accessParent() on anything but a ref() or a refList()', () => {
+			expect(() => text().accessParent()).toThrow(/only valid on a ref\(\) or refList\(\)/);
+			expect(() => refList(() => project).accessParent()).not.toThrow();
 		});
 		it('rejects a permission name that is not an identifier', () => {
 			expect(allowing({ read: true, requires: 'view-all' })).toThrow(
@@ -655,14 +655,29 @@ describe('schema builder — access model', () => {
 				{ write: true, requires: 'view' },
 			)).not.toThrow();
 		});
-		it('rejects two access parents', () => {
+		it('accepts several access parents', () => {
 			expect(() =>
 				entity('e', {
 					id: text().key(),
 					a: ref(() => project).accessParent(),
-					b: ref(() => project).accessParent(),
+					b: refList(() => project).accessParent(),
 				}, { access })
-			).toThrow(/fields "a" and "b" are both marked accessParent\(\)/);
+			).not.toThrow();
+		});
+		it('rejects a grant entity with more than one access parent', () => {
+			expect(() =>
+				entity('e', {
+					...fields,
+					a: ref(() => project).accessParent(),
+					b: ref(() => project).accessParent(),
+				}, { access, grant: { subject: 'userId', role: 'role', roles } })
+			).toThrow('entity "e": a grant entity has one access parent');
+			expect(() =>
+				entity('e', { ...fields, a: refList(() => project).accessParent() }, {
+					access,
+					grant: { subject: 'userId', role: 'role', roles },
+				})
+			).toThrow('entity "e": a grant entity has one access parent');
 		});
 		it('rejects an access parent without access', () => {
 			expect(() => entity('e', { id: text().key(), p: ref(() => project).accessParent() })).toThrow(

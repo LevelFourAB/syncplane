@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -193,6 +194,34 @@ func (a *txAccess) admits(tx storage.ReadTx, rule accessRule, info *entityInfo, 
 	return true, nil
 }
 
+// admitsThrough reports whether rule's source holds for the caller through
+// each of parents on its own, as of tx: each permission it needs at the
+// workspace root, at the row of info with key, or at that parent or a row
+// above it. It reports true for no parents and for a rule that admits every
+// admitted caller. A write that adds a row below a parent shows the row to
+// the readers of that parent, and one that takes it away hides the row from
+// them, so the rule must hold there and not only through another parent.
+func (a *txAccess) admitsThrough(tx storage.ReadTx, rule accessRule, info *entityInfo, key string, parents []anchorRow) (bool, error) {
+	if len(parents) == 0 || len(rule.requires) == 0 {
+		return true, nil
+	}
+	set, err := a.get(tx)
+	if err != nil {
+		return false, err
+	}
+	chains := a.chainsOf(tx)
+	for _, p := range rule.requires {
+		anchors := set.perms[p]
+		if anchors.holds(info.name, key) {
+			continue
+		}
+		if ok, err := chains.holdsAtEach(anchors, parents); err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
 // admitting returns the rules of info that name op and admit the caller at
 // the row of info with key, as of tx, in declaration order.
 func (a *txAccess) admitting(tx storage.ReadTx, op accessOp, info *entityInfo, key string, row protoreflect.Message) ([]accessRule, error) {
@@ -236,9 +265,7 @@ func touchesGrant(info *entityInfo, op syncplanev1.CrudOp, mask []string) bool {
 		return true
 	}
 	fields := []string{info.grant.subjectName, string(info.grant.role.Name())}
-	if info.access.hasParent() {
-		fields = append(fields, info.access.parentName)
-	}
+	fields = append(fields, info.access.parentUnits...)
 	for _, path := range mask {
 		head, _, _ := strings.Cut(path, ".")
 		for _, f := range fields {
@@ -307,19 +334,20 @@ func (s *Server) checkGrantRow(info *entityInfo, key string, op syncplanev1.Crud
 		}
 		if !named {
 			return Reject(CodeInvalidArgument, fmt.Sprintf(
-				"entity %q: row %q names no %q; a grant row must name the row it applies at", info.name, key, a.parentName))
+				"entity %q: row %q names no %q; a grant row must name the row it applies at", info.name, key, a.parentUnits[0]))
 		}
 	}
 	return nil
 }
 
 // checkAccessChain refuses a write that would put a row on a parent chain the
-// model cannot walk: a row below itself, or a row more than
-// Limits.MaxAccessDepth hops below a row without an access parent. Every
-// write path runs it, Trusted ones included, on the row as it will be stored.
-// Only an entity whose chain of parent entities is recursive can do either,
-// since registration bounds every other chain, and only a write that changes
-// the row's access parent is walked.
+// model cannot walk: a row below itself, a row more than
+// Limits.MaxAccessDepth hops below a row without an access parent on any
+// path, or a row whose access parents name more than Limits.MaxAccessParents
+// rows. Every write path runs it, Trusted ones included, on the row as it will
+// be stored. Only an entity whose chain of parent entities is recursive can
+// put a row below itself or too deep, since registration bounds every other
+// chain, and only a write that changes the row's access parents is checked.
 func (s *Server) checkAccessChain(
 	ctx context.Context,
 	ws string,
@@ -330,12 +358,13 @@ func (s *Server) checkAccessChain(
 	final proto.Message,
 ) error {
 	model := s.catalogPtr().access
-	if model == nil || info.access == nil || !info.access.hasParent() || model.depths[info.name] != depthUnbounded {
+	if model == nil || info.access == nil || !info.access.hasParent() {
 		return nil
 	}
-	report := func(row storage.Row, err error) { s.reportPoison(ctx, ws, row, err) }
 	e := edgeOf(model, info, final.ProtoReflect())
-	if !e.ok {
+	maxParents := s.limits.maxAccessParents()
+	recursive := model.depths[info.name] == depthUnbounded
+	if !e.ok() || (len(e.parents) <= maxParents && !recursive) {
 		return nil
 	}
 	row, live, err := load()
@@ -343,24 +372,65 @@ func (s *Server) checkAccessChain(
 		return err
 	}
 	if live {
-		if stored, err := info.decode(row.Value); err == nil && edgeOf(model, info, stored.ProtoReflect()) == e {
+		if stored, err := info.decode(row.Value); err == nil && edgeOf(model, info, stored.ProtoReflect()).equal(e) {
 			return nil
 		}
 	}
+	if len(e.parents) > maxParents {
+		return Reject(CodeInvalidArgument, fmt.Sprintf(
+			"entity %q: row %q names %d access parents, more than MaxAccessParents (%d) allows",
+			info.name, key, len(e.parents), maxParents))
+	}
+	if !recursive {
+		return nil
+	}
+	report := func(row storage.Row, err error) { s.reportPoison(ctx, ws, row, err) }
 	maxDepth := s.limits.maxAccessDepth()
 	chains := newAccessChains(model, tx, maxDepth, report)
 	self := anchorRow{entity: info.name, key: key}
-	for hops := 1; e.ok; hops++ {
-		if e.parent == self {
-			return Reject(CodeInvalidArgument, fmt.Sprintf(
+	tooDeep := Reject(CodeInvalidArgument, fmt.Sprintf(
+		"entity %q: row %q would sit more than MaxAccessDepth (%d) hops below a row without an access parent",
+		info.name, key, maxDepth))
+	// A depth-first walk for the longest path, since a read finds an anchor on
+	// any path and so each must be walkable. height memoizes the most hops
+	// from a row up to a row without a parent, and onPath finds a cycle, which
+	// has no end.
+	height := map[anchorRow]int{}
+	onPath := map[anchorRow]bool{self: true}
+	var walk func(at anchorRow, hops int) (int, error)
+	walk = func(at anchorRow, hops int) (int, error) {
+		if at == self {
+			return 0, Reject(CodeInvalidArgument, fmt.Sprintf(
 				"entity %q: row %q would sit below itself in the access model", info.name, key))
 		}
-		if hops > maxDepth {
-			return Reject(CodeInvalidArgument, fmt.Sprintf(
-				"entity %q: row %q would sit more than MaxAccessDepth (%d) hops below a row without an access parent",
-				info.name, key, maxDepth))
+		if hops > maxDepth || onPath[at] {
+			return 0, tooDeep
 		}
-		if e, err = chains.edge(e.parent); err != nil {
+		if h, ok := height[at]; ok {
+			if hops+h > maxDepth {
+				return 0, tooDeep
+			}
+			return h, nil
+		}
+		up, err := chains.edge(at)
+		if err != nil {
+			return 0, err
+		}
+		onPath[at] = true
+		h := 0
+		for _, p := range up.parents {
+			ph, err := walk(p, hops+1)
+			if err != nil {
+				return 0, err
+			}
+			h = max(h, ph+1)
+		}
+		delete(onPath, at)
+		height[at] = h
+		return h, nil
+	}
+	for _, p := range e.parents {
+		if _, err := walk(p, 1); err != nil {
 			return err
 		}
 	}
@@ -376,11 +446,11 @@ type accessWrite struct {
 	key    string
 	op     syncplanev1.CrudOp
 	mask   []string
-	// live, stored and storedParent describe the row before the write:
-	// whether one existed, its value, and the row its access parent named.
-	live         bool
-	stored       protoreflect.Message
-	storedParent chainEdge
+	// live, stored and storedParents describe the row before the write:
+	// whether one existed, its value, and the rows its access parents named.
+	live          bool
+	stored        protoreflect.Message
+	storedParents chainEdge
 	// updating are the update rules that admit the caller at the stored row.
 	// One of them must also admit the row as it will be stored, and the
 	// fields the write changes.
@@ -464,7 +534,7 @@ func (g *writeGate) beginAccessWrite(
 		}
 	}
 	w.live, w.stored = true, sr
-	w.storedParent = edgeOf(model, info, sr)
+	w.storedParents = edgeOf(model, info, sr)
 	if want == opUpdate {
 		w.updating = admitting
 	}
@@ -475,12 +545,15 @@ func (g *writeGate) beginAccessWrite(
 // after the mask merge, the protected-field carry-over, the creator stamp and
 // the reference projection, before the index update.
 //
-// A create needs a create rule that admits the caller and the new row. An
-// update needs one of the update rules that admitted the caller at the stored
-// row to admit the row as it will be stored as well, and the fields the write
-// changes. A move also needs, where the row sits before it, the right to read
-// every entity whose rows can sit below it: the rows below move with it, and
-// the caller would otherwise show them to whoever reads at the new parent. On
+// A create needs a create rule that admits the caller and the new row, with
+// its source held through each parent the row names. An update needs one of
+// the update rules that admitted the caller at the stored row to admit the
+// row as it will be stored as well, and the fields the write changes. When
+// the update changes the row's access parents, that rule's source must also
+// hold through each parent the write adds and each one it removes. A move
+// also needs, where the row sits before it, the right to read every entity
+// whose rows can sit below it: the rows below move with it, and the caller
+// would otherwise show them to whoever reads at the new parent. On
 // a grant entity, a write that can change what the row grants also needs
 // every permission of the new role at the new anchor, so a caller cannot
 // grant more than it holds.
@@ -492,17 +565,31 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 	fr := final.ProtoReflect()
 	// The parent's entity counts as well as its key: a polymorphic parent can
 	// move between rows of two entities that share a key.
-	moved := w.live && edgeOf(model, w.info, fr) != w.storedParent
+	parents := edgeOf(model, w.info, fr)
+	moved := w.live && !parents.equal(w.storedParents)
 	switch {
 	case !w.live:
 		admitting, err := w.access.admitting(tx, opCreate, w.info, w.key, fr)
 		if err != nil {
 			return err
 		}
-		if len(admitting) == 0 {
+		admitted := false
+		for _, rule := range admitting {
+			if admitted, err = w.access.admitsThrough(tx, rule, w.info, w.key, parents.parents); err != nil {
+				return err
+			}
+			if admitted {
+				break
+			}
+		}
+		if !admitted {
 			return refuseRow(w.info, w.key)
 		}
 	default:
+		var changed []anchorRow
+		if moved {
+			changed = symmetricDifference(w.storedParents.parents, parents.parents)
+		}
 		admitted, err := admitsUpdate(w.updating,
 			func() []string { return changedUnits(w.info.msgType.Descriptor(), w.stored, fr) },
 			func(rule accessRule) (bool, error) {
@@ -512,7 +599,11 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 				if !moved && !rule.checksRow() {
 					return true, nil
 				}
-				return w.access.admits(tx, rule, w.info, w.key, fr)
+				ok, err := w.access.admits(tx, rule, w.info, w.key, fr)
+				if err != nil || !ok || !moved {
+					return ok, err
+				}
+				return w.access.admitsThrough(tx, rule, w.info, w.key, changed)
 			})
 		if err != nil {
 			return err
@@ -578,6 +669,23 @@ func admitsUpdate(rules []accessRule, changed func() []string, final func(access
 	return false, nil
 }
 
+// symmetricDifference returns the rows in exactly one of a and b, which are
+// sorted by entity and key and hold no repeats, in the same order.
+func symmetricDifference(a, b []anchorRow) []anchorRow {
+	var out []anchorRow
+	for _, r := range a {
+		if !slices.Contains(b, r) {
+			out = append(out, r)
+		}
+	}
+	for _, r := range b {
+		if !slices.Contains(a, r) {
+			out = append(out, r)
+		}
+	}
+	return compactRows(out)
+}
+
 // liveRowBelow returns the name of an entity with a live row whose access
 // parent is the row of info with key, or "" when there is none.
 func liveRowBelow(tx storage.ReadTx, model *accessModel, info *entityInfo, key string, limits Limits) (string, error) {
@@ -640,7 +748,7 @@ func liveRowNaming(
 				if derr != nil {
 					return nil
 				}
-				if named, ok := parentOf(msg.ProtoReflect(), cases[child.name]); ok && named == self {
+				if slices.Contains(parentsOf(msg.ProtoReflect(), cases[child.name]), self) {
 					return stop()
 				}
 				return nil

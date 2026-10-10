@@ -3141,6 +3141,529 @@ func (x *Charge) GetMemo() string {
 	return ""
 }
 
+// A product, the top of one of the trees in the multi-parent schema below:
+// Product, Cycle, Shelf, Topic, LaneMember, Story, StoryNote and Leaflet,
+// registered apart from the schemas above. A story sits below its product and
+// below its cycle, a leaflet below each shelf it lists, and a topic below
+// each topic it lists.
+type Product struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Product) Reset() {
+	*x = Product{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Product) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Product) ProtoMessage() {}
+
+func (x *Product) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Product.ProtoReflect.Descriptor instead.
+func (*Product) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{47}
+}
+
+func (x *Product) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// A cycle, the top of another tree.
+type Cycle struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Cycle) Reset() {
+	*x = Cycle{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[48]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Cycle) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Cycle) ProtoMessage() {}
+
+func (x *Cycle) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[48]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Cycle.ProtoReflect.Descriptor instead.
+func (*Cycle) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{48}
+}
+
+func (x *Cycle) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// A shelf, the top of another tree.
+type Shelf struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Shelf) Reset() {
+	*x = Shelf{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[49]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Shelf) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Shelf) ProtoMessage() {}
+
+func (x *Shelf) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[49]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Shelf.ProtoReflect.Descriptor instead.
+func (*Shelf) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{49}
+}
+
+func (x *Shelf) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// A topic below each topic it lists, so that the topics form a graph.
+type Topic struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Parents       []*Topic               `protobuf:"bytes,2,rep,name=parents,proto3" json:"parents,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Topic) Reset() {
+	*x = Topic{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[50]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Topic) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Topic) ProtoMessage() {}
+
+func (x *Topic) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[50]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Topic.ProtoReflect.Descriptor instead.
+func (*Topic) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{50}
+}
+
+func (x *Topic) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Topic) GetParents() []*Topic {
+	if x != nil {
+		return x.Parents
+	}
+	return nil
+}
+
+// A role on one product, cycle, shelf or topic and the rows below it.
+type LaneMember struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Types that are valid to be assigned to Lane:
+	//
+	//	*LaneMember_Product
+	//	*LaneMember_Cycle
+	//	*LaneMember_Shelf
+	//	*LaneMember_Topic
+	Lane          isLaneMember_Lane `protobuf_oneof:"lane"`
+	UserId        string            `protobuf:"bytes,6,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Role          string            `protobuf:"bytes,7,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LaneMember) Reset() {
+	*x = LaneMember{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[51]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LaneMember) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LaneMember) ProtoMessage() {}
+
+func (x *LaneMember) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[51]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LaneMember.ProtoReflect.Descriptor instead.
+func (*LaneMember) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{51}
+}
+
+func (x *LaneMember) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *LaneMember) GetLane() isLaneMember_Lane {
+	if x != nil {
+		return x.Lane
+	}
+	return nil
+}
+
+func (x *LaneMember) GetProduct() *Product {
+	if x != nil {
+		if x, ok := x.Lane.(*LaneMember_Product); ok {
+			return x.Product
+		}
+	}
+	return nil
+}
+
+func (x *LaneMember) GetCycle() *Cycle {
+	if x != nil {
+		if x, ok := x.Lane.(*LaneMember_Cycle); ok {
+			return x.Cycle
+		}
+	}
+	return nil
+}
+
+func (x *LaneMember) GetShelf() *Shelf {
+	if x != nil {
+		if x, ok := x.Lane.(*LaneMember_Shelf); ok {
+			return x.Shelf
+		}
+	}
+	return nil
+}
+
+func (x *LaneMember) GetTopic() *Topic {
+	if x != nil {
+		if x, ok := x.Lane.(*LaneMember_Topic); ok {
+			return x.Topic
+		}
+	}
+	return nil
+}
+
+func (x *LaneMember) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *LaneMember) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+type isLaneMember_Lane interface {
+	isLaneMember_Lane()
+}
+
+type LaneMember_Product struct {
+	Product *Product `protobuf:"bytes,2,opt,name=product,proto3,oneof"`
+}
+
+type LaneMember_Cycle struct {
+	Cycle *Cycle `protobuf:"bytes,3,opt,name=cycle,proto3,oneof"`
+}
+
+type LaneMember_Shelf struct {
+	Shelf *Shelf `protobuf:"bytes,4,opt,name=shelf,proto3,oneof"`
+}
+
+type LaneMember_Topic struct {
+	Topic *Topic `protobuf:"bytes,5,opt,name=topic,proto3,oneof"`
+}
+
+func (*LaneMember_Product) isLaneMember_Lane() {}
+
+func (*LaneMember_Cycle) isLaneMember_Lane() {}
+
+func (*LaneMember_Shelf) isLaneMember_Lane() {}
+
+func (*LaneMember_Topic) isLaneMember_Lane() {}
+
+// A story below its product and below its cycle. A planner moves a story
+// between cycles without the right to edit it.
+type Story struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Product       *Product               `protobuf:"bytes,2,opt,name=product,proto3" json:"product,omitempty"`
+	Cycle         *Cycle                 `protobuf:"bytes,3,opt,name=cycle,proto3" json:"cycle,omitempty"`
+	Title         string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Story) Reset() {
+	*x = Story{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[52]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Story) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Story) ProtoMessage() {}
+
+func (x *Story) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[52]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Story.ProtoReflect.Descriptor instead.
+func (*Story) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{52}
+}
+
+func (x *Story) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Story) GetProduct() *Product {
+	if x != nil {
+		return x.Product
+	}
+	return nil
+}
+
+func (x *Story) GetCycle() *Cycle {
+	if x != nil {
+		return x.Cycle
+	}
+	return nil
+}
+
+func (x *Story) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+// A note on a story, below whichever product and cycle the story sits below.
+type StoryNote struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Story         *Story                 `protobuf:"bytes,2,opt,name=story,proto3" json:"story,omitempty"`
+	Body          string                 `protobuf:"bytes,3,opt,name=body,proto3" json:"body,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoryNote) Reset() {
+	*x = StoryNote{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[53]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoryNote) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoryNote) ProtoMessage() {}
+
+func (x *StoryNote) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[53]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoryNote.ProtoReflect.Descriptor instead.
+func (*StoryNote) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{53}
+}
+
+func (x *StoryNote) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *StoryNote) GetStory() *Story {
+	if x != nil {
+		return x.Story
+	}
+	return nil
+}
+
+func (x *StoryNote) GetBody() string {
+	if x != nil {
+		return x.Body
+	}
+	return ""
+}
+
+// A leaflet below each shelf it lists.
+type Leaflet struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Shelves       []*Shelf               `protobuf:"bytes,2,rep,name=shelves,proto3" json:"shelves,omitempty"`
+	Title         string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Leaflet) Reset() {
+	*x = Leaflet{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[54]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Leaflet) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Leaflet) ProtoMessage() {}
+
+func (x *Leaflet) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[54]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Leaflet.ProtoReflect.Descriptor instead.
+func (*Leaflet) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{54}
+}
+
+func (x *Leaflet) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Leaflet) GetShelves() []*Shelf {
+	if x != nil {
+		return x.Shelves
+	}
+	return nil
+}
+
+func (x *Leaflet) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
 var File_syncplane_testdata_access_v1_access_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
@@ -3592,7 +4115,79 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x04memo\x18\x03 \x01(\tR\x04memo:S\xa2\xbb\x18O\n" +
 	"\x06charge\x12\x02idRA\n" +
 	"\x1f\b\x012\rview_invoices2\fread_billing\n" +
-	"\x1e(\x012\redit_invoices2\vuse_billing*Q\n" +
+	"\x1e(\x012\redit_invoices2\vuse_billing\"N\n" +
+	"\aProduct\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id:3\xa2\xbb\x18/\n" +
+	"\aproduct\x12\x02idR \n" +
+	"\x0e\b\x012\n" +
+	"view_lanes\n" +
+	"\x0e(\x012\n" +
+	"edit_lanes\"J\n" +
+	"\x05Cycle\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id:1\xa2\xbb\x18-\n" +
+	"\x05cycle\x12\x02idR \n" +
+	"\x0e\b\x012\n" +
+	"view_lanes\n" +
+	"\x0e(\x012\n" +
+	"edit_lanes\"J\n" +
+	"\x05Shelf\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id:1\xa2\xbb\x18-\n" +
+	"\x05shelf\x12\x02idR \n" +
+	"\x0e\b\x012\n" +
+	"view_lanes\n" +
+	"\x0e(\x012\n" +
+	"edit_lanes\"\x93\x01\n" +
+	"\x05Topic\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12E\n" +
+	"\aparents\x18\x02 \x03(\v2#.syncplane.testdata.access.v1.TopicB\x06\xaa\xbb\x18\x02Z\x00R\aparents:3\xa2\xbb\x18/\n" +
+	"\x05topic\x12\x02idR\"\n" +
+	"\x0f\b\x012\vview_topics\n" +
+	"\x0f(\x012\vedit_topics\"\xdb\x05\n" +
+	"\n" +
+	"LaneMember\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12I\n" +
+	"\aproduct\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProductB\x06\xaa\xbb\x18\x02Z\x00H\x00R\aproduct\x12C\n" +
+	"\x05cycle\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.CycleB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05cycle\x12C\n" +
+	"\x05shelf\x18\x04 \x01(\v2#.syncplane.testdata.access.v1.ShelfB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05shelf\x12C\n" +
+	"\x05topic\x18\x05 \x01(\v2#.syncplane.testdata.access.v1.TopicB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05topic\x12\x17\n" +
+	"\auser_id\x18\x06 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04role\x18\a \x01(\tR\x04role:\xed\x02\xa2\xbb\x18\xe8\x02\n" +
+	"\vlane_member\x12\x02idR0\n" +
+	"\x15\b\x012\x11view_lane_members\n" +
+	"\x17(\x012\x13manage_lane_membersZ\xa2\x02\n" +
+	"\auser_id\x12\x04role\x1aV\n" +
+	"\vlane_viewer\x12\n" +
+	"view_lanes\x12\x11view_lane_members\x12\fview_stories\x12\rview_leaflets\x12\vview_topics\x1aD\n" +
+	"\vlane_editor\x12\fedit_stories\x12\redit_leaflets\x12\vedit_topics\x1a\vlane_viewer\x1a)\n" +
+	"\flane_planner\x12\fplan_stories\x1a\vlane_viewer\x1aH\n" +
+	"\n" +
+	"lane_admin\x12\n" +
+	"edit_lanes\x12\x13manage_lane_members\x1a\vlane_editor\x1a\flane_plannerB\x06\n" +
+	"\x04lane\"\x89\x02\n" +
+	"\x05Story\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
+	"\aproduct\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProductB\x06\xaa\xbb\x18\x02Z\x00R\aproduct\x12A\n" +
+	"\x05cycle\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.CycleB\x06\xaa\xbb\x18\x02Z\x00R\x05cycle\x12\x14\n" +
+	"\x05title\x18\x04 \x01(\tR\x05title:N\xa2\xbb\x18J\n" +
+	"\x05story\x12\x02idR=\n" +
+	"\x10\b\x012\fview_stories\n" +
+	"\x10(\x012\fedit_stories\n" +
+	"\x17\x18\x012\fplan_storiesJ\x05cycle\"\xae\x01\n" +
+	"\tStoryNote\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12A\n" +
+	"\x05story\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.StoryB\x06\xaa\xbb\x18\x02Z\x00R\x05story\x12\x12\n" +
+	"\x04body\x18\x03 \x01(\tR\x04body::\xa2\xbb\x186\n" +
+	"\n" +
+	"story_note\x12\x02idR$\n" +
+	"\x10\b\x012\fview_stories\n" +
+	"\x10(\x012\fedit_stories\"\xb1\x01\n" +
+	"\aLeaflet\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12E\n" +
+	"\ashelves\x18\x02 \x03(\v2#.syncplane.testdata.access.v1.ShelfB\x06\xaa\xbb\x18\x02Z\x00R\ashelves\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:9\xa2\xbb\x185\n" +
+	"\aleaflet\x12\x02idR&\n" +
+	"\x11\b\x012\rview_leaflets\n" +
+	"\x11(\x012\redit_leaflets*Q\n" +
 	"\bTeamRole\x12\x19\n" +
 	"\x15TEAM_ROLE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TEAM_ROLE_VIEWER\x10\x01\x12\x14\n" +
@@ -3611,7 +4206,7 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 55)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(TeamRole)(0),            // 0: syncplane.testdata.access.v1.TeamRole
 	(*OrgMember)(nil),        // 1: syncplane.testdata.access.v1.OrgMember
@@ -3661,6 +4256,14 @@ var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(*Biller)(nil),           // 45: syncplane.testdata.access.v1.Biller
 	(*Invoice)(nil),          // 46: syncplane.testdata.access.v1.Invoice
 	(*Charge)(nil),           // 47: syncplane.testdata.access.v1.Charge
+	(*Product)(nil),          // 48: syncplane.testdata.access.v1.Product
+	(*Cycle)(nil),            // 49: syncplane.testdata.access.v1.Cycle
+	(*Shelf)(nil),            // 50: syncplane.testdata.access.v1.Shelf
+	(*Topic)(nil),            // 51: syncplane.testdata.access.v1.Topic
+	(*LaneMember)(nil),       // 52: syncplane.testdata.access.v1.LaneMember
+	(*Story)(nil),            // 53: syncplane.testdata.access.v1.Story
+	(*StoryNote)(nil),        // 54: syncplane.testdata.access.v1.StoryNote
+	(*Leaflet)(nil),          // 55: syncplane.testdata.access.v1.Leaflet
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	2,  // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
@@ -3699,11 +4302,20 @@ var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	43, // 33: syncplane.testdata.access.v1.AccountMember.account:type_name -> syncplane.testdata.access.v1.Account
 	43, // 34: syncplane.testdata.access.v1.Invoice.account:type_name -> syncplane.testdata.access.v1.Account
 	46, // 35: syncplane.testdata.access.v1.Charge.invoice:type_name -> syncplane.testdata.access.v1.Invoice
-	36, // [36:36] is the sub-list for method output_type
-	36, // [36:36] is the sub-list for method input_type
-	36, // [36:36] is the sub-list for extension type_name
-	36, // [36:36] is the sub-list for extension extendee
-	0,  // [0:36] is the sub-list for field type_name
+	51, // 36: syncplane.testdata.access.v1.Topic.parents:type_name -> syncplane.testdata.access.v1.Topic
+	48, // 37: syncplane.testdata.access.v1.LaneMember.product:type_name -> syncplane.testdata.access.v1.Product
+	49, // 38: syncplane.testdata.access.v1.LaneMember.cycle:type_name -> syncplane.testdata.access.v1.Cycle
+	50, // 39: syncplane.testdata.access.v1.LaneMember.shelf:type_name -> syncplane.testdata.access.v1.Shelf
+	51, // 40: syncplane.testdata.access.v1.LaneMember.topic:type_name -> syncplane.testdata.access.v1.Topic
+	48, // 41: syncplane.testdata.access.v1.Story.product:type_name -> syncplane.testdata.access.v1.Product
+	49, // 42: syncplane.testdata.access.v1.Story.cycle:type_name -> syncplane.testdata.access.v1.Cycle
+	53, // 43: syncplane.testdata.access.v1.StoryNote.story:type_name -> syncplane.testdata.access.v1.Story
+	50, // 44: syncplane.testdata.access.v1.Leaflet.shelves:type_name -> syncplane.testdata.access.v1.Shelf
+	45, // [45:45] is the sub-list for method output_type
+	45, // [45:45] is the sub-list for method input_type
+	45, // [45:45] is the sub-list for extension type_name
+	45, // [45:45] is the sub-list for extension extendee
+	0,  // [0:45] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_access_v1_access_proto_init() }
@@ -3731,13 +4343,19 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 		(*InitiativeMember_UserId)(nil),
 		(*InitiativeMember_Squad)(nil),
 	}
+	file_syncplane_testdata_access_v1_access_proto_msgTypes[51].OneofWrappers = []any{
+		(*LaneMember_Product)(nil),
+		(*LaneMember_Cycle)(nil),
+		(*LaneMember_Shelf)(nil),
+		(*LaneMember_Topic)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   47,
+			NumMessages:   55,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

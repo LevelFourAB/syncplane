@@ -9,14 +9,18 @@ import {
 	BillerSchema,
 	ChargeSchema,
 	CommentSchema,
+	CycleSchema,
 	DraftSchema,
 	InvoiceSchema,
 	IssueSchema,
 	LabelSchema,
+	LaneMemberSchema,
+	LeafletSchema,
 	NoteSchema,
 	OrgMemberSchema,
 	PageSchema,
 	PostSchema,
+	ProductSchema,
 	ProjectMemberSchema,
 	ProjectSchema,
 	RepoMemberSchema,
@@ -25,8 +29,11 @@ import {
 	RoomMemberSchema,
 	RoomSchema,
 	SettingSchema,
+	ShelfSchema,
 	SquadMemberSchema,
 	SquadSchema,
+	StoryNoteSchema,
+	StorySchema,
 	TaskSchema,
 	ThreadSchema,
 	TicketSchema,
@@ -74,6 +81,13 @@ const entities = [
 	BillerSchema,
 	InvoiceSchema,
 	ChargeSchema,
+	ProductSchema,
+	CycleSchema,
+	ShelfSchema,
+	LaneMemberSchema,
+	StorySchema,
+	StoryNoteSchema,
+	LeafletSchema,
 ];
 
 const open: SyncClient[] = [];
@@ -686,6 +700,90 @@ describe('rules that need several permissions on the client', () => {
 		await bob.syncNow();
 		expect(await bob.get(InvoiceSchema, 'i1')).toBeUndefined();
 		expect(await bob.get(ChargeSchema, 'c1')).toBeUndefined();
+	});
+});
+
+describe('several access parents on the client', () => {
+	// Ann edits in p1, Bob edits in p1 and c1, and Carol views c1. s1 sits
+	// below p1, and s2 below p1 and c1.
+	async function seedLanes(ws: string): Promise<void> {
+		const member = (id: string, lane: object, userId: string, role: string) => ({
+			entity: 'lane_member',
+			value: { id, ...lane, userId, role },
+		});
+		await trusted(ws, [
+			{ entity: 'product', value: { id: 'p1' } },
+			{ entity: 'cycle', value: { id: 'c1' } },
+			member('lm-ann', { product: { id: 'p1' } }, 'ann', 'lane_editor'),
+			member('lm-bob-p', { product: { id: 'p1' } }, 'bob', 'lane_editor'),
+			member('lm-bob-c', { cycle: { id: 'c1' } }, 'bob', 'lane_editor'),
+			member('lm-carol', { cycle: { id: 'c1' } }, 'carol', 'lane_viewer'),
+			{ entity: 'story', value: { id: 's1', product: { id: 'p1' } } },
+			{ entity: 'story', value: { id: 's2', product: { id: 'p1' }, cycle: { id: 'c1' } } },
+			{ entity: 'story_note', value: { id: 'n1', story: { id: 's1' } } },
+		]);
+	}
+
+	it('predicts a create through each parent as the server decides it', async () => {
+		const ws = freshWorkspace();
+		await seedLanes(ws);
+		const rejections: RejectionInfo[] = [];
+		const ann = await synced(
+			clientAs('ann', ws, new MemoryKVStore(), (info) => rejections.push(info)),
+		);
+		const bob = await synced(clientAs('bob', ws));
+		const both = { id: 'n', product: { id: 'p1' }, cycle: { id: 'c1' } };
+
+		expect(await ann.canCreate(StorySchema, both)).toBe('no');
+		await ann.mutate.put(StorySchema, both);
+		await ann.syncNow();
+		expect(rejections.map((r) => r.errorCode)).toEqual([ 'permission_denied' ]);
+
+		expect(await bob.canCreate(StorySchema, both)).toBe('yes');
+		await bob.mutate.put(StorySchema, both);
+		await bob.syncNow();
+		const carol = await synced(clientAs('carol', ws));
+		expect(await carol.get(StorySchema, 'n')).toBeDefined();
+	});
+
+	it('syncs the rows below a row to the readers of a parent it gains, and drops them when it loses it', async () => {
+		const ws = freshWorkspace();
+		await seedLanes(ws);
+		const carol = await synced(clientAs('carol', ws));
+		const bob = await synced(clientAs('bob', ws));
+		expect(await carol.get(StorySchema, 's2')).toBeDefined();
+		expect(await carol.get(StorySchema, 's1')).toBeUndefined();
+		expect(await carol.can(StorySchema, 's2', 'read')).toBe('yes');
+
+		await bob.mutate.patch(StorySchema, 's1', { cycle: { id: 'c1' } });
+		await bob.syncNow();
+		await carol.syncNow();
+		expect(await carol.get(StorySchema, 's1')).toBeDefined();
+		expect(await carol.get(StoryNoteSchema, 'n1')).toBeDefined();
+
+		await bob.mutate.patch(StorySchema, 's1', { cycle: undefined });
+		await bob.syncNow();
+		await carol.syncNow();
+		expect(await carol.get(StorySchema, 's1')).toBeUndefined();
+		expect(await carol.get(StoryNoteSchema, 'n1')).toBeUndefined();
+	});
+
+	it('reads a leaflet through any shelf it lists', async () => {
+		const ws = freshWorkspace();
+		await trusted(ws, [
+			{ entity: 'shelf', value: { id: 'h1' } },
+			{ entity: 'shelf', value: { id: 'h2' } },
+			{
+				entity: 'lane_member',
+				value: { id: 'lm-dan', shelf: { id: 'h2' }, userId: 'dan', role: 'lane_viewer' },
+			},
+			{ entity: 'leaflet', value: { id: 'l1', shelves: [ { id: 'h1' }, { id: 'h2' } ] } },
+			{ entity: 'leaflet', value: { id: 'l2', shelves: [ { id: 'h1' } ] } },
+		]);
+		const dan = await synced(clientAs('dan', ws));
+		expect(await dan.get(LeafletSchema, 'l1')).toBeDefined();
+		expect(await dan.get(LeafletSchema, 'l2')).toBeUndefined();
+		expect(await dan.can(LeafletSchema, 'l1', 'read')).toBe('yes');
 	});
 });
 

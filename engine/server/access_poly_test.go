@@ -196,14 +196,6 @@ var _ = Describe("Access model registration of a polymorphic access parent", fun
 			card := messageNamed(file, "Card")
 			proto.GetExtension(card.GetOptions(), syncplanev1.E_Entity).(*syncplanev1.EntityOptions).Access = nil
 		}, `oneof "place" is marked access_parent, but the entity declares no access option`),
-		Entry("a marked field beside a marked oneof", func(file *descriptorpb.FileDescriptorProto) {
-			card := messageNamed(file, "Card")
-			card.Field = append(card.Field, &descriptorpb.FieldDescriptorProto{
-				Name: proto.String("home"), JsonName: proto.String("home"), Number: proto.Int32(9),
-				Type: descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(), Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
-				TypeName: proto.String(".syncplane.testdata.access.v1.Board"), Options: accessParentMark(),
-			})
-		}, `fields "board" and "home" are both marked access_parent`),
 		Entry("a polymorphic reference message with a workspace field", func(file *descriptorpb.FileDescriptorProto) {
 			ref := messageNamed(file, "PlaceRef")
 			ref.Field = append(ref.Field, &descriptorpb.FieldDescriptorProto{

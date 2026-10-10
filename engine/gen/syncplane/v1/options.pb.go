@@ -254,9 +254,9 @@ func (x *EntityOptions) GetMembers() *MembersOptions {
 // A caller holds a permission at an anchor: the workspace root, or one row
 // that a grant row's `access_parent` field points at. A permission held at
 // an anchor applies to the anchor row and to every row below it: the rows
-// whose `access_parent` field points at it, the rows whose `access_parent`
-// field points at those, and so on. A row whose `access_parent` field is
-// unset, or names a row that does not exist, has no parent and never falls
+// whose `access_parent` fields point at it, the rows whose `access_parent`
+// fields point at those, and so on. A row whose `access_parent` fields are
+// unset, or name only rows that do not exist, has no parent and never falls
 // back to the workspace root. See `GrantOptions` and `AccessParentOptions`.
 //
 // An operation on a row is allowed when at least one rule in `allow` admits
@@ -347,6 +347,14 @@ func (x *AccessOptions) GetAllow() []*AccessRule {
 // to a value outside the caller's subjects, and a rule with `when` admits no
 // write that makes the row fail the condition.
 //
+// A row with several access parents shows to the readers of each. A rule
+// admits a create only when its source holds through each parent the row
+// names, and an update that adds or removes a parent only when its source
+// holds through each parent it adds or removes. A source holds through a
+// parent when each permission is held at the workspace root, at the row, or
+// at that parent or a row above it. Every other operation needs the source
+// through any one parent.
+//
 // ```protobuf
 //
 //	message Comment {
@@ -387,10 +395,10 @@ type AccessRule struct {
 	Write bool `protobuf:"varint,5,opt,name=write,proto3" json:"write,omitempty"`
 	// The source of the rule: a caller that holds every one of these
 	// permissions where the row sits, at the workspace root, at the row, or at
-	// a row up the row's chain of access parents. Each permission can be held
-	// at a different one of these places. Each entry starts with a letter or
-	// an underscore, followed by letters, digits and underscores, and no entry
-	// is named twice.
+	// a row above the row through its access parents. Each permission can be
+	// held at a different one of these places. Each entry starts with a letter
+	// or an underscore, followed by letters, digits and underscores, and no
+	// entry is named twice.
 	//
 	// The text format writes one permission without brackets:
 	//
@@ -912,22 +920,52 @@ func (x *MembersOptions) GetEntity() string {
 	return ""
 }
 
-// Marks the reference that places each row of an entity below another row in
+// Marks a reference that places each row of an entity below another row in
 // the access model.
 //
 // A permission held at the referenced row applies to the referencing row and
-// to every row below it. The referenced row can have an access parent of its
+// to every row below it. The referenced row can have access parents of its
 // own, and an entity can be its own access parent.
 //
-// An entity has at most one access parent: one top-level, singular field, or
-// every member of one `oneof` on the entity. Each marked field is a
-// reference: its type is an entity message, or a reference message without a
-// `workspace` field. A marked field cannot carry a `write_policy`.
+// Each marked field is a top-level field, or a member of a `oneof` whose
+// members are all marked. Each is a reference: its type is an entity message,
+// or a reference message without a `workspace` field. A marked field cannot
+// be a map or carry a `write_policy`.
+//
+// An entity can mark several fields, and a marked field can be repeated. A
+// row then sits below every row its marked fields name, and a permission held
+// at any of them, or at a row above any of them, applies to the row:
+//
+// ```protobuf
+//
+//	message Task {
+//	  option (syncplane.v1.entity) = {
+//	    name: "task" key_fields: ["id"]
+//	    access: { allow: [
+//	      { read: true requires: "view_tasks" },
+//	      { write: true requires: "edit_tasks" }
+//	    ] }
+//	  };
+//	  string id = 1;
+//	  Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//	  Milestone milestone = 3
+//	    [(syncplane.v1.field_behavior).access_parent = {}];
+//	  repeated Label labels = 4
+//	    [(syncplane.v1.field_behavior).access_parent = {}];
+//	}
+//
+// ```
+//
+// A write that adds or removes a parent needs its rule where that parent
+// sits; see `AccessRule`. A write fails when the row would name more rows
+// than the server's `MaxAccessParents` limit allows, or would sit below
+// itself. A grant entity has one access parent: one singular field, or the
+// members of one `oneof`.
 //
 // A polymorphic parent points at one of several entities: a marked `oneof`,
 // or a marked field whose reference message holds a `oneof` of entities. The
 // case a row holds names the row it sits below, and a row that holds no case
-// has no parent.
+// has no parent there.
 //
 // Registration refuses unknown fields inside this message.
 type AccessParentOptions struct {
@@ -1510,7 +1548,8 @@ type FieldBehavior struct {
 	// the reverse relation of every case.
 	ReverseRelation string `protobuf:"bytes,10,opt,name=reverse_relation,json=reverseRelation,proto3" json:"reverse_relation,omitempty"`
 	// Places each row below the row that this reference points at in the
-	// access model. See `AccessParentOptions`.
+	// access model, or below each row that a repeated reference points at.
+	// See `AccessParentOptions`.
 	AccessParent *AccessParentOptions `protobuf:"bytes,11,opt,name=access_parent,json=accessParent,proto3" json:"access_parent,omitempty"`
 	// Stores the subject of the caller who creates the row. See
 	// `CreatorOptions`.

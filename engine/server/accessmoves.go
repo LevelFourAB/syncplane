@@ -24,13 +24,15 @@ import (
 // compareMoves).
 //
 // A move is recorded only for a row other rows can sit below, and only when
-// one does at the time of the write: the change of its access parent, its
+// one does at the time of the write: a change of its access parents, its
 // creation below a parent (a row created with a key that rows below already
 // name) and its deletion (a Trusted write may delete a row with rows below
-// it). A row without rows below it moves nothing that the change scan does
-// not already see. When one sequence writes a row more than once, the log
-// keeps one record whose parent before the change is the one the row had at
-// the start of the sequence.
+// it). A record holds the row's parents before and after the change, so a row
+// that gains or loses one of several parents is one record. A row without
+// rows below it moves nothing that the change scan does not already see. When
+// one sequence writes a row more than once, the log keeps one record whose
+// parents before the change are the ones the row had at the start of the
+// sequence.
 //
 // The records are rows of accessMovesEntity, which no schema declares, so the
 // sync paths skip them as they skip any entity the catalog does not hold. Each
@@ -58,25 +60,35 @@ func accessMovePrefix(seq uint64) string {
 	return fmt.Sprintf("%0*d/", accessMoveSeqWidth, seq)
 }
 
-// anchorRefOf renders an edge's parent for the log, nil when the edge is
-// unset.
-func anchorRefOf(e chainEdge) *syncplanecursorv1.AnchorRef {
-	if !e.ok {
-		return nil
+// anchorRefsOf renders an edge's parents for the log: the first, nil when the
+// edge is unset, and the others.
+func anchorRefsOf(e chainEdge) (*syncplanecursorv1.AnchorRef, []*syncplanecursorv1.AnchorRef) {
+	if !e.ok() {
+		return nil, nil
 	}
-	return &syncplanecursorv1.AnchorRef{Entity: e.parent.entity, Key: e.parent.key}
+	refs := make([]*syncplanecursorv1.AnchorRef, len(e.parents))
+	for i, p := range e.parents {
+		refs[i] = &syncplanecursorv1.AnchorRef{Entity: p.entity, Key: p.key}
+	}
+	return refs[0], refs[1:]
 }
 
-// edgeOfRef reads an edge back from the log.
-func edgeOfRef(r *syncplanecursorv1.AnchorRef) chainEdge {
-	if r == nil {
+// edgeOfRefs reads an edge back from the log: first and more as
+// anchorRefsOf renders them.
+func edgeOfRefs(first *syncplanecursorv1.AnchorRef, more []*syncplanecursorv1.AnchorRef) chainEdge {
+	if first == nil {
 		return chainEdge{}
 	}
-	return chainEdge{parent: anchorRow{entity: r.GetEntity(), key: r.GetKey()}, ok: true}
+	rows := make([]anchorRow, 0, 1+len(more))
+	rows = append(rows, anchorRow{entity: first.GetEntity(), key: first.GetKey()})
+	for _, r := range more {
+		rows = append(rows, anchorRow{entity: r.GetEntity(), key: r.GetKey()})
+	}
+	return edgeTo(rows...)
 }
 
 // recordAccessMove writes the log record of a write that changes the access
-// parent of a row other rows can sit below, when rows sit below it. Every
+// parents of a row other rows can sit below, when rows sit below it. Every
 // write path calls it, Trusted ones included, after every check that can
 // refuse the write and before the row is written. final is the row as it will
 // be stored, nil for a delete; load returns the row before the write.
@@ -110,7 +122,7 @@ func (s *Server) recordAccessMove(
 	if final != nil {
 		to = edgeOf(model, info, final.ProtoReflect())
 	}
-	if from == to {
+	if from.equal(to) {
 		return nil
 	}
 	below, err := liveRowBelow(tx, model, info, key, s.limits)
@@ -128,14 +140,18 @@ func (s *Server) recordAccessMove(
 	case !prev.Deleted:
 		var m syncplanecursorv1.AccessMove
 		if err := proto.Unmarshal(prev.Value, &m); err == nil {
-			from = edgeOfRef(m.GetFrom())
+			from = edgeOfRefs(m.GetFrom(), m.GetMoreFrom())
 		}
 	}
+	fromFirst, fromMore := anchorRefsOf(from)
+	toFirst, toMore := anchorRefsOf(to)
 	value, err := proto.MarshalOptions{Deterministic: true}.Marshal(&syncplanecursorv1.AccessMove{
-		Entity: info.name,
-		Key:    key,
-		From:   anchorRefOf(from),
-		To:     anchorRefOf(to),
+		Entity:   info.name,
+		Key:      key,
+		From:     fromFirst,
+		To:       toFirst,
+		MoreFrom: fromMore,
+		MoreTo:   toMore,
 	})
 	if err != nil {
 		return err
@@ -176,8 +192,8 @@ func readAccessMoves(tx storage.ReadTx, floor uint64, limit int) (moves []access
 		moves = append(moves, accessMove{
 			version: row.Version,
 			row:     anchorRow{entity: m.GetEntity(), key: m.GetKey()},
-			from:    edgeOfRef(m.GetFrom()),
-			to:      edgeOfRef(m.GetTo()),
+			from:    edgeOfRefs(m.GetFrom(), m.GetMoreFrom()),
+			to:      edgeOfRefs(m.GetTo(), m.GetMoreTo()),
 		})
 		return nil
 	})

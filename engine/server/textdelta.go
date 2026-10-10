@@ -165,14 +165,16 @@ func (info *entityInfo) recordTextDeltaGaps(tx storage.WriteTx, key string, path
 }
 
 // readInputs is what a row's own fields decide about which callers may read it
-// in the access model: its access parent, the values of the fields its read
+// in the access model: its access parents, the values of the fields its read
 // rules check against the caller's subjects, and whether it matches each read
 // rule's when condition. The zero value is a row whose fields decide nothing:
 // one that does not exist, or one whose entity's read rules do not read its
 // fields.
 type readInputs struct {
 	decides bool
-	parent  chainEdge
+	// parents is the key of the row's parent edge (see chainEdge.key), so
+	// that two values compare with ==.
+	parents string
 	// checks holds, for each read rule with a check on the row in rule order,
 	// the value of its subject field quoted and whether the row matches its
 	// when condition.
@@ -191,7 +193,7 @@ func readInputsOf(model *accessModel, info *entityInfo, row proto.Message) readI
 		return readInputs{}
 	}
 	r := row.ProtoReflect()
-	in := readInputs{decides: true, parent: edgeOf(model, info, r)}
+	in := readInputs{decides: true, parents: edgeOf(model, info, r).key()}
 	if len(checked) > 0 {
 		var b strings.Builder
 		for _, rule := range checked {

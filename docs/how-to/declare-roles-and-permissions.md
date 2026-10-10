@@ -468,6 +468,43 @@ In the TypeScript schema builder, `requires` takes one name or a list:
 
 `can()` answers `'yes'` only when the client can place every permission of the rule on the row's chain.
 
+### Put a row below several parents
+
+Mark each reference that places the row, or mark a repeated reference. Here a task sits below its project and below its milestone, and a milestone planner attaches tasks to milestones without the right to edit them:
+
+```proto
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" },
+				{
+					update: true
+					requires: "plan_tasks"
+					fields: [ "milestone" ]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Milestone milestone = 3
+		[(syncplane.v1.field_behavior) = { access_parent: {} }];
+}
+```
+
+- A reader of the project or of the milestone reads the task, and the rows below it.
+- To create a task in a project and a milestone, the caller needs `edit_tasks` at both, or at the workspace root.
+- To attach a task to a milestone, or to detach it, the caller needs the rule at that milestone. A planner who holds `plan_tasks` at the project and at both milestones moves a task between them.
+- To edit the title or delete the task, the rule through one parent is enough.
+- For a list, such as `repeated Space spaces`, add or remove one space with a `PATCH` whose mask names `spaces.<key>`. Two clients that add a space at the same time keep both.
+- A grant entity keeps one parent. Write one grant row for each row where a role applies.
+
+In the TypeScript schema builder, mark each field with `.accessParent()`, on a `ref()` or a `refList()`. `canCreate()` answers `'yes'` only when the client can place the permission through each parent of the new row.
+
 ### Moving and deleting rows that other rows sit below
 
 Rows below a row move with it. To move a task to another project, the caller needs one update rule that admits it at both projects, here the `write` rule with `edit_tasks`, and, at the old project, the read permission of every entity that can sit below a task, here `view_tasks` for the comments. Without the read permission a caller could carry rows it cannot read to a project where other people can read them.

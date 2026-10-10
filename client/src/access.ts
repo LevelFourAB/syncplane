@@ -46,8 +46,8 @@ export type CanAnswer = 'yes' | 'no' | 'unknown';
 export type AccessOperation = 'read' | 'create' | 'update' | 'delete';
 
 /**
- * How many rows up a row's chain of access parents `can` walks before it
- * answers `'unknown'`: the server's default `MaxAccessDepth`.
+ * How many rows up a row's chains of access parents `can` walks on each path
+ * before it answers `'unknown'`: the server's default `MaxAccessDepth`.
  */
 export const MAX_ACCESS_CHAIN = 32;
 
@@ -248,28 +248,38 @@ function and(a: CanAnswer, b: CanAnswer): CanAnswer {
 	return a === 'unknown' || b === 'unknown' ? 'unknown' : 'yes';
 }
 
-/**
- * What a row's access parent names: the entity and key of the row it sits
- * below, with the entity's definition, `null` for a row whose entity has no
- * access parent or whose reference is unset, and `undefined` when the row is
- * not known.
- */
-export type ParentRef = { entity: string; key: string; def: EntityDef } | null | undefined;
-
-/**
- * The rows above a row for `canAt`, nearest first: the row its access parent
- * names, the row that row's access parent names, and so on. `complete` is
- * false when the walk stopped at a row the client does not hold, so rows
- * further up are not known.
- */
-export interface AccessChain {
-	readonly rows: readonly { entity: string; key: string }[];
-	readonly complete: boolean;
+/** One row of a workspace. */
+export interface AccessRow {
+	readonly entity: string;
+	readonly key: string;
 }
 
 /**
+ * What a row's access parents name: the entity and key of each row it sits
+ * below, with the entity's definition, sorted by entity and key without
+ * repeats. Empty for a row whose entity has no access parent or whose
+ * references are unset, and `undefined` when the row is not known.
+ */
+export type ParentRefs = readonly (AccessRow & { def: EntityDef })[] | undefined;
+
+/**
+ * The rows above a row for `canAt`: `parents` holds the rows its access
+ * parents name, and `above` the same for a row above it. Either is
+ * `undefined` for a row the client does not hold, so the rows further up
+ * that path are not known.
+ */
+export interface AccessChain {
+	readonly parents: readonly AccessRow[] | undefined;
+	above(row: AccessRow): readonly AccessRow[] | undefined;
+}
+
+/** A chain whose rows the client does not know. */
+export const UNKNOWN_CHAIN: AccessChain = { parents: undefined, above: () => undefined };
+
+/**
  * Decides `permission` at the row of `entity` with `key`, given the rows
- * above it. The rule the server applies, with `'unknown'` where the client
+ * above it: at the workspace root, at the row itself, or at a row above it on
+ * any path. The rule the server applies, with `'unknown'` where the client
  * lacks an input.
  */
 export function canAt(
@@ -281,17 +291,82 @@ export function canAt(
 ): CanAnswer {
 	if (summary === undefined) return 'unknown';
 	if (summary.holds(permission, entity, key)) return 'yes';
-	for (const row of chain.rows) {
-		if (summary.holds(permission, row.entity, row.key)) return 'yes';
+	if (chain.parents === undefined) return 'unknown';
+	return reach(summary, permission, chain.parents, chain);
+}
+
+/**
+ * Decides `permission` at the row of `entity` with `key` through each of its
+ * parents on its own: at the workspace root, at the row itself, or at that
+ * parent or a row above it. A row without a parent needs the root or the
+ * row. A create needs its permissions this way. The rule the server applies,
+ * with `'unknown'` where the client lacks an input.
+ */
+export function canAtEach(
+	summary: AccessSummary | undefined,
+	permission: string,
+	entity: string,
+	key: string,
+	chain: AccessChain,
+): CanAnswer {
+	if (summary === undefined) return 'unknown';
+	if (summary.holds(permission, entity, key)) return 'yes';
+	if (chain.parents === undefined) return 'unknown';
+	if (chain.parents.length === 0) return 'no';
+	let answer: CanAnswer = 'yes';
+	for (const parent of chain.parents) {
+		answer = and(answer, reach(summary, permission, [ parent ], chain));
 	}
-	return chain.complete ? 'no' : 'unknown';
+	return answer;
+}
+
+/**
+ * Whether `permission` is held at one of `start` or a row above them, at
+ * most MAX_ACCESS_CHAIN hops above the row they sit above.
+ */
+function reach(
+	summary: AccessSummary,
+	permission: string,
+	start: readonly AccessRow[],
+	chain: AccessChain,
+): CanAnswer {
+	const seen = new Set<string>();
+	const fresh = (rows: readonly AccessRow[]) =>
+		rows.filter((row) => {
+			const id = accessRowId(row);
+			if (seen.has(id)) return false;
+			seen.add(id);
+			return true;
+		});
+	let complete = true;
+	let level = fresh(start);
+	for (let hops = 1; level.length > 0; hops++) {
+		for (const row of level) {
+			if (summary.holds(permission, row.entity, row.key)) return 'yes';
+		}
+		const next: AccessRow[] = [];
+		for (const row of level) {
+			const up = chain.above(row);
+			if (up === undefined) complete = false;
+			else next.push(...fresh(up));
+		}
+		if (hops >= MAX_ACCESS_CHAIN && next.length > 0) return 'unknown';
+		level = next;
+	}
+	return complete ? 'no' : 'unknown';
+}
+
+/** A string that names `row` alone, for maps keyed by row. */
+export function accessRowId(row: AccessRow): string {
+	return JSON.stringify([ row.entity, row.key ]);
 }
 
 /**
  * The row of `def` with `key` as {@link decideRules} reads it from local
- * data: a permission is decided by {@link canAt} over `chain`, and a subject
- * field and a `when` condition read `row`, which is unknown when the client
- * does not hold the row.
+ * data: a permission is decided by {@link canAt} over `chain`, or by
+ * {@link canAtEach} with `throughEach`, and a subject field and a `when`
+ * condition read `row`, which is unknown when the client does not hold the
+ * row.
  */
 export function ruleRowOf(
 	summary: AccessSummary,
@@ -299,9 +374,11 @@ export function ruleRowOf(
 	key: string,
 	row: Message | undefined,
 	chain: AccessChain,
+	throughEach = false,
 ): RuleRow {
+	const decide = throughEach ? canAtEach : canAt;
 	return {
-		held: (permission) => canAt(summary, permission, def.name, key, chain),
+		held: (permission) => decide(summary, permission, def.name, key, chain),
 		subject: (name) => {
 			if (row === undefined) return undefined;
 			const field = def.schema.fields.find((f) => f.name === name);
@@ -380,11 +457,11 @@ export function whenReads(
 
 /**
  * The inputs a prediction for a row of `def` reads from the row itself, as a
- * string: whether the client holds the row, what its access parent names,
+ * string: whether the client holds the row, what its access parents name,
  * and with `subjects`, the value of each subject field the entity's access
  * rules name. `row` is undefined when the client does not hold the row. Two
  * rows with equal strings give the same {@link ruleRowOf} and
- * {@link parentRefOf}, so a change of the row that keeps the string cannot
+ * {@link parentRefsOf}, so a change of the row that keeps the string cannot
  * change an answer for it.
  */
 export function accessInputsOf(
@@ -393,8 +470,8 @@ export function accessInputsOf(
 	subjects: boolean,
 ): string {
 	if (row === undefined) return '';
-	const parent = parentRefOf(def, row);
-	const inputs: (string | null)[] = [ parent?.entity ?? null, parent?.key ?? null ];
+	const parents = parentRefsOf(def, row) ?? [];
+	const inputs: (string | string[][])[] = [ parents.map((p) => [ p.entity, p.key ]) ];
 	if (subjects) {
 		const rec = row as unknown as Record<string, unknown>;
 		for (const rule of def.accessRules ?? []) {
@@ -408,8 +485,8 @@ export function accessInputsOf(
 }
 
 /**
- * The units a write changes to move a row of `def` to another access parent:
- * the marked field, or the oneof whose members are the cases. Empty for an
+ * The units a write changes to move a row of `def` to other access parents:
+ * each marked field, and each oneof whose members are cases. Empty for an
  * entity without an access parent.
  */
 export function accessParentUnits(def: EntityDef): string[] {
@@ -419,8 +496,8 @@ export function accessParentUnits(def: EntityDef): string[] {
 const parentFields = new WeakMap<DescMessage, readonly DescField[]>();
 
 /**
- * The fields of an entity marked `access_parent`: one field, the members of
- * one oneof, or none.
+ * The fields of an entity marked `access_parent`: singular and repeated
+ * fields, and the members of oneofs, in field order.
  */
 export function accessParentFields(schema: DescMessage): readonly DescField[] {
 	let fields = parentFields.get(schema);
@@ -432,16 +509,17 @@ export function accessParentFields(schema: DescMessage): readonly DescField[] {
 }
 
 /**
- * What a row's access parent names, from the case the row holds. `row` is
+ * What a row's access parents name, from the cases the row holds. `row` is
  * the row's value, or undefined when the row is not held locally.
  */
-export function parentRefOf(def: EntityDef, row: Message | undefined): ParentRef {
+export function parentRefsOf(def: EntityDef, row: Message | undefined): ParentRefs {
 	const fields = accessParentFields(def.schema);
-	if (fields.length === 0) return null;
+	if (fields.length === 0) return [];
 	if (row === undefined) return undefined;
-	for (const field of fields) {
-		const value = fieldValueOf(row as unknown as Record<string, unknown>, field);
-		if (value === undefined || value === null) continue;
+	const out: (AccessRow & { def: EntityDef })[] = [];
+	const seen = new Set<string>();
+	const add = (field: DescField, value: unknown) => {
+		if (value === undefined || value === null) return;
 		// The cases inside one reference message share the field, and only the
 		// active one yields a stub.
 		for (const shape of refShapes(field)) {
@@ -449,10 +527,22 @@ export function parentRefOf(def: EntityDef, row: Message | undefined): ParentRef
 			if (stub === undefined) continue;
 			const target = targetDefOf(shape.targetSchema);
 			const key = keyOf(target, stub);
-			return key === '' ? null : { entity: target.name, key, def: target };
+			const ref = { entity: target.name, key, def: target };
+			if (key !== '' && !seen.has(accessRowId(ref))) {
+				seen.add(accessRowId(ref));
+				out.push(ref);
+			}
+			return;
 		}
+	};
+	for (const field of fields) {
+		const value = fieldValueOf(row as unknown as Record<string, unknown>, field);
+		if (field.fieldKind === 'list') {
+			for (const element of (value ?? []) as unknown[]) add(field, element);
+		} else add(field, value);
 	}
-	return null;
+	const order = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+	return out.sort((a, b) => order(a.entity, b.entity) || order(a.key, b.key));
 }
 
 const targetDefs = new WeakMap<DescMessage, EntityDef>();

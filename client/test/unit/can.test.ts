@@ -25,6 +25,7 @@ import {
 	DraftSchema,
 	FolderSchema,
 	InvoiceSchema,
+	LeafletSchema,
 	PageSchema,
 	PinSchema,
 	PostSchema,
@@ -34,9 +35,12 @@ import {
 	RoomSchema,
 	SettingSchema,
 	SpaceSchema,
+	StoryNoteSchema,
+	StorySchema,
 	TaskSchema,
 	ThreadSchema,
 	TicketSchema,
+	TopicSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { CrudOp, MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import { CallerAccessSchema } from '../../src/gen/syncplane/v1/service_pb.js';
@@ -382,6 +386,88 @@ describe('hasPermission()', () => {
 		expect(await t.client.hasPermission(FolderSchema, 'low', 'view_folders')).toBe('yes');
 		expect(await t.client.hasPermission(FolderSchema, 'top', 'view_folders')).toBe('no');
 		await t.client.close();
+	});
+});
+
+describe('several access parents', () => {
+	const at = (permission: string, entity: string, ...keys: string[]) => ({
+		permission,
+		anchors: [ { entity, keys } ],
+	});
+
+	it('decides through any parent of a row and any row above it', async () => {
+		const t = await createTestClient({
+			entities: [ StorySchema, StoryNoteSchema, LeafletSchema, TopicSchema ],
+		});
+		t.server.put(StorySchema, { id: 's-pc', product: { id: 'p1' }, cycle: { id: 'c1' } });
+		t.server.put(StorySchema, { id: 's-p', product: { id: 'p1' } });
+		t.server.put(StoryNoteSchema, { id: 'n-pc', story: { id: 's-pc' } });
+		t.server.put(StoryNoteSchema, { id: 'n-far', story: { id: 's-far' } });
+		t.server.put(LeafletSchema, { id: 'l-12', shelves: [ { id: 'h1' }, { id: 'h2' } ] });
+		t.server.put(TopicSchema, { id: 'top' });
+		t.server.put(TopicSchema, { id: 'mid', parents: [ { id: 'top' } ] });
+		t.server.put(TopicSchema, { id: 'low', parents: [ { id: 'side' }, { id: 'mid' } ] });
+		t.server.setCallerAccess({
+			permissions: [
+				at('view_stories', 'cycle', 'c1'),
+				at('view_leaflets', 'shelf', 'h2'),
+				at('view_topics', 'topic', 'top'),
+			],
+		});
+		await t.sync();
+		expect(await t.client.hasPermission(StorySchema, 's-pc', 'view_stories')).toBe('yes');
+		expect(await t.client.hasPermission(StorySchema, 's-p', 'view_stories')).toBe('no');
+		expect(await t.client.hasPermission(StoryNoteSchema, 'n-pc', 'view_stories')).toBe('yes');
+		expect(await t.client.hasPermission(StoryNoteSchema, 'n-far', 'view_stories')).toBe('unknown');
+		expect(await t.client.hasPermission(LeafletSchema, 'l-12', 'view_leaflets')).toBe('yes');
+		expect(await t.client.hasPermission(TopicSchema, 'low', 'view_topics')).toBe('yes');
+
+		// A queued write that adds a parent counts where the row will be.
+		await t.client.mutate.patch(StorySchema, 's-p', { cycle: { id: 'c1' } });
+		expect(await t.client.hasPermission(StorySchema, 's-p', 'view_stories')).toBe('yes');
+		await t.client.close();
+	});
+
+	it('checks a create through each parent the row names', async () => {
+		const t = await createTestClient({ entities: [ StorySchema, LeafletSchema ] });
+		t.server.setCallerAccess({
+			permissions: [ at('edit_stories', 'product', 'p1'), at('edit_leaflets', 'shelf', 'h1') ],
+		});
+		await t.sync();
+		expect(await t.client.canCreate(StorySchema, { id: 'n', product: { id: 'p1' } })).toBe('yes');
+		expect(
+			await t.client.canCreate(StorySchema, { id: 'n', product: { id: 'p1' }, cycle: { id: 'c1' } }),
+		)
+			.toBe('no');
+		expect(await t.client.canCreate(LeafletSchema, { id: 'n', shelves: [ { id: 'h1' } ] })).toBe(
+			'yes',
+		);
+		expect(
+			await t.client.canCreate(LeafletSchema, { id: 'n', shelves: [ { id: 'h1' }, { id: 'h2' } ] }),
+		)
+			.toBe('no');
+		await t.client.close();
+
+		const both = await createTestClient({ entities: [ StorySchema ] });
+		both.server.setCallerAccess({
+			permissions: [ {
+				permission: 'edit_stories',
+				anchors: [
+					{ entity: 'product', keys: [ 'p1' ] },
+					{ entity: 'cycle', keys: [ 'c1' ] },
+				],
+			} ],
+		});
+		await both.sync();
+		expect(
+			await both.client.canCreate(StorySchema, {
+				id: 'n',
+				product: { id: 'p1' },
+				cycle: { id: 'c1' },
+			}),
+		)
+			.toBe('yes');
+		await both.client.close();
 	});
 });
 

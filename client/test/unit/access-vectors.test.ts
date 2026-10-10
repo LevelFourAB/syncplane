@@ -10,7 +10,14 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { AccessSummary, type CanAnswer, canAt } from '../../src/access.js';
+import {
+	type AccessChain,
+	type AccessRow,
+	AccessSummary,
+	type CanAnswer,
+	canAt,
+	canAtEach,
+} from '../../src/access.js';
 import { callerAccessOf } from '../../src/testing/access.js';
 
 interface AccessCase {
@@ -19,7 +26,9 @@ interface AccessCase {
 	permission: string;
 	entity: string;
 	key: string;
-	chain: ({ entity: string; key: string } | 'unknown')[];
+	chain?: (AccessRow | 'unknown')[];
+	graph?: { entity: string; key: string; parents: AccessRow[] | 'unknown' }[];
+	each?: boolean;
 	want: CanAnswer;
 }
 
@@ -40,14 +49,32 @@ function summaryOf(access: AccessCase['access']): AccessSummary | undefined {
 	}));
 }
 
+const id = (row: AccessRow) => JSON.stringify([ row.entity, row.key ]);
+
+/** The chain a case describes: a row it does not list has no parents. */
+function chainOf(c: AccessCase): AccessChain {
+	const parents = new Map<string, readonly AccessRow[] | undefined>();
+	let at: AccessRow = { entity: c.entity, key: c.key };
+	for (const row of c.chain ?? []) {
+		if (row === 'unknown') {
+			parents.set(id(at), undefined);
+			break;
+		}
+		parents.set(id(at), [ row ]);
+		at = row;
+	}
+	for (const node of c.graph ?? []) {
+		parents.set(id(node), node.parents === 'unknown' ? undefined : node.parents);
+	}
+	const above = (row: AccessRow) => (parents.has(id(row)) ? parents.get(id(row)) : []);
+	return { parents: above({ entity: c.entity, key: c.key }), above };
+}
+
 describe('access conformance vectors', () => {
 	for (const c of vectors.cases) {
 		it(c.name, () => {
-			const rows = c.chain.filter((r) => r !== 'unknown');
-			const complete = !c.chain.includes('unknown');
-			expect(canAt(summaryOf(c.access), c.permission, c.entity, c.key, { rows, complete })).toBe(
-				c.want,
-			);
+			const decide = c.each ? canAtEach : canAt;
+			expect(decide(summaryOf(c.access), c.permission, c.entity, c.key, chainOf(c))).toBe(c.want);
 		});
 	}
 });

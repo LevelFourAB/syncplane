@@ -163,12 +163,31 @@ type accessVector struct {
 	Entity     string                      `json:"entity"`
 	Key        string                      `json:"key"`
 	Chain      []json.RawMessage           `json:"chain"`
+	Graph      []accessVectorNode          `json:"graph"`
+	Each       bool                        `json:"each"`
 	Want       string                      `json:"want"`
 }
 
 type accessVectorPerm struct {
 	Root    bool                `json:"root"`
 	Anchors map[string][]string `json:"anchors"`
+}
+
+type accessVectorRow struct{ Entity, Key string }
+
+// accessVectorNode is one row of a vector's graph. Parents is a list of rows,
+// or the string "unknown".
+type accessVectorNode struct {
+	Entity  string          `json:"entity"`
+	Key     string          `json:"key"`
+	Parents json.RawMessage `json:"parents"`
+}
+
+// unknown reports whether the vector names a row the client does not hold,
+// which only a client can lack.
+func (c accessVector) unknown() bool {
+	return slices.ContainsFunc(c.Chain, func(r json.RawMessage) bool { return string(r) == `"unknown"` }) ||
+		slices.ContainsFunc(c.Graph, func(n accessVectorNode) bool { return string(n.Parents) == `"unknown"` })
 }
 
 var _ = Describe("access conformance vectors", func() {
@@ -183,7 +202,7 @@ var _ = Describe("access conformance vectors", func() {
 		panic(err)
 	}
 	for _, c := range file.Cases {
-		if c.Access == nil || slices.ContainsFunc(c.Chain, func(r json.RawMessage) bool { return string(r) == `"unknown"` }) {
+		if c.Access == nil || c.unknown() {
 			continue // only a client can lack these inputs
 		}
 		It(c.Name, func() {
@@ -200,23 +219,46 @@ var _ = Describe("access conformance vectors", func() {
 				}
 				set.perms[perm] = a
 			}
-			// The chain is the whole of what the walker reads: every edge is
-			// an override, and the last row's edge is unset.
+			// The rows the vector names are the whole of what the walker
+			// reads: every edge is an override, and a row with no parents in
+			// the vector has an unset edge.
 			chains := newAccessChainsFrom(nil, func(string, string) (storage.Row, error) {
-				Fail("the walk read a row the chain does not name")
+				Fail("the walk read a row the vector does not name")
 				return storage.Row{}, nil
 			}, 32, nil)
 			chains.overrides = map[anchorRow]chainEdge{}
 			at := anchorRow{entity: c.Entity, key: c.Key}
+			chains.overrides[at] = chainEdge{}
 			for _, raw := range c.Chain {
-				var p struct{ Entity, Key string }
+				var p accessVectorRow
 				Expect(json.Unmarshal(raw, &p)).To(Succeed())
 				next := anchorRow{entity: p.Entity, key: p.Key}
-				chains.overrides[at] = chainEdge{parent: next, ok: true}
+				chains.overrides[at] = edgeTo(next)
+				chains.overrides[next] = chainEdge{}
 				at = next
 			}
-			chains.overrides[at] = chainEdge{}
-			got, err := chains.holds(set.perms[c.Permission], &entityInfo{name: c.Entity}, c.Key, nil)
+			for _, n := range c.Graph {
+				var parents []accessVectorRow
+				Expect(json.Unmarshal(n.Parents, &parents)).To(Succeed())
+				rows := make([]anchorRow, len(parents))
+				for i, p := range parents {
+					rows[i] = anchorRow{entity: p.Entity, key: p.Key}
+					if _, ok := chains.overrides[rows[i]]; !ok {
+						chains.overrides[rows[i]] = chainEdge{}
+					}
+				}
+				chains.overrides[anchorRow{entity: n.Entity, key: n.Key}] = edgeTo(rows...)
+			}
+			info := &entityInfo{name: c.Entity}
+			var (
+				got bool
+				err error
+			)
+			if c.Each {
+				got, err = chains.holdsThroughEach(set.perms[c.Permission], info, c.Key, nil)
+			} else {
+				got, err = chains.holds(set.perms[c.Permission], info, c.Key, nil)
+			}
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(c.Want == "yes"))
 		})

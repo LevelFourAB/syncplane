@@ -441,12 +441,14 @@ export class Field<T> {
 
 	/**
 	 * Places each row below the row this reference points at in the access
-	 * model: a permission held at the referenced row applies to this row. An
-	 * entity has at most one access parent, and both it and the referenced
-	 * entity must declare `access`; see {@link EntityOptions.access}.
+	 * model, or below each row a `refList()` points at: a permission held at a
+	 * referenced row applies to this row. An entity can mark several fields,
+	 * and a row then sits below every row they name. Both it and the
+	 * referenced entity must declare `access`; see
+	 * {@link EntityOptions.access}. A grant entity marks one singular field.
 	 *
-	 * Throws unless the field is a singular `ref()`. The server also refuses
-	 * the mark on a protected field.
+	 * Throws unless the field is a `ref()` or a `refList()`. The server also
+	 * refuses the mark on a protected field.
 	 *
 	 * @example
 	 * ```ts
@@ -464,8 +466,8 @@ export class Field<T> {
 	 * ```
 	 */
 	accessParent(): Field<T> {
-		if (this.spec.kind !== 'ref' || this.spec.repeated || this.spec.refWorkspace) {
-			throw new Error('accessParent() is only valid on a ref() field');
+		if (this.spec.kind !== 'ref' || this.spec.refWorkspace) {
+			throw new Error('accessParent() is only valid on a ref() or refList() field');
 		}
 		return new Field<T>({ ...this.spec, accessParent: true });
 	}
@@ -733,7 +735,7 @@ export interface AccessDecl<F extends Fields = Fields> {
  * At least one operation must be `true`. `write` admits `create`, `update`
  * and `delete`. The source is either `requires`, which admits a caller that
  * holds every permission it names at the workspace root, at the row, or at a
- * row up the row's chain of `.accessParent()` references, each at any one of
+ * row above it through its `.accessParent()` references, each at any one of
  * these places, or `admitted: true`, which admits every caller admitted to the
  * workspace. `requires` names no permission twice. To admit a caller that
  * holds either of two permissions, declare two rules. The server's workspace
@@ -744,7 +746,7 @@ export interface AccessDecl<F extends Fields = Fields> {
  * caller's subjects; an empty value never matches, and a permission held at
  * the root does not skip the check. `fields` names the fields an update may
  * change, by accessor name; it is valid only on a rule whose one operation is
- * `update`, and cannot name a key field. A move changes the access parent
+ * `update`, and cannot name a key field. A move changes an access parent
  * field, so a rule with `fields` admits a move only when it lists that field.
  *
  * `when` builds a condition the row must match, with the same field proxy a
@@ -755,7 +757,10 @@ export interface AccessDecl<F extends Fields = Fields> {
  * as it will be stored, so a rule admits moving a row to another access parent
  * only when its source holds at both places, a rule with `subject` admits no
  * update that writes someone else into the subject field, and a rule with
- * `when` admits no update that makes the row fail the condition.
+ * `when` admits no update that makes the row fail the condition. A row with
+ * several access parents shows to the readers of each, so a rule admits a
+ * create, or an update that adds or removes a parent, only when its source
+ * holds through each parent the write adds or removes on its own.
  *
  * @example
  * ```ts
@@ -1110,11 +1115,6 @@ function assertAccess(
 	const access = options?.access;
 	if (access !== undefined) assertAccessRules(where, access, fields);
 	const parents = Object.keys(fields).filter((key) => fields[key]!.spec.accessParent === true);
-	if (parents.length > 1) {
-		throw new Error(
-			`${where}: fields "${parents[0]}" and "${parents[1]}" are both marked accessParent()`,
-		);
-	}
 	if (parents.length > 0 && access === undefined) {
 		throw new Error(
 			`${where}: field "${parents[0]}" is marked accessParent(), but the entity declares no access`,
@@ -1129,6 +1129,12 @@ function assertAccess(
 	if (grant === undefined) return;
 	if (access === undefined) {
 		throw new Error(`${where}: a grant entity must declare access`);
+	}
+	// A grant row applies at one anchor.
+	if (parents.length > 1 || parents.some((key) => fields[key]!.spec.repeated)) {
+		throw new Error(
+			`${where}: a grant entity has one access parent: one singular ref() marked accessParent()`,
+		);
 	}
 	for (const part of [ 'subject', 'role' ] as const) {
 		const spec = fields[grant[part]]?.spec;
