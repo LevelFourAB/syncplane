@@ -2079,7 +2079,8 @@ Exported functions and types:
 - `createTestClient(opts: TestClientOptions): Promise<TestClient>`: Returns an instance configured with an in-memory server.
 - `createTestServer(opts?: TestServerOptions): TestServer`: Creates a shared in-memory sync server.
 - `TestClient`: Implements `client`, `db`, `server`, `net` (`offline()`, `online()`, `isOffline`), `clientId`, `rejections`, `sync()`, and `close()`.
-- `TestServer`: Implements `transport()`, `reject(match?, code?, message?)`, `holdPushes()`, `gc(workspace?)`, `revoke(id)`, `withholdAccess(id)`, `restore(id)`, `mutator(name, m)`, `setCallerAccess(access, { workspace? })`, and data inspection helpers (`put`, `del`, `get`, `rows`). `setCallerAccess` takes a `TestCallerAccess`: the caller's `subjects`, and for each permission it holds, `root: true` or the `anchors` rows. It sets the access summary every later bootstrap and pull carries, which `can` and `useCan` answer from; the test server enforces none of it.
+- `TestServer`: Implements `transport()`, `reject(match?, code?, message?)`, `holdPushes()`, `gc(workspace?)`, `revoke(id)`, `withholdAccess(id)`, `restore(id)`, `mutator(name, m)`, `setCallerAccess(access, { workspace? })`, and data inspection helpers (`put`, `del`, `get`, `rows`). `setCallerAccess` takes a `TestCallerAccess`: the caller's `subjects`, the `roles` it holds, and the `permissions` it holds outside a role. A role is held at the workspace root, or `at` a row (`[ ProjectSchema, 'p1' ]`), and grants the permissions of its declaration and of its `includes`. `setCallerAccess` throws for a role that no registered entity declares, and for an `at` row that the role's grant rows cannot point at. A permission is held at `root: true` or at the `anchors` rows. The call sets the access summary that every later bootstrap and pull carries, which `can` and `useCan` answer from. The test server does not check writes against it.
+- `TestServerOptions.serve`: `'all'` (default) sends every row. `'readable'` sends only the rows that a read rule lets the caller read, as the real server does. With it, a client does not hold the rows the caller cannot read, so `can` answers `'unknown'` for them.
 - `Rejection`: Error class thrown inside test mutators to simulate server rejections.
 - `DEFAULT_WORKSPACE`: Constant string `'main'`.
 
@@ -2087,7 +2088,8 @@ Exported functions and types:
 
 The testing kit does not simulate the following features:
 
-- Partial-sync predicates, windows, and follows (every row syncs).
+- Partial-sync predicates, windows, and follows (every row syncs, or every readable row with `serve: 'readable'`).
+- Write checks of the access model (use `server.reject` to refuse a write).
 - Server queries (`queryServer` and related functions fail).
 - Presence rooms.
 - Multi-tab behavior (Node.js does not provide a shared lock manager).

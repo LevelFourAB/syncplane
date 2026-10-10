@@ -699,4 +699,4 @@ function EditButton({ taskId }: { taskId: string }) {
 
 See [Predicting access](../reference/typescript-client.md#predicting-access).
 
-In tests that use `createTestClient`, set the summary the client receives with `server.setCallerAccess(...)`.
+In tests that use `createTestClient`, give the caller roles with `server.setCallerAccess({ roles: [ { role: 'project_admin', at: [ ProjectSchema, 'p1' ] } ] })`. See [Testing your app without a server](test-your-app.md).

@@ -131,6 +131,28 @@ Before you begin, ensure you have:
 
    Throw `Rejection` from a mutator to reject the mutation and discard staged writes.
 
+9. Test access predictions:
+
+   Give the caller roles with `server.setCallerAccess`. The test server finds each role in the `grant` options of the registered entities, and gives the permissions of the role and of its `includes`. Set `serve: 'readable'` to send the client only the rows the caller can read, as the real server does:
+
+   ```ts
+   const server = createTestServer({ entities, serve: 'readable' });
+   server.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+   server.put(TaskSchema, { id: 't2', project: { id: 'p2' } });
+   server.setCallerAccess({
+   	subjects: [ 'ann' ],
+   	roles: [ { role: 'project_admin', at: [ ProjectSchema, 'p1' ] } ],
+   });
+   const t = await createTestClient({ server });
+   await t.sync();
+
+   expect(await t.client.can(TaskSchema, 't1', 'update')).toBe('yes');
+   expect(await t.db.task.get('t2')).toBeUndefined(); // not readable, not sent
+   expect(await t.client.can(TaskSchema, 't2', 'read')).toBe('unknown');
+   ```
+
+   Omit `at` to hold a role at the workspace root, as a global role does. A misspelled role, or an `at` row that the role's grant rows cannot point at, throws. Call `setCallerAccess` again to change the access: on the next sync, the client receives the rows the caller can now read and loses the rows it cannot. The test server does not check writes against the access; use `server.reject` to refuse a write.
+
 ## Confirming the results
 
 Run your test runner to execute the test suite. Verify that all sync cycles complete and all assertions pass without unhandled rejections or timeouts.

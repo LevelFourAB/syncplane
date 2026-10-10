@@ -95,7 +95,7 @@ describe('useHasPermission', () => {
 		await t.sync();
 
 		const { result } = renderHook(() => useHasPermission(TaskSchema, 't1', 'edit_tasks'), {
-			wrapper: wrapper(t.client as unknown as SyncClient),
+			wrapper: wrapper(t.client),
 		});
 		await waitFor(() => expect(result.current).toBe('no'));
 
@@ -113,7 +113,7 @@ describe('useHasPermission', () => {
 	it('is unknown before any summary arrives', async () => {
 		const t = await createTestClient({ entities });
 		const { result } = renderHook(() => useHasPermission(TaskSchema, 't1', 'view_tasks'), {
-			wrapper: wrapper(t.client as unknown as SyncClient),
+			wrapper: wrapper(t.client),
 		});
 		await act(async () => {
 			await new Promise((r) => setTimeout(r, 0));
@@ -142,7 +142,7 @@ describe('useCan', () => {
 		await t.sync();
 
 		const { result } = renderHook(() => useCan(PostSchema, 'po', 'update', { fields: [ 'body' ] }), {
-			wrapper: wrapper(t.client as unknown as SyncClient),
+			wrapper: wrapper(t.client),
 		});
 		await waitFor(() => expect(result.current).toBe('yes'));
 
@@ -165,7 +165,7 @@ describe('useCan', () => {
 		t.server.setCallerAccess(undefined);
 
 		const { result } = renderHook(() => useCan(PostSchema, 'po', 'update', { fields: [ 'body' ] }), {
-			wrapper: wrapper(t.client as unknown as SyncClient),
+			wrapper: wrapper(t.client),
 		});
 		await waitFor(() => expect(result.current).toBe('yes'));
 
@@ -194,7 +194,7 @@ describe('useCan', () => {
 		t.server.reject({ entity: RoomMemberSchema });
 
 		const { result } = renderHook(() => useCan(PostSchema, 'po', 'update', { fields: [ 'body' ] }), {
-			wrapper: wrapper(t.client as unknown as SyncClient),
+			wrapper: wrapper(t.client),
 		});
 		await waitFor(() => expect(result.current).toBe('yes'));
 
@@ -222,9 +222,9 @@ describe('useCan', () => {
 		await t.sync();
 		t.server.setCallerAccess(undefined);
 
-		const asks = countAsks(t.client as unknown as SyncClient);
+		const asks = countAsks(t.client);
 		const { result } = renderHook(() => useCan(PostSchema, 'po', 'update', { fields: [ 'body' ] }), {
-			wrapper: wrapper(t.client as unknown as SyncClient),
+			wrapper: wrapper(t.client),
 		});
 		await waitFor(() => expect(result.current).toBe('yes'));
 		await settle();
@@ -253,7 +253,7 @@ describe('access hooks on a row', () => {
 		t.server.setCallerAccess(posting('view_posts', 'post'));
 		await t.sync();
 		t.server.setCallerAccess(undefined);
-		const client = t.client as unknown as SyncClient;
+		const client = t.client;
 		return { t, client, asks: countAsks(client) };
 	}
 
@@ -406,7 +406,7 @@ describe('useHasPermission below an anchor', () => {
 		t.server.setCallerAccess(undefined);
 
 		const { result } = renderHook(() => useHasPermission(CommentSchema, 'c1', 'view_tasks'), {
-			wrapper: wrapper(t.client as unknown as SyncClient),
+			wrapper: wrapper(t.client),
 		});
 		await waitFor(() => expect(result.current).toBe('yes'));
 
@@ -428,7 +428,7 @@ describe('useCanCreate', () => {
 		await t.sync();
 
 		const { result } = renderHook(() => useCanCreate(PostSchema, { id: 'new', room: { id: 'r1' } }), {
-			wrapper: wrapper(t.client as unknown as SyncClient),
+			wrapper: wrapper(t.client),
 		});
 		await waitFor(() => expect(result.current).toBe('no'));
 
