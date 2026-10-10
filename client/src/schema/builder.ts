@@ -60,6 +60,7 @@ import {
 	AccessParentOptionsSchema,
 	type AccessRule,
 	AccessRuleSchema,
+	AccessWithinSchema,
 	AdmittedCallerSchema,
 	CreatorOptionsSchema,
 	entity as entityExt,
@@ -808,11 +809,90 @@ export type AccessRuleDecl<F extends Fields = Fields> =
 		subject?: string;
 		fields?: string[];
 		when?(row: QueryRef<RowOf<F>>): Cond;
+		within?: WithinDecl | readonly WithinDecl[];
 	}
 	& (
 		| { requires: string | readonly [string, ...string[]]; admitted?: never }
 		| { admitted: true; requires?: never }
 	);
+
+/**
+ * One entry of an access rule's `within`, mirroring syncplane.v1.AccessWithin:
+ * the rule admits only rows that are, or sit below, a row of `entity` that
+ * passes every check the entry sets. A row passes when the row itself, or any
+ * row above it through `.accessParent()` references, is such a row.
+ *
+ * `entity` names an entity of the same schema whose rows the rule's rows can
+ * sit below, or the rule's own entity when its rows sit below rows of their
+ * own. `subject` names a singular `text()` field of that entity, by accessor
+ * name, that must hold one of the caller's subjects; `when` is a condition
+ * that row must match, and reads only that row. At least one of the two is
+ * set. Build an entry with `when` through {@link within}, which types the
+ * condition against the entity's fields. A permission held at the root does
+ * not skip the check.
+ *
+ * A write to a row that changes whether it passes changes what the rows below
+ * it show, as a move does, so it needs a read rule of each entity whose rows
+ * can sit below it. In a recursive entity, a row that fails does not hide the
+ * rows below it when a row above it passes.
+ *
+ * @example
+ * Comments the owner of their doc reads and writes:
+ * ```ts
+ * const comment = schema.entity('comment', {
+ *   id: schema.text().key(),
+ *   doc: schema.ref(() => doc).accessParent(),
+ * }, {
+ *   access: {
+ *     allow: [
+ *       { read: true, write: true, admitted: true, within: { entity: 'doc', subject: 'ownerId' } },
+ *     ],
+ *   },
+ * });
+ * ```
+ */
+export interface WithinDecl<F extends Fields = Fields> {
+	entity: string;
+	subject?: Extract<keyof F, string>;
+	when?(row: QueryRef<RowOf<F>>): Cond;
+}
+
+/**
+ * Builds a within entry on rows of `target`, with `when` typed against its
+ * fields. See {@link WithinDecl}.
+ *
+ * @example
+ * Tasks that clerks read unless their project is private, and that nobody
+ * edits while the project is archived:
+ * ```ts
+ * const task = schema.entity('task', {
+ *   id: schema.text().key(),
+ *   project: schema.ref(() => project).accessParent(),
+ * }, {
+ *   access: {
+ *     allow: [
+ *       { read: true, requires: 'view_tasks' },
+ *       {
+ *         read: true,
+ *         requires: 'view_open_tasks',
+ *         within: schema.within(project, { when: (p) => p.private.eq(false) }),
+ *       },
+ *       {
+ *         write: true,
+ *         requires: 'edit_tasks',
+ *         within: schema.within(project, { when: (p) => p.archived.eq(false) }),
+ *       },
+ *     ],
+ *   },
+ * });
+ * ```
+ */
+export function within<F extends Fields>(
+	target: EntitySchema<F>,
+	checks: Omit<WithinDecl<F>, 'entity'>,
+): WithinDecl {
+	return { ...checks, entity: target.name } as WithinDecl;
+}
 
 /**
  * The roles an entity's rows grant, mirroring syncplane.v1.GrantOptions. Each
@@ -1285,16 +1365,18 @@ function assertAccessRules(where: string, access: AccessDecl, fields: Fields): v
 				listed.add(name);
 			}
 		}
-		const when = whenOf(at, rule, fields);
+		const when = whenOf(at, rule.when, fields);
+		const within = withinKeysOf(at, rule);
 		// The key is the rule as the proto message holds it: an operation left
 		// unset and one set to false encode the same, so they must collide, and
-		// the order of a requires or a fields list does not count.
+		// the order of a requires, a fields or a within list does not count.
 		const key = JSON.stringify([
 			...ACCESS_OPERATIONS.map((op) => rule[op] === true),
 			requires === undefined ? null : [ ...requires ].sort(),
 			rule.subject ?? null,
 			rule.fields === undefined ? null : [ ...rule.fields ].sort(),
 			when === undefined ? null : toJson(ConditionSchema, when),
+			within,
 		]);
 		const first = seen.get(key);
 		if (first !== undefined) {
@@ -1304,20 +1386,92 @@ function assertAccessRules(where: string, access: AccessDecl, fields: Fields): v
 	});
 }
 
+/** A rule's within entries as a list. */
+function withinListOf(rule: AccessRuleDecl): readonly WithinDecl[] {
+	const within = rule.within;
+	if (within === undefined) return [];
+	return Array.isArray(within) ? within : [ within as WithinDecl ];
+}
+
+/**
+ * Checks what a rule's within entries say by themselves, and returns a key for
+ * each, sorted: an entity and at least one check, and no entry twice. That the
+ * entity is in the schema and its fields fit the checks is
+ * validateWithinTargets's to check. `at` names the rule in an error.
+ */
+function withinKeysOf(at: string, rule: AccessRuleDecl): string[] {
+	const keys: string[] = [];
+	withinListOf(rule).forEach((w, j) => {
+		const where = `${at} within[${j}]`;
+		if (!w.entity) throw new Error(`${where}: names no entity`);
+		validateEntityName(w.entity, where);
+		if (w.subject === undefined && w.when === undefined) {
+			throw new Error(`${where}: sets no check; set subject or when`);
+		}
+		// The condition is keyed as built, before its paths are lowered, which
+		// needs the entity's fields.
+		const key = JSON.stringify([
+			w.entity,
+			w.subject ?? null,
+			w.when === undefined ? null : w.when(rootRef()),
+		]);
+		if (keys.includes(key)) throw new Error(`${where}: repeats an earlier entry`);
+		keys.push(key);
+	});
+	return keys.sort();
+}
+
+/**
+ * Checks each within entry of every rule against the entity it names: one of
+ * `entities`, with a singular `text()` subject field, and a condition over its
+ * fields that reads only its row. Whether the rule's rows can sit below that
+ * entity's rows is the server's to check at registration.
+ */
+function validateWithinTargets(entities: readonly EntitySchema[]): void {
+	const byName = new Map(entities.map((e) => [ e.name, e ]));
+	for (const e of entities) {
+		e.access?.allow.forEach((rule, i) => {
+			withinListOf(rule).forEach((w, j) => {
+				const where = `entity "${e.name}" access.allow[${i}] within[${j}]`;
+				const target = byName.get(w.entity);
+				if (target === undefined) {
+					throw new Error(`${where}: names entity "${w.entity}", which is not part of this schema`);
+				}
+				if (w.subject !== undefined) {
+					const spec = target.fields[w.subject]?.spec;
+					if (spec === undefined) {
+						throw new Error(
+							`${where}: subject field "${w.subject}" is not declared on entity "${w.entity}"`,
+						);
+					}
+					if (spec.kind !== 'scalar' || spec.scalar !== 'string' || spec.repeated) {
+						throw new Error(`${where}: subject field "${w.subject}" must be a singular text() field`);
+					}
+				}
+				whenOf(where, w.when, target.fields);
+			});
+		});
+	}
+}
+
 /** The permissions a rule requires as a list, `undefined` when it sets none. */
 function requiresOf(rule: AccessRuleDecl): readonly string[] | undefined {
 	return typeof rule.requires === 'string' ? [ rule.requires ] : rule.requires;
 }
 
 /**
- * Builds a rule's `when` condition over the entity's `fields` and lowers its
- * accessor-name paths to proto names, as the server reads them. Refuses a
+ * Builds a `when` condition over the `fields` of the row it reads and lowers
+ * its accessor-name paths to proto names, as the server reads them. Refuses a
  * condition that reads anything but the row, which the server refuses at
  * registration. `at` names the rule in an error.
  */
-function whenOf(at: string, rule: AccessRuleDecl, fields: Fields): Condition | undefined {
-	if (rule.when === undefined) return undefined;
-	const cond = rule.when(rootRef());
+function whenOf(
+	at: string,
+	build: ((row: QueryRef<RowOf<Fields>>) => Cond) | undefined,
+	fields: Fields,
+): Condition | undefined {
+	if (build === undefined) return undefined;
+	const cond = build(rootRef());
 	const refuse = (c: Cond): void => {
 		switch (c.kind) {
 			case 'rel':
@@ -1499,6 +1653,7 @@ export function defineSchema(...entities: EntitySchema[]): SchemaBundle {
 		seen.add(e.name);
 	}
 	validateRefTargets(entities);
+	validateWithinTargets(entities);
 
 	const fdset = buildSet(entities);
 	let registry: FileRegistry | undefined;
@@ -1569,12 +1724,20 @@ function oneSchemaFile(entities: readonly EntitySchema[]): FileDescriptorProto {
 		package: DYNAMIC_PACKAGE,
 		syntax: 'proto3',
 		dependency: [ 'syncplane/v1/options.proto' ],
-		messageType: entities.map(entityMessageOf),
+		messageType: entities.map((e) => entityMessageOf(e, entities)),
 	});
 }
 
-/** Lowers one access rule of an entity with `fields` to its syncplane.v1.AccessRule. */
-function accessRuleOf(rule: AccessRuleDecl, fields: Fields): AccessRule {
+/**
+ * Lowers one access rule of an entity with `fields` to its
+ * syncplane.v1.AccessRule. `entities` are the schema's, which within entries
+ * name.
+ */
+function accessRuleOf(
+	rule: AccessRuleDecl,
+	fields: Fields,
+	entities: readonly EntitySchema[],
+): AccessRule {
 	return create(AccessRuleSchema, {
 		read: rule.read === true,
 		create: rule.create === true,
@@ -1586,12 +1749,23 @@ function accessRuleOf(rule: AccessRuleDecl, fields: Fields): AccessRule {
 		// Accessor names lower to proto names, as a grant's fields do.
 		subject: rule.subject === undefined ? '' : snakeCase(rule.subject),
 		fields: (rule.fields ?? []).map(snakeCase),
-		when: whenOf('', rule, fields),
+		when: whenOf('', rule.when, fields),
+		within: withinListOf(rule).map((w) => {
+			const target = entities.find((e) => e.name === w.entity)!;
+			return create(AccessWithinSchema, {
+				entity: w.entity,
+				subject: w.subject === undefined ? '' : snakeCase(w.subject),
+				when: whenOf('', w.when, target.fields),
+			});
+		}),
 	});
 }
 
-/** Lowers one entity to a top-level DescriptorProto with (syncplane.v1.entity). */
-function entityMessageOf(e: EntitySchema): DescriptorProto {
+/**
+ * Lowers one entity to a top-level DescriptorProto with (syncplane.v1.entity).
+ * `entities` are the schema's.
+ */
+function entityMessageOf(e: EntitySchema, entities: readonly EntitySchema[]): DescriptorProto {
 	const fullName = `${DYNAMIC_PACKAGE}.${pascalCase(e.name)}`;
 	const built = buildMessage(pascalCase(e.name), fullName, e.fields);
 
@@ -1608,7 +1782,7 @@ function entityMessageOf(e: EntitySchema): DescriptorProto {
 			keyFields: keyFieldNames,
 			...(e.access === undefined ? {} : {
 				access: create(AccessOptionsSchema, {
-					allow: e.access.allow.map((r) => accessRuleOf(r, e.fields)),
+					allow: e.access.allow.map((r) => accessRuleOf(r, e.fields, entities)),
 				}),
 			}),
 			...(e.grant === undefined ? {} : {

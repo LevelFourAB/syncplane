@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the decision an entity's access rules make on one operation: the server's write checks (engine/server/accesswrite.go: txAccess.admits and admitsUpdate) and the client's can() (client/src/access.ts: decideRules) must agree on every case the server can decide. `rules` are an entity's (syncplane.v1.entity).access rules: the operations each names (`write` covers create, update and delete), its source (`requires`, the permissions a caller must hold together, or `admitted: true` for every admitted caller), and its checks (`subject`, the field that must name one of the caller's `subjects`, `fields`, the units an update may change, and `when`, a name that stands for the rule's condition on the row). `row` is the row the operation reads or deletes, the row a create will store, or the stored row of an update; `final` is the row an update will store, and `changed` the units the update changes, null for an update of fields that no fields list covers. For each row, `held` says whether the caller holds each permission at the row or at a row up its chain of access parents, `fields` gives the value of each subject field, and `matches` says whether the row matches each condition. testdata/queryeval pins how a condition evaluates, so these cases name a condition rather than spell one out. A permission missing from `held` is held nowhere. A null in `held`, `fields` or `matches` is an input the client cannot know, such as a parent row it does not hold; the server always knows every input, so it checks only the cases without a null. A rule admits an operation it names when the caller holds each permission in `requires` and its subject and when checks hold on the row; an update needs one rule whose fields check allows `changed` to admit both `row` and `final`. The answer is \"yes\" when one rule admits the operation, \"no\" when every rule refuses it, and \"unknown\" otherwise.",
+	"comment": "Shared conformance vectors for the decision an entity's access rules make on one operation: the server's write checks (engine/server/accesswrite.go: txAccess.admits and admitsUpdate) and the client's can() (client/src/access.ts: decideRules) must agree on every case the server can decide. `rules` are an entity's (syncplane.v1.entity).access rules: the operations each names (`write` covers create, update and delete), its source (`requires`, the permissions a caller must hold together, or `admitted: true` for every admitted caller), and its checks (`subject`, the field that must name one of the caller's `subjects`, `fields`, the units an update may change, `when`, a name that stands for the rule's condition on the row, and `within`, names that stand for the rule's within entries). `row` is the row the operation reads or deletes, the row a create will store, or the stored row of an update; `final` is the row an update will store, and `changed` the units the update changes, null for an update of fields that no fields list covers. For each row, `held` says whether the caller holds each permission at the row or at a row up its chain of access parents, `fields` gives the value of each subject field, `matches` says whether the row matches each condition, and `within` whether the row sits within a row that passes each within entry: the row itself or a row above it (testdata/access/within.json pins that walk). testdata/queryeval pins how a condition evaluates, so these cases name a condition rather than spell one out. A permission missing from `held` is held nowhere. A null in `held`, `fields`, `matches` or `within` is an input the client cannot know, such as a parent row it does not hold; the server always knows every input, so it checks only the cases without a null. A rule admits an operation it names when the caller holds each permission in `requires` and its subject and when checks hold on the row; an update needs one rule whose fields check allows `changed` to admit both `row` and `final`. The answer is \"yes\" when one rule admits the operation, \"no\" when every rule refuses it, and \"unknown\" otherwise.",
 	"cases": [
 		{
 			"name": "a read rule admits a caller who holds its permission",
@@ -1997,6 +1997,295 @@
 					"owner_id": "bob"
 				}
 			},
+			"want": "no"
+		},
+		{
+			"name": "a within entry admits a row that sits within a row that passes it",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_open_tasks"
+					],
+					"within": [
+						"open_project"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_open_tasks": true
+				},
+				"fields": {},
+				"within": {
+					"open_project": true
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a within entry refuses a row that sits within no row that passes it, wherever the permission is held",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_open_tasks"
+					],
+					"within": [
+						"open_project"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_open_tasks": true
+				},
+				"fields": {},
+				"within": {
+					"open_project": false
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a within entry the client cannot decide leaves the answer unknown",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_open_tasks"
+					],
+					"within": [
+						"open_project"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_open_tasks": true
+				},
+				"fields": {},
+				"within": {
+					"open_project": null
+				}
+			},
+			"want": "unknown"
+		},
+		{
+			"name": "a rule without the within entry admits where the rule with it refuses",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_open_tasks"
+					],
+					"within": [
+						"open_project"
+					]
+				},
+				{
+					"read": true,
+					"requires": [
+						"view_tasks"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_open_tasks": true,
+					"view_tasks": true
+				},
+				"fields": {},
+				"within": {
+					"open_project": false
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "within entries of one rule must all hold",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"admitted": true,
+					"within": [
+						"open_project",
+						"owned_doc"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {},
+				"fields": {},
+				"within": {
+					"open_project": true,
+					"owned_doc": false
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "an admitted rule with a within entry admits a row within a row that passes it",
+			"op": "delete",
+			"rules": [
+				{
+					"delete": true,
+					"admitted": true,
+					"within": [
+						"owned_doc"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {},
+				"fields": {},
+				"within": {
+					"owned_doc": true
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "an update needs the within entry on the stored row and on the row as it will be stored",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"requires": [
+						"edit_tasks"
+					],
+					"within": [
+						"open_project"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit_tasks": true
+				},
+				"fields": {},
+				"within": {
+					"open_project": true
+				}
+			},
+			"final": {
+				"held": {
+					"edit_tasks": true
+				},
+				"fields": {},
+				"within": {
+					"open_project": false
+				}
+			},
+			"changed": [
+				"project"
+			],
+			"want": "no"
+		},
+		{
+			"name": "an update within a row that passes on both sides is admitted",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"requires": [
+						"edit_tasks"
+					],
+					"within": [
+						"open_project"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit_tasks": true
+				},
+				"fields": {},
+				"within": {
+					"open_project": true
+				}
+			},
+			"final": {
+				"held": {
+					"edit_tasks": true
+				},
+				"fields": {},
+				"within": {
+					"open_project": true
+				}
+			},
+			"changed": [
+				"title"
+			],
+			"want": "yes"
+		},
+		{
+			"name": "an update out of a row that fails the within entry is refused, though the new place passes",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"requires": [
+						"edit_tasks"
+					],
+					"within": [
+						"open_project"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit_tasks": true
+				},
+				"fields": {},
+				"within": {
+					"open_project": false
+				}
+			},
+			"final": {
+				"held": {
+					"edit_tasks": true
+				},
+				"fields": {},
+				"within": {
+					"open_project": true
+				}
+			},
+			"changed": [
+				"project"
+			],
 			"want": "no"
 		}
 	]

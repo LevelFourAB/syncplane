@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -177,7 +178,8 @@ type readInputs struct {
 	parents string
 	// checks holds, for each read rule with a check on the row in rule order,
 	// the value of its subject field quoted and whether the row matches its
-	// when condition.
+	// when condition, then what within entries on the row's own entity read
+	// of it.
 	checks string
 }
 
@@ -196,6 +198,7 @@ func readInputsOf(model *accessModel, info *entityInfo, row proto.Message) readI
 	in := readInputs{decides: true, parents: edgeOf(model, info, r).key()}
 	if len(checked) > 0 {
 		var b strings.Builder
+		self := false
 		for _, rule := range checked {
 			if rule.subject != nil {
 				b.WriteString(strconv.Quote(r.Get(rule.subject).String()))
@@ -203,6 +206,10 @@ func readInputsOf(model *accessModel, info *entityInfo, row proto.Message) readI
 			if rule.when != nil {
 				b.WriteString(strconv.FormatBool(rule.when.Eval(r)))
 			}
+			self = self || slices.ContainsFunc(rule.within, func(w withinEntry) bool { return w.entity == info.name })
+		}
+		if self {
+			b.WriteString(withinStateOf(model, info, r).key())
 		}
 		in.checks = b.String()
 	}

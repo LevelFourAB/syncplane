@@ -1378,3 +1378,266 @@ message Leaflet {
 		[(syncplane.v1.field_behavior) = { access_parent: {} }];
 	string title = 3;
 }
+
+// A role on the whole workspace, the top of the within schema below: Clerk,
+// Dossier, DossierMember, Matter, MatterWatcher, Memo, Binder and Sheet,
+// registered apart from the schemas above.
+message Clerk {
+	option (syncplane.v1.entity) = {
+		name: "clerk"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "clerk"
+					grants: [ "view_open_dossiers", "view_open_matters" ]
+				},
+				{
+					name: "registrar"
+					grants: [
+						"manage_clerks",
+						"view_dossiers",
+						"edit_dossiers",
+						"manage_dossier_members",
+						"view_matters",
+						"edit_matters",
+						"view_binders",
+						"edit_binders"
+					]
+				}
+			]
+		}
+		access: {
+			allow: [
+				{ read: true requires: "manage_clerks" },
+				{ write: true requires: "manage_clerks" }
+			]
+		}
+	};
+	string id = 1;
+	string user_id = 2;
+	string role = 3;
+}
+
+// A dossier: a private one hides its matters and memos from clerks, who read
+// matters through the workspace root, and an archived one makes its matters
+// read-only. Its owner reads and writes the memos below it.
+message Dossier {
+	option (syncplane.v1.entity) = {
+		name: "dossier"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_dossiers" },
+				{
+					read: true
+					requires: "view_open_dossiers"
+					when: {
+						cmp: {
+							path: [ "private" ]
+							op: CMP_OP_EQ
+							value: { bool_value: false }
+						}
+					}
+				},
+				{ update: true requires: "edit_dossiers" }
+			]
+		}
+	};
+	string id = 1;
+	string title = 2;
+	bool private = 3;
+	bool archived = 4;
+	string owner_id = 5 [(syncplane.v1.field_behavior) = { indexed: true }];
+}
+
+// A role on one dossier and the rows below it.
+message DossierMember {
+	option (syncplane.v1.entity) = {
+		name: "dossier_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "dossier_member"
+					grants: [ "view_dossiers", "view_matters", "edit_matters" ]
+				},
+				{
+					name: "dossier_editor"
+					grants: [ "view_dossiers", "edit_dossiers" ]
+				}
+			]
+		}
+		access: {
+			allow: [
+				{ read: true requires: "view_dossiers" },
+				{ write: true requires: "manage_dossier_members" }
+			]
+		}
+	};
+	string id = 1;
+	Dossier dossier = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string user_id = 3;
+	string role = 4;
+}
+
+// A matter in a dossier.
+message Matter {
+	option (syncplane.v1.entity) = {
+		name: "matter"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_matters" },
+				{
+					read: true
+					requires: "view_open_matters"
+					within: {
+						entity: "dossier"
+						when: {
+							cmp: {
+								path: [ "private" ]
+								op: CMP_OP_EQ
+								value: { bool_value: false }
+							}
+						}
+					}
+				},
+				{
+					write: true
+					requires: "edit_matters"
+					within: {
+						entity: "dossier"
+						when: {
+							cmp: {
+								path: [ "archived" ]
+								op: CMP_OP_EQ
+								value: { bool_value: false }
+							}
+						}
+					}
+				}
+			]
+		}
+	};
+	string id = 1;
+	Dossier dossier = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string title = 3;
+}
+
+// A role on one matter: a watcher reads it and its memos while its dossier is
+// not private.
+message MatterWatcher {
+	option (syncplane.v1.entity) = {
+		name: "matter_watcher"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [ {
+				name: "matter_watcher"
+				grants: [ "view_open_matters" ]
+			} ]
+		}
+		access: {
+			allow: [
+				{ read: true requires: "view_matters" },
+				{ write: true requires: "edit_matters" }
+			]
+		}
+	};
+	string id = 1;
+	Matter matter = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string user_id = 3;
+	string role = 4;
+}
+
+// A memo on a matter, two access_parent hops below its dossier, whose body is
+// collaborative text.
+message Memo {
+	option (syncplane.v1.entity) = {
+		name: "memo"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_matters" },
+				{
+					read: true
+					requires: "view_open_matters"
+					within: {
+						entity: "dossier"
+						when: {
+							cmp: {
+								path: [ "private" ]
+								op: CMP_OP_EQ
+								value: { bool_value: false }
+							}
+						}
+					}
+				},
+				{
+					read: true
+					write: true
+					admitted: {}
+					within: { entity: "dossier" subject: "owner_id" }
+				}
+			]
+		}
+	};
+	string id = 1;
+	Matter matter = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	bytes body = 3 [(syncplane.v1.field_behavior) = { text: true }];
+	string title = 4;
+}
+
+// A binder inside a binder, or at the top when parent is unset. Its owner
+// reads it and everything below it, and edits it.
+message Binder {
+	option (syncplane.v1.entity) = {
+		name: "binder"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_binders" },
+				{ write: true requires: "edit_binders" },
+				{
+					read: true
+					update: true
+					admitted: {}
+					within: { entity: "binder" subject: "owner_id" }
+				}
+			]
+		}
+	};
+	string id = 1;
+	Binder parent = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string owner_id = 3 [(syncplane.v1.field_behavior) = { indexed: true }];
+	string title = 4;
+}
+
+// A sheet in a binder.
+message Sheet {
+	option (syncplane.v1.entity) = {
+		name: "sheet"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_binders" },
+				{ write: true requires: "edit_binders" },
+				{
+					read: true
+					write: true
+					admitted: {}
+					within: { entity: "binder" subject: "owner_id" }
+				}
+			]
+		}
+	};
+	string id = 1;
+	Binder binder = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string title = 3;
+}

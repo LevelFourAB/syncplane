@@ -179,9 +179,10 @@ func (a *txAccess) holdsAt(tx storage.ReadTx, perm string, at *anchorRow) (bool,
 // admitted caller holds for every caller that passed the workspace gate,
 // which is every caller with an access. A rule with a subject check also
 // needs the row's subject field to hold one of the caller's subjects, and a
-// rule with a when check needs the row to match its condition. row is the
-// row's decoded value, or nil for a row that does not exist, which no check
-// on the row admits.
+// rule with a when check needs the row to match its condition, and a rule
+// with within entries needs the row to sit within a row that passes each. row
+// is the row's decoded value, or nil for a row that does not exist, which no
+// check on the row and no within entry admits.
 func (a *txAccess) admits(tx storage.ReadTx, rule accessRule, info *entityInfo, key string, row protoreflect.Message) (bool, error) {
 	if rule.checksRow() && (row == nil || !rule.rowHolds(a.caller.subjects, row)) {
 		return false, nil
@@ -190,6 +191,9 @@ func (a *txAccess) admits(tx storage.ReadTx, rule accessRule, info *entityInfo, 
 		if ok, err := a.holds(tx, p, info, key, row); err != nil || !ok {
 			return false, err
 		}
+	}
+	if rule.checksAbove() {
+		return a.chainsOf(tx).withinAll(rule, a.caller.subjects, info, key, row)
 	}
 	return true, nil
 }
@@ -553,7 +557,9 @@ func (g *writeGate) beginAccessWrite(
 // hold through each parent the write adds and each one it removes. A move
 // also needs, where the row sits before it, the right to read every entity
 // whose rows can sit below it: the rows below move with it, and the caller
-// would otherwise show them to whoever reads at the new parent. On
+// would otherwise show them to whoever reads at the new parent. An update
+// that changes what a within entry reads of the row needs the same, since it
+// changes what the rows below show to whoever reads them. On
 // a grant entity, a write that can change what the row grants also needs
 // every permission of the new role at the new anchor, so a caller cannot
 // grant more than it holds.
@@ -596,7 +602,7 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 				// Unmoved, the row sits on the chain the rule's source was
 				// checked against, so only a check on the row can answer
 				// differently.
-				if !moved && !rule.checksRow() {
+				if !moved && !rule.checksRow() && !rule.checksAbove() {
 					return true, nil
 				}
 				ok, err := w.access.admits(tx, rule, w.info, w.key, fr)
@@ -611,7 +617,11 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 		if !admitted {
 			return refuseRow(w.info, w.key)
 		}
-		if !moved {
+		// A change of what a within entry reads of the row changes what the rows
+		// below it show, as a move does.
+		rechecked := !moved && len(model.withinOn[w.info.name]) > 0 &&
+			!withinStateOf(model, w.info, w.stored).equal(withinStateOf(model, w.info, fr))
+		if !moved && !rechecked {
 			break
 		}
 		set, err := w.access.get(tx)
@@ -619,6 +629,7 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 			return err
 		}
 		chains := w.access.chainsOf(tx)
+		subjects := w.access.caller.subjects
 		for _, r := range model.readersBelow(w.info.name) {
 			ok, err := chains.holds(set.readAnchors(r), w.info, w.key, w.stored)
 			for _, o := range r.checked {
@@ -626,14 +637,21 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 					break
 				}
 				ok, err = chains.holdsAll(set.anchorsOf(o.requires), w.info, w.key, w.stored)
+				if err == nil && ok && o.checksAbove() {
+					ok, err = chains.withinAllOn(o, subjects, w.info, w.key, w.stored)
+				}
 			}
 			if err != nil {
 				return err
 			}
 			if !ok {
+				what := "moving"
+				if rechecked {
+					what = "changing"
+				}
 				return Reject(CodePermissionDenied, fmt.Sprintf(
-					"entity %q: moving row %q needs one of the permissions %s where it is now, to carry the rows below it",
-					w.info.name, w.key, strings.Join(r.sources(), ", ")))
+					"entity %q: %s row %q needs one of the permissions %s where it is now, to change what the rows below it show",
+					w.info.name, what, w.key, strings.Join(r.sources(), ", ")))
 			}
 		}
 	}

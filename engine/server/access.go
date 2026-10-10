@@ -85,6 +85,29 @@ type accessRule struct {
 	// check. whenSpec renders it in a canonical form, "" without one.
 	when     *query.Compiled
 	whenSpec string
+	// within are the rule's within entries, sorted by spec. Nil when the rule
+	// sets none. Each needs the catalog to resolve: see accessModel.withins.
+	within []withinEntry
+}
+
+// withinEntry is one entry of an access rule's within list, as the rule
+// declares it: the entity of the row the rule's row must sit within, and the
+// checks that row must pass.
+type withinEntry struct {
+	entity string
+	// subject is the name of the subject field, "" without a subject check.
+	subject string
+	// when is the condition, nil without a when check. whenSpec renders it in
+	// a canonical form, "" without one.
+	when     *syncplanev1.Condition
+	whenSpec string
+}
+
+// spec renders the entry in a canonical form: entries with equal specs pass
+// the same rows. "{", "}" and ";" cannot be part of an entity or field name,
+// and a when spec is hex.
+func (w withinEntry) spec() string {
+	return w.entity + "{subject=" + w.subject + ",when=" + w.whenSpec + "}"
 }
 
 // admitted reports whether the rule admits every caller admitted to the
@@ -103,6 +126,33 @@ func (r accessRule) names(op accessOp) bool {
 // sets a subject check or a when check.
 func (r accessRule) checksRow() bool {
 	return r.subject != nil || r.when != nil
+}
+
+// checksAbove reports whether the rule reads rows at or above the row to
+// decide: it sets a within entry.
+func (r accessRule) checksAbove() bool {
+	return len(r.within) > 0
+}
+
+// withinSpec renders the rule's within entries in a canonical form, "" for a
+// rule without one.
+func (r accessRule) withinSpec() string {
+	specs := make([]string, len(r.within))
+	for i, w := range r.within {
+		specs[i] = w.spec()
+	}
+	return strings.Join(specs, ";")
+}
+
+// withinCovers reports whether every within entry of r is one of o's too:
+// r's entries admit every row o's admit.
+func (r accessRule) withinCovers(o accessRule) bool {
+	for _, w := range r.within {
+		if !slices.ContainsFunc(o.within, func(x withinEntry) bool { return x.spec() == w.spec() }) {
+			return false
+		}
+	}
+	return true
 }
 
 // joint reports whether the rule needs more than one permission.
@@ -177,6 +227,9 @@ func (r accessRule) spec() string {
 	if r.when != nil {
 		spec += ":when=" + r.whenSpec
 	}
+	if r.within != nil {
+		spec += ":within=" + r.withinSpec()
+	}
 	return spec
 }
 
@@ -243,8 +296,10 @@ func (r readers) key() string {
 // cannot read each row. Each rule of checked stays there without its checks
 // on the row, since a rule that checks the row admits other rows than perms
 // do, and a rule that needs more than one permission holds where all of them
-// do. A rule leaves checked when one of perms admits every caller it admits,
-// and two rules with the same source are kept once.
+// do. A rule keeps its within entries, which read the rows above the row and
+// so can change with them. A rule leaves checked when one of perms admits
+// every caller it admits, and two rules with the same source and the same
+// within entries are kept once.
 func (r readers) loose() readers {
 	if r.all || len(r.checked) == 0 {
 		return readers{perms: r.perms, all: r.all}
@@ -252,10 +307,12 @@ func (r readers) loose() readers {
 	out := readers{perms: r.perms}
 	for _, o := range r.checked {
 		if slices.ContainsFunc(o.requires, func(p string) bool { return slices.Contains(out.perms, p) }) ||
-			slices.ContainsFunc(out.checked, func(c accessRule) bool { return c.source() == o.source() }) {
+			slices.ContainsFunc(out.checked, func(c accessRule) bool {
+				return c.source() == o.source() && c.withinSpec() == o.withinSpec()
+			}) {
 			continue
 		}
-		out.checked = append(out.checked, accessRule{ops: opRead, requires: o.requires})
+		out.checked = append(out.checked, accessRule{ops: opRead, requires: o.requires, within: o.within})
 	}
 	sort.Slice(out.checked, func(i, j int) bool { return out.checked[i].spec() < out.checked[j].spec() })
 	return out
@@ -507,7 +564,7 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 		}
 		switch {
 		case !rule.names(opRead):
-		case rule.checksRow() || rule.joint():
+		case rule.checksRow() || rule.checksAbove() || rule.joint():
 			a.read.checked = append(a.read.checked, rule)
 		case rule.admitted():
 			a.read.all = true
@@ -591,7 +648,49 @@ func accessRuleOf(i int, r *syncplanev1.AccessRule, desc protoreflect.MessageDes
 		}
 		rule.when, rule.whenSpec = when, spec
 	}
+	for j, w := range r.GetWithin() {
+		entry, err := withinEntryOf(fmt.Sprintf("%s within[%d]", where, j), w)
+		if err != nil {
+			return accessRule{}, err
+		}
+		if slices.ContainsFunc(rule.within, func(x withinEntry) bool { return x.spec() == entry.spec() }) {
+			return accessRule{}, fmt.Errorf("%s within[%d] repeats an earlier entry", where, j)
+		}
+		rule.within = append(rule.within, entry)
+	}
+	sort.Slice(rule.within, func(i, j int) bool { return rule.within[i].spec() < rule.within[j].spec() })
 	return rule, nil
+}
+
+// withinEntryOf checks what one within entry of an access rule says by
+// itself: an entity, at least one check, and a when condition that reads only
+// a row. That the entity is in the model and above the rule's entity, and
+// that its fields fit the checks, is compileAccessModel's to check.
+func withinEntryOf(where string, w *syncplanev1.AccessWithin) (withinEntry, error) {
+	if err := refuseUnknownOptionFields(where, w); err != nil {
+		return withinEntry{}, err
+	}
+	if w.GetEntity() == "" {
+		return withinEntry{}, fmt.Errorf("%s names no entity", where)
+	}
+	if w.GetSubject() == "" && w.GetWhen() == nil {
+		return withinEntry{}, fmt.Errorf("%s sets no check; set subject or when", where)
+	}
+	entry := withinEntry{entity: w.GetEntity(), subject: w.GetSubject()}
+	if cond := w.GetWhen(); cond != nil {
+		if err := refuseUnknownCondFields(cond.ProtoReflect()); err != nil {
+			return withinEntry{}, fmt.Errorf("%s when: %w", where, err)
+		}
+		if err := refuseNonRowConds(cond); err != nil {
+			return withinEntry{}, fmt.Errorf("%s when: %w", where, err)
+		}
+		raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(cond)
+		if err != nil {
+			return withinEntry{}, err
+		}
+		entry.when, entry.whenSpec = cond, hex.EncodeToString(raw)
+	}
+	return entry, nil
 }
 
 // ruleWhenOf compiles the when condition of an access rule against the
@@ -1201,10 +1300,17 @@ type accessModel struct {
 	// depths maps each model entity to the largest number of access_parent
 	// hops from its rows to an entity without a parent, or depthUnbounded.
 	depths map[string]int
-	// moving is set when some entity has an access parent and rows that can
-	// sit below its rows, so moving one of its rows moves rows below it (see
-	// the access move log).
+	// moving is set when a write to a row can change what the rows below it
+	// show without a write to them, which the access move log records: some
+	// entity has an access parent and rows that can sit below its rows, so
+	// moving one of its rows moves rows below it, or some rule has a within
+	// entry.
 	moving bool
+	// withins maps the spec of each within entry of every rule to the entry
+	// resolved against the catalog. withinOn maps the name of each entity a
+	// within entry names to the distinct entries that name it, sorted by spec.
+	withins  map[string]*withinCheck
+	withinOn map[string][]*withinCheck
 	// readPerms are the permissions model entities read by, sorted. They are
 	// what a cursor records of a caller's access.
 	readPerms []string
@@ -1437,6 +1543,9 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 			m.moving = true
 		}
 	}
+	if err := m.resolveWithins(names); err != nil {
+		return nil, err
+	}
 
 	mutatorNames := make([]string, 0, len(mutators))
 	for name, mi := range mutators {
@@ -1540,6 +1649,72 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	return m, nil
 }
 
+// withinCheck is a within entry resolved against the catalog: the entity
+// whose rows it reads, and the checks such a row must pass.
+type withinCheck struct {
+	spec   string
+	target *entityInfo
+	// subject is nil without a subject check.
+	subject protoreflect.FieldDescriptor
+	// when is nil without a when check. whenSpec renders it as the entry's
+	// spec does.
+	when     *query.Compiled
+	whenSpec string
+}
+
+// resolveWithins resolves the within entries of the rules of the named
+// entities into m.withins and m.withinOn. An entry must name an entity in the
+// model whose rows the rule's entity can sit below, and its checks must fit
+// that entity's fields. It runs once m.below is complete.
+func (m *accessModel) resolveWithins(names []string) error {
+	m.withins = map[string]*withinCheck{}
+	m.withinOn = map[string][]*withinCheck{}
+	for _, name := range names {
+		for i, r := range m.entities[name].access.rules {
+			for j, w := range r.within {
+				where := fmt.Sprintf("server: entity %q access allow[%d] within[%d]", name, i, j)
+				target, ok := m.entities[w.entity]
+				switch {
+				case !ok:
+					return fmt.Errorf("%s names entity %q, which is not a registered entity in the access model", where, w.entity)
+				case !slices.Contains(m.below[w.entity], name) && w.entity == name:
+					return fmt.Errorf("%s names the rule's own entity, whose rows do not sit below rows of their own entity; "+
+						"check the row itself with subject or when", where)
+				case !slices.Contains(m.below[w.entity], name):
+					return fmt.Errorf("%s names entity %q, whose rows %q rows cannot sit below", where, w.entity, name)
+				}
+				spec := w.spec()
+				if _, done := m.withins[spec]; done {
+					continue
+				}
+				check := &withinCheck{spec: spec, target: target, whenSpec: w.whenSpec}
+				desc := target.msgType.Descriptor()
+				if w.subject != "" {
+					fd, err := stringField(desc, w.subject)
+					if err != nil {
+						return fmt.Errorf("%s subject: entity %q: %w", where, w.entity, err)
+					}
+					check.subject = fd
+				}
+				if w.when != nil {
+					compiled, err := query.Compile(desc, w.when)
+					if err != nil {
+						return fmt.Errorf("%s when: entity %q: %w", where, w.entity, err)
+					}
+					check.when = compiled
+				}
+				m.withins[spec] = check
+				m.withinOn[w.entity] = append(m.withinOn[w.entity], check)
+				m.moving = true
+			}
+		}
+	}
+	for _, checks := range m.withinOn {
+		sort.Slice(checks, func(i, j int) bool { return checks[i].spec < checks[j].spec })
+	}
+	return nil
+}
+
 // checkMembers checks the members option of the team entity info against the
 // catalog: it names a grant entity whose access parent points at info alone,
 // and whose subject is one string field. A member entity with a team case
@@ -1616,6 +1791,9 @@ func (m *accessModel) covers(a, b accessRule) bool {
 		return false
 	}
 	if a.when != nil && a.whenSpec != b.whenSpec {
+		return false
+	}
+	if !a.withinCovers(b) {
 		return false
 	}
 	if a.fields != nil && (b.fields == nil || !b.fieldsWithin(a.fields)) {

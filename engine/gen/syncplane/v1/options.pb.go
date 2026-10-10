@@ -458,7 +458,10 @@ type AccessRule struct {
 	// ```
 	//
 	// A permission held at the workspace root does not skip the check.
-	When          *Condition `protobuf:"bytes,10,opt,name=when,proto3" json:"when,omitempty"`
+	When *Condition `protobuf:"bytes,10,opt,name=when,proto3" json:"when,omitempty"`
+	// Admits only rows that sit within a row that passes a check: each entry
+	// must hold. See `AccessWithin`.
+	Within        []*AccessWithin `protobuf:"bytes,11,rep,name=within,proto3" json:"within,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -563,6 +566,137 @@ func (x *AccessRule) GetWhen() *Condition {
 	return nil
 }
 
+func (x *AccessRule) GetWithin() []*AccessWithin {
+	if x != nil {
+		return x.Within
+	}
+	return nil
+}
+
+// Admits only rows that sit within a row of an entity that passes a check.
+//
+// The entry holds for a row when the row itself, or a row above it on any
+// path of access parents, is a row of `entity` and passes every check the
+// entry sets. A row with no such row at or above it fails the entry. A
+// permission held at the workspace root does not skip the check.
+//
+// A private project hides its tasks from callers who read tasks through the
+// workspace root, and its members still read them; an archived project makes
+// its tasks read-only; the owner of a doc reads and edits its comments:
+//
+// ```protobuf
+//
+//	message Task {
+//	  option (syncplane.v1.entity) = {
+//	    name: "task" key_fields: ["id"]
+//	    access: { allow: [
+//	      { read: true requires: "view_tasks" },
+//	      { read: true requires: "view_open_tasks"
+//	        within: { entity: "project"
+//	          when: { cmp: { path: ["private"] op: CMP_OP_EQ
+//	            value: { bool_value: false } } } } },
+//	      { write: true requires: "edit_tasks"
+//	        within: { entity: "project"
+//	          when: { cmp: { path: ["archived"] op: CMP_OP_EQ
+//	            value: { bool_value: false } } } } }
+//	    ] }
+//	  };
+//	  string id = 1;
+//	  Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//	}
+//
+//	message Comment {
+//	  option (syncplane.v1.entity) = {
+//	    name: "comment" key_fields: ["id"]
+//	    access: { allow: [
+//	      { read: true requires: "view_docs" },
+//	      { write: true requires: "view_docs"
+//	        within: { entity: "doc" subject: "owner_id" } }
+//	    ] }
+//	  };
+//	  string id = 1;
+//	  Doc doc = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//	}
+//
+// ```
+//
+// A write to a row that changes whether it passes an entry changes what the
+// rows below it show, as a move does. Such a write needs, where the row sits,
+// a read rule of each entity whose rows can sit below it, and clients receive
+// the rows below it that they gain and lose.
+//
+// In a recursive entity, such as a folder tree, a row that fails the entry
+// does not hide the rows below it from a caller when a row above it passes.
+//
+// Registration refuses an entry that sets no check, an `entity` whose rows the
+// rule's entity cannot sit below (its own entity only when it is recursive), a
+// `subject` that is not a top-level, singular `string` field of `entity`, a
+// `when` that reads another row, and unknown fields inside this message.
+type AccessWithin struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The entity the row must sit within, by its entity name.
+	Entity string `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	// Admits only a row of `entity` whose field with this name holds one of
+	// the caller's subjects. An empty value never matches.
+	Subject string `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
+	// Admits only a row of `entity` that matches this condition. Paths start
+	// at that row.
+	When          *Condition `protobuf:"bytes,3,opt,name=when,proto3" json:"when,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AccessWithin) Reset() {
+	*x = AccessWithin{}
+	mi := &file_syncplane_v1_options_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AccessWithin) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AccessWithin) ProtoMessage() {}
+
+func (x *AccessWithin) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_options_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AccessWithin.ProtoReflect.Descriptor instead.
+func (*AccessWithin) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *AccessWithin) GetEntity() string {
+	if x != nil {
+		return x.Entity
+	}
+	return ""
+}
+
+func (x *AccessWithin) GetSubject() string {
+	if x != nil {
+		return x.Subject
+	}
+	return ""
+}
+
+func (x *AccessWithin) GetWhen() *Condition {
+	if x != nil {
+		return x.When
+	}
+	return nil
+}
+
 // Selects every caller admitted to the workspace as the source of an
 // `AccessRule`.
 //
@@ -577,7 +711,7 @@ type AdmittedCaller struct {
 
 func (x *AdmittedCaller) Reset() {
 	*x = AdmittedCaller{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[3]
+	mi := &file_syncplane_v1_options_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -589,7 +723,7 @@ func (x *AdmittedCaller) String() string {
 func (*AdmittedCaller) ProtoMessage() {}
 
 func (x *AdmittedCaller) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[3]
+	mi := &file_syncplane_v1_options_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -602,7 +736,7 @@ func (x *AdmittedCaller) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AdmittedCaller.ProtoReflect.Descriptor instead.
 func (*AdmittedCaller) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{3}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{4}
 }
 
 // Declares an entity whose rows grant roles.
@@ -690,7 +824,7 @@ type GrantOptions struct {
 
 func (x *GrantOptions) Reset() {
 	*x = GrantOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[4]
+	mi := &file_syncplane_v1_options_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -702,7 +836,7 @@ func (x *GrantOptions) String() string {
 func (*GrantOptions) ProtoMessage() {}
 
 func (x *GrantOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[4]
+	mi := &file_syncplane_v1_options_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -715,7 +849,7 @@ func (x *GrantOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GrantOptions.ProtoReflect.Descriptor instead.
 func (*GrantOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{4}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *GrantOptions) GetSubject() string {
@@ -772,7 +906,7 @@ type Role struct {
 
 func (x *Role) Reset() {
 	*x = Role{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[5]
+	mi := &file_syncplane_v1_options_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -784,7 +918,7 @@ func (x *Role) String() string {
 func (*Role) ProtoMessage() {}
 
 func (x *Role) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[5]
+	mi := &file_syncplane_v1_options_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -797,7 +931,7 @@ func (x *Role) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Role.ProtoReflect.Descriptor instead.
 func (*Role) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{5}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Role) GetName() string {
@@ -885,7 +1019,7 @@ type MembersOptions struct {
 
 func (x *MembersOptions) Reset() {
 	*x = MembersOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[6]
+	mi := &file_syncplane_v1_options_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -897,7 +1031,7 @@ func (x *MembersOptions) String() string {
 func (*MembersOptions) ProtoMessage() {}
 
 func (x *MembersOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[6]
+	mi := &file_syncplane_v1_options_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -910,7 +1044,7 @@ func (x *MembersOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MembersOptions.ProtoReflect.Descriptor instead.
 func (*MembersOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{6}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *MembersOptions) GetEntity() string {
@@ -976,7 +1110,7 @@ type AccessParentOptions struct {
 
 func (x *AccessParentOptions) Reset() {
 	*x = AccessParentOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[7]
+	mi := &file_syncplane_v1_options_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -988,7 +1122,7 @@ func (x *AccessParentOptions) String() string {
 func (*AccessParentOptions) ProtoMessage() {}
 
 func (x *AccessParentOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[7]
+	mi := &file_syncplane_v1_options_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1001,7 +1135,7 @@ func (x *AccessParentOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AccessParentOptions.ProtoReflect.Descriptor instead.
 func (*AccessParentOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{7}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{8}
 }
 
 // Marks a field that records who created the row.
@@ -1025,7 +1159,7 @@ type CreatorOptions struct {
 
 func (x *CreatorOptions) Reset() {
 	*x = CreatorOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[8]
+	mi := &file_syncplane_v1_options_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1037,7 +1171,7 @@ func (x *CreatorOptions) String() string {
 func (*CreatorOptions) ProtoMessage() {}
 
 func (x *CreatorOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[8]
+	mi := &file_syncplane_v1_options_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1050,7 +1184,7 @@ func (x *CreatorOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreatorOptions.ProtoReflect.Descriptor instead.
 func (*CreatorOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{8}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{9}
 }
 
 // Enables server-side field history tracking for an entity.
@@ -1075,7 +1209,7 @@ type HistoryOptions struct {
 
 func (x *HistoryOptions) Reset() {
 	*x = HistoryOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[9]
+	mi := &file_syncplane_v1_options_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1087,7 +1221,7 @@ func (x *HistoryOptions) String() string {
 func (*HistoryOptions) ProtoMessage() {}
 
 func (x *HistoryOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[9]
+	mi := &file_syncplane_v1_options_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1100,7 +1234,7 @@ func (x *HistoryOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryOptions.ProtoReflect.Descriptor instead.
 func (*HistoryOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{9}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{10}
 }
 
 // Declares a message as a reference message: the stored shape of a typed
@@ -1180,7 +1314,7 @@ type ReferenceOptions struct {
 
 func (x *ReferenceOptions) Reset() {
 	*x = ReferenceOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[10]
+	mi := &file_syncplane_v1_options_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1192,7 +1326,7 @@ func (x *ReferenceOptions) String() string {
 func (*ReferenceOptions) ProtoMessage() {}
 
 func (x *ReferenceOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[10]
+	mi := &file_syncplane_v1_options_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1205,7 +1339,7 @@ func (x *ReferenceOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReferenceOptions.ProtoReflect.Descriptor instead.
 func (*ReferenceOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{10}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{11}
 }
 
 // Specifies a single field read during full-text search.
@@ -1222,7 +1356,7 @@ type SearchField struct {
 
 func (x *SearchField) Reset() {
 	*x = SearchField{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[11]
+	mi := &file_syncplane_v1_options_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1234,7 +1368,7 @@ func (x *SearchField) String() string {
 func (*SearchField) ProtoMessage() {}
 
 func (x *SearchField) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[11]
+	mi := &file_syncplane_v1_options_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1247,7 +1381,7 @@ func (x *SearchField) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchField.ProtoReflect.Descriptor instead.
 func (*SearchField) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{11}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SearchField) GetPath() string {
@@ -1288,7 +1422,7 @@ type SearchSpec struct {
 
 func (x *SearchSpec) Reset() {
 	*x = SearchSpec{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[12]
+	mi := &file_syncplane_v1_options_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1300,7 +1434,7 @@ func (x *SearchSpec) String() string {
 func (*SearchSpec) ProtoMessage() {}
 
 func (x *SearchSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[12]
+	mi := &file_syncplane_v1_options_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1313,7 +1447,7 @@ func (x *SearchSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchSpec.ProtoReflect.Descriptor instead.
 func (*SearchSpec) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{12}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SearchSpec) GetField() []*SearchField {
@@ -1350,7 +1484,7 @@ type IndexKey struct {
 
 func (x *IndexKey) Reset() {
 	*x = IndexKey{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[13]
+	mi := &file_syncplane_v1_options_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1362,7 +1496,7 @@ func (x *IndexKey) String() string {
 func (*IndexKey) ProtoMessage() {}
 
 func (x *IndexKey) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[13]
+	mi := &file_syncplane_v1_options_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1375,7 +1509,7 @@ func (x *IndexKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexKey.ProtoReflect.Descriptor instead.
 func (*IndexKey) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{13}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *IndexKey) GetPath() string {
@@ -1410,7 +1544,7 @@ type IndexSpec struct {
 
 func (x *IndexSpec) Reset() {
 	*x = IndexSpec{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[14]
+	mi := &file_syncplane_v1_options_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1422,7 +1556,7 @@ func (x *IndexSpec) String() string {
 func (*IndexSpec) ProtoMessage() {}
 
 func (x *IndexSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[14]
+	mi := &file_syncplane_v1_options_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1435,7 +1569,7 @@ func (x *IndexSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexSpec.ProtoReflect.Descriptor instead.
 func (*IndexSpec) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{14}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *IndexSpec) GetName() string {
@@ -1560,7 +1694,7 @@ type FieldBehavior struct {
 
 func (x *FieldBehavior) Reset() {
 	*x = FieldBehavior{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[15]
+	mi := &file_syncplane_v1_options_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1572,7 +1706,7 @@ func (x *FieldBehavior) String() string {
 func (*FieldBehavior) ProtoMessage() {}
 
 func (x *FieldBehavior) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[15]
+	mi := &file_syncplane_v1_options_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1585,7 +1719,7 @@ func (x *FieldBehavior) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FieldBehavior.ProtoReflect.Descriptor instead.
 func (*FieldBehavior) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{15}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *FieldBehavior) GetOpaque() bool {
@@ -1741,7 +1875,7 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x05grant\x18\v \x01(\v2\x1a.syncplane.v1.GrantOptionsR\x05grant\x126\n" +
 	"\amembers\x18\f \x01(\v2\x1c.syncplane.v1.MembersOptionsR\amembersJ\x04\b\x04\x10\x05J\x04\b\a\x10\bJ\x04\b\b\x10\tR\rdelete_policyR\rcreate_policyR\rupdate_policy\"?\n" +
 	"\rAccessOptions\x12.\n" +
-	"\x05allow\x18\x01 \x03(\v2\x18.syncplane.v1.AccessRuleR\x05allow\"\xb3\x02\n" +
+	"\x05allow\x18\x01 \x03(\v2\x18.syncplane.v1.AccessRuleR\x05allow\"\xe7\x02\n" +
 	"\n" +
 	"AccessRule\x12\x12\n" +
 	"\x04read\x18\x01 \x01(\bR\x04read\x12\x16\n" +
@@ -1754,7 +1888,12 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\asubject\x18\b \x01(\tR\asubject\x12\x16\n" +
 	"\x06fields\x18\t \x03(\tR\x06fields\x12+\n" +
 	"\x04when\x18\n" +
-	" \x01(\v2\x17.syncplane.v1.ConditionR\x04when\"\x10\n" +
+	" \x01(\v2\x17.syncplane.v1.ConditionR\x04when\x122\n" +
+	"\x06within\x18\v \x03(\v2\x1a.syncplane.v1.AccessWithinR\x06within\"m\n" +
+	"\fAccessWithin\x12\x16\n" +
+	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x18\n" +
+	"\asubject\x18\x02 \x01(\tR\asubject\x12+\n" +
+	"\x04when\x18\x03 \x01(\v2\x17.syncplane.v1.ConditionR\x04when\"\x10\n" +
 	"\x0eAdmittedCaller\"f\n" +
 	"\fGrantOptions\x12\x18\n" +
 	"\asubject\x18\x01 \x01(\tR\asubject\x12\x12\n" +
@@ -1820,56 +1959,59 @@ func file_syncplane_v1_options_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_v1_options_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_syncplane_v1_options_proto_goTypes = []any{
 	(FieldWritePolicy)(0),               // 0: syncplane.v1.FieldWritePolicy
 	(*EntityOptions)(nil),               // 1: syncplane.v1.EntityOptions
 	(*AccessOptions)(nil),               // 2: syncplane.v1.AccessOptions
 	(*AccessRule)(nil),                  // 3: syncplane.v1.AccessRule
-	(*AdmittedCaller)(nil),              // 4: syncplane.v1.AdmittedCaller
-	(*GrantOptions)(nil),                // 5: syncplane.v1.GrantOptions
-	(*Role)(nil),                        // 6: syncplane.v1.Role
-	(*MembersOptions)(nil),              // 7: syncplane.v1.MembersOptions
-	(*AccessParentOptions)(nil),         // 8: syncplane.v1.AccessParentOptions
-	(*CreatorOptions)(nil),              // 9: syncplane.v1.CreatorOptions
-	(*HistoryOptions)(nil),              // 10: syncplane.v1.HistoryOptions
-	(*ReferenceOptions)(nil),            // 11: syncplane.v1.ReferenceOptions
-	(*SearchField)(nil),                 // 12: syncplane.v1.SearchField
-	(*SearchSpec)(nil),                  // 13: syncplane.v1.SearchSpec
-	(*IndexKey)(nil),                    // 14: syncplane.v1.IndexKey
-	(*IndexSpec)(nil),                   // 15: syncplane.v1.IndexSpec
-	(*FieldBehavior)(nil),               // 16: syncplane.v1.FieldBehavior
-	(*Condition)(nil),                   // 17: syncplane.v1.Condition
-	(*descriptorpb.MessageOptions)(nil), // 18: google.protobuf.MessageOptions
-	(*descriptorpb.FieldOptions)(nil),   // 19: google.protobuf.FieldOptions
+	(*AccessWithin)(nil),                // 4: syncplane.v1.AccessWithin
+	(*AdmittedCaller)(nil),              // 5: syncplane.v1.AdmittedCaller
+	(*GrantOptions)(nil),                // 6: syncplane.v1.GrantOptions
+	(*Role)(nil),                        // 7: syncplane.v1.Role
+	(*MembersOptions)(nil),              // 8: syncplane.v1.MembersOptions
+	(*AccessParentOptions)(nil),         // 9: syncplane.v1.AccessParentOptions
+	(*CreatorOptions)(nil),              // 10: syncplane.v1.CreatorOptions
+	(*HistoryOptions)(nil),              // 11: syncplane.v1.HistoryOptions
+	(*ReferenceOptions)(nil),            // 12: syncplane.v1.ReferenceOptions
+	(*SearchField)(nil),                 // 13: syncplane.v1.SearchField
+	(*SearchSpec)(nil),                  // 14: syncplane.v1.SearchSpec
+	(*IndexKey)(nil),                    // 15: syncplane.v1.IndexKey
+	(*IndexSpec)(nil),                   // 16: syncplane.v1.IndexSpec
+	(*FieldBehavior)(nil),               // 17: syncplane.v1.FieldBehavior
+	(*Condition)(nil),                   // 18: syncplane.v1.Condition
+	(*descriptorpb.MessageOptions)(nil), // 19: google.protobuf.MessageOptions
+	(*descriptorpb.FieldOptions)(nil),   // 20: google.protobuf.FieldOptions
 }
 var file_syncplane_v1_options_proto_depIdxs = []int32{
-	15, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
-	10, // 1: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
-	13, // 2: syncplane.v1.EntityOptions.search:type_name -> syncplane.v1.SearchSpec
+	16, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
+	11, // 1: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
+	14, // 2: syncplane.v1.EntityOptions.search:type_name -> syncplane.v1.SearchSpec
 	2,  // 3: syncplane.v1.EntityOptions.access:type_name -> syncplane.v1.AccessOptions
-	5,  // 4: syncplane.v1.EntityOptions.grant:type_name -> syncplane.v1.GrantOptions
-	7,  // 5: syncplane.v1.EntityOptions.members:type_name -> syncplane.v1.MembersOptions
+	6,  // 4: syncplane.v1.EntityOptions.grant:type_name -> syncplane.v1.GrantOptions
+	8,  // 5: syncplane.v1.EntityOptions.members:type_name -> syncplane.v1.MembersOptions
 	3,  // 6: syncplane.v1.AccessOptions.allow:type_name -> syncplane.v1.AccessRule
-	4,  // 7: syncplane.v1.AccessRule.admitted:type_name -> syncplane.v1.AdmittedCaller
-	17, // 8: syncplane.v1.AccessRule.when:type_name -> syncplane.v1.Condition
-	6,  // 9: syncplane.v1.GrantOptions.roles:type_name -> syncplane.v1.Role
-	12, // 10: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
-	14, // 11: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
-	0,  // 12: syncplane.v1.FieldBehavior.write_policy:type_name -> syncplane.v1.FieldWritePolicy
-	8,  // 13: syncplane.v1.FieldBehavior.access_parent:type_name -> syncplane.v1.AccessParentOptions
-	9,  // 14: syncplane.v1.FieldBehavior.creator:type_name -> syncplane.v1.CreatorOptions
-	18, // 15: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
-	18, // 16: syncplane.v1.reference:extendee -> google.protobuf.MessageOptions
-	19, // 17: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
-	1,  // 18: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
-	11, // 19: syncplane.v1.reference:type_name -> syncplane.v1.ReferenceOptions
-	16, // 20: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
-	21, // [21:21] is the sub-list for method output_type
-	21, // [21:21] is the sub-list for method input_type
-	18, // [18:21] is the sub-list for extension type_name
-	15, // [15:18] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	5,  // 7: syncplane.v1.AccessRule.admitted:type_name -> syncplane.v1.AdmittedCaller
+	18, // 8: syncplane.v1.AccessRule.when:type_name -> syncplane.v1.Condition
+	4,  // 9: syncplane.v1.AccessRule.within:type_name -> syncplane.v1.AccessWithin
+	18, // 10: syncplane.v1.AccessWithin.when:type_name -> syncplane.v1.Condition
+	7,  // 11: syncplane.v1.GrantOptions.roles:type_name -> syncplane.v1.Role
+	13, // 12: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
+	15, // 13: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
+	0,  // 14: syncplane.v1.FieldBehavior.write_policy:type_name -> syncplane.v1.FieldWritePolicy
+	9,  // 15: syncplane.v1.FieldBehavior.access_parent:type_name -> syncplane.v1.AccessParentOptions
+	10, // 16: syncplane.v1.FieldBehavior.creator:type_name -> syncplane.v1.CreatorOptions
+	19, // 17: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
+	19, // 18: syncplane.v1.reference:extendee -> google.protobuf.MessageOptions
+	20, // 19: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
+	1,  // 20: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
+	12, // 21: syncplane.v1.reference:type_name -> syncplane.v1.ReferenceOptions
+	17, // 22: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
+	23, // [23:23] is the sub-list for method output_type
+	23, // [23:23] is the sub-list for method input_type
+	20, // [20:23] is the sub-list for extension type_name
+	17, // [17:20] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_options_proto_init() }
@@ -1884,7 +2026,7 @@ func file_syncplane_v1_options_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_options_proto_rawDesc), len(file_syncplane_v1_options_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   16,
+			NumMessages:   17,
 			NumExtensions: 3,
 			NumServices:   0,
 		},

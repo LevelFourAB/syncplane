@@ -10,12 +10,15 @@ import {
 	ChargeSchema,
 	CommentSchema,
 	CycleSchema,
+	DossierSchema,
 	DraftSchema,
 	InvoiceSchema,
 	IssueSchema,
 	LabelSchema,
 	LaneMemberSchema,
 	LeafletSchema,
+	MatterSchema,
+	MemoSchema,
 	NoteSchema,
 	OrgMemberSchema,
 	PageSchema,
@@ -88,6 +91,9 @@ const entities = [
 	StorySchema,
 	StoryNoteSchema,
 	LeafletSchema,
+	DossierSchema,
+	MatterSchema,
+	MemoSchema,
 ];
 
 const open: SyncClient[] = [];
@@ -634,6 +640,71 @@ describe('when checks on the client', () => {
 		} ]);
 		await ann.syncNow();
 		expect((await ann.get(ThreadSchema, 'th-open'))?.title).toBe('back');
+	});
+});
+
+describe('within entries on the client', () => {
+	async function seedDossiers(ws: string): Promise<void> {
+		await trusted(ws, [
+			{ entity: 'clerk', value: { id: 'c-cora', userId: 'cora', role: 'clerk' } },
+			{ entity: 'clerk', value: { id: 'c-reg', userId: 'reg', role: 'registrar' } },
+			{ entity: 'dossier', value: { id: 'd-open', ownerId: 'olga' } },
+			{ entity: 'dossier', value: { id: 'd-arch', archived: true, ownerId: 'cora' } },
+			{ entity: 'dossier', value: { id: 'd-priv', private: true, ownerId: 'olga' } },
+			{ entity: 'matter', value: { id: 'm-open', dossier: { id: 'd-open' }, title: 'open' } },
+			{ entity: 'matter', value: { id: 'm-arch', dossier: { id: 'd-arch' }, title: 'archived' } },
+			{ entity: 'matter', value: { id: 'm-priv', dossier: { id: 'd-priv' }, title: 'private' } },
+			{ entity: 'memo', value: { id: 'memo-priv', matter: { id: 'm-priv' } } },
+		]);
+	}
+
+	it('predicts what the server admits and refuses', async () => {
+		const ws = freshWorkspace();
+		await seedDossiers(ws);
+		const rejections: RejectionInfo[] = [];
+		const reg = await synced(
+			clientAs('reg', ws, new MemoryKVStore(), (info) => rejections.push(info)),
+		);
+
+		expect(await reg.can(MatterSchema, 'm-open', 'update', { fields: [ 'title' ] })).toBe('yes');
+		await reg.mutate.patch(MatterSchema, 'm-open', { title: 'renamed' });
+		expect(await reg.can(MatterSchema, 'm-arch', 'update', { fields: [ 'title' ] })).toBe('no');
+		await reg.mutate.patch(MatterSchema, 'm-arch', { title: 'renamed' });
+		await reg.syncNow();
+
+		expect(rejections.map((r) => r.errorCode)).toEqual([ 'permission_denied' ]);
+		expect((await reg.get(MatterSchema, 'm-open'))?.title).toBe('renamed');
+		expect((await reg.get(MatterSchema, 'm-arch'))?.title).toBe('archived');
+	});
+
+	it('syncs the rows below a row whose fields an entry reads when they change', async () => {
+		const ws = freshWorkspace();
+		await seedDossiers(ws);
+		const cora = await synced(clientAs('cora', ws));
+		expect(await cora.get(MatterSchema, 'm-priv')).toBeUndefined();
+		expect(await cora.can(MatterSchema, 'm-open', 'read')).toBe('yes');
+		expect(await cora.get(MemoSchema, 'memo-priv')).toBeUndefined();
+
+		await trusted(ws, [ {
+			entity: 'dossier',
+			value: { id: 'd-open', private: true, ownerId: 'olga' },
+		} ]);
+		await cora.syncNow();
+		expect(await cora.get(MatterSchema, 'm-open')).toBeUndefined();
+		expect(await cora.get(DossierSchema, 'd-open')).toBeUndefined();
+
+		await trusted(ws, [ { entity: 'dossier', value: { id: 'd-open', ownerId: 'olga' } } ]);
+		await cora.syncNow();
+		expect((await cora.get(MatterSchema, 'm-open'))?.title).toBe('open');
+
+		// The owner rule shows the new owner the memos below a private dossier.
+		await trusted(ws, [ {
+			entity: 'dossier',
+			value: { id: 'd-priv', private: true, ownerId: 'cora' },
+		} ]);
+		await cora.syncNow();
+		expect(await cora.get(MemoSchema, 'memo-priv')).toBeDefined();
+		expect(await cora.get(MatterSchema, 'm-priv')).toBeUndefined();
 	});
 });
 

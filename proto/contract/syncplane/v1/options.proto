@@ -234,6 +234,77 @@ message AccessRule {
 	//
 	// A permission held at the workspace root does not skip the check.
 	Condition when = 10;
+	// Admits only rows that sit within a row that passes a check: each entry
+	// must hold. See `AccessWithin`.
+	repeated AccessWithin within = 11;
+}
+
+// Admits only rows that sit within a row of an entity that passes a check.
+//
+// The entry holds for a row when the row itself, or a row above it on any
+// path of access parents, is a row of `entity` and passes every check the
+// entry sets. A row with no such row at or above it fails the entry. A
+// permission held at the workspace root does not skip the check.
+//
+// A private project hides its tasks from callers who read tasks through the
+// workspace root, and its members still read them; an archived project makes
+// its tasks read-only; the owner of a doc reads and edits its comments:
+//
+// ```protobuf
+// message Task {
+//   option (syncplane.v1.entity) = {
+//     name: "task" key_fields: ["id"]
+//     access: { allow: [
+//       { read: true requires: "view_tasks" },
+//       { read: true requires: "view_open_tasks"
+//         within: { entity: "project"
+//           when: { cmp: { path: ["private"] op: CMP_OP_EQ
+//             value: { bool_value: false } } } } },
+//       { write: true requires: "edit_tasks"
+//         within: { entity: "project"
+//           when: { cmp: { path: ["archived"] op: CMP_OP_EQ
+//             value: { bool_value: false } } } } }
+//     ] }
+//   };
+//   string id = 1;
+//   Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+// }
+//
+// message Comment {
+//   option (syncplane.v1.entity) = {
+//     name: "comment" key_fields: ["id"]
+//     access: { allow: [
+//       { read: true requires: "view_docs" },
+//       { write: true requires: "view_docs"
+//         within: { entity: "doc" subject: "owner_id" } }
+//     ] }
+//   };
+//   string id = 1;
+//   Doc doc = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+// }
+// ```
+//
+// A write to a row that changes whether it passes an entry changes what the
+// rows below it show, as a move does. Such a write needs, where the row sits,
+// a read rule of each entity whose rows can sit below it, and clients receive
+// the rows below it that they gain and lose.
+//
+// In a recursive entity, such as a folder tree, a row that fails the entry
+// does not hide the rows below it from a caller when a row above it passes.
+//
+// Registration refuses an entry that sets no check, an `entity` whose rows the
+// rule's entity cannot sit below (its own entity only when it is recursive), a
+// `subject` that is not a top-level, singular `string` field of `entity`, a
+// `when` that reads another row, and unknown fields inside this message.
+message AccessWithin {
+	// The entity the row must sit within, by its entity name.
+	string entity = 1;
+	// Admits only a row of `entity` whose field with this name holds one of
+	// the caller's subjects. An empty value never matches.
+	string subject = 2;
+	// Admits only a row of `entity` that matches this condition. Paths start
+	// at that row.
+	Condition when = 3;
 }
 
 // Selects every caller admitted to the workspace as the source of an

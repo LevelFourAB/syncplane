@@ -40,6 +40,8 @@ import {
 	refList,
 	type RoleDecl,
 	text,
+	within,
+	type WithinDecl,
 	workspaceRef,
 } from '../../src/schema/builder.js';
 
@@ -973,6 +975,88 @@ describe('schema builder — when checks', () => {
 				{ read: true, requires: 'p', when: (e) => e.note.eq('a') },
 				{ read: true, requires: 'p', when: (e) => e.note.eq('a') },
 			)).toThrow('entity "e" access.allow[1]: the rule repeats access.allow[0]');
+		});
+	});
+});
+
+describe('schema builder — within entries', () => {
+	const project = entity('project', {
+		id: text().key(),
+		isPrivate: bool(),
+		ownerId: text(),
+	}, {
+		access: { allow: [ { read: true, requires: 'view_tasks' } ] },
+	});
+	const task = entity('task', {
+		id: text().key(),
+		project: ref(() => project).accessParent(),
+	}, {
+		access: {
+			allow: [
+				{ read: true, requires: 'view_tasks' },
+				{
+					read: true,
+					admitted: true,
+					within: [
+						within(project, { when: (p) => p.isPrivate.eq(false) }),
+						{ entity: 'project', subject: 'ownerId' },
+					],
+				},
+			],
+		},
+	});
+
+	it('lowers each entry with proto field names, and reads it onto the EntityDef', () => {
+		const bundle = defineSchema(project, task);
+		const within = getOption(bundle.descMessage('task'), entityExt).access!.allow[1]!.within;
+		expect(within.map((w) => [ w.entity, w.subject ])).toEqual([ [ 'project', '' ], [
+			'project',
+			'owner_id',
+		] ]);
+		expect(condFromProto(within[0]!.when!)).toEqual({
+			kind: 'cmp',
+			path: [ 'is_private' ],
+			op: 'eq',
+			value: false,
+		});
+		const def = entityDefOf(bundle.descMessage('task'));
+		expect(def.accessRules![0]!.within).toEqual([]);
+		expect(def.accessRules![1]!.within.map((w) => w.subject)).toEqual([ undefined, 'owner_id' ]);
+	});
+
+	describe('validation', () => {
+		const fields = { id: text().key(), project: ref(() => project).accessParent() };
+		const allowing = (...within: WithinDecl[]) => () =>
+			defineSchema(
+				project,
+				entity('e', fields, { access: { allow: [ { read: true, requires: 'p', within } ] } }),
+			);
+
+		it('rejects an entry without a check', () => {
+			expect(allowing({ entity: 'project' }))
+				.toThrow('entity "e" access.allow[0] within[0]: sets no check; set subject or when');
+		});
+		it('rejects an entry that repeats another', () => {
+			expect(
+				allowing({ entity: 'project', subject: 'ownerId' }, { entity: 'project', subject: 'ownerId' }),
+			)
+				.toThrow('entity "e" access.allow[0] within[1]: repeats an earlier entry');
+		});
+		it('rejects an entity outside the schema', () => {
+			expect(allowing({ entity: 'nothing', subject: 'ownerId' }))
+				.toThrow(
+					'entity "e" access.allow[0] within[0]: names entity "nothing", which is not part of this schema',
+				);
+		});
+		it('rejects a subject field that is not a text() field of the entity', () => {
+			expect(allowing({ entity: 'project', subject: 'missing' }))
+				.toThrow('subject field "missing" is not declared on entity "project"');
+			expect(allowing({ entity: 'project', subject: 'isPrivate' }))
+				.toThrow('subject field "isPrivate" must be a singular text() field');
+		});
+		it('rejects a condition that cannot decide access', () => {
+			expect(allowing(within(project, { when: (p) => or(p.ownerId.eq('x'), p.match('y')) })))
+				.toThrow('entity "e" access.allow[0] within[0]: when uses match(), which cannot decide access');
 		});
 	});
 });

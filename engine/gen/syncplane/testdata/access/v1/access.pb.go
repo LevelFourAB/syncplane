@@ -3664,6 +3664,549 @@ func (x *Leaflet) GetTitle() string {
 	return ""
 }
 
+// A role on the whole workspace, the top of the within schema below: Clerk,
+// Dossier, DossierMember, Matter, MatterWatcher, Memo, Binder and Sheet,
+// registered apart from the schemas above.
+type Clerk struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	UserId        string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Role          string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Clerk) Reset() {
+	*x = Clerk{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[55]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Clerk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Clerk) ProtoMessage() {}
+
+func (x *Clerk) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[55]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Clerk.ProtoReflect.Descriptor instead.
+func (*Clerk) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{55}
+}
+
+func (x *Clerk) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Clerk) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *Clerk) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// A dossier: a private one hides its matters and memos from clerks, who read
+// matters through the workspace root, and an archived one makes its matters
+// read-only. Its owner reads and writes the memos below it.
+type Dossier struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title         string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Private       bool                   `protobuf:"varint,3,opt,name=private,proto3" json:"private,omitempty"`
+	Archived      bool                   `protobuf:"varint,4,opt,name=archived,proto3" json:"archived,omitempty"`
+	OwnerId       string                 `protobuf:"bytes,5,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Dossier) Reset() {
+	*x = Dossier{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[56]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Dossier) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Dossier) ProtoMessage() {}
+
+func (x *Dossier) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[56]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Dossier.ProtoReflect.Descriptor instead.
+func (*Dossier) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{56}
+}
+
+func (x *Dossier) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Dossier) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *Dossier) GetPrivate() bool {
+	if x != nil {
+		return x.Private
+	}
+	return false
+}
+
+func (x *Dossier) GetArchived() bool {
+	if x != nil {
+		return x.Archived
+	}
+	return false
+}
+
+func (x *Dossier) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+// A role on one dossier and the rows below it.
+type DossierMember struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Dossier       *Dossier               `protobuf:"bytes,2,opt,name=dossier,proto3" json:"dossier,omitempty"`
+	UserId        string                 `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Role          string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DossierMember) Reset() {
+	*x = DossierMember{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[57]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DossierMember) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DossierMember) ProtoMessage() {}
+
+func (x *DossierMember) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[57]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DossierMember.ProtoReflect.Descriptor instead.
+func (*DossierMember) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{57}
+}
+
+func (x *DossierMember) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *DossierMember) GetDossier() *Dossier {
+	if x != nil {
+		return x.Dossier
+	}
+	return nil
+}
+
+func (x *DossierMember) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *DossierMember) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// A matter in a dossier.
+type Matter struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Dossier       *Dossier               `protobuf:"bytes,2,opt,name=dossier,proto3" json:"dossier,omitempty"`
+	Title         string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Matter) Reset() {
+	*x = Matter{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[58]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Matter) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Matter) ProtoMessage() {}
+
+func (x *Matter) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[58]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Matter.ProtoReflect.Descriptor instead.
+func (*Matter) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{58}
+}
+
+func (x *Matter) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Matter) GetDossier() *Dossier {
+	if x != nil {
+		return x.Dossier
+	}
+	return nil
+}
+
+func (x *Matter) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+// A role on one matter: a watcher reads it and its memos while its dossier is
+// not private.
+type MatterWatcher struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Matter        *Matter                `protobuf:"bytes,2,opt,name=matter,proto3" json:"matter,omitempty"`
+	UserId        string                 `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Role          string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MatterWatcher) Reset() {
+	*x = MatterWatcher{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[59]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MatterWatcher) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MatterWatcher) ProtoMessage() {}
+
+func (x *MatterWatcher) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[59]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MatterWatcher.ProtoReflect.Descriptor instead.
+func (*MatterWatcher) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{59}
+}
+
+func (x *MatterWatcher) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *MatterWatcher) GetMatter() *Matter {
+	if x != nil {
+		return x.Matter
+	}
+	return nil
+}
+
+func (x *MatterWatcher) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *MatterWatcher) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// A memo on a matter, two access_parent hops below its dossier, whose body is
+// collaborative text.
+type Memo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Matter        *Matter                `protobuf:"bytes,2,opt,name=matter,proto3" json:"matter,omitempty"`
+	Body          []byte                 `protobuf:"bytes,3,opt,name=body,proto3" json:"body,omitempty"`
+	Title         string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Memo) Reset() {
+	*x = Memo{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[60]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Memo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Memo) ProtoMessage() {}
+
+func (x *Memo) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[60]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Memo.ProtoReflect.Descriptor instead.
+func (*Memo) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{60}
+}
+
+func (x *Memo) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Memo) GetMatter() *Matter {
+	if x != nil {
+		return x.Matter
+	}
+	return nil
+}
+
+func (x *Memo) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *Memo) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+// A binder inside a binder, or at the top when parent is unset. Its owner
+// reads it and everything below it, and edits it.
+type Binder struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Parent        *Binder                `protobuf:"bytes,2,opt,name=parent,proto3" json:"parent,omitempty"`
+	OwnerId       string                 `protobuf:"bytes,3,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
+	Title         string                 `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Binder) Reset() {
+	*x = Binder{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[61]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Binder) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Binder) ProtoMessage() {}
+
+func (x *Binder) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[61]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Binder.ProtoReflect.Descriptor instead.
+func (*Binder) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{61}
+}
+
+func (x *Binder) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Binder) GetParent() *Binder {
+	if x != nil {
+		return x.Parent
+	}
+	return nil
+}
+
+func (x *Binder) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *Binder) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+// A sheet in a binder.
+type Sheet struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Binder        *Binder                `protobuf:"bytes,2,opt,name=binder,proto3" json:"binder,omitempty"`
+	Title         string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Sheet) Reset() {
+	*x = Sheet{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[62]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Sheet) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Sheet) ProtoMessage() {}
+
+func (x *Sheet) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[62]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Sheet.ProtoReflect.Descriptor instead.
+func (*Sheet) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{62}
+}
+
+func (x *Sheet) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Sheet) GetBinder() *Binder {
+	if x != nil {
+		return x.Binder
+	}
+	return nil
+}
+
+func (x *Sheet) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
 var File_syncplane_testdata_access_v1_access_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
@@ -4187,7 +4730,96 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x05title\x18\x03 \x01(\tR\x05title:9\xa2\xbb\x185\n" +
 	"\aleaflet\x12\x02idR&\n" +
 	"\x11\b\x012\rview_leaflets\n" +
-	"\x11(\x012\redit_leaflets*Q\n" +
+	"\x11(\x012\redit_leaflets\"\xcc\x02\n" +
+	"\x05Clerk\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04role\x18\x03 \x01(\tR\x04role:\x85\x02\xa2\xbb\x18\x80\x02\n" +
+	"\x05clerk\x12\x02idR&\n" +
+	"\x11\b\x012\rmanage_clerks\n" +
+	"\x11(\x012\rmanage_clerksZ\xca\x01\n" +
+	"\auser_id\x12\x04role\x1a.\n" +
+	"\x05clerk\x12\x12view_open_dossiers\x12\x11view_open_matters\x1a\x88\x01\n" +
+	"\tregistrar\x12\rmanage_clerks\x12\rview_dossiers\x12\redit_dossiers\x12\x16manage_dossier_members\x12\fview_matters\x12\fedit_matters\x12\fview_binders\x12\fedit_binders\"\xee\x01\n" +
+	"\aDossier\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05title\x18\x02 \x01(\tR\x05title\x12\x18\n" +
+	"\aprivate\x18\x03 \x01(\bR\aprivate\x12\x1a\n" +
+	"\barchived\x18\x04 \x01(\bR\barchived\x12!\n" +
+	"\bowner_id\x18\x05 \x01(\tB\x06\xaa\xbb\x18\x02(\x01R\aownerId:d\xa2\xbb\x18`\n" +
+	"\adossier\x12\x02idRQ\n" +
+	"\x11\b\x012\rview_dossiers\n" +
+	")\b\x012\x12view_open_dossiersR\x11\n" +
+	"\x0f\n" +
+	"\aprivate\x10\x01\x1a\x02(\x00\n" +
+	"\x11\x18\x012\redit_dossiers\"\xe0\x02\n" +
+	"\rDossierMember\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
+	"\adossier\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.DossierB\x06\xaa\xbb\x18\x02Z\x00R\adossier\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xc8\x01\xa2\xbb\x18\xc3\x01\n" +
+	"\x0edossier_member\x12\x02idR/\n" +
+	"\x11\b\x012\rview_dossiers\n" +
+	"\x1a(\x012\x16manage_dossier_membersZ|\n" +
+	"\auser_id\x12\x04role\x1a;\n" +
+	"\x0edossier_member\x12\rview_dossiers\x12\fview_matters\x12\fedit_matters\x1a.\n" +
+	"\x0edossier_editor\x12\rview_dossiers\x12\redit_dossiers\"\x85\x02\n" +
+	"\x06Matter\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
+	"\adossier\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.DossierB\x06\xaa\xbb\x18\x02Z\x00R\adossier\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:\x8b\x01\xa2\xbb\x18\x86\x01\n" +
+	"\x06matter\x12\x02idRx\n" +
+	"\x10\b\x012\fview_matters\n" +
+	"3\b\x012\x11view_open_mattersZ\x1c\n" +
+	"\adossier\x1a\x11\n" +
+	"\x0f\n" +
+	"\aprivate\x10\x01\x1a\x02(\x00\n" +
+	"/(\x012\fedit_mattersZ\x1d\n" +
+	"\adossier\x1a\x12\n" +
+	"\x10\n" +
+	"\barchived\x10\x01\x1a\x02(\x00\"\x88\x02\n" +
+	"\rMatterWatcher\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
+	"\x06matter\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.MatterB\x06\xaa\xbb\x18\x02Z\x00R\x06matter\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:t\xa2\xbb\x18p\n" +
+	"\x0ematter_watcher\x12\x02idR$\n" +
+	"\x10\b\x012\fview_matters\n" +
+	"\x10(\x012\fedit_mattersZ4\n" +
+	"\auser_id\x12\x04role\x1a#\n" +
+	"\x0ematter_watcher\x12\x11view_open_matters\"\x84\x02\n" +
+	"\x04Memo\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
+	"\x06matter\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.MatterB\x06\xaa\xbb\x18\x02Z\x00R\x06matter\x12\x1a\n" +
+	"\x04body\x18\x03 \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x04body\x12\x14\n" +
+	"\x05title\x18\x04 \x01(\tR\x05title:t\xa2\xbb\x18p\n" +
+	"\x04memo\x12\x02idRd\n" +
+	"\x10\b\x012\fview_matters\n" +
+	"3\b\x012\x11view_open_mattersZ\x1c\n" +
+	"\adossier\x1a\x11\n" +
+	"\x0f\n" +
+	"\aprivate\x10\x01\x1a\x02(\x00\n" +
+	"\x1b\b\x01(\x01:\x00Z\x13\n" +
+	"\adossier\x12\bowner_id\"\xeb\x01\n" +
+	"\x06Binder\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
+	"\x06parent\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.BinderB\x06\xaa\xbb\x18\x02Z\x00R\x06parent\x12!\n" +
+	"\bowner_id\x18\x03 \x01(\tB\x06\xaa\xbb\x18\x02(\x01R\aownerId\x12\x14\n" +
+	"\x05title\x18\x04 \x01(\tR\x05title:R\xa2\xbb\x18N\n" +
+	"\x06binder\x12\x02idR@\n" +
+	"\x10\b\x012\fview_binders\n" +
+	"\x10(\x012\fedit_binders\n" +
+	"\x1a\b\x01\x18\x01:\x00Z\x12\n" +
+	"\x06binder\x12\bowner_id\"\xc6\x01\n" +
+	"\x05Sheet\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
+	"\x06binder\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.BinderB\x06\xaa\xbb\x18\x02Z\x00R\x06binder\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:Q\xa2\xbb\x18M\n" +
+	"\x05sheet\x12\x02idR@\n" +
+	"\x10\b\x012\fview_binders\n" +
+	"\x10(\x012\fedit_binders\n" +
+	"\x1a\b\x01(\x01:\x00Z\x12\n" +
+	"\x06binder\x12\bowner_id*Q\n" +
 	"\bTeamRole\x12\x19\n" +
 	"\x15TEAM_ROLE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TEAM_ROLE_VIEWER\x10\x01\x12\x14\n" +
@@ -4206,7 +4838,7 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 55)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 63)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(TeamRole)(0),            // 0: syncplane.testdata.access.v1.TeamRole
 	(*OrgMember)(nil),        // 1: syncplane.testdata.access.v1.OrgMember
@@ -4264,6 +4896,14 @@ var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(*Story)(nil),            // 53: syncplane.testdata.access.v1.Story
 	(*StoryNote)(nil),        // 54: syncplane.testdata.access.v1.StoryNote
 	(*Leaflet)(nil),          // 55: syncplane.testdata.access.v1.Leaflet
+	(*Clerk)(nil),            // 56: syncplane.testdata.access.v1.Clerk
+	(*Dossier)(nil),          // 57: syncplane.testdata.access.v1.Dossier
+	(*DossierMember)(nil),    // 58: syncplane.testdata.access.v1.DossierMember
+	(*Matter)(nil),           // 59: syncplane.testdata.access.v1.Matter
+	(*MatterWatcher)(nil),    // 60: syncplane.testdata.access.v1.MatterWatcher
+	(*Memo)(nil),             // 61: syncplane.testdata.access.v1.Memo
+	(*Binder)(nil),           // 62: syncplane.testdata.access.v1.Binder
+	(*Sheet)(nil),            // 63: syncplane.testdata.access.v1.Sheet
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	2,  // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
@@ -4311,11 +4951,17 @@ var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	49, // 42: syncplane.testdata.access.v1.Story.cycle:type_name -> syncplane.testdata.access.v1.Cycle
 	53, // 43: syncplane.testdata.access.v1.StoryNote.story:type_name -> syncplane.testdata.access.v1.Story
 	50, // 44: syncplane.testdata.access.v1.Leaflet.shelves:type_name -> syncplane.testdata.access.v1.Shelf
-	45, // [45:45] is the sub-list for method output_type
-	45, // [45:45] is the sub-list for method input_type
-	45, // [45:45] is the sub-list for extension type_name
-	45, // [45:45] is the sub-list for extension extendee
-	0,  // [0:45] is the sub-list for field type_name
+	57, // 45: syncplane.testdata.access.v1.DossierMember.dossier:type_name -> syncplane.testdata.access.v1.Dossier
+	57, // 46: syncplane.testdata.access.v1.Matter.dossier:type_name -> syncplane.testdata.access.v1.Dossier
+	59, // 47: syncplane.testdata.access.v1.MatterWatcher.matter:type_name -> syncplane.testdata.access.v1.Matter
+	59, // 48: syncplane.testdata.access.v1.Memo.matter:type_name -> syncplane.testdata.access.v1.Matter
+	62, // 49: syncplane.testdata.access.v1.Binder.parent:type_name -> syncplane.testdata.access.v1.Binder
+	62, // 50: syncplane.testdata.access.v1.Sheet.binder:type_name -> syncplane.testdata.access.v1.Binder
+	51, // [51:51] is the sub-list for method output_type
+	51, // [51:51] is the sub-list for method input_type
+	51, // [51:51] is the sub-list for extension type_name
+	51, // [51:51] is the sub-list for extension extendee
+	0,  // [0:51] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_access_v1_access_proto_init() }
@@ -4355,7 +5001,7 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   55,
+			NumMessages:   63,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

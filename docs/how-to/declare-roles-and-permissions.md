@@ -408,7 +408,7 @@ message Task {
 - The update rule must admit the stored row and the row as it will be stored, so a holder of `edit_tasks` cannot archive a task or restore one. Give that to another rule, here the `write` rule with `manage_tasks`.
 - When a task becomes hidden, clients that read it through the first rule alone receive a delete. When it stops being hidden, they receive it again.
 - To let the author read their own draft, add a second read rule with `subject` beside the one with `when`. The rules join with OR.
-- A condition reads only the row. It cannot read the project above the task.
+- A condition reads only the row. To decide by a field of the project above the task, use `within`; see the next section.
 
 In the TypeScript schema builder, `when` takes the same field proxy as a query's `where`:
 
@@ -417,6 +417,123 @@ In the TypeScript schema builder, `when` takes the same field proxy as a query's
 ```
 
 `can()` evaluates the condition on the row the client holds. It answers `'unknown'` for an update whose `fields` include a field the condition reads, because the new value decides.
+
+### Decide by a field of a row above: private, archived and owned parents
+
+Add `within` to a rule to admit only rows that sit within a row that passes a check. The entry names the entity of that row, and a `subject` field or a `when` condition on it. Here a private project hides its tasks and their comments from org members, an archived project makes its tasks read-only, and the owner of a project reads and writes the comments of its tasks:
+
+1. Give the org role and the project role different read permissions, so that one rule can check the project for org members and another can leave it unchecked for project members:
+
+   ```proto
+   roles: [
+     { name: "org_member" grants: [ "view_projects", "view_open_tasks" ] },
+     ...
+   ]
+   ```
+
+   ```proto
+   roles: [
+     { name: "project_member" grants: [ "view_projects", "view_tasks", "edit_tasks" ] },
+     ...
+   ]
+   ```
+
+2. Declare the fields on the parent. Mark the owner field `indexed`, so that a read by an owner who reads through the root narrows to the owner's rows:
+
+   ```proto
+   message Project {
+   	option (syncplane.v1.entity) = {
+   		name: "project"
+   		key_fields: [ "id" ]
+   		access: {
+   			allow: [
+   				{ read: true requires: "view_projects" },
+   				{ update: true requires: "edit_projects" }
+   			]
+   		}
+   	};
+   	string id = 1;
+   	bool private = 2;
+   	bool archived = 3;
+   	string owner_id = 4 [(syncplane.v1.field_behavior) = { indexed: true }];
+   }
+   ```
+
+3. Add the rules with `within` to the entities below:
+
+   ```proto
+   message Task {
+   	option (syncplane.v1.entity) = {
+   		name: "task"
+   		key_fields: [ "id" ]
+   		access: {
+   			allow: [
+   				{ read: true requires: "view_tasks" },
+   				{
+   					read: true
+   					requires: "view_open_tasks"
+   					within: {
+   						entity: "project"
+   						when: { cmp: { path: [ "private" ] op: CMP_OP_EQ value: { bool_value: false } } }
+   					}
+   				},
+   				{
+   					write: true
+   					requires: "edit_tasks"
+   					within: {
+   						entity: "project"
+   						when: { cmp: { path: [ "archived" ] op: CMP_OP_EQ value: { bool_value: false } } }
+   					}
+   				}
+   			]
+   		}
+   	};
+   	string id = 1;
+   	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+   }
+
+   message Comment {
+   	option (syncplane.v1.entity) = {
+   		name: "comment"
+   		key_fields: [ "id" ]
+   		access: {
+   			allow: [
+   				{ read: true requires: "view_tasks" },
+   				{
+   					read: true
+   					requires: "view_open_tasks"
+   					within: {
+   						entity: "project"
+   						when: { cmp: { path: [ "private" ] op: CMP_OP_EQ value: { bool_value: false } } }
+   					}
+   				},
+   				{
+   					read: true
+   					write: true
+   					admitted: {}
+   					within: { entity: "project" subject: "owner_id" }
+   				}
+   			]
+   		}
+   	};
+   	string id = 1;
+   	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+   }
+   ```
+
+- The entry holds when the row itself, or any row above it, is a row of the named entity that passes. The comment is two levels below the project, and the entry finds it.
+- When a project becomes private, org members receive a delete for each of its tasks and comments on their next pull. When it stops being private, they receive them again. The same happens to the comments when the owner changes.
+- A write that changes `private` or `owner_id` changes what other callers read below the project, so it needs, where the project is, a read rule of each entity below it. A caller that edits projects but cannot read their tasks cannot make a project public.
+- In a tree of one entity, such as folders inside folders, one row that passes is enough. A private inner folder below a folder that is not private does not hide its documents through such a rule.
+
+In the TypeScript schema builder, an entry with `subject` is a plain object. Build an entry with `when` through `schema.within`, which types the condition against the parent's fields:
+
+```ts
+{ read: true, requires: 'view_open_tasks', within: schema.within(project, { when: (p) => p.private.eq(false) }) },
+{ read: true, write: true, admitted: true, within: { entity: 'project', subject: 'ownerId' } },
+```
+
+`can()` reads the rows above the row from the rows the client holds. It answers `'unknown'` when a row of the named entity on the way is not held, and for an update that moves the row.
 
 ### Require two permissions together
 

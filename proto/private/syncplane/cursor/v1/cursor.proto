@@ -134,8 +134,9 @@ message Cursor {
 }
 
 // AccessMove is one change of the access parent of a row that other rows sit
-// below: a move to another parent, or the row's creation or deletion. The
-// rows below it change visibility without being written, so the server
+// below: a move to another parent, a change of what access rules' within
+// checks read of the row, or the row's creation or deletion. The rows below
+// it change visibility without being written, so the server
 // records the change in the transaction that makes it, as a row of an entity
 // no schema declares, at the change's sequence. A pull reads the moves after
 // its cursor and resyncs the rows below each one that changes what the client
@@ -154,6 +155,21 @@ message AccessMove {
 	AnchorRef to = 4;
 	repeated AnchorRef more_from = 5;
 	repeated AnchorRef more_to = 6;
+	// What the access rules' within checks read of the row before the change,
+	// as of the start of the sequence. Set only for a row of an entity that a
+	// within check names, and only when the row existed: absent, the row
+	// passed no such check.
+	WithinState from_within = 7;
+}
+
+// WithinState is what the within checks that name one entity read of one of
+// its rows.
+message WithinState {
+	// The value of each subject field a check reads, by field name.
+	map<string, string> subjects = 1;
+	// The conditions the row matched, each as the canonical form of a check's
+	// when condition, sorted.
+	repeated string matched = 2;
 }
 
 // AnchorRef names one row of a workspace.

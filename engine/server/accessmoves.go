@@ -23,16 +23,20 @@ import (
 // after its cursor to find the rows that moved without being written (see
 // compareMoves).
 //
+// The rows below a row also change visibility when a write changes what an
+// access rule's within entry reads of the row, such as a project's private
+// flag or a doc's owner, so the log records that as a move too.
+//
 // A move is recorded only for a row other rows can sit below, and only when
-// one does at the time of the write: a change of its access parents, its
-// creation below a parent (a row created with a key that rows below already
-// name) and its deletion (a Trusted write may delete a row with rows below
-// it). A record holds the row's parents before and after the change, so a row
-// that gains or loses one of several parents is one record. A row without
-// rows below it moves nothing that the change scan does not already see. When
-// one sequence writes a row more than once, the log keeps one record whose
-// parents before the change are the ones the row had at the start of the
-// sequence.
+// one does at the time of the write: a change of its access parents or of
+// what within entries read of it, its creation (a row created with a key that
+// rows below already name) and its deletion (a Trusted write may delete a row
+// with rows below it). A record holds the row's parents before and after the
+// change, so a row that gains or loses one of several parents is one record,
+// and what within entries read of the row before it. A row without rows below
+// it moves nothing that the change scan does not already see. When one
+// sequence writes a row more than once, the log keeps one record whose state
+// before the change is the one the row had at the start of the sequence.
 //
 // The records are rows of accessMovesEntity, which no schema declares, so the
 // sync paths skip them as they skip any entity the catalog does not hold. Each
@@ -88,7 +92,8 @@ func edgeOfRefs(first *syncplanecursorv1.AnchorRef, more []*syncplanecursorv1.An
 }
 
 // recordAccessMove writes the log record of a write that changes the access
-// parents of a row other rows can sit below, when rows sit below it. Every
+// parents of a row other rows can sit below, or what within entries read of
+// it, when rows sit below it. Every
 // write path calls it, Trusted ones included, after every check that can
 // refuse the write and before the row is written. final is the row as it will
 // be stored, nil for a delete; load returns the row before the write.
@@ -104,10 +109,17 @@ func (s *Server) recordAccessMove(
 	actor storage.Actor,
 ) error {
 	model := s.catalogPtr().access
-	if model == nil || info.access == nil || !info.access.hasParent() || !model.anchors[info.name] {
+	if model == nil || info.access == nil || !model.anchors[info.name] {
 		return nil
 	}
-	var from, to chainEdge
+	checked := len(model.withinOn[info.name]) > 0
+	if !info.access.hasParent() && !checked {
+		return nil
+	}
+	var (
+		from, to             chainEdge
+		fromWithin, toWithin rowWithin
+	)
 	row, live, err := load()
 	if err != nil {
 		return err
@@ -117,12 +129,14 @@ func (s *Server) recordAccessMove(
 			s.reportPoison(ctx, ws, row, err)
 		} else {
 			from = edgeOf(model, info, stored.ProtoReflect())
+			fromWithin = withinStateOf(model, info, stored.ProtoReflect())
 		}
 	}
 	if final != nil {
 		to = edgeOf(model, info, final.ProtoReflect())
+		toWithin = withinStateOf(model, info, final.ProtoReflect())
 	}
-	if from.equal(to) {
+	if from.equal(to) && fromWithin.equal(toWithin) {
 		return nil
 	}
 	below, err := liveRowBelow(tx, model, info, key, s.limits)
@@ -141,17 +155,19 @@ func (s *Server) recordAccessMove(
 		var m syncplanecursorv1.AccessMove
 		if err := proto.Unmarshal(prev.Value, &m); err == nil {
 			from = edgeOfRefs(m.GetFrom(), m.GetMoreFrom())
+			fromWithin = rowWithinOf(m.GetFromWithin())
 		}
 	}
 	fromFirst, fromMore := anchorRefsOf(from)
 	toFirst, toMore := anchorRefsOf(to)
 	value, err := proto.MarshalOptions{Deterministic: true}.Marshal(&syncplanecursorv1.AccessMove{
-		Entity:   info.name,
-		Key:      key,
-		From:     fromFirst,
-		To:       toFirst,
-		MoreFrom: fromMore,
-		MoreTo:   toMore,
+		Entity:     info.name,
+		Key:        key,
+		From:       fromFirst,
+		To:         toFirst,
+		MoreFrom:   fromMore,
+		MoreTo:     toMore,
+		FromWithin: withinStateProto(fromWithin),
 	})
 	if err != nil {
 		return err
@@ -159,11 +175,31 @@ func (s *Server) recordAccessMove(
 	return tx.PutRow(accessMovesEntity, logKey, value, seq, actor)
 }
 
+// withinStateProto renders st for the log: nil for a row that does not
+// exist.
+func withinStateProto(st rowWithin) *syncplanecursorv1.WithinState {
+	if !st.live {
+		return nil
+	}
+	return &syncplanecursorv1.WithinState{Subjects: st.subjects, Matched: st.matched}
+}
+
+// rowWithinOf reads a state back from the log, as withinStateProto renders
+// it.
+func rowWithinOf(m *syncplanecursorv1.WithinState) rowWithin {
+	if m == nil {
+		return rowWithin{}
+	}
+	return rowWithin{live: true, subjects: m.GetSubjects(), matched: m.GetMatched()}
+}
+
 // accessMove is one record of the log, read back.
 type accessMove struct {
 	version  uint64
 	row      anchorRow
 	from, to chainEdge
+	// fromWithin is what the within checks read of the row before the change.
+	fromWithin rowWithin
 }
 
 // errMovesRead stops a newest-first scan of the log.
@@ -190,10 +226,11 @@ func readAccessMoves(tx storage.ReadTx, floor uint64, limit int) (moves []access
 			return fmt.Errorf("server: access move %q does not decode: %w", row.Key, err)
 		}
 		moves = append(moves, accessMove{
-			version: row.Version,
-			row:     anchorRow{entity: m.GetEntity(), key: m.GetKey()},
-			from:    edgeOfRefs(m.GetFrom(), m.GetMoreFrom()),
-			to:      edgeOfRefs(m.GetTo(), m.GetMoreTo()),
+			version:    row.Version,
+			row:        anchorRow{entity: m.GetEntity(), key: m.GetKey()},
+			from:       edgeOfRefs(m.GetFrom(), m.GetMoreFrom()),
+			to:         edgeOfRefs(m.GetTo(), m.GetMoreTo()),
+			fromWithin: rowWithinOf(m.GetFromWithin()),
 		})
 		return nil
 	})

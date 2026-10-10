@@ -415,6 +415,10 @@ A caller holds a permission at an **anchor**: the workspace root, or one row tha
 | `access.allow[]`               | `subject`  | A check: the named top-level, singular `string` field holds one of the caller's subjects. An empty value never matches.                                                                                                                                                                                                                                                                                                                        |
 | `access.allow[]`               | `fields`   | A check: an update changes no top-level field or oneof outside this list. Only on a rule whose one operation is `update`. Cannot name a key field.                                                                                                                                                                                                                                                                                             |
 | `access.allow[]`               | `when`     | A check: the row matches this `syncplane.v1.Condition`, with paths from the row. A `rel` or `match` condition is refused. See [Conditions on the row](#conditions-on-the-row).                                                                                                                                                                                                                                                                 |
+| `access.allow[]`               | `within`   | Checks: each entry (`syncplane.v1.AccessWithin`) holds. See [Checks on the rows above](#checks-on-the-rows-above).                                                                                                                                                                                                                                                                                                                             |
+| `access.allow[].within[]`      | `entity`   | The entity of the row the row must sit within, by name: an entity whose rows the rule's rows can sit below, or the rule's own entity when its rows sit below rows of their own.                                                                                                                                                                                                                                                                |
+| `access.allow[].within[]`      | `subject`  | A check: the named top-level, singular `string` field of that row holds one of the caller's subjects. An empty value never matches.                                                                                                                                                                                                                                                                                                            |
+| `access.allow[].within[]`      | `when`     | A check: that row matches this `syncplane.v1.Condition`, with paths from that row. A `rel` or `match` condition is refused.                                                                                                                                                                                                                                                                                                                    |
 | `grant`                        | `subject`  | The name of the field or oneof that holds the subject the row grants to. A field is top-level and singular: a `string` field names one caller, and a reference to an entity with `members` names a team. See [Teams](#teams).                                                                                                                                                                                                                  |
 | `grant`                        | `role`     | The name of the field that holds the role the row grants: a top-level, singular `string` or enum field outside any oneof. An enum value names the role with the same name as the value.                                                                                                                                                                                                                                                        |
 | `grant`                        | `roles`    | The roles rows can grant. Each role has a `name`, the permissions it `grants`, and the names of the roles of the same `grant` it `includes`. A role grants every permission of each role it includes, through any number of steps.                                                                                                                                                                                                             |
@@ -505,6 +509,88 @@ A holder of `edit_tasks` edits a task while it is not archived. The update rule 
 
 A read rule with `when` does not narrow the rows that bootstrap, resync and `Query` read: they read the rows below the rule's anchors, or every row of the entity when the caller holds every permission of the rule at the workspace root, and test each one.
 
+### Checks on the rows above
+
+A `within` entry admits only rows that sit within a row that passes a check: the row itself, or a row above it on any path of access parents, is a row of the named entity, and that row passes every check the entry sets. A row with no such row at or above it fails the entry. The entries of a rule join with AND, and with the rule's other checks. A permission held at the workspace root does not skip the check.
+
+```protobuf
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{
+					read: true
+					requires: "view_open_tasks"
+					within: {
+						entity: "project"
+						when: {
+							cmp: {
+								path: [ "private" ]
+								op: CMP_OP_EQ
+								value: { bool_value: false }
+							}
+						}
+					}
+				},
+				{
+					write: true
+					requires: "edit_tasks"
+					within: {
+						entity: "project"
+						when: {
+							cmp: {
+								path: [ "archived" ]
+								op: CMP_OP_EQ
+								value: { bool_value: false }
+							}
+						}
+					}
+				}
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+}
+
+message Comment {
+	option (syncplane.v1.entity) = {
+		name: "comment"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{
+					read: true
+					write: true
+					admitted: {}
+					within: { entity: "project" subject: "owner_id" }
+				}
+			]
+		}
+	};
+	string id = 1;
+	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+}
+```
+
+A role at the workspace root that grants `view_open_tasks` reads the tasks of every project that is not private. A role at a project that grants `view_tasks` reads its tasks whether it is private or not. No caller writes a task of an archived project. The caller that a project names in its `owner_id` field reads and writes the comments of its tasks.
+
+| Operation | Effect of `within`                                                                                                                                                                                |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Read      | A write to a row above that makes the row fail every entry that let a client read it removes the row from that client, as a delete. A write that makes it pass sends the row.                     |
+| Create    | The row as it will be stored must sit within a row that passes.                                                                                                                                   |
+| Delete    | The stored row must sit within a row that passes.                                                                                                                                                 |
+| Update    | The stored row and the row as it will be stored must sit within a row that passes. A move out of a row that fails, or into one, is refused.                                                       |
+| Above     | A write that changes whether a row passes an entry needs, where the row sits, a read rule of each entity whose rows can sit below it, as a move does. See [Access model](server.md#access-model). |
+
+The rows above a row are a graph when a row has several parents. One row that passes is enough, so a parent only adds. In an entity whose rows sit below rows of their own, such as a folder tree, a row that fails does not hide the rows below it from a caller when a row above it passes: a private inner folder below a folder that is not private does not hide its documents. Give the inner row grants of its own instead.
+
+A read rule with a `within` entry narrows bootstrap, resync and `Query` to the rows below the rule's anchors. When the caller holds every permission of the rule at the workspace root, or the rule uses `admitted`, an entry with `subject` narrows to the rows within the rows whose field names the caller, when that field has an index: mark it `indexed`. Otherwise the read tests every row of the entity.
+
 ### Operations no rule admits
 
 An operation that no rule of an entity names is open only to trusted writes: in-process writes under `server.Trusted`, connectors, effects, and the bodies of custom mutators. Before the write transaction opens, and before `Permissions.CanMutate` runs, the server refuses with `permission_denied` a write that can only be such an operation. This check reads no row. It classifies the write from its operation and its `expected_version`, where version 0 means that the row does not exist:
@@ -523,7 +609,7 @@ In a schema that does not use the access model, the server refuses no write for 
 
 Additional constraints:
 
-- A rule reads the permissions the caller holds where the row sits, and the fields of the row itself. It never reads a field of another row, such as the access parent.
+- A rule reads the permissions the caller holds where the row sits, the fields of the row itself, and, through `within`, the fields of the rows at or above it. It never reads a field of a row below the row or beside it.
 - Rules apply to whole rows. To keep one field of a writable row out of a client's reach, use [Protected fields](#protected-fields).
 - The rows that a custom mutator body writes are not checked against the rules. The invocation is checked by its `MutatorAccess`; see [Access model](server.md#access-model). A mutator can therefore make a change that no rule admits to the caller:
 
@@ -710,6 +796,7 @@ Registration refuses a schema that uses the model when:
 - An entity declares no `access` and the server is built with `WithStrictAccess`.
 - An `access` declares no rule, or two rules with the same operation flags, source and checks.
 - A rule's `when` condition does not compile against the entity, or uses a `rel` or `match` condition.
+- A rule's `within` entry names no entity, sets neither `subject` nor `when`, repeats another entry of the rule, names an entity that is not in the model or whose rows the rule's rows cannot sit below (the rule's own entity counts only when its rows sit below rows of their own), names a `subject` that is not a top-level, singular `string` field of that entity, or has a `when` condition that does not compile against that entity or uses a `rel` or `match` condition.
 - A rule sets no operation flag, sets neither `requires` nor `admitted`, sets both, or names one permission twice in `requires`.
 - An entity marks an `access_parent` field that is a map, not a reference, nested inside a message field, a workspace-qualified reference, or protected by `write_policy`.
 - A grant entity marks more than one `access_parent` field, other than the members of one oneof, or marks a repeated one.
@@ -725,7 +812,7 @@ Registration refuses a schema that uses the model when:
 - A role includes a role that its own `grant` does not declare, includes one role twice, or includes itself, directly or through other roles.
 - A permission that a rule's `requires` or a `MutatorAccess` names is granted by no role, or a role grants a permission that no rule and no `MutatorAccess` names.
 - A permission or role name breaks the [naming rules](naming.md#permission-and-role-names).
-- The `access`, rule, `admitted`, `grant`, role, `members` or `access_parent` options carry fields the server does not know, which a newer `options.proto` can write.
+- The `access`, rule, `admitted`, `within`, `grant`, role, `members` or `access_parent` options carry fields the server does not know, which a newer `options.proto` can write.
 
 `RegisterDescriptorSet` and `New` refuse a schema that breaks a rule. `RegisterEntity` adds one entity at a time, so a schema it builds can break a rule until its last entity is registered. While it does, every request to the server fails with `failed_precondition`.
 

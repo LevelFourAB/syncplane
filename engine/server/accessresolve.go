@@ -617,8 +617,8 @@ func grantRoleOf(g *grantSpec, msg protoreflect.Message) string {
 // is outside the model, or a read rule that checks nothing on the row and
 // needs one permission admits the caller at the root. A row is readable when
 // the caller holds every permission of one of the read rules at the row or at
-// a row up its parent chain, and the row passes that rule's subject and when
-// checks.
+// a row up its parent chain, and the row passes that rule's subject, when and
+// within checks.
 func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 	a := info.access
 	if a == nil {
@@ -648,7 +648,14 @@ func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 			if !o.rule.rowHolds(subjects, r) {
 				continue
 			}
-			if ok, err := chains.holdsAll(o.anchors, info, key, r); err != nil || ok {
+			ok, err := chains.holdsAll(o.anchors, info, key, r)
+			if err != nil {
+				return false, err
+			}
+			if ok && o.rule.checksAbove() {
+				ok, err = chains.withinAll(o.rule, subjects, info, key, r)
+			}
+			if err != nil || ok {
 				return ok, err
 			}
 		}
@@ -670,7 +677,8 @@ type checkedRead struct {
 func checkedReadsOf(r readers, caller *accessCaller, set *accessSet) []checkedRead {
 	var out []checkedRead
 	for _, rule := range r.checked {
-		if rule.subject != nil && len(caller.subjects) == 0 {
+		if (rule.subject != nil || slices.ContainsFunc(rule.within, func(w withinEntry) bool { return w.subject != "" })) &&
+			len(caller.subjects) == 0 {
 			continue
 		}
 		if rule.admitted() {
@@ -808,11 +816,12 @@ func (e *rowEmitter) accessCandidates(tx storage.ReadTx, info *entityInfo, maxCa
 // checkedCandidates returns, in key order, a superset of the keys of the rows
 // of info that the read rule o admits the bound caller to: the rows whose
 // subject field names one of the caller's subjects when the rule has a
-// subject check and the field's index is ready, and otherwise the rows below
-// the anchors of every permission the rule needs that the caller does not
-// hold at the root. ok is false when neither can be read within
-// maxCandidates keys, which is always the case for a rule without a subject
-// check whose permissions the caller holds at the root.
+// subject check and the field's index is ready; otherwise the rows below the
+// anchors of every permission the rule needs that the caller does not hold at
+// the root; otherwise the rows within a row that a within entry's subject
+// field names the caller in (see withinRows). ok is false when none can be
+// read within maxCandidates keys, which is always the case for a rule without
+// a subject check whose permissions the caller holds at the root.
 func (e *rowEmitter) checkedCandidates(tx storage.ReadTx, info *entityInfo, o checkedRead, maxCandidates int) ([]string, bool, error) {
 	if o.rule.subject != nil {
 		keys, ok, err := subjectRows(tx, info, o.rule.subject, e.caller.subjects, maxCandidates, e.srv.limits)
@@ -820,6 +829,18 @@ func (e *rowEmitter) checkedCandidates(tx storage.ReadTx, info *entityInfo, o ch
 			return keys, ok, err
 		}
 	}
+	keys, found, err := e.anchorCandidates(tx, info, o, maxCandidates)
+	if err != nil || found {
+		return keys, found, err
+	}
+	return withinRows(tx, e.caller.model, info, o.rule, e.caller.subjects, maxCandidates, e.srv.limits)
+}
+
+// anchorCandidates returns, in key order, the rows of info below the anchors
+// of every permission the read rule o needs that the caller does not hold at
+// the root. ok is false when the caller holds each of them at the root, or no
+// walk fits in maxCandidates keys.
+func (e *rowEmitter) anchorCandidates(tx storage.ReadTx, info *entityInfo, o checkedRead, maxCandidates int) ([]string, bool, error) {
 	var keys []string
 	found := false
 	for _, a := range o.anchors {
@@ -895,6 +916,41 @@ func subjectRows(tx storage.ReadTx, info *entityInfo, fd protoreflect.FieldDescr
 	}
 	sort.Strings(keys)
 	return slices.Compact(keys), true, nil
+}
+
+// withinRows returns, in key order, a superset of the keys of the rows of info
+// that pass the within entries of rule for a caller with subjects: the rows
+// at or below a row whose field names one of subjects, for the first entry
+// with a subject check whose field's index is ready. ok is false when no
+// entry has one, or the rows do not fit in maxCandidates keys.
+func withinRows(
+	tx storage.ReadTx,
+	model *accessModel,
+	info *entityInfo,
+	rule accessRule,
+	subjects []string,
+	maxCandidates int,
+	limits Limits,
+) ([]string, bool, error) {
+	for _, entry := range rule.within {
+		w := model.withins[entry.spec()]
+		if w == nil || w.subject == nil {
+			continue
+		}
+		named, ok, err := subjectRows(tx, w.target, w.subject, subjects, maxCandidates, limits)
+		if err != nil {
+			return nil, false, err
+		}
+		if !ok {
+			continue
+		}
+		from := make([]anchorRow, len(named))
+		for i, key := range named {
+			from[i] = anchorRow{entity: w.target.name, key: key}
+		}
+		return rowsBelow(tx, model, info, from, maxCandidates, limits)
+	}
+	return nil, false, nil
 }
 
 // anchorRowsOf returns the rows a is held at, in no order; none for nil.

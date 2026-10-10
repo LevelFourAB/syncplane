@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSI4Cg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUi4wEKCkFjY2Vzc1J1bGUSDAoEcmVhZBgBIAEoCBIOCgZjcmVhdGUYAiABKAgSDgoGdXBkYXRlGAMgASgIEg4KBmRlbGV0ZRgEIAEoCBINCgV3cml0ZRgFIAEoCBIQCghyZXF1aXJlcxgGIAMoCRIuCghhZG1pdHRlZBgHIAEoCzIcLnN5bmNwbGFuZS52MS5BZG1pdHRlZENhbGxlchIPCgdzdWJqZWN0GAggASgJEg4KBmZpZWxkcxgJIAMoCRIlCgR3aGVuGAogASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbiIQCg5BZG1pdHRlZENhbGxlciJQCgxHcmFudE9wdGlvbnMSDwoHc3ViamVjdBgBIAEoCRIMCgRyb2xlGAIgASgJEiEKBXJvbGVzGAMgAygLMhIuc3luY3BsYW5lLnYxLlJvbGUiNgoEUm9sZRIMCgRuYW1lGAEgASgJEg4KBmdyYW50cxgCIAMoCRIQCghpbmNsdWRlcxgDIAMoCSIgCg5NZW1iZXJzT3B0aW9ucxIOCgZlbnRpdHkYASABKAkiFQoTQWNjZXNzUGFyZW50T3B0aW9ucyIQCg5DcmVhdG9yT3B0aW9ucyIQCg5IaXN0b3J5T3B0aW9ucyISChBSZWZlcmVuY2VPcHRpb25zIhsKC1NlYXJjaEZpZWxkEgwKBHBhdGgYASABKAkiTwoKU2VhcmNoU3BlYxIoCgVmaWVsZBgBIAMoCzIZLnN5bmNwbGFuZS52MS5TZWFyY2hGaWVsZBIXCg9rZWVwX2RpYWNyaXRpY3MYAiABKAgiJgoISW5kZXhLZXkSDAoEcGF0aBgBIAEoCRIMCgRkZXNjGAIgASgIIj4KCUluZGV4U3BlYxIMCgRuYW1lGAEgASgJEiMKA2tleRgCIAMoCzIWLnN5bmNwbGFuZS52MS5JbmRleEtleSLXAgoNRmllbGRCZWhhdmlvchIOCgZvcGFxdWUYASABKAgSEQoJa2V5X2ZpZWxkGAIgAygJEhMKC29yZGVyX2ZpZWxkGAMgASgJEgwKBHRleHQYBCABKAgSDwoHaW5kZXhlZBgFIAEoCBIPCgdoaXN0b3J5GAYgASgIEhIKCnNlYXJjaGFibGUYByABKAgSNAoMd3JpdGVfcG9saWN5GAggASgOMh4uc3luY3BsYW5lLnYxLkZpZWxkV3JpdGVQb2xpY3kSEQoJd29ya3NwYWNlGAkgASgIEhgKEHJldmVyc2VfcmVsYXRpb24YCiABKAkSOAoNYWNjZXNzX3BhcmVudBgLIAEoCzIhLnN5bmNwbGFuZS52MS5BY2Nlc3NQYXJlbnRPcHRpb25zEi0KB2NyZWF0b3IYDCABKAsyHC5zeW5jcGxhbmUudjEuQ3JlYXRvck9wdGlvbnMqeQoQRmllbGRXcml0ZVBvbGljeRIiCh5GSUVMRF9XUklURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIcChhGSUVMRF9XUklURV9QT0xJQ1lfQUxMT1cQARIjCh9GSUVMRF9XUklURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAI6VgoGZW50aXR5Eh8uZ29vZ2xlLnByb3RvYnVmLk1lc3NhZ2VPcHRpb25zGLSHAyABKAsyGy5zeW5jcGxhbmUudjEuRW50aXR5T3B0aW9uc1IGZW50aXR5Ol8KCXJlZmVyZW5jZRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi2hwMgASgLMh4uc3luY3BsYW5lLnYxLlJlZmVyZW5jZU9wdGlvbnNSCXJlZmVyZW5jZTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor, file_syncplane_v1_query]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSI4Cg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUijwIKCkFjY2Vzc1J1bGUSDAoEcmVhZBgBIAEoCBIOCgZjcmVhdGUYAiABKAgSDgoGdXBkYXRlGAMgASgIEg4KBmRlbGV0ZRgEIAEoCBINCgV3cml0ZRgFIAEoCBIQCghyZXF1aXJlcxgGIAMoCRIuCghhZG1pdHRlZBgHIAEoCzIcLnN5bmNwbGFuZS52MS5BZG1pdHRlZENhbGxlchIPCgdzdWJqZWN0GAggASgJEg4KBmZpZWxkcxgJIAMoCRIlCgR3aGVuGAogASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbhIqCgZ3aXRoaW4YCyADKAsyGi5zeW5jcGxhbmUudjEuQWNjZXNzV2l0aGluIlYKDEFjY2Vzc1dpdGhpbhIOCgZlbnRpdHkYASABKAkSDwoHc3ViamVjdBgCIAEoCRIlCgR3aGVuGAMgASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbiIQCg5BZG1pdHRlZENhbGxlciJQCgxHcmFudE9wdGlvbnMSDwoHc3ViamVjdBgBIAEoCRIMCgRyb2xlGAIgASgJEiEKBXJvbGVzGAMgAygLMhIuc3luY3BsYW5lLnYxLlJvbGUiNgoEUm9sZRIMCgRuYW1lGAEgASgJEg4KBmdyYW50cxgCIAMoCRIQCghpbmNsdWRlcxgDIAMoCSIgCg5NZW1iZXJzT3B0aW9ucxIOCgZlbnRpdHkYASABKAkiFQoTQWNjZXNzUGFyZW50T3B0aW9ucyIQCg5DcmVhdG9yT3B0aW9ucyIQCg5IaXN0b3J5T3B0aW9ucyISChBSZWZlcmVuY2VPcHRpb25zIhsKC1NlYXJjaEZpZWxkEgwKBHBhdGgYASABKAkiTwoKU2VhcmNoU3BlYxIoCgVmaWVsZBgBIAMoCzIZLnN5bmNwbGFuZS52MS5TZWFyY2hGaWVsZBIXCg9rZWVwX2RpYWNyaXRpY3MYAiABKAgiJgoISW5kZXhLZXkSDAoEcGF0aBgBIAEoCRIMCgRkZXNjGAIgASgIIj4KCUluZGV4U3BlYxIMCgRuYW1lGAEgASgJEiMKA2tleRgCIAMoCzIWLnN5bmNwbGFuZS52MS5JbmRleEtleSLXAgoNRmllbGRCZWhhdmlvchIOCgZvcGFxdWUYASABKAgSEQoJa2V5X2ZpZWxkGAIgAygJEhMKC29yZGVyX2ZpZWxkGAMgASgJEgwKBHRleHQYBCABKAgSDwoHaW5kZXhlZBgFIAEoCBIPCgdoaXN0b3J5GAYgASgIEhIKCnNlYXJjaGFibGUYByABKAgSNAoMd3JpdGVfcG9saWN5GAggASgOMh4uc3luY3BsYW5lLnYxLkZpZWxkV3JpdGVQb2xpY3kSEQoJd29ya3NwYWNlGAkgASgIEhgKEHJldmVyc2VfcmVsYXRpb24YCiABKAkSOAoNYWNjZXNzX3BhcmVudBgLIAEoCzIhLnN5bmNwbGFuZS52MS5BY2Nlc3NQYXJlbnRPcHRpb25zEi0KB2NyZWF0b3IYDCABKAsyHC5zeW5jcGxhbmUudjEuQ3JlYXRvck9wdGlvbnMqeQoQRmllbGRXcml0ZVBvbGljeRIiCh5GSUVMRF9XUklURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIcChhGSUVMRF9XUklURV9QT0xJQ1lfQUxMT1cQARIjCh9GSUVMRF9XUklURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAI6VgoGZW50aXR5Eh8uZ29vZ2xlLnByb3RvYnVmLk1lc3NhZ2VPcHRpb25zGLSHAyABKAsyGy5zeW5jcGxhbmUudjEuRW50aXR5T3B0aW9uc1IGZW50aXR5Ol8KCXJlZmVyZW5jZRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi2hwMgASgLMh4uc3luY3BsYW5lLnYxLlJlZmVyZW5jZU9wdGlvbnNSCXJlZmVyZW5jZTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor, file_syncplane_v1_query]);
 
 /**
  * Declares a message as a syncable entity.
@@ -361,6 +361,14 @@ export type AccessRule = Message<"syncplane.v1.AccessRule"> & {
    * @generated from field: syncplane.v1.Condition when = 10;
    */
   when?: Condition | undefined;
+
+  /**
+   * Admits only rows that sit within a row that passes a check: each entry
+   * must hold. See `AccessWithin`.
+   *
+   * @generated from field: repeated syncplane.v1.AccessWithin within = 11;
+   */
+  within: AccessWithin[];
 };
 
 /**
@@ -369,6 +377,99 @@ export type AccessRule = Message<"syncplane.v1.AccessRule"> & {
  */
 export const AccessRuleSchema: GenMessage<AccessRule> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 2);
+
+/**
+ * Admits only rows that sit within a row of an entity that passes a check.
+ *
+ * The entry holds for a row when the row itself, or a row above it on any
+ * path of access parents, is a row of `entity` and passes every check the
+ * entry sets. A row with no such row at or above it fails the entry. A
+ * permission held at the workspace root does not skip the check.
+ *
+ * A private project hides its tasks from callers who read tasks through the
+ * workspace root, and its members still read them; an archived project makes
+ * its tasks read-only; the owner of a doc reads and edits its comments:
+ *
+ * ```protobuf
+ * message Task {
+ *   option (syncplane.v1.entity) = {
+ *     name: "task" key_fields: ["id"]
+ *     access: { allow: [
+ *       { read: true requires: "view_tasks" },
+ *       { read: true requires: "view_open_tasks"
+ *         within: { entity: "project"
+ *           when: { cmp: { path: ["private"] op: CMP_OP_EQ
+ *             value: { bool_value: false } } } } },
+ *       { write: true requires: "edit_tasks"
+ *         within: { entity: "project"
+ *           when: { cmp: { path: ["archived"] op: CMP_OP_EQ
+ *             value: { bool_value: false } } } } }
+ *     ] }
+ *   };
+ *   string id = 1;
+ *   Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+ * }
+ *
+ * message Comment {
+ *   option (syncplane.v1.entity) = {
+ *     name: "comment" key_fields: ["id"]
+ *     access: { allow: [
+ *       { read: true requires: "view_docs" },
+ *       { write: true requires: "view_docs"
+ *         within: { entity: "doc" subject: "owner_id" } }
+ *     ] }
+ *   };
+ *   string id = 1;
+ *   Doc doc = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+ * }
+ * ```
+ *
+ * A write to a row that changes whether it passes an entry changes what the
+ * rows below it show, as a move does. Such a write needs, where the row sits,
+ * a read rule of each entity whose rows can sit below it, and clients receive
+ * the rows below it that they gain and lose.
+ *
+ * In a recursive entity, such as a folder tree, a row that fails the entry
+ * does not hide the rows below it from a caller when a row above it passes.
+ *
+ * Registration refuses an entry that sets no check, an `entity` whose rows the
+ * rule's entity cannot sit below (its own entity only when it is recursive), a
+ * `subject` that is not a top-level, singular `string` field of `entity`, a
+ * `when` that reads another row, and unknown fields inside this message.
+ *
+ * @generated from message syncplane.v1.AccessWithin
+ */
+export type AccessWithin = Message<"syncplane.v1.AccessWithin"> & {
+  /**
+   * The entity the row must sit within, by its entity name.
+   *
+   * @generated from field: string entity = 1;
+   */
+  entity: string;
+
+  /**
+   * Admits only a row of `entity` whose field with this name holds one of
+   * the caller's subjects. An empty value never matches.
+   *
+   * @generated from field: string subject = 2;
+   */
+  subject: string;
+
+  /**
+   * Admits only a row of `entity` that matches this condition. Paths start
+   * at that row.
+   *
+   * @generated from field: syncplane.v1.Condition when = 3;
+   */
+  when?: Condition | undefined;
+};
+
+/**
+ * Describes the message syncplane.v1.AccessWithin.
+ * Use `create(AccessWithinSchema)` to create a new message.
+ */
+export const AccessWithinSchema: GenMessage<AccessWithin> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 3);
 
 /**
  * Selects every caller admitted to the workspace as the source of an
@@ -388,7 +489,7 @@ export type AdmittedCaller = Message<"syncplane.v1.AdmittedCaller"> & {
  * Use `create(AdmittedCallerSchema)` to create a new message.
  */
 export const AdmittedCallerSchema: GenMessage<AdmittedCaller> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 3);
+  messageDesc(file_syncplane_v1_options, 4);
 
 /**
  * Declares an entity whose rows grant roles.
@@ -489,7 +590,7 @@ export type GrantOptions = Message<"syncplane.v1.GrantOptions"> & {
  * Use `create(GrantOptionsSchema)` to create a new message.
  */
 export const GrantOptionsSchema: GenMessage<GrantOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 4);
+  messageDesc(file_syncplane_v1_options, 5);
 
 /**
  * Declares one role and the permissions it grants.
@@ -540,7 +641,7 @@ export type Role = Message<"syncplane.v1.Role"> & {
  * Use `create(RoleSchema)` to create a new message.
  */
 export const RoleSchema: GenMessage<Role> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 5);
+  messageDesc(file_syncplane_v1_options, 6);
 
 /**
  * Declares the entity whose rows say who the members of each team are.
@@ -612,7 +713,7 @@ export type MembersOptions = Message<"syncplane.v1.MembersOptions"> & {
  * Use `create(MembersOptionsSchema)` to create a new message.
  */
 export const MembersOptionsSchema: GenMessage<MembersOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 6);
+  messageDesc(file_syncplane_v1_options, 7);
 
 /**
  * Marks a reference that places each row of an entity below another row in
@@ -672,7 +773,7 @@ export type AccessParentOptions = Message<"syncplane.v1.AccessParentOptions"> & 
  * Use `create(AccessParentOptionsSchema)` to create a new message.
  */
 export const AccessParentOptionsSchema: GenMessage<AccessParentOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 7);
+  messageDesc(file_syncplane_v1_options, 8);
 
 /**
  * Marks a field that records who created the row.
@@ -699,7 +800,7 @@ export type CreatorOptions = Message<"syncplane.v1.CreatorOptions"> & {
  * Use `create(CreatorOptionsSchema)` to create a new message.
  */
 export const CreatorOptionsSchema: GenMessage<CreatorOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 8);
+  messageDesc(file_syncplane_v1_options, 9);
 
 /**
  * Enables server-side field history tracking for an entity.
@@ -727,7 +828,7 @@ export type HistoryOptions = Message<"syncplane.v1.HistoryOptions"> & {
  * Use `create(HistoryOptionsSchema)` to create a new message.
  */
 export const HistoryOptionsSchema: GenMessage<HistoryOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 9);
+  messageDesc(file_syncplane_v1_options, 10);
 
 /**
  * Declares a message as a reference message: the stored shape of a typed
@@ -805,7 +906,7 @@ export type ReferenceOptions = Message<"syncplane.v1.ReferenceOptions"> & {
  * Use `create(ReferenceOptionsSchema)` to create a new message.
  */
 export const ReferenceOptionsSchema: GenMessage<ReferenceOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 10);
+  messageDesc(file_syncplane_v1_options, 11);
 
 /**
  * Specifies a single field read during full-text search.
@@ -829,7 +930,7 @@ export type SearchField = Message<"syncplane.v1.SearchField"> & {
  * Use `create(SearchFieldSchema)` to create a new message.
  */
 export const SearchFieldSchema: GenMessage<SearchField> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 11);
+  messageDesc(file_syncplane_v1_options, 12);
 
 /**
  * Configures full-text search over an entity, specifying searchable fields in
@@ -875,7 +976,7 @@ export type SearchSpec = Message<"syncplane.v1.SearchSpec"> & {
  * Use `create(SearchSpecSchema)` to create a new message.
  */
 export const SearchSpecSchema: GenMessage<SearchSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 12);
+  messageDesc(file_syncplane_v1_options, 13);
 
 /**
  * Specifies one field component of an index and its sort order.
@@ -910,7 +1011,7 @@ export type IndexKey = Message<"syncplane.v1.IndexKey"> & {
  * Use `create(IndexKeySchema)` to create a new message.
  */
 export const IndexKeySchema: GenMessage<IndexKey> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 13);
+  messageDesc(file_syncplane_v1_options, 14);
 
 /**
  * Defines a secondary index for an entity.
@@ -943,7 +1044,7 @@ export type IndexSpec = Message<"syncplane.v1.IndexSpec"> & {
  * Use `create(IndexSpecSchema)` to create a new message.
  */
 export const IndexSpecSchema: GenMessage<IndexSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 14);
+  messageDesc(file_syncplane_v1_options, 15);
 
 /**
  * Configures merge, indexing, and authorization behavior for a field.
@@ -1116,7 +1217,7 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
  * Use `create(FieldBehaviorSchema)` to create a new message.
  */
 export const FieldBehaviorSchema: GenMessage<FieldBehavior> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 15);
+  messageDesc(file_syncplane_v1_options, 16);
 
 /**
  * Specifies which callers can write a specific field of an entity.

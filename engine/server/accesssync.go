@@ -182,8 +182,8 @@ type accessComparison struct {
 	// bound now, nil when it does not.
 	old *accessSet
 	// oldChains walks parent chains as the client's rows reflect them: with
-	// the parent each row moved since then had before its first move. Nil
-	// when no row moved.
+	// the parent each row moved since then had, and what within entries read
+	// of it, before its first move. Nil when no row moved.
 	oldChains *accessChains
 	// moved are the rows whose moves change what the caller can read, in the
 	// order they first moved.
@@ -268,9 +268,9 @@ func (s *Server) compareAccess(ctx context.Context, ws string, tx storage.ReadTx
 // A move changes what the caller can read when, for some entity whose rows can
 // sit below the moved row, the caller could read it on the moved row's chain
 // as the client's rows reflect it and cannot on the chain now, or the other
-// way around. The first side reads with the
-// cursor's access and with each moved row's parent from before its first
-// move; the second with the access and parents bound now.
+// way around. The first side reads with the cursor's access and with each
+// moved row's parent, and what within entries read of it, from before its
+// first move; the second with the access and rows bound now.
 func (s *Server) compareMoves(ctx context.Context, ws string, tx storage.ReadTx, cur cursorState, e *rowEmitter, cmp *accessComparison) error {
 	model := e.caller.model
 	e.movesThrough = cur.movesThrough
@@ -297,7 +297,8 @@ func (s *Server) compareMoves(ctx context.Context, ws string, tx storage.ReadTx,
 	}
 	cmp.oldChains = newAccessChains(model, tx, s.limits.maxAccessDepth(), report)
 	cmp.oldChains.overrides, _ = firstMoves(moves)
-	cmp.moved, err = movedForCaller(model, cmp.oldChains, oldSet, e.chains, e.access, moves)
+	cmp.oldChains.withinOverrides = firstWithins(model, moves)
+	cmp.moved, err = movedForCaller(model, e.caller.subjects, cmp.oldChains, oldSet, e.chains, e.access, moves)
 	if err != nil {
 		return err
 	}
@@ -316,7 +317,8 @@ func (s *Server) compareMoves(ctx context.Context, ws string, tx storage.ReadTx,
 		if len(later) > 0 {
 			began := newAccessChains(model, tx, s.limits.maxAccessDepth(), report)
 			began.overrides, _ = firstMoves(later)
-			stale, err := movedForCaller(model, began, e.access, e.chains, e.access, later)
+			began.withinOverrides = firstWithins(model, later)
+			stale, err := movedForCaller(model, e.caller.subjects, began, e.access, e.chains, e.access, later)
 			if err != nil {
 				return err
 			}
@@ -342,12 +344,31 @@ func firstMoves(moves []accessMove) (map[anchorRow]chainEdge, []anchorRow) {
 	return first, rows
 }
 
+// firstWithins returns, for each row that moves and whose entity a within
+// entry names, what the within checks read of it before its first move.
+func firstWithins(model *accessModel, moves []accessMove) map[anchorRow]rowWithin {
+	var first map[anchorRow]rowWithin
+	for _, m := range moves {
+		if len(model.withinOn[m.row.entity]) == 0 {
+			continue
+		}
+		if first == nil {
+			first = map[anchorRow]rowWithin{}
+		}
+		if _, seen := first[m.row]; !seen {
+			first[m.row] = m.fromWithin
+		}
+	}
+	return first
+}
+
 // movedForCaller returns, in the order they first moved, the rows of moves
 // whose chains let the caller read some entity below them on one side and not
 // on the other: was and wasSet read the chains before the moves, is and isSet
-// now.
+// now. subjects are the caller's, sorted.
 func movedForCaller(
 	model *accessModel,
+	subjects []string,
 	was *accessChains,
 	wasSet *accessSet,
 	is *accessChains,
@@ -361,7 +382,7 @@ func movedForCaller(
 			continue // the entity left the model, which a change of policy resets
 		}
 		for _, r := range model.readersBelow(row.entity) {
-			changed, err := readsChange(was, wasSet, is, isSet, r, row)
+			changed, err := readsChange(model, subjects, was, wasSet, is, isSet, r, row)
 			if err != nil {
 				return nil, err
 			}
@@ -377,10 +398,24 @@ func movedForCaller(
 // readsChange reports whether the rows of an entity read by r, a
 // readers.loose result, that sit below row can be read on one side and not on
 // the other: was and wasSet read the chains on one side, is and isSet on the
-// other. A rule in r.checked admits other rows than r.perms do, or needs its
-// permissions together, which can each change on their own, so each is
-// compared apart from r.perms and from the others.
-func readsChange(was *accessChains, wasSet *accessSet, is *accessChains, isSet *accessSet, r readers, row anchorRow) (bool, error) {
+// other, for a caller with subjects. A rule in r.checked admits other rows
+// than r.perms do, or needs its permissions together, which can each change
+// on their own, so each is compared apart from r.perms and from the others.
+//
+// A rule with within entries can also change for the rows below row when
+// what its entries read at row or above it changes. That shows the rows to a
+// caller that holds the rule's permissions where they sit, which can be at a
+// row below row as well as at row or above it.
+func readsChange(
+	model *accessModel,
+	subjects []string,
+	was *accessChains,
+	wasSet *accessSet,
+	is *accessChains,
+	isSet *accessSet,
+	r readers,
+	row anchorRow,
+) (bool, error) {
 	before, err := was.holdsAt(wasSet.readAnchors(r), row)
 	if err != nil {
 		return false, err
@@ -403,8 +438,53 @@ func readsChange(was *accessChains, wasSet *accessSet, is *accessChains, isSet *
 		if err != nil || before != after {
 			return before != after, err
 		}
+		if !o.checksAbove() {
+			continue
+		}
+		wasWithin, err := was.withinAllAt(o, subjects, row)
+		if err != nil {
+			return false, err
+		}
+		isWithin, err := is.withinAllAt(o, subjects, row)
+		if err != nil {
+			return false, err
+		}
+		if wasWithin == isWithin {
+			continue
+		}
+		if before || mayHoldBelow(model, wasSet, perms, row) || mayHoldBelow(model, isSet, perms, row) {
+			return true, nil
+		}
 	}
 	return false, nil
+}
+
+// mayHoldBelow reports whether set can hold each of perms at some row below
+// row: each is held at the workspace root, or at a row of an entity whose rows
+// can sit below rows of row's entity. It reads nothing, so it can report true
+// for an anchor that sits elsewhere.
+func mayHoldBelow(model *accessModel, set *accessSet, perms []string, row anchorRow) bool {
+	below := model.below[row.entity]
+	for _, p := range perms {
+		a := set.perms[p]
+		if a == nil {
+			return false
+		}
+		if a.root {
+			continue
+		}
+		found := false
+		for at := range a.rows {
+			if _, ok := slices.BinarySearch(below, at.entity); ok {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }
 
 // accessUnchanged reports whether cur was issued under the access model and
@@ -562,7 +642,8 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 	// A read rule in checked reads the rows below the anchors of each of its
 	// own permissions that pass its checks. One with a permission that moved
 	// to or from the root can show or hide every such row, wherever it sits:
-	// the rows that name the caller for a subject check, and any row
+	// the rows that name the caller for a subject check, the rows within a row
+	// that names the caller for a within entry's subject check, and any row
 	// otherwise, which no index finds.
 	var named []string
 	for _, rule := range a.read.checked {
@@ -578,10 +659,13 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 		if !rooted {
 			continue
 		}
-		if rule.subject == nil {
-			return nil, false, nil
+		var rows []string
+		ok := false
+		if rule.subject != nil {
+			rows, ok, err = subjectRows(tx, info, rule.subject, newEm.caller.subjects, maxCandidates, newEm.srv.limits)
+		} else {
+			rows, ok, err = withinRows(tx, newEm.caller.model, info, rule, newEm.caller.subjects, maxCandidates, newEm.srv.limits)
 		}
-		rows, ok, err := subjectRows(tx, info, rule.subject, newEm.caller.subjects, maxCandidates, newEm.srv.limits)
 		if err != nil || !ok {
 			return nil, false, err
 		}

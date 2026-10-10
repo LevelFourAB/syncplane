@@ -32,12 +32,15 @@ interface VectorRule {
 	fields?: string[];
 	/** Names the rule's condition, which each row's `matches` answers. */
 	when?: string;
+	/** Names the rule's within entries, which each row's `within` answers. */
+	within?: string[];
 }
 
 interface VectorRow {
 	held: Record<string, boolean | null>;
 	fields: Record<string, string | null>;
 	matches?: Record<string, boolean | null>;
+	within?: Record<string, boolean | null>;
 }
 
 interface RulesCase {
@@ -74,6 +77,9 @@ const ruleOf = (r: VectorRule): AccessRuleDef => {
 		subject: r.subject === undefined ? undefined : ({ name: r.subject } as DescField),
 		fields: r.fields === undefined ? undefined : [ ...r.fields ].sort(),
 		when: r.when === undefined ? undefined : create(ConditionSchema),
+		// The entity of an entry stands for its name, which each row's within
+		// answers.
+		within: (r.within ?? []).map((name) => ({ entity: name, subject: undefined, when: undefined })),
 	};
 	if (r.when !== undefined) whenNames.set(rule, r.when);
 	return rule;
@@ -86,6 +92,15 @@ const rowOf = (v: VectorRow): RuleRow => ({
 	held: (permission) => answerOf(v.held[permission]),
 	subject: (field) => v.fields[field] ?? undefined,
 	matches: (rule) => answerOf(v.matches?.[whenNames.get(rule)!]),
+	within: (rule) => {
+		let answer: CanAnswer = 'yes';
+		for (const entry of rule.within) {
+			const one = answerOf(v.within?.[entry.entity]);
+			if (one === 'no') return 'no';
+			if (one === 'unknown') answer = 'unknown';
+		}
+		return answer;
+	},
 });
 
 describe('access rule conformance vectors', () => {

@@ -33,10 +33,94 @@ type accessChains struct {
 	// held above it reaches the rows below it.
 	report func(storage.Row, error)
 	edges  map[anchorRow]chainEdge
-	// overrides replace the parent edges of the rows they name. The old side
-	// of a resync reads with the parents that moved rows had when its cursor
-	// was issued.
-	overrides map[anchorRow]chainEdge
+	// withins holds what the within checks read of each row read so far, for
+	// the rows of entities a within entry names.
+	withins map[anchorRow]rowWithin
+	// overrides replace the parent edges of the rows they name, and
+	// withinOverrides what the within checks read of them. The old side of a
+	// resync reads with what moved rows held when its cursor was issued.
+	overrides       map[anchorRow]chainEdge
+	withinOverrides map[anchorRow]rowWithin
+}
+
+// rowWithin is what the within checks that name a row's entity read of the
+// row: the value of each subject field, and the conditions it matches. The
+// zero value is a row that does not exist, which passes no check.
+type rowWithin struct {
+	live bool
+	// subjects maps each subject field a check reads, by name, to its value.
+	subjects map[string]string
+	// matched are the when specs of the checks whose condition the row
+	// matches, sorted.
+	matched []string
+}
+
+// withinStateOf returns what the within checks that name info read of row,
+// nil for a row that does not exist.
+func withinStateOf(model *accessModel, info *entityInfo, row protoreflect.Message) rowWithin {
+	checks := model.withinOn[info.name]
+	if row == nil || len(checks) == 0 {
+		return rowWithin{}
+	}
+	st := rowWithin{live: true}
+	for _, w := range checks {
+		if w.subject != nil {
+			if st.subjects == nil {
+				st.subjects = map[string]string{}
+			}
+			st.subjects[string(w.subject.Name())] = row.Get(w.subject).String()
+		}
+		if w.when != nil && !slices.Contains(st.matched, w.whenSpec) && w.when.Eval(row) {
+			st.matched = append(st.matched, w.whenSpec)
+		}
+	}
+	slices.Sort(st.matched)
+	return st
+}
+
+// passes reports whether the row passes w for a caller with subjects, which
+// are sorted.
+func (st rowWithin) passes(w *withinCheck, subjects []string) bool {
+	if !st.live {
+		return false
+	}
+	if w.subject != nil && !subjectMatches(subjects, st.subjects[string(w.subject.Name())]) {
+		return false
+	}
+	if w.when != nil {
+		if _, ok := slices.BinarySearch(st.matched, w.whenSpec); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// key renders st as a string that equals the key of another state exactly
+// when the two are equal.
+func (st rowWithin) key() string {
+	names := make([]string, 0, len(st.subjects))
+	for name := range st.subjects {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	values := make([]string, len(names))
+	for i, name := range names {
+		values[i] = name + "=" + st.subjects[name]
+	}
+	return fmt.Sprintf("%t%q%q", st.live, values, st.matched)
+}
+
+// equal reports whether st and o read the same of their rows.
+func (st rowWithin) equal(o rowWithin) bool {
+	if st.live != o.live || len(st.subjects) != len(o.subjects) || !slices.Equal(st.matched, o.matched) {
+		return false
+	}
+	for k, v := range st.subjects {
+		if w, ok := o.subjects[k]; !ok || w != v {
+			return false
+		}
+	}
+	return true
 }
 
 // chainEdge is one row's access parent edges: the rows its access parents
@@ -81,7 +165,14 @@ func newAccessChainsFrom(
 	maxDepth int,
 	report func(storage.Row, error),
 ) *accessChains {
-	return &accessChains{model: model, get: get, maxDepth: maxDepth, report: report, edges: map[anchorRow]chainEdge{}}
+	return &accessChains{
+		model:    model,
+		get:      get,
+		maxDepth: maxDepth,
+		report:   report,
+		edges:    map[anchorRow]chainEdge{},
+		withins:  map[anchorRow]rowWithin{},
+	}
 }
 
 // edgeOf returns the parent edge of a row of info whose value is row, nil for
@@ -109,27 +200,201 @@ func (c *accessChains) edge(at anchorRow) (chainEdge, error) {
 	if e, ok := c.edges[at]; ok {
 		return e, nil
 	}
-	var e chainEdge
 	// A row of an entity without an access parent ends every chain, so the
 	// common one-level case reads nothing.
-	if info := c.model.entities[at.entity]; info != nil && len(c.model.parents[at.entity]) > 0 {
+	if len(c.model.parents[at.entity]) == 0 {
+		c.edges[at] = chainEdge{}
+		return chainEdge{}, nil
+	}
+	if err := c.load(at); err != nil {
+		return chainEdge{}, err
+	}
+	return c.edges[at], nil
+}
+
+// withinState returns what the within checks read of the row at, reading the
+// row the first time.
+func (c *accessChains) withinState(at anchorRow) (rowWithin, error) {
+	if st, ok := c.withinOverrides[at]; ok {
+		return st, nil
+	}
+	if st, ok := c.withins[at]; ok {
+		return st, nil
+	}
+	if err := c.load(at); err != nil {
+		return rowWithin{}, err
+	}
+	return c.withins[at], nil
+}
+
+// load reads the row at and memoizes its parent edge and what the within
+// checks read of it. A row that does not exist or does not decode has
+// neither.
+func (c *accessChains) load(at anchorRow) error {
+	info := c.model.entities[at.entity]
+	var msg protoreflect.Message
+	if info != nil {
 		row, err := c.get(at.entity, at.key)
 		switch {
 		case errors.Is(err, storage.ErrNotFound):
 		case err != nil:
-			return chainEdge{}, err
+			return err
 		case row.Deleted:
 		default:
-			msg, err := info.decode(row.Value)
+			decoded, err := info.decode(row.Value)
 			if err != nil {
 				c.report(row, err)
 			} else {
-				e = edgeOf(c.model, info, msg.ProtoReflect())
+				msg = decoded.ProtoReflect()
 			}
 		}
 	}
-	c.edges[at] = e
-	return e, nil
+	if info == nil || msg == nil {
+		c.edges[at], c.withins[at] = chainEdge{}, rowWithin{}
+		return nil
+	}
+	c.edges[at] = edgeOf(c.model, info, msg)
+	c.withins[at] = withinStateOf(c.model, info, msg)
+	return nil
+}
+
+// firstWithin returns what the within checks read of a row whose value the
+// caller holds.
+func (c *accessChains) firstWithin(info *entityInfo, key string, row protoreflect.Message) rowWithin {
+	if st, ok := c.withinOverrides[anchorRow{entity: info.name, key: key}]; ok {
+		return st
+	}
+	return withinStateOf(c.model, info, row)
+}
+
+// withinAll reports whether the row of info with key passes every within
+// entry of rule for a caller with subjects, which are sorted: for each, the
+// row itself or a row above it on some path of at most maxDepth hops is a row
+// of the entry's entity that passes its checks. row is the row's decoded
+// value, nil for a row that does not exist. It is the rule the client's
+// withinAt mirrors.
+func (c *accessChains) withinAll(rule accessRule, subjects []string, info *entityInfo, key string, row protoreflect.Message) (bool, error) {
+	for _, entry := range rule.within {
+		w := c.model.withins[entry.spec()]
+		if w == nil {
+			return false, nil
+		}
+		if w.target.name == info.name && c.firstWithin(info, key, row).passes(w, subjects) {
+			continue
+		}
+		ok, err := c.withinAbove(w, subjects, c.firstEdge(info, key, row))
+		if err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// withinAllAt reports whether the row at passes every within entry of rule
+// that rows at or above it can decide, as withinAll decides it for a row. An
+// entry whose entity's rows cannot sit at or above at holds: what decides it
+// for the rows below at sits between them and at, and does not change with
+// at or the rows above it.
+func (c *accessChains) withinAllAt(rule accessRule, subjects []string, at anchorRow) (bool, error) {
+	return c.withinAllFrom(rule, subjects, at.entity,
+		func() (rowWithin, error) { return c.withinState(at) },
+		func() (chainEdge, error) { return c.edge(at) })
+}
+
+// withinAllOn is withinAllAt for the row of info with key whose value the
+// caller holds, nil for a row that does not exist.
+func (c *accessChains) withinAllOn(rule accessRule, subjects []string, info *entityInfo, key string, row protoreflect.Message) (bool, error) {
+	return c.withinAllFrom(rule, subjects, info.name,
+		func() (rowWithin, error) { return c.firstWithin(info, key, row), nil },
+		func() (chainEdge, error) { return c.firstEdge(info, key, row), nil })
+}
+
+// withinAllFrom decides withinAllAt for a row of entity, given what the
+// within checks read of the row and its parent edge.
+func (c *accessChains) withinAllFrom(
+	rule accessRule,
+	subjects []string,
+	entity string,
+	self func() (rowWithin, error),
+	edge func() (chainEdge, error),
+) (bool, error) {
+	for _, entry := range rule.within {
+		w := c.model.withins[entry.spec()]
+		if w == nil {
+			return false, nil
+		}
+		if entity != w.target.name && !slices.Contains(c.model.below[w.target.name], entity) {
+			continue
+		}
+		if entity == w.target.name {
+			st, err := self()
+			if err != nil {
+				return false, err
+			}
+			if st.passes(w, subjects) {
+				continue
+			}
+		}
+		e, err := edge()
+		if err != nil {
+			return false, err
+		}
+		ok, err := c.withinAbove(w, subjects, e)
+		if err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// withinAbove reports whether a row above the edge e, on any path of at most
+// maxDepth hops, is a row of w's entity that passes w for a caller with
+// subjects. It walks only the rows whose entity can sit below w's entity.
+func (c *accessChains) withinAbove(w *withinCheck, subjects []string, e chainEdge) (bool, error) {
+	target := w.target.name
+	leads := func(at anchorRow) bool {
+		return at.entity == target || slices.Contains(c.model.below[target], at.entity)
+	}
+	seen := map[anchorRow]struct{}{}
+	var frontier []anchorRow
+	for _, at := range e.parents {
+		if leads(at) {
+			seen[at] = struct{}{}
+			frontier = append(frontier, at)
+		}
+	}
+	for hops := 1; len(frontier) > 0; hops++ {
+		for _, at := range frontier {
+			if at.entity != target {
+				continue
+			}
+			st, err := c.withinState(at)
+			if err != nil {
+				return false, err
+			}
+			if st.passes(w, subjects) {
+				return true, nil
+			}
+		}
+		if hops >= c.maxDepth {
+			break
+		}
+		var next []anchorRow
+		for _, at := range frontier {
+			up, err := c.edge(at)
+			if err != nil {
+				return false, err
+			}
+			for _, p := range up.parents {
+				if _, dup := seen[p]; !dup && leads(p) {
+					seen[p] = struct{}{}
+					next = append(next, p)
+				}
+			}
+		}
+		frontier = next
+	}
+	return false, nil
 }
 
 // holds reports whether a holds its permission at the row of info with key:

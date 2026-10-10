@@ -28,6 +28,9 @@ type rulesVectorRule struct {
 	Fields   []string `json:"fields"`
 	// When names the rule's condition, which each row's Matches answers.
 	When string `json:"when"`
+	// Within names the rule's within entries, which each row's Within
+	// answers.
+	Within []string `json:"within"`
 }
 
 // rulesVectorRow is one side of an operation. A nil value is an input only
@@ -36,6 +39,7 @@ type rulesVectorRow struct {
 	Held    map[string]*bool   `json:"held"`
 	Fields  map[string]*string `json:"fields"`
 	Matches map[string]*bool   `json:"matches"`
+	Within  map[string]*bool   `json:"within"`
 }
 
 func (r *rulesVectorRow) known() bool {
@@ -53,6 +57,11 @@ func (r *rulesVectorRow) known() bool {
 		}
 	}
 	for _, v := range r.Matches {
+		if v == nil {
+			return false
+		}
+	}
+	for _, v := range r.Within {
 		if v == nil {
 			return false
 		}
@@ -93,7 +102,7 @@ var _ = Describe("access rule conformance vectors", func() {
 			for i, r := range tc.Rules {
 				rules[i] = rulesVectorRuleOf(r)
 			}
-			// admits mirrors txAccess.admits, with the chain walk and the
+			// admits mirrors txAccess.admits, with the chain walks and the
 			// condition answered by the vector.
 			admits := func(rule accessRule, row *rulesVectorRow) bool {
 				if rule.subject != nil {
@@ -105,6 +114,11 @@ var _ = Describe("access rule conformance vectors", func() {
 				if rule.when != nil {
 					v := row.Matches[rule.whenSpec]
 					if v == nil || !*v {
+						return false
+					}
+				}
+				for _, w := range rule.within {
+					if v := row.Within[w.entity]; v == nil || !*v {
 						return false
 					}
 				}
@@ -163,6 +177,10 @@ func rulesVectorRuleOf(r rulesVectorRule) accessRule {
 	}
 	if r.Fields != nil {
 		rule.fields = slices.Sorted(slices.Values(r.Fields))
+	}
+	for _, name := range r.Within {
+		// The entity stands for the entry's name, which each row answers.
+		rule.within = append(rule.within, withinEntry{entity: name})
 	}
 	if r.When != "" {
 		// The vector names the condition, so the spec carries the name and

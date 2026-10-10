@@ -33,6 +33,8 @@ import {
 	touchPendingAccess,
 	UNKNOWN_CHAIN,
 	whenReads,
+	withinEntities,
+	withinReads,
 } from './access.js';
 import { CodeFormatUpgraded, CodeWatchFailed, CodeWorkspacePurged } from './codes.js';
 import {
@@ -1759,6 +1761,8 @@ interface AccessWalk {
 	 * MAX_ACCESS_CHAIN hops.
 	 */
 	above: Map<string, readonly AccessRow[] | undefined>;
+	/** The entities whose rows the walk reads for a `within` entry. */
+	withinEntities: ReadonlySet<string>;
 	/** The rows of the level the walk reads next. */
 	level: NonNullable<ParentRefs>[number][];
 }
@@ -3325,6 +3329,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					subject: (field) => (changed?.includes(field) ? undefined : stored.subject(field)),
 					matches: (rule) =>
 						changed !== null && whenReads(def.schema, rule, changed) ? 'unknown' : stored.matches(rule),
+					within: (rule) =>
+						moves || (changed !== null && withinReads(def, rule, changed))
+							? 'unknown'
+							: stored.within(rule),
 				};
 				return decideRules(rules, 'update', summary.subjects, stored, final, changed);
 			},
@@ -3492,6 +3500,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						row: undefined,
 						parents: undefined,
 						above: new Map(),
+						withinEntities: withinEntities(plan.def),
 						level: [],
 					});
 				}
@@ -3538,18 +3547,27 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				const chain: AccessChain = {
 					parents: walk.parents,
 					above: (row) => walk.above.get(accessRowId(row)),
+					row: (at) => {
+						const def = this.entityRegistry.get(at.entity);
+						if (def === undefined) return undefined;
+						const row = rowOf(def, walk.workspaceId, at.key);
+						return row === undefined ? undefined : { def, row };
+					},
 				};
 				out[walk.at] = { answer: walk.plan.decide(walk.row, chain) };
 			});
 		};
 		// Moves the rows of `refs`, `hops` above the row, that `walk` has not
 		// reached into its next level. A row past MAX_ACCESS_CHAIN hops is not
-		// read, so the rows above it are not known.
+		// read, so the rows above it are not known. A row without an access
+		// parent ends its path, and is read only when a within entry reads it.
 		const enter = (walk: AccessWalk, refs: NonNullable<ParentRefs>, hops: number) => {
 			for (const ref of refs) {
 				const id = accessRowId(ref);
 				if (walk.above.has(id)) continue;
-				if (accessParentFields(ref.def.schema).length === 0) walk.above.set(id, []);
+				if (
+					accessParentFields(ref.def.schema).length === 0 && !walk.withinEntities.has(ref.def.name)
+				) walk.above.set(id, []);
 				else if (hops > MAX_ACCESS_CHAIN) walk.above.set(id, undefined);
 				else {
 					walk.above.set(id, undefined);

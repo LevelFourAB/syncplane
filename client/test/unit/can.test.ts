@@ -16,16 +16,20 @@ import { type CanAnswer, countAccessChanges } from '../../src/access.js';
 import { SyncClient } from '../../src/client.js';
 import {
 	AccountSchema,
+	BinderSchema,
 	BulletinSchema,
 	CardItemSchema,
 	CardSchema,
 	ChargeSchema,
 	CommentSchema,
 	DocSchema,
+	DossierSchema,
 	DraftSchema,
 	FolderSchema,
 	InvoiceSchema,
 	LeafletSchema,
+	MatterSchema,
+	MemoSchema,
 	PageSchema,
 	PinSchema,
 	PostSchema,
@@ -34,6 +38,7 @@ import {
 	RoomMemberSchema,
 	RoomSchema,
 	SettingSchema,
+	SheetSchema,
 	SpaceSchema,
 	StoryNoteSchema,
 	StorySchema,
@@ -681,6 +686,95 @@ describe('can() with a when check', () => {
 		const t = await threadClient(inR1('view_posts', 'post'));
 		expect(await t.client.can(ThreadSchema, 'th-gone', 'read')).toBe('unknown');
 		await t.client.close();
+	});
+});
+
+/**
+ * A test client over the within schema, as `subject`: d-open is open and owned
+ * by olga, d-priv private and owned by olga, d-arch archived and owned by
+ * cora, each with one matter and one memo; m-far sits in a dossier the client
+ * does not hold. b-top is bea's and holds ian's b-inner, each with a sheet.
+ */
+async function dossierClient(subject: string, permissions: TestCallerAccess['permissions']) {
+	const t = await createTestClient({
+		entities: [ DossierSchema, MatterSchema, MemoSchema, BinderSchema, SheetSchema ],
+	});
+	t.server.put(DossierSchema, { id: 'd-open', ownerId: 'olga' });
+	t.server.put(DossierSchema, { id: 'd-priv', private: true, ownerId: 'olga' });
+	t.server.put(DossierSchema, { id: 'd-arch', archived: true, ownerId: 'cora' });
+	for (const d of [ 'open', 'priv', 'arch' ]) {
+		t.server.put(MatterSchema, { id: `m-${d}`, dossier: { id: `d-${d}` } });
+		t.server.put(MemoSchema, { id: `memo-${d}`, matter: { id: `m-${d}` } });
+	}
+	t.server.put(MatterSchema, { id: 'm-far', dossier: { id: 'd-far' } });
+	t.server.put(BinderSchema, { id: 'b-top', ownerId: 'bea' });
+	t.server.put(BinderSchema, { id: 'b-inner', parent: { id: 'b-top' }, ownerId: 'ian' });
+	t.server.put(SheetSchema, { id: 's-top', binder: { id: 'b-top' } });
+	t.server.put(SheetSchema, { id: 's-inner', binder: { id: 'b-inner' } });
+	t.server.setCallerAccess({ subjects: [ subject ], permissions });
+	await t.sync();
+	return t;
+}
+
+const atRoot = (...perms: string[]) => perms.map((permission) => ({ permission, root: true }));
+
+describe('can() with a within entry', () => {
+	it('checks the row above that the entry names', async () => {
+		const t = await dossierClient('cora', atRoot('view_open_matters', 'edit_matters'));
+		expect(await t.client.can(MatterSchema, 'm-open', 'read')).toBe('yes');
+		expect(await t.client.can(MatterSchema, 'm-priv', 'read')).toBe('no');
+		expect(await t.client.can(MemoSchema, 'memo-open', 'read')).toBe('yes');
+		expect(await t.client.can(MemoSchema, 'memo-priv', 'read')).toBe('no');
+		expect(await t.client.can(MatterSchema, 'm-open', 'update', { fields: [ 'title' ] })).toBe('yes');
+		expect(await t.client.can(MatterSchema, 'm-arch', 'update', { fields: [ 'title' ] })).toBe('no');
+		await t.client.close();
+	});
+
+	it('admits the owner of a row above through a subject check', async () => {
+		const t = await dossierClient('olga', atRoot('view_open_matters'));
+		expect(await t.client.can(MemoSchema, 'memo-priv', 'read')).toBe('yes');
+		expect(await t.client.can(MemoSchema, 'memo-priv', 'update', { fields: [ 'title' ] })).toBe(
+			'yes',
+		);
+		expect(await t.client.can(MemoSchema, 'memo-arch', 'update', { fields: [ 'title' ] })).toBe('no');
+		expect(await t.client.canCreate(MemoSchema, { id: 'new', matter: { id: 'm-priv' } })).toBe('yes');
+		await t.client.close();
+	});
+
+	it('reads the row itself and every row above it in a recursive tree', async () => {
+		const bea = await dossierClient('bea', atRoot('view_open_matters'));
+		expect(await bea.client.can(BinderSchema, 'b-top', 'read')).toBe('yes');
+		expect(await bea.client.can(BinderSchema, 'b-inner', 'read')).toBe('yes');
+		expect(await bea.client.can(SheetSchema, 's-inner', 'update', { fields: [ 'title' ] })).toBe(
+			'yes',
+		);
+		await bea.client.close();
+		const ian = await dossierClient('ian', atRoot('view_open_matters'));
+		expect(await ian.client.can(BinderSchema, 'b-inner', 'read')).toBe('yes');
+		expect(await ian.client.can(SheetSchema, 's-top', 'read')).toBe('no');
+		await ian.client.close();
+	});
+
+	it('answers unknown where a row the entry reads is not held', async () => {
+		const t = await dossierClient('cora', atRoot('view_open_matters', 'edit_matters'));
+		expect(await t.client.can(MatterSchema, 'm-far', 'read')).toBe('unknown');
+		await t.client.close();
+	});
+
+	it('answers unknown for an update that moves the row or changes what the entry reads of it', async () => {
+		const t = await dossierClient('cora', atRoot('view_open_matters', 'edit_matters'));
+		expect(await t.client.can(MatterSchema, 'm-open', 'update', { fields: [ 'dossier' ] })).toBe(
+			'unknown',
+		);
+		await t.client.close();
+		const bea = await dossierClient('bea', atRoot('view_open_matters'));
+		expect(await bea.client.can(BinderSchema, 'b-top', 'update', { fields: [ 'owner_id' ] })).toBe(
+			'unknown',
+		);
+		expect(await bea.client.can(BinderSchema, 'b-top', 'update', { fields: [ 'title' ] })).toBe(
+			'yes',
+		);
+		await bea.client.close();
 	});
 });
 

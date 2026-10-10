@@ -204,6 +204,20 @@ export interface AccessRuleDef {
 	fields: readonly string[] | undefined;
 	/** The condition a row must match, with proto-name paths. */
 	when: Condition | undefined;
+	/** The rows the row must sit within; empty for a rule without the check. */
+	within: readonly WithinDef[];
+}
+
+/**
+ * One entry of an access rule's `within`: the row must itself be, or sit below,
+ * a row of `entity` that passes the entry's checks.
+ */
+export interface WithinDef {
+	entity: string;
+	/** The proto name of the field of `entity` that must hold one of the caller's subjects. */
+	subject: string | undefined;
+	/** The condition the row of `entity` must match, with proto-name paths. */
+	when: Condition | undefined;
 }
 
 /** One secondary index of an entity: a name unique within it, and the
@@ -275,6 +289,11 @@ function accessRulesOf(
 		subject: rule.subject === '' ? undefined : schema.fields.find((f) => f.name === rule.subject),
 		fields: rule.fields.length === 0 ? undefined : [ ...rule.fields ].sort(),
 		when: rule.when,
+		within: rule.within.map((w) => ({
+			entity: w.entity,
+			subject: w.subject === '' ? undefined : w.subject,
+			when: w.when,
+		})),
 	}));
 }
 
