@@ -98,11 +98,15 @@ func (s *Server) gateTo(ctx context.Context, workspaceID string, leaveGrants boo
 		return adm, true, fmt.Errorf("server: workspace %q: %w", workspaceID, err)
 	}
 	if model == nil {
+		if adm.creator, err = s.creatorOf(ctx, adm.principal, workspaceID); err != nil {
+			return adm, true, err
+		}
 		return adm, true, nil
 	}
-	if adm.caller, err = s.resolveCaller(ctx, adm.principal, model); err != nil {
+	if adm.caller, err = s.resolveCaller(ctx, adm.principal, workspaceID, model); err != nil {
 		return adm, true, err
 	}
+	adm.creator = adm.caller.primary
 	wrap := func(err error) error { return fmt.Errorf("server: workspace %q: %w", workspaceID, err) }
 	if leaveGrants && model.requiresPermission() {
 		adm.verdict = &pendingVerdict{srv: s, ws: workspaceID, caller: adm.caller, wrap: wrap}

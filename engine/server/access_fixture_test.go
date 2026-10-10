@@ -27,6 +27,26 @@ func accessEntities() server.Option {
 	)
 }
 
+// rootRolesBy gives each caller the root roles that roles returns, and keeps
+// its Principal.Subject as its only subject.
+func rootRolesBy(roles func(p server.Principal) []string) server.Option {
+	return server.WithCallerAccess(func(_ context.Context, p server.Principal, _ string) (server.CallerAccess, error) {
+		access := server.CallerAccess{RootRoles: roles(p)}
+		if p.Subject != "" {
+			access.Subjects = []string{p.Subject}
+		}
+		return access, nil
+	})
+}
+
+// subjectsBy gives each caller the subjects that subjects returns, and no
+// root role.
+func subjectsBy(subjects func(p server.Principal) []string) server.Option {
+	return server.WithCallerAccess(func(_ context.Context, p server.Principal, _ string) (server.CallerAccess, error) {
+		return server.CallerAccess{Subjects: subjects(p)}, nil
+	})
+}
+
 // userHeader names the caller of a request to the test authenticator. A
 // request without it is anonymous; staffHeader adds a "staff" claim.
 const (

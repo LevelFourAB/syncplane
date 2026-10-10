@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -321,8 +322,8 @@ var _ = Describe("Owner rules", func() {
 			Expect(d.GetAuthorId()).To(Equal("bob"))
 		})
 
-		It("records the primary subject that WithSubjects returns first", func() {
-			f = newSchemaFixtureOn(newTestStore(), roomEntities(), server.WithSubjects(func(p server.Principal) []string {
+		It("records the primary subject that WithCallerAccess returns first", func() {
+			f = newSchemaFixtureOn(newTestStore(), roomEntities(), subjectsBy(func(p server.Principal) []string {
 				if p.Subject == "" {
 					return nil
 				}
@@ -480,13 +481,12 @@ var _ = Describe("Owner rules", func() {
 		})
 
 		It("still checks the subject for a caller who holds the permission at the root", func() {
-			f = newSchemaFixtureOn(newTestStore(), roomEntities(), server.WithGlobalRoles(
-				func(_ context.Context, p server.Principal) ([]string, error) {
-					if p.Subject == "staff" {
-						return []string{"room_moderator"}, nil
-					}
-					return nil, nil
-				}))
+			f = newSchemaFixtureOn(newTestStore(), roomEntities(), rootRolesBy(func(p server.Principal) []string {
+				if p.Subject == "staff" {
+					return []string{"room_moderator"}
+				}
+				return nil
+			}))
 			f.seedRooms()
 			trusted(&accessv1.Draft{Id: "d-staff", Room: room("r2"), AuthorId: "staff"})
 
@@ -559,13 +559,12 @@ var _ = Describe("Owner rules", func() {
 
 		It("resyncs the caller's rows when the rule's permission moves to the root", func() {
 			staff := map[string]bool{}
-			f = newSchemaFixtureOn(newTestStore(), roomEntities(), server.WithGlobalRoles(
-				func(_ context.Context, p server.Principal) ([]string, error) {
-					if staff[p.Subject] {
-						return []string{"room_viewer"}, nil
-					}
-					return nil, nil
-				}))
+			f = newSchemaFixtureOn(newTestStore(), roomEntities(), rootRolesBy(func(p server.Principal) []string {
+				if staff[p.Subject] {
+					return []string{"room_viewer"}
+				}
+				return nil
+			}))
 			f.seedRooms()
 			r := newAccessReplica(f, "bob")
 			r.sync()
@@ -584,7 +583,7 @@ var _ = Describe("Owner rules", func() {
 	})
 
 	It("sends the caller's subjects with the primary subject first", func() {
-		f = newSchemaFixtureOn(newTestStore(), roomEntities(), server.WithSubjects(func(p server.Principal) []string {
+		f = newSchemaFixtureOn(newTestStore(), roomEntities(), subjectsBy(func(p server.Principal) []string {
 			return []string{"z:" + p.Subject, p.Subject, "a:" + p.Subject}
 		}))
 		f.seedRooms()
@@ -647,7 +646,7 @@ var _ = Describe("A creator field outside the access model", func() {
 				{Name: "body", Number: 3, Kind: protoreflect.StringKind},
 			},
 		}
-		f := newSchemaFixtureOn(newTestStore(), server.WithSubjects(func(p server.Principal) []string {
+		f := newSchemaFixtureOn(newTestStore(), subjectsBy(func(p server.Principal) []string {
 			return []string{"user:" + p.Subject}
 		}))
 		Expect(f.srv.RegisterDynamicEntity(spec)).To(Succeed())
@@ -673,5 +672,14 @@ var _ = Describe("A creator field outside the access model", func() {
 		results = f.push("bob", "c3", putMutation("c3", 1, "memo", "m1", memo(map[string]any{"id": "m1", "author": "bob", "body": "x"})))
 		Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED), results[0].GetErrorMessage())
 		Expect(author()).To(Equal("user:ann"))
+	})
+
+	It("fails a request when the caller access hook fails", func() {
+		f := newSchemaFixtureOn(newTestStore(), server.WithCallerAccess(
+			func(context.Context, server.Principal, string) (server.CallerAccess, error) {
+				return server.CallerAccess{}, connect.NewError(connect.CodeUnavailable, errors.New("directory is down"))
+			}))
+		_, err := f.pullErr("ann")
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnavailable))
 	})
 })

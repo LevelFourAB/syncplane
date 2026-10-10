@@ -67,11 +67,15 @@ func (s *Server) admitTo(ctx context.Context, workspaceID string, leaveGrants bo
 		return adm, workspaceAccessError(err)
 	}
 	if model == nil {
+		if adm.creator, err = s.creatorOf(ctx, adm.principal, workspaceID); err != nil {
+			return adm, workspaceAccessError(err)
+		}
 		return adm, nil
 	}
-	if adm.caller, err = s.resolveCaller(ctx, adm.principal, model); err != nil {
+	if adm.caller, err = s.resolveCaller(ctx, adm.principal, workspaceID, model); err != nil {
 		return adm, workspaceAccessError(err)
 	}
+	adm.creator = adm.caller.primary
 	if leaveGrants && model.requiresPermission() {
 		adm.verdict = &pendingVerdict{srv: s, ws: workspaceID, caller: adm.caller, wrap: workspaceAccessError}
 		return adm, nil
@@ -112,6 +116,9 @@ type admission struct {
 	// such as a room's anchor.
 	caller *accessCaller
 	access *accessSet
+	// creator is the caller's primary subject, which an enforced create stores
+	// in each creator field: caller.primary in a schema with the model.
+	creator string
 	// verdict is the grant check the gate left to the transaction that
 	// serves the request, nil when the gate made it (see
 	// enterWorkspaceServed). access is then nil.

@@ -47,8 +47,7 @@ The following table lists configuration options for `server.New`:
 | ------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `WithAuthenticator(a)`                      | anonymous    | Authenticates request headers into a `Principal` before each sync RPC.                                                                                                                                                                                                         |
 | `WithPermissions(p)`                        | `AllowAll`   | Sets workspace access, write permissions, and per-row read filter policies.                                                                                                                                                                                                    |
-| `WithSubjects(fn)`                          | subject      | Sets the subjects a caller's grant rows may name in the access model. Defaults to `Principal.Subject`, and none for an anonymous caller. See [Access model](#access-model).                                                                                                    |
-| `WithGlobalRoles(fn)`                       | none         | Sets the roles a caller holds at the root of every workspace in the access model. See [Access model](#access-model).                                                                                                                                                           |
+| `WithCallerAccess(fn)`                      | subject      | Sets, per workspace, the subjects a caller's grant rows may name and the roles it holds at the workspace root. Defaults to `Principal.Subject` and no root roles. See [Access model](#access-model).                                                                           |
 | `WithStrictAccess()`                        | off          | Refuses, at registration, an entity that declares no `access` in a schema that uses the access model. See [Access model](#access-model).                                                                                                                                       |
 | `WithLimits(l)`                             | See limits   | Sets request and data size bounds. Non-positive fields retain default values.                                                                                                                                                                                                  |
 | `WithChunkSize(n)`                          | 256          | Sets bootstrap chunk size in rows.                                                                                                                                                                                                                                             |
@@ -505,17 +504,20 @@ See [Authentication and permissions](../how-to/authentication-and-permissions.md
 A schema that declares `access` or `grant` options uses the [access model](proto-options.md#access-model). An entity of such a schema that declares no `access` is outside the model: every caller the workspace gate admits reads and writes its rows, narrowed only by the permission hooks. In a schema that declares a role, registration logs one warning per such entity, at level `WARN` with the message `access model warning`, since the entity is open to every caller that holds a permission. `WithStrictAccess` refuses the entity instead. The engine reads what each caller holds from the grant rows:
 
 ```go
-type SubjectsFunc func(p Principal) []string
-type GlobalRolesFunc func(ctx context.Context, p Principal) ([]string, error)
+type CallerAccess struct {
+	Subjects  []string
+	RootRoles []string
+}
+type CallerAccessFunc func(ctx context.Context, p Principal, workspaceID string) (CallerAccess, error)
 
-server.WithSubjects(fn SubjectsFunc)
-server.WithGlobalRoles(fn GlobalRolesFunc)
+server.WithCallerAccess(fn CallerAccessFunc)
 ```
 
-- A grant row applies to a caller when its subject field equals one of the caller's subjects. `WithSubjects` sets them; the default is `Principal.Subject`, and none for an anonymous caller. Empty subjects are ignored.
+- A grant row applies to a caller when its subject field equals one of the caller's `Subjects`. Without the hook, the only subject is `Principal.Subject`, and there is none for an anonymous caller. With the hook, `Principal.Subject` is a subject only when the hook returns it. Empty subjects are ignored. The first non-empty subject is the one a `creator` field stores.
 - A grant row whose subject names a team applies to every member of that team: a caller whose own grant row of the team's member entity grants its role at the team row. See [Teams](proto-options.md#teams).
-- `WithGlobalRoles` adds roles the caller holds at the root of every workspace, such as staff roles from an identity-provider claim. A role that no grant entity declares fails the request with `internal`. Any other error from the hook fails the request as retryable.
-- Both hooks run once per request before any read transaction opens, and again on every `Subscribe` heartbeat.
+- `RootRoles` are roles the caller holds at the root of the workspace, such as staff roles from an identity-provider claim. A role that no grant entity declares grants nothing. The server logs one warning for it, at level `WARN` with the message `access model warning`.
+- An error from the hook fails the request with `internal`, or with the code of a `*connect.Error` that the hook returns. The engine never reads it as a denial.
+- The hook runs once per request, after `CanAccessWorkspace` and before any read transaction opens, and again on every `Subscribe` heartbeat. A `Trusted` call does not run it. The engine does not cache the result: cache a slow lookup in the hook.
 
 | Step                                           | Rule                                                                                                                                                                                                                                                                               |
 | ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

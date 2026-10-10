@@ -2,9 +2,12 @@ package server_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
+	gosync "sync"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -173,13 +176,13 @@ var _ = Describe("Access model reads", func() {
 		})
 	})
 
-	Context("global roles and subjects", func() {
-		It("grants a global role at the root of the workspace", func() {
-			f = newAccessFixture(server.WithGlobalRoles(func(_ context.Context, p server.Principal) ([]string, error) {
+	Context("caller access", func() {
+		It("grants a root role at the root of the workspace", func() {
+			f = newAccessFixture(rootRolesBy(func(p server.Principal) []string {
 				if staff, _ := p.StringClaim("staff"); staff == "admin" {
-					return []string{"org_admin"}, nil
+					return []string{"org_admin"}
 				}
-				return nil, nil
+				return nil
 			}))
 			f.seedOrg()
 			req := connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: ws})
@@ -190,18 +193,74 @@ var _ = Describe("Access model reads", func() {
 			Expect(resp.Msg.GetPatch().GetChanges()).To(HaveLen(len(everything)))
 		})
 
-		It("fails the request on a global role the schema does not declare", func() {
-			f = newAccessFixture(server.WithGlobalRoles(func(context.Context, server.Principal) ([]string, error) {
-				return []string{"superuser"}, nil
+		It("ignores a root role the schema does not declare, and warns once", func() {
+			logs := &recordingHandler{}
+			f = newAccessFixture(server.WithLogger(slog.New(logs)), rootRolesBy(func(server.Principal) []string {
+				return []string{"superuser", "org_admin"}
 			}))
+			f.seedOrg()
+			Expect(f.pull("nobody")).To(Equal(everything))
+			Expect(f.pull("nobody")).To(Equal(everything))
+			var unknown []string
+			for _, w := range logs.attrs("access model warning", "finding") {
+				if strings.Contains(w, "root role") {
+					unknown = append(unknown, w)
+				}
+			}
+			Expect(unknown).To(ConsistOf(
+				ContainSubstring(`root role "superuser", which no grant entity of the schema declares`)))
+		})
+
+		It("refuses a caller whose only root role the schema does not declare", func() {
+			f = newAccessFixture(rootRolesBy(func(server.Principal) []string {
+				return []string{"superuser"}
+			}))
+			f.seedOrg()
+			_, err := f.pullErr("nobody")
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
+		})
+
+		It("hands the hook the workspace of the request", func() {
+			var seen gosync.Map
+			f = newAccessFixture(server.WithCallerAccess(
+				func(_ context.Context, p server.Principal, workspaceID string) (server.CallerAccess, error) {
+					seen.Store(workspaceID, true)
+					return server.CallerAccess{Subjects: []string{p.Subject}}, nil
+				}))
+			f.seedOrg()
+			Expect(f.pull("admin")).To(Equal(everything))
+			_, ok := seen.Load(ws)
+			Expect(ok).To(BeTrue())
+		})
+
+		It("gives a caller no subject when the hook returns none", func() {
+			f = newAccessFixture(server.WithCallerAccess(
+				func(context.Context, server.Principal, string) (server.CallerAccess, error) {
+					return server.CallerAccess{}, nil
+				}))
+			f.seedOrg()
+			_, err := f.pullErr("admin")
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
+		})
+
+		It("fails the request when the hook fails, and keeps the code of a connect error", func() {
+			fail := errors.New("directory is down")
+			f = newAccessFixture(server.WithCallerAccess(
+				func(context.Context, server.Principal, string) (server.CallerAccess, error) {
+					return server.CallerAccess{}, fail
+				}))
 			f.seedOrg()
 			_, err := f.pullErr("admin")
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInternal))
-			Expect(err).To(MatchError(ContainSubstring(`global role "superuser" is not declared`)))
+			Expect(err).To(MatchError(ContainSubstring("directory is down")))
+
+			fail = connect.NewError(connect.CodeUnavailable, errors.New("directory is down"))
+			_, err = f.pullErr("admin")
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnavailable))
 		})
 
-		It("matches grant rows against every subject WithSubjects returns", func() {
-			f = newAccessFixture(server.WithSubjects(func(p server.Principal) []string {
+		It("matches grant rows against every subject the hook returns", func() {
+			f = newAccessFixture(subjectsBy(func(p server.Principal) []string {
 				if strings.HasPrefix(p.Subject, "eng") {
 					return []string{p.Subject, "team:eng", ""}
 				}

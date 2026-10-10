@@ -252,7 +252,7 @@ func newResolveOnceFixture(opts ...Option) *resolveOnceFixture {
 			store.indexes[[2]string{g.name, c.indexName()}] = true
 		}
 	}
-	caller, err := srv.resolveCaller(ctx, Principal{Subject: "me"}, model)
+	caller, err := srv.resolveCaller(ctx, Principal{Subject: "me"}, "ws", model)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(store.WithReadTx(ctx, "ws", func(tx storage.ReadTx) error {
 		_, err := resolveAccess(tx, caller, srv.limits)

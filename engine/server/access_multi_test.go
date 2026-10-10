@@ -1,7 +1,6 @@
 package server_test
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 
@@ -381,11 +380,11 @@ var _ = Describe("Access model writes below several access parents", func() {
 	})
 
 	It("refuses to delete a parent while a live row lists it", func() {
-		f = newMultiFixtureOn(newTestStore(), server.WithGlobalRoles(func(_ context.Context, p server.Principal) ([]string, error) {
+		f = newMultiFixtureOn(newTestStore(), rootRolesBy(func(p server.Principal) []string {
 			if p.Subject == "root" {
-				return []string{"lane_admin"}, nil
+				return []string{"lane_admin"}
 			}
-			return nil, nil
+			return nil
 		}))
 		f.seed(&accessv1.Shelf{Id: "h1"}, &accessv1.Shelf{Id: "h3"}, leaflet("l-13", "h1", "h3"))
 		r := one("root", del("shelf", "h3"))

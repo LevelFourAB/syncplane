@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -1269,7 +1270,7 @@ func refuseUnknownOptionFields(what string, m interface {
 // access or grant.
 type accessModel struct {
 	// roles maps every declared role name to its definition. Names are unique
-	// across the schema, which is what lets a global role be named alone.
+	// across the schema, which is what lets a root role be named alone.
 	roles map[string]*modelRole
 	// granted maps every permission some role grants, directly or through an
 	// include, to the names of those roles, sorted. A permission it lacks is
@@ -1328,6 +1329,11 @@ type accessModel struct {
 	// warnings are findings that do not make the model invalid but are likely
 	// mistakes. Registration logs them.
 	warnings []string
+	// unknownRootRoles are the undeclared root roles a warning was logged for
+	// (see warnUnknownRootRole). They are the only part of the model that
+	// changes after it is compiled.
+	unknownRootRolesMu sync.Mutex
+	unknownRootRoles   map[string]struct{}
 }
 
 // requiresPermission reports whether the workspace gate admits only a caller

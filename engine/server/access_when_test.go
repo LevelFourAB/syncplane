@@ -1,7 +1,6 @@
 package server_test
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 
@@ -265,13 +264,12 @@ var _ = Describe("When checks", func() {
 		})
 
 		It("still checks the condition for a caller who holds the permission at the root", func() {
-			f = newSchemaFixtureOn(newTestStore(), roomEntities(), threadEntities(), server.WithGlobalRoles(
-				func(_ context.Context, p server.Principal) ([]string, error) {
-					if p.Subject == "staff" {
-						return []string{"room_viewer"}, nil
-					}
-					return nil, nil
-				}))
+			f = newSchemaFixtureOn(newTestStore(), roomEntities(), threadEntities(), rootRolesBy(func(p server.Principal) []string {
+				if p.Subject == "staff" {
+					return []string{"room_viewer"}
+				}
+				return nil
+			}))
 			f.seedThreads()
 
 			rows := f.pull("staff")
@@ -320,13 +318,12 @@ var _ = Describe("When checks", func() {
 
 		It("resyncs the rows that match when the rule's permission moves to the root and back", func() {
 			staff := map[string]bool{}
-			f = newSchemaFixtureOn(newTestStore(), roomEntities(), threadEntities(), server.WithGlobalRoles(
-				func(_ context.Context, p server.Principal) ([]string, error) {
-					if staff[p.Subject] {
-						return []string{"room_viewer"}, nil
-					}
-					return nil, nil
-				}))
+			f = newSchemaFixtureOn(newTestStore(), roomEntities(), threadEntities(), rootRolesBy(func(p server.Principal) []string {
+				if staff[p.Subject] {
+					return []string{"room_viewer"}
+				}
+				return nil
+			}))
 			f.seedThreads()
 			r := newAccessReplica(f, "bob")
 			r.sync()

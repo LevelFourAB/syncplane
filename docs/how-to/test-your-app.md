@@ -151,7 +151,7 @@ Before you begin, ensure you have:
    expect(await t.client.can(TaskSchema, 't2', 'read')).toBe('unknown');
    ```
 
-   Omit `at` to hold a role at the workspace root, as a global role does. A misspelled role, or an `at` row that the role's grant rows cannot point at, throws. Call `setCallerAccess` again to change the access: on the next sync, the client receives the rows the caller can now read and loses the rows it cannot. The test server does not check writes against the access; use `server.reject` to refuse a write.
+   Omit `at` to hold a role at the workspace root, as a root role from `WithCallerAccess` does. A misspelled role, or an `at` row that the role's grant rows cannot point at, throws. Call `setCallerAccess` again to change the access: on the next sync, the client receives the rows the caller can now read and loses the rows it cannot. The test server does not check writes against the access; use `server.reject` to refuse a write.
 
 ## Confirming the results
 

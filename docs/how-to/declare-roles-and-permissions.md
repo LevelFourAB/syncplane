@@ -81,7 +81,7 @@ First choose how your app uses teams:
 | Your app needs                                                     | Use                                                                                                           |
 | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
 | Each project belongs to one team                                   | Make `Team` the `access_parent` of `Project`, and grant roles on the team.                                    |
-| Teams come from your identity provider                             | Return the caller's groups from `WithSubjects`, such as `group:eng`, and grant to them.                       |
+| Teams come from your identity provider                             | Return the caller's groups from `WithCallerAccess`, such as `group:eng`, and grant to them.                   |
 | A team gets a role on projects that other teams or users also have | Team grants, below.                                                                                           |
 | A project is open to the whole workspace or to chosen teams        | [Share a project with the whole workspace or with chosen teams](share-with-the-workspace-or-chosen-teams.md). |
 
@@ -636,25 +636,23 @@ A client cannot delete a row while a live row names it as its access parent. Del
 
 ## 4. Tell the server who the caller is
 
-Grant rows name subjects. By default, a caller's subject is `Principal.Subject` from your authenticator. Map callers to more subjects, or give staff roles on every workspace, with two server options:
+Grant rows name subjects. By default, a caller's subject is `Principal.Subject` from your authenticator. Map callers to other subjects, or give staff roles at the workspace root, with `WithCallerAccess`:
 
 ```go
 srv, err := server.New(store,
 	server.WithEntities(&orgv1.OrgMember{}, &orgv1.Project{}, &orgv1.ProjectMember{}, &orgv1.Task{}),
 	server.WithAuthenticator(authn),
-	server.WithSubjects(func(p server.Principal) []string {
-		return []string{p.Issuer + "|" + p.Subject}
-	}),
-	server.WithGlobalRoles(func(_ context.Context, p server.Principal) ([]string, error) {
+	server.WithCallerAccess(func(_ context.Context, p server.Principal, workspaceID string) (server.CallerAccess, error) {
+		access := server.CallerAccess{Subjects: []string{p.Issuer + "|" + p.Subject}}
 		if staff, _ := p.StringClaim("staff"); staff == "admin" {
-			return []string{"org_admin"}, nil
+			access.RootRoles = []string{"org_admin"}
 		}
-		return nil, nil
+		return access, nil
 	}),
 )
 ```
 
-If you change the subjects, write grant rows with the same values.
+The hook replaces the default subject. Return `p.Subject` yourself if your grant rows name it. If you change the subjects, write grant rows with the same values. The hook runs on every request, so cache a lookup that is slow.
 
 ## 5. Create the first grant
 

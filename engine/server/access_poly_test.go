@@ -1,7 +1,6 @@
 package server_test
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -368,11 +367,11 @@ var _ = Describe("Access model writes below a polymorphic access parent", func()
 	// space share a key, so only the entity tells the rows below the space
 	// apart from rows below the board.
 	It("deletes a board while rows sit below a space with the same key, with and without the indexes", func() {
-		f = newPolyFixtureOn(newTestStore(), server.WithGlobalRoles(func(_ context.Context, p server.Principal) ([]string, error) {
+		f = newPolyFixtureOn(newTestStore(), rootRolesBy(func(p server.Principal) []string {
 			if p.Subject == "root" {
-				return []string{"place_admin"}, nil
+				return []string{"place_admin"}
 			}
-			return nil, nil
+			return nil
 		}))
 		for _, id := range []string{"y1", "y2"} {
 			f.seed(&accessv1.Board{Id: id}, &accessv1.Space{Id: id}, cardInSpace("c-"+id, id), pinInSpace("p-"+id, id))

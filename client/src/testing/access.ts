@@ -17,7 +17,7 @@ export interface TestCallerAccess {
 	readonly subjects?: readonly string[];
 	/**
 	 * The roles the caller holds, each granting the permissions its
-	 * declaration and its `includes` give, as grant rows or global roles give
+	 * declaration and its `includes` give, as grant rows or root roles give
 	 * them on the server.
 	 */
 	readonly roles?: readonly TestRole[];
@@ -38,7 +38,7 @@ export interface TestRole {
 	 * The row the role is held at, as a grant row whose access parent points
 	 * at it gives the role. Its entity must be one that the access parent of
 	 * the role's grant entity can point at. Omitted, the role is held at the
-	 * workspace root, as a global role or a grant entity without an access
+	 * workspace root, as a root role or a grant entity without an access
 	 * parent gives it.
 	 */
 	readonly at?: readonly [entity: DescMessage, key: string];

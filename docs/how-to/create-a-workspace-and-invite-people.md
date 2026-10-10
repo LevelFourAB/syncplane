@@ -33,7 +33,7 @@ func createWorkspace(srv *server.Server, workspaceID, userID string) error {
 }
 ```
 
-`Mutate` holds the workspace's write lock, so two requests for the same id cannot both find it free. Use the same `userID` that `WithSubjects` returns for the caller, or `Principal.Subject` when you do not set `WithSubjects`.
+`Mutate` holds the workspace's write lock, so two requests for the same id cannot both find it free. Use the same `userID` that `WithCallerAccess` returns first in `Subjects` for the caller, or `Principal.Subject` when you do not set `WithCallerAccess`.
 
 ## 2. Create the workspace from the client
 
@@ -80,16 +80,16 @@ The new member's client adds the workspace with `client.addWorkspace(workspaceId
 
 A person who has no account yet has no user id to grant to. Grant to their email address instead, as a subject:
 
-1. Map each caller to an email subject in `WithSubjects`, from a verified email claim only. Keep the user id first, because a `creator` field stores the first subject:
+1. Map each caller to an email subject in `WithCallerAccess`, from a verified email claim only. Keep the user id first, because a `creator` field stores the first subject:
 
    ```go
-   server.WithSubjects(func(p server.Principal) []string {
+   server.WithCallerAccess(func(_ context.Context, p server.Principal, _ string) (server.CallerAccess, error) {
    	subjects := []string{p.Subject}
    	verified, _ := p.Claim("email_verified")
    	if email, ok := p.StringClaim("email"); ok && verified == true {
    		subjects = append(subjects, "email:"+strings.ToLower(email))
    	}
-   	return subjects
+   	return server.CallerAccess{Subjects: subjects}, nil
    })
    ```
 
@@ -112,6 +112,6 @@ To remove an invitation, delete its grant row. To replace an email grant with a 
 ## Check before you ship
 
 - **Refuse a workspace id that holds grant rows.** The create endpoint runs as trusted code, so the access rules do not stop it.
-- **Use verified email addresses only.** An unverified email claim lets a caller take the grants of any address. Write the same form of the address in `WithSubjects` and in the grant rows, such as lowercase.
+- **Use verified email addresses only.** An unverified email claim lets a caller take the grants of any address. Write the same form of the address in `WithCallerAccess` and in the grant rows, such as lowercase.
 - **Show the waiting state.** Show the user that they wait for access while `access` is `'none'`. If they decline an invitation, call `client.removeWorkspace(id)` to stop the retries.
 - **A caller who loses their last grant also sees `'none'`.** Their client keeps the rows it holds. Remove the workspace with `client.removeWorkspace(id, { purge: true })` when your app decides the rows must not stay on the device.

@@ -63,7 +63,7 @@ message WorkspaceMember {
 }
 ```
 
-Workspace admins need their role at the root, so that it reaches restricted projects too. Declare a grant entity without an `access_parent` field for them, or give the role with `WithGlobalRoles`:
+Workspace admins need their role at the root, so that it reaches restricted projects too. Declare a grant entity without an `access_parent` field for them, or return the role in `RootRoles` from `WithCallerAccess`:
 
 ```proto
 message Admin {

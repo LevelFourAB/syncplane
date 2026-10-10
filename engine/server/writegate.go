@@ -39,10 +39,8 @@ type writeGate struct {
 	// access is what the caller holds in the access model, resolved inside
 	// each write transaction; nil for a schema without the model.
 	access *txAccess
-	// creator is what an enforced create stores in each creator field, set
-	// once creatorKnown is.
-	creator      string
-	creatorKnown bool
+	// creator is what an enforced create stores in each creator field.
+	creator string
 	// refusalsLogged holds the writes whose access refusal was logged, by
 	// entity, key and operation. A push runs its batch again under savepoints
 	// after a refusal, and the storage adapter may run a closure again, so the
@@ -58,7 +56,7 @@ func (s *Server) newWriteGate(ctx context.Context, adm admission, workspaceID st
 	}
 	hook, _ := s.perms.(FieldPermissions)
 	return &writeGate{
-		srv: s, ctx: ctx, p: adm.principal, ws: workspaceID, fieldHook: hook,
+		srv: s, ctx: ctx, p: adm.principal, ws: workspaceID, fieldHook: hook, creator: adm.creator,
 		access: newTxAccess(adm, s.limits, func(row storage.Row, err error) {
 			s.reportPoison(ctx, workspaceID, row, err)
 		}),
@@ -66,17 +64,9 @@ func (s *Server) newWriteGate(ctx context.Context, adm admission, workspaceID st
 }
 
 // creatorSubject returns the caller's primary subject, which a create stores
-// in each creator field. In a schema with the access model it is the one the
-// workspace gate resolved, so the hook runs once per request.
+// in each creator field. The workspace gate resolved it, so the
+// WithCallerAccess hook runs once per request and never inside a transaction.
 func (g *writeGate) creatorSubject() string {
-	if !g.creatorKnown {
-		if g.access != nil {
-			g.creator = g.access.caller.primary
-		} else {
-			g.creator = g.srv.primarySubjectOf(g.p)
-		}
-		g.creatorKnown = true
-	}
 	return g.creator
 }
 

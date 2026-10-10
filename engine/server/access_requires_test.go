@@ -1,7 +1,6 @@
 package server_test
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 
@@ -239,13 +238,12 @@ var _ = Describe("Rules that need several permissions", func() {
 		})
 
 		It("reads every row for a caller who holds both permissions at the root", func() {
-			f = newSchemaFixtureOn(newTestStore(), billingEntities(), server.WithGlobalRoles(
-				func(_ context.Context, p server.Principal) ([]string, error) {
-					if p.Subject == "staff" {
-						return []string{"account_viewer", "billing_reader"}, nil
-					}
-					return nil, nil
-				}))
+			f = newSchemaFixtureOn(newTestStore(), billingEntities(), rootRolesBy(func(p server.Principal) []string {
+				if p.Subject == "staff" {
+					return []string{"account_viewer", "billing_reader"}
+				}
+				return nil
+			}))
 			f.seedBilling()
 
 			Expect(f.pull("staff")).To(ContainElements("invoice/i1", "invoice/i2", "charge/c1", "charge/c2"))

@@ -842,10 +842,9 @@ type Server struct {
 	// poison dedupes the quarantine log for rows that will not decode (see
 	// poison.go).
 	poison poisonReports
-	// subjects and globalRoles are the WithSubjects and WithGlobalRoles hooks,
-	// nil when not installed. Fixed once New returns.
-	subjects    SubjectsFunc
-	globalRoles GlobalRolesFunc
+	// callerAccess is the WithCallerAccess hook, nil when not installed. Fixed
+	// once New returns.
+	callerAccess CallerAccessFunc
 	// strictAccess is WithStrictAccess: registration refuses an entity outside
 	// the access model in a schema that uses it.
 	strictAccess bool

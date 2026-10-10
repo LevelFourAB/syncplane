@@ -270,7 +270,7 @@ func newAccessBench(b *testing.B, c accessBenchCase) *accessBench {
 		b.Fatal(err)
 	}
 	me := Principal{Subject: "me"}
-	caller, err := srv.resolveCaller(ctx, me, model)
+	caller, err := srv.resolveCaller(ctx, me, "ws", model)
 	if err != nil {
 		b.Fatal(err)
 	}

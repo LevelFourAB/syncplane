@@ -4,71 +4,70 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
 
-	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
-// SubjectsFunc returns the subject strings that the grant rows of a caller
-// may name. See WithSubjects.
-type SubjectsFunc func(p Principal) []string
-
-// GlobalRolesFunc returns the roles a caller holds at the workspace root of
-// every workspace. See WithGlobalRoles.
-type GlobalRolesFunc func(ctx context.Context, p Principal) ([]string, error)
-
-// WithSubjects sets the subjects a caller's grant rows may name in the access
-// model: a grant row applies to a caller when its subject field equals one of
-// them. The default is the caller's Principal.Subject, and none for an
-// anonymous caller.
-//
-// Empty strings in the result are ignored, so an empty subject never matches a
-// grant row. A deployment that accepts more than one issuer should return
-// subjects that name the issuer, so that two issuers' callers with the same
-// Subject do not share grants.
-//
-// The first non-empty subject is the caller's primary subject: an enforced
-// create stores it in each field marked (syncplane.v1.field_behavior).creator.
-//
-// fn runs once per request, before any read transaction opens, and must be
-// safe for concurrent use. A long-lived stream calls it again on every
-// heartbeat. In a schema that does not use the access model, only the primary
-// subject has an effect.
-func WithSubjects(fn SubjectsFunc) Option {
-	return func(s *Server) error {
-		s.subjects = fn
-		return nil
-	}
+// CallerAccess is what a caller is in the access model of one workspace. The
+// zero value is a caller with no subjects and no roles at the root.
+type CallerAccess struct {
+	// Subjects are the values a grant row's subject field may hold for the row
+	// to apply to the caller. The first non-empty one is the caller's primary
+	// subject: an enforced create stores it in each field marked
+	// (syncplane.v1.field_behavior).creator. Empty strings are ignored, so an
+	// empty subject never matches a grant row.
+	Subjects []string
+	// RootRoles are roles the caller holds at the root of the workspace, in
+	// addition to what its grant rows give. A role that no grant option of the
+	// schema declares grants nothing, and the server logs a warning for it.
+	RootRoles []string
 }
 
-// WithGlobalRoles sets the roles a caller holds at the workspace root of every
-// workspace, in addition to what its grant rows give. Use it for access that
-// comes from outside the data, such as staff roles in an identity-provider
-// claim:
+// CallerAccessFunc returns what the caller p is in the access model of the
+// workspace workspaceID. See WithCallerAccess.
+type CallerAccessFunc func(ctx context.Context, p Principal, workspaceID string) (CallerAccess, error)
+
+// WithCallerAccess sets what each caller is in the access model of each
+// workspace: the subjects its grant rows may name, and the roles it holds at
+// the workspace root. Use it for access that comes from outside the data, such
+// as group membership or staff roles in an identity-provider claim:
 //
-//	server.WithGlobalRoles(func(_ context.Context, p server.Principal) ([]string, error) {
+//	server.WithCallerAccess(func(_ context.Context, p server.Principal, _ string) (server.CallerAccess, error) {
+//		access := server.CallerAccess{Subjects: []string{p.Subject}}
 //		if staff, _ := p.StringClaim("staff"); staff == "admin" {
-//			return []string{"org_admin"}, nil
+//			access.RootRoles = []string{"org_admin"}
 //		}
-//		return nil, nil
+//		return access, nil
 //	})
 //
-// Each role must be declared in the grant option of an entity in the schema.
-// A role that is not fails the request with an internal error, rather than
-// granting nothing in silence. Any other error from fn fails the request as
-// retryable; it is never read as a denial.
+// Without it, a caller's only subject is Principal.Subject, none for an
+// anonymous caller, and the caller holds no role at the root. With it, fn is
+// the only source: Principal.Subject is a subject only when fn returns it.
 //
-// fn runs once per request, before any read transaction opens, and must be
-// safe for concurrent use. A long-lived stream calls it again on every
-// heartbeat. It has no effect on a schema that does not use the access model.
-func WithGlobalRoles(fn GlobalRolesFunc) Option {
+// A deployment that accepts more than one issuer should return subjects that
+// name the issuer, so that two issuers' callers with the same Subject do not
+// share grants.
+//
+// fn runs once per request, anonymous callers included, after the
+// CanAccessWorkspace hook of the Permissions policy admits the caller and
+// before any read transaction opens. A Trusted call does not run it. A
+// long-lived stream runs it again on every heartbeat, which is how a change in
+// what fn returns reaches an open stream. The server does not cache the
+// result, so fn must cache a lookup that is too slow to run per request. fn
+// must be safe for concurrent use.
+//
+// An error from fn fails the request with code internal, or with the code of a
+// *connect.Error that fn returns. It is never read as a denial. In a schema
+// that does not use the access model, only the primary subject has an effect.
+func WithCallerAccess(fn CallerAccessFunc) Option {
 	return func(s *Server) error {
-		s.globalRoles = fn
+		s.callerAccess = fn
 		return nil
 	}
 }
@@ -88,72 +87,111 @@ func WithStrictAccess() Option {
 
 // accessCaller is a caller's identity in the access model, resolved once per
 // request by the workspace gate: the subjects its grant rows may name and the
-// roles it holds at the root of every workspace.
+// roles it holds at the root of the workspace.
 type accessCaller struct {
 	model *accessModel
 	// subjects are sorted and without repeats; primary is the first one the
 	// hook returned, "" when there is none.
-	subjects    []string
-	primary     string
-	globalRoles []string
+	subjects  []string
+	primary   string
+	rootRoles []string
 }
 
-// resolveCaller runs the WithSubjects and WithGlobalRoles hooks for p against
-// model. It returns nil for a schema that does not use the model.
-func (s *Server) resolveCaller(ctx context.Context, p Principal, model *accessModel) (*accessCaller, error) {
+// resolveCaller runs the WithCallerAccess hook for p in the workspace
+// workspaceID against model. It returns nil for a schema that does not use the
+// model.
+func (s *Server) resolveCaller(ctx context.Context, p Principal, workspaceID string, model *accessModel) (*accessCaller, error) {
 	if model == nil {
 		return nil, nil
 	}
-	c := &accessCaller{model: model}
-	for _, subject := range s.subjectsOf(p) {
+	access, err := s.callerAccessOf(ctx, p, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	c := &accessCaller{model: model, primary: primarySubject(access)}
+	for _, subject := range access.Subjects {
 		if subject != "" && !slices.Contains(c.subjects, subject) {
 			c.subjects = append(c.subjects, subject)
 		}
 	}
-	if len(c.subjects) > 0 {
-		c.primary = c.subjects[0]
-	}
 	sort.Strings(c.subjects)
-	if s.globalRoles != nil {
-		roles, err := s.globalRoles(ctx, p)
-		if err != nil {
-			return nil, fmt.Errorf("server: resolving global roles: %w", err)
+	for _, role := range access.RootRoles {
+		if model.roles[role] == nil {
+			s.warnUnknownRootRole(ctx, model, role)
+			continue
 		}
-		for _, role := range roles {
-			if model.roles[role] == nil {
-				return nil, connect.NewError(connect.CodeInternal, fmt.Errorf(
-					"server: global role %q is not declared by any grant entity of the schema", role))
-			}
-			if !slices.Contains(c.globalRoles, role) {
-				c.globalRoles = append(c.globalRoles, role)
-			}
+		if !slices.Contains(c.rootRoles, role) {
+			c.rootRoles = append(c.rootRoles, role)
 		}
-		sort.Strings(c.globalRoles)
 	}
+	sort.Strings(c.rootRoles)
 	return c, nil
 }
 
-// subjectsOf returns the subjects of p as WithSubjects maps them, in the
-// order the hook returns them: Principal.Subject without the hook.
-func (s *Server) subjectsOf(p Principal) []string {
-	if s.subjects != nil {
-		return s.subjects(p)
+// callerAccessOf returns what p is in the workspace workspaceID, as
+// WithCallerAccess maps it: Principal.Subject alone without the hook.
+func (s *Server) callerAccessOf(ctx context.Context, p Principal, workspaceID string) (CallerAccess, error) {
+	if s.callerAccess == nil {
+		if p.Subject == "" {
+			return CallerAccess{}, nil
+		}
+		return CallerAccess{Subjects: []string{p.Subject}}, nil
 	}
-	if p.Subject != "" {
-		return []string{p.Subject}
+	access, err := s.callerAccess(ctx, p, workspaceID)
+	if err != nil {
+		return CallerAccess{}, fmt.Errorf("server: resolving caller access: %w", err)
 	}
-	return nil
+	return access, nil
 }
 
-// primarySubjectOf returns the primary subject of p: the first non-empty
-// subject WithSubjects returns, "" for an anonymous caller.
-func (s *Server) primarySubjectOf(p Principal) string {
-	for _, subject := range s.subjectsOf(p) {
+// primarySubject returns the first non-empty subject of access, "" when there
+// is none.
+func primarySubject(access CallerAccess) string {
+	for _, subject := range access.Subjects {
 		if subject != "" {
 			return subject
 		}
 	}
 	return ""
+}
+
+// creatorOf returns the primary subject of p in the workspace workspaceID, for
+// a schema that does not use the access model.
+func (s *Server) creatorOf(ctx context.Context, p Principal, workspaceID string) (string, error) {
+	access, err := s.callerAccessOf(ctx, p, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	return primarySubject(access), nil
+}
+
+// maxUnknownRootRoles caps how many distinct unknown root roles one model
+// records as warned. The roles come from the application's hook, which may
+// pass on claim values, so the record must not grow without bound.
+const maxUnknownRootRoles = 64
+
+// warnUnknownRootRole logs that the WithCallerAccess hook returned role, which
+// no grant entity of model declares: once per role and model, for at most
+// maxUnknownRootRoles roles.
+func (s *Server) warnUnknownRootRole(ctx context.Context, model *accessModel, role string) {
+	model.unknownRootRolesMu.Lock()
+	_, seen := model.unknownRootRoles[role]
+	full := len(model.unknownRootRoles) >= maxUnknownRootRoles
+	if !seen && !full {
+		if model.unknownRootRoles == nil {
+			model.unknownRootRoles = map[string]struct{}{}
+		}
+		model.unknownRootRoles[role] = struct{}{}
+	}
+	model.unknownRootRolesMu.Unlock()
+	if seen || full {
+		return
+	}
+	s.log().LogAttrs(ctx, slog.LevelWarn, "access model warning",
+		slog.String("component", "schema"),
+		slog.String("finding", fmt.Sprintf(
+			"WithCallerAccess returned root role %q, which no grant entity of the schema declares; "+
+				"it grants nothing, so check its spelling", role)))
 }
 
 // callerSubjects returns the subjects of c with the primary subject first,
@@ -351,7 +389,7 @@ func accessIn(tx storage.ReadTx, c *accessCaller, limits Limits, prior *accessSe
 }
 
 // resolveAccess reads what the caller holds from the grant rows in tx, and
-// adds its global roles at the root.
+// adds its root roles at the root.
 //
 // A grant row counts only when its subject names the caller, its role is
 // declared, and its anchor exists: a grant entity with an access parent
@@ -365,7 +403,7 @@ func accessIn(tx storage.ReadTx, c *accessCaller, limits Limits, prior *accessSe
 // grant entity whose indexes are not ready is scanned instead.
 func resolveAccess(tx storage.ReadTx, c *accessCaller, limits Limits) (*accessSet, error) {
 	set := &accessSet{perms: map[string]*permAnchors{}}
-	for _, role := range c.globalRoles {
+	for _, role := range c.rootRoles {
 		set.grantRoot(c.model.roles[role].perms)
 	}
 	if len(c.subjects) == 0 {

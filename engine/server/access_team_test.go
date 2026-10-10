@@ -1,7 +1,6 @@
 package server_test
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -263,11 +262,11 @@ var _ = Describe("Access model teams", func() {
 	}
 	// staff holds squad_lead at the root of every workspace: the squads'
 	// permissions without a squad_member row.
-	staff := server.WithGlobalRoles(func(_ context.Context, p server.Principal) ([]string, error) {
+	staff := rootRolesBy(func(p server.Principal) []string {
 		if p.Subject == "staff" {
-			return []string{"squad_lead"}, nil
+			return []string{"squad_lead"}
 		}
-		return nil, nil
+		return nil
 	})
 
 	// The specs read through the indexes the resolution probes, which a

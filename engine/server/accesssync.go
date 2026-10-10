@@ -20,7 +20,7 @@ import (
 )
 
 // A cursor records what its caller could read when it was issued, so that a
-// pull can tell when that changed — a grant added or removed, a global role
+// pull can tell when that changed — a grant added or removed, a root role
 // gained, an anchor deleted — and resync the rows under the anchors that
 // moved. The record itself lives in the cursor-state store and the cursor
 // carries a hash and a reference: a resync tombstones the rows the record
