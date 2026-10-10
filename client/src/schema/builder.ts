@@ -57,7 +57,6 @@ import {
 
 import {
 	AccessOptionsSchema,
-	AccessParentOptionsSchema,
 	type AccessRule,
 	AccessRuleSchema,
 	AccessWithinSchema,
@@ -190,8 +189,6 @@ interface FieldSpec {
 	creator?: boolean;
 	/** kind 'ref' — the name of the reverse relation on the target; see Field.reverseRelation. */
 	reverseRelation?: string;
-	/** kind 'ref' — place each row below the referenced row; see Field.accessParent. */
-	accessParent?: boolean;
 }
 
 /**
@@ -345,11 +342,12 @@ export class Field<T> {
 	 * ```ts
 	 * const comment = schema.entity('comment', {
 	 *   id: schema.text().key(),
-	 *   task: schema.ref(() => task).accessParent(),
+	 *   task: schema.ref(() => task),
 	 *   authorId: schema.text().creator(),
 	 *   body: schema.text(),
 	 * }, {
 	 *   access: {
+	 *     parents: [ 'task' ],
 	 *     allow: [
 	 *       { read: true, requires: 'view_tasks' },
 	 *       { create: true, delete: true, requires: 'comment', callerIs: 'authorId' },
@@ -398,39 +396,6 @@ export class Field<T> {
 		}
 		validateRelationName(name, 'reverseRelation()');
 		return new Field<T>({ ...this.spec, reverseRelation: name });
-	}
-
-	/**
-	 * Places each row below the row this reference points at in the access
-	 * model, or below each row a `refList()` points at: a permission held at a
-	 * referenced row applies to this row. An entity can mark several fields,
-	 * and a row then sits below every row they name. Both it and the
-	 * referenced entity must declare `access`; see
-	 * {@link EntityOptions.access}. A grant entity marks one singular field.
-	 *
-	 * Throws unless the field is a `ref()` or a `refList()`. A field guard
-	 * cannot name it.
-	 *
-	 * @example
-	 * ```ts
-	 * const task = schema.entity('task', {
-	 *   id: schema.text().key(),
-	 *   project: schema.ref(() => project).accessParent(),
-	 * }, {
-	 *   access: {
-	 *     allow: [
-	 *       { read: true, requires: 'view_tasks' },
-	 *       { write: true, requires: 'edit_tasks' },
-	 *     ],
-	 *   },
-	 * });
-	 * ```
-	 */
-	accessParent(): Field<T> {
-		if (this.spec.kind !== 'ref' || this.spec.refWorkspace) {
-			throw new Error('accessParent() is only valid on a ref() or refList() field');
-		}
-		return new Field<T>({ ...this.spec, accessParent: true });
 	}
 }
 
@@ -684,8 +649,8 @@ export interface EntitySchema<F extends Fields = Fields> {
  *
  * `allow` holds at least one rule, and no two rules the same.
  *
- * Within `entity()`, a rule's `callerIs` and `fields`, and a grant's `subject`
- * and `role`, accept only the names of the entity's fields. A declaration
+ * Within `entity()`, `parents`, a rule's `callerIs` and `fields`, and a
+ * grant's `subject` and `role`, accept only the names of the entity's fields. A declaration
  * annotated as `AccessDecl` takes any name, and does not fit an entity's
  * options; to share rules between entities, check them with `satisfies`.
  *
@@ -699,6 +664,42 @@ export interface EntitySchema<F extends Fields = Fields> {
  */
 export interface AccessDecl<F extends Fields = Fields> {
 	allow: readonly AccessRuleDecl<F>[];
+	/**
+	 * The access parents, by accessor name: the `ref()` and `refList()` fields
+	 * that place each row below the rows they point at. A permission held at a
+	 * referenced row, or at a row above it, applies to this row. A row sits
+	 * below every row its parents name. The referenced entity can have access
+	 * parents of its own, and an entity can be its own access parent. An
+	 * entity with no parents sits at the workspace root.
+	 *
+	 * No two entries are the same, and each referenced entity must declare
+	 * `access`. A `workspaceRef()` cannot be a parent. A grant entity names at
+	 * most one parent, and not a `refList()`. A field guard cannot name a
+	 * parent.
+	 *
+	 * A write that adds or removes a parent needs its rule where that parent
+	 * sits; see {@link AccessRuleDecl}. A write fails when the row would name
+	 * more rows than the server's `MaxAccessParents` limit allows, or would
+	 * sit below itself.
+	 *
+	 * @example
+	 * ```ts
+	 * const task = schema.entity('task', {
+	 *   id: schema.text().key(),
+	 *   project: schema.ref(() => project),
+	 *   labels: schema.refList(() => label),
+	 * }, {
+	 *   access: {
+	 *     parents: [ 'project', 'labels' ],
+	 *     allow: [
+	 *       { read: true, requires: 'view_tasks' },
+	 *       { write: true, requires: 'edit_tasks' },
+	 *     ],
+	 *   },
+	 * });
+	 * ```
+	 */
+	parents?: readonly FieldKeys<F>[];
 	/**
 	 * The field guards: each one restricts who can read and who can write a
 	 * set of fields, whatever rule in `allow` admits the read or the write. A
@@ -738,8 +739,8 @@ export interface AccessDecl<F extends Fields = Fields> {
  * decides the rest, and a refused patch comes back as a rejection ack.
  *
  * `fields` names the guarded fields by accessor name. A field is in at most
- * one guard, and cannot be a key field, a `.creator()` field or an
- * `.accessParent()` reference. A guard rule cannot name `delete` or `fields`,
+ * one guard, and cannot be a key field, a `.creator()` field or a field that
+ * `parents` names. A guard rule cannot name `delete` or `fields`,
  * and its `callerIs` and `when` cannot read a guarded field. A guard that can
  * hide its fields cannot name a field that a rule in `allow` reads with
  * `callerIs` or `when`, or the subject or role field of a grant entity.
@@ -806,7 +807,7 @@ type SubjectKeys<F extends Fields> = Fields extends F ? string : {
  * At least one operation must be `true`. `write` admits `create`, `update`
  * and `delete`. The source is either `requires`, which admits a caller that
  * holds every permission it names at the workspace root, at the row, or at a
- * row above it through its `.accessParent()` references, each at any one of
+ * row above it through its access parents, each at any one of
  * these places, or `admitted: true`, which admits every caller admitted to the
  * workspace. `requires` names no permission twice. To admit a caller that
  * holds either of two permissions, declare two rules. The server's workspace
@@ -899,7 +900,7 @@ export type GuardRuleDecl<F extends Fields = Fields> =
  * One entry of an access rule's `within`, mirroring syncplane.v1.AccessWithin:
  * the rule admits only rows that are, or sit below, a row of `entity` that
  * passes every check the entry sets. A row passes when the row itself, or any
- * row above it through `.accessParent()` references, is such a row.
+ * row above it through access parents, is such a row.
  *
  * `entity` names an entity of the same schema whose rows the rule's rows can
  * sit below, by its wire name or as a thunk that returns it. A thunk is
@@ -922,9 +923,10 @@ export type GuardRuleDecl<F extends Fields = Fields> =
  * ```ts
  * const comment = schema.entity('comment', {
  *   id: schema.text().key(),
- *   doc: schema.ref(() => doc).accessParent(),
+ *   doc: schema.ref(() => doc),
  * }, {
  *   access: {
+ *     parents: [ 'doc' ],
  *     allow: [
  *       { read: true, write: true, admitted: true, within: { entity: 'doc', callerIs: 'ownerId' } },
  *     ],
@@ -941,8 +943,8 @@ export interface WithinDecl<F extends Fields = Fields> {
 
 /**
  * A within entry on rows of the rule's own entity, for an entity whose rows
- * sit below rows of their own through an `.accessParent()` reference to
- * itself. It means the same as a {@link WithinDecl} that names the entity,
+ * sit below rows of their own through an access parent that references the
+ * entity itself. It means the same as a {@link WithinDecl} that names the entity,
  * and types `callerIs` and `when` against the entity's fields.
  *
  * @example
@@ -951,10 +953,11 @@ export interface WithinDecl<F extends Fields = Fields> {
  * ```ts
  * const folder = schema.entity('folder', {
  *   id: schema.text().key(),
- *   parent: schema.ref(() => folder).accessParent(),
+ *   parent: schema.ref(() => folder),
  *   private: schema.bool(),
  * }, {
  *   access: {
+ *     parents: [ 'parent' ],
  *     allow: [
  *       { read: true, requires: 'view_private' },
  *       { read: true, admitted: true, within: { self: true, when: (f) => f.private.eq(false) } },
@@ -984,9 +987,10 @@ export type WithinEntry<F extends Fields = Fields> = WithinDecl | SelfWithinDecl
  * ```ts
  * const task = schema.entity('task', {
  *   id: schema.text().key(),
- *   project: schema.ref(() => project).accessParent(),
+ *   project: schema.ref(() => project),
  * }, {
  *   access: {
+ *     parents: [ 'project' ],
  *     allow: [
  *       { read: true, requires: 'view_tasks' },
  *       {
@@ -1021,8 +1025,8 @@ export function within<F extends Fields>(
 /**
  * The roles an entity's rows grant, mirroring syncplane.v1.GrantOptions. Each
  * row gives the subject in its `subject` field the role in its `role` field,
- * at the row its `.accessParent()` reference points at, or at the workspace
- * root when the entity has no access parent.
+ * at the row its access parent points at, or at the workspace root when the
+ * entity has no access parent.
  */
 export interface GrantDecl<F extends Fields = Fields> {
 	/**
@@ -1042,7 +1046,7 @@ export interface GrantDecl<F extends Fields = Fields> {
  * syncplane.v1.MembersOptions.
  *
  * Each live row of the member entity makes its subject a member of the team
- * row its `.accessParent()` reference points at, whatever its role. The member
+ * row its access parent points at, whatever its role. The member
  * entity is a grant entity whose access parent is this entity alone, and whose
  * subject is a `text()` field.
  */
@@ -1247,7 +1251,7 @@ export interface EntityOptions<F extends Fields = Fields> {
 	 * ```ts
 	 * const projectMember = schema.entity('project_member', {
 	 *   id: schema.text().key(),
-	 *   project: schema.ref(() => project).accessParent(),
+	 *   project: schema.ref(() => project),
 	 *   userId: schema.text(),
 	 *   role: schema.text(),
 	 * }, {
@@ -1260,6 +1264,7 @@ export interface EntityOptions<F extends Fields = Fields> {
 	 *     ],
 	 *   },
 	 *   access: {
+	 *     parents: [ 'project' ],
 	 *     allow: [
 	 *       { read: true, requires: 'view_members' },
 	 *       { write: true, requires: 'manage_members' },
@@ -1285,21 +1290,21 @@ export interface EntityOptions<F extends Fields = Fields> {
 	 * });
 	 * const teamMember = schema.entity('team_member', {
 	 *   id: schema.text().key(),
-	 *   team: schema.ref(() => team).accessParent(),
+	 *   team: schema.ref(() => team),
 	 *   userId: schema.text(),
 	 *   role: schema.text(),
 	 * }, {
 	 *   grant: { subject: 'userId', role: 'role', roles: [ { name: 'team_member', grants: ['view_teams'] } ] },
-	 *   access: { allow: [ { read: true, requires: 'view_teams' } ] },
+	 *   access: { parents: [ 'team' ], allow: [ { read: true, requires: 'view_teams' } ] },
 	 * });
 	 * const projectTeam = schema.entity('project_team', {
 	 *   id: schema.text().key(),
-	 *   project: schema.ref(() => project).accessParent(),
+	 *   project: schema.ref(() => project),
 	 *   team: schema.ref(() => team),
 	 *   role: schema.text(),
 	 * }, {
 	 *   grant: { subject: 'team', role: 'role', roles: [ { name: 'project_team_writer', grants: ['view_tasks', 'edit_tasks'] } ] },
-	 *   access: { allow: [ { read: true, requires: 'view_tasks' } ] },
+	 *   access: { parents: [ 'project' ], allow: [ { read: true, requires: 'view_tasks' } ] },
 	 * });
 	 * ```
 	 */
@@ -1319,13 +1324,11 @@ function assertAccess(
 ): void {
 	const where = `entity "${entityName}"`;
 	const access = options?.access;
-	if (access !== undefined) assertAccessRules(where, entityName, access, fields, false);
-	const parents = Object.keys(fields).filter((key) => fields[key]!.spec.accessParent === true);
-	if (parents.length > 0 && access === undefined) {
-		throw new Error(
-			`${where}: field "${parents[0]}" is marked accessParent(), but the entity declares no access`,
-		);
+	if (access !== undefined) {
+		assertParents(where, access, fields);
+		assertAccessRules(where, entityName, access, fields, false);
 	}
+	const parents = access?.parents ?? [];
 	const members = options?.members;
 	if (members !== undefined) {
 		if (access === undefined) throw new Error(`${where}: an entity with members must declare access`);
@@ -1339,7 +1342,7 @@ function assertAccess(
 	// A grant row applies at one anchor.
 	if (parents.length > 1 || parents.some((key) => fields[key]!.spec.repeated)) {
 		throw new Error(
-			`${where}: a grant entity has one access parent: one singular ref() marked accessParent()`,
+			`${where}: a grant entity has at most one access parent: access.parents names one singular ref()`,
 		);
 	}
 	for (const part of [ 'subject', 'role' ] as const) {
@@ -1390,6 +1393,34 @@ function assertAccess(
 		}
 	}
 	assertRoleIncludes(where, grant.roles, names);
+}
+
+/**
+ * Validates the access parents of one entity against the rules the engine
+ * enforces on syncplane.v1.AccessOptions at registration: each entry names a
+ * declared `ref()` or `refList()` field once. The schema-wide check that each
+ * target declares access is validateAccessTargets.
+ */
+function assertParents(where: string, access: AccessDecl, fields: Fields): void {
+	const parents = access.parents;
+	if (parents === undefined) return;
+	// A plain-JS caller can pass a shape the types refuse.
+	if (!Array.isArray(parents as unknown)) throw new Error(`${where}: access.parents must be a list`);
+	parents.forEach((name, i) => {
+		const at = `${where} access.parents[${i}]`;
+		const first = parents.indexOf(name);
+		if (first !== i) throw new Error(`${at} and access.parents[${first}] both name "${name}"`);
+		const spec = fields[name]?.spec;
+		if (spec === undefined) throw new Error(`${at}: names "${name}", which is not declared`);
+		if (spec.kind !== 'ref') {
+			throw new Error(`${at}: names "${name}", which is not a ref() or a refList() field`);
+		}
+		if (spec.refWorkspace) {
+			throw new Error(
+				`${at}: names "${name}", which is a workspace reference; an access parent is a ref() or a refList()`,
+			);
+		}
+	});
 }
 
 /**
@@ -1466,7 +1497,7 @@ function assertAccessRules(
 		seen.set(key, i);
 	});
 	if (access.guard !== undefined) {
-		assertGuards(where, owner, access.allow, access.guard, fields, resolve);
+		assertGuards(where, owner, access, fields, resolve);
 	}
 }
 
@@ -1558,11 +1589,13 @@ function assertAccessRule(
 function assertGuards(
 	where: string,
 	owner: string,
-	allow: readonly AccessRuleDecl[],
-	guards: readonly FieldGuardDecl[],
+	access: AccessDecl,
 	fields: Fields,
 	resolve: boolean,
 ): void {
+	const allow = access.allow;
+	const guards = access.guard!;
+	const parents = new Set<string>(access.parents ?? []);
 	// A plain-JS caller can pass a shape the types refuse.
 	if (!Array.isArray(guards as unknown)) throw new Error(`${where}: access.guard must be a list`);
 	const guardOf = new Map<string, number>();
@@ -1580,7 +1613,7 @@ function assertGuards(
 			}
 			if (listed.has(name)) throw new Error(`${at}: fields names "${name}" twice`);
 			listed.add(name);
-			if (spec.accessParent) {
+			if (parents.has(name)) {
 				throw new Error(
 					`${at}: names "${name}", which is an access parent; a guard cannot restrict it`,
 				);
@@ -1820,12 +1853,11 @@ function validateWithinTargets(entities: readonly EntitySchema[]): void {
 function validateAccessTargets(entities: readonly EntitySchema[]): void {
 	const byName = new Map(entities.map((e) => [ e.name, e ]));
 	for (const e of entities) {
-		for (const [ key, field ] of Object.entries(e.fields)) {
-			if (field.spec.accessParent !== true) continue;
-			const target = field.spec.ref!();
+		for (const key of e.access?.parents ?? []) {
+			const target = e.fields[key]!.spec.ref!();
 			if (target.access === undefined) {
 				throw new Error(
-					`entity "${e.name}" field "${key}" is marked accessParent(), but points at entity "${target.name}", `
+					`entity "${e.name}" access.parents names "${key}", which points at entity "${target.name}", `
 						+ `which declares no access; declare access on "${target.name}"`,
 				);
 			}
@@ -1861,10 +1893,10 @@ function validateMembers(team: EntitySchema, byName: ReadonlyMap<string, EntityS
 				+ 'its rows must grant a role at the team they make their subject a member of',
 		);
 	}
-	const parents = Object.values(member.fields).filter((f) => f.spec.accessParent === true);
-	if (parents.length !== 1 || parents[0]!.spec.ref!().name !== team.name) {
+	const parents = member.access?.parents ?? [];
+	if (parents.length !== 1 || member.fields[parents[0]!]!.spec.ref!().name !== team.name) {
 		throw new Error(
-			`${where} names entity "${member.name}", whose accessParent() does not point at "${team.name}" alone`,
+			`${where} names entity "${member.name}", whose access.parents does not point at "${team.name}" alone`,
 		);
 	}
 	if (member.fields[member.grant.subject]!.spec.kind === 'ref') {
@@ -2207,6 +2239,8 @@ function entityMessageOf(e: EntitySchema, entities: readonly EntitySchema[]): De
 			...(e.access === undefined ? {} : {
 				access: create(AccessOptionsSchema, {
 					allow: e.access.allow.map((r) => accessRuleOf(r, e.name, e.fields, entities)),
+					// Accessor names lower to proto names, as a guard's fields do.
+					parents: (e.access.parents ?? []).map(snakeCase),
 					guard: (e.access.guard ?? []).map((g) =>
 						create(FieldGuardSchema, {
 							// Accessor names lower to proto names, as a rule's fields do.
@@ -2474,20 +2508,17 @@ function setScalarMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
 }
 
 /**
- * Sets the (syncplane.v1.field_behavior) marks a reference field carries: its
- * reverse relation's name and its access-parent mark. No-op when none is set:
- * a reference the builder annotated would report a behaviour it does not have.
+ * Sets the (syncplane.v1.field_behavior) mark a reference field carries: its
+ * reverse relation's name. No-op when none is set: a reference the builder
+ * annotated would report a behaviour it does not have.
  */
 function setRefMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
-	if (spec.reverseRelation === undefined && !spec.accessParent) return;
+	if (spec.reverseRelation === undefined) return;
 	const fieldOptions = create(FieldOptionsSchema);
 	setExtension(
 		fieldOptions,
 		fieldBehaviorExt,
-		create(FieldBehaviorSchema, {
-			reverseRelation: spec.reverseRelation ?? '',
-			...(spec.accessParent ? { accessParent: create(AccessParentOptionsSchema) } : {}),
-		}),
+		create(FieldBehaviorSchema, { reverseRelation: spec.reverseRelation }),
 	);
 	field.options = fieldOptions;
 }

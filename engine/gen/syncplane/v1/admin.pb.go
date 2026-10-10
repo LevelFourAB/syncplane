@@ -101,8 +101,8 @@ type RegisterRequest struct {
 	// the server does not check the revision.
 	ExpectedRevision string `protobuf:"bytes,3,opt,name=expected_revision,json=expectedRevision,proto3" json:"expected_revision,omitempty"`
 	// Allows the registration to change the access model of an entity that is
-	// already registered: its `access`, `grant` or `access_parent` options, or
-	// the names of the enum values its role field matches.
+	// already registered: its `access` or `grant` options, or the names of the
+	// enum values its role field matches.
 	//
 	// If `false`, the server rejects such a change with
 	// `FAILED_PRECONDITION`. A change makes every client resync the affected

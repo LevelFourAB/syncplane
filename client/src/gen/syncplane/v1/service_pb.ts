@@ -380,8 +380,8 @@ export const PullResponseSchema: GenMessage<PullResponse> = /*@__PURE__*/
  *
  * The caller holds a permission at a row when root_permissions lists it, or
  * when the anchor group that lists the row lists it. A permission held at a
- * row applies to the row and to every row whose `access_parent` field points
- * at it. A permission that no list names is held nowhere.
+ * row applies to the row and to every row whose access parent points at it.
+ * A permission that no list names is held nowhere.
  *
  * Every list except subjects is sorted and holds no duplicates, so equal
  * access has one encoding, apart from seq.

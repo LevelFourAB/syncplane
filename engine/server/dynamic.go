@@ -146,11 +146,6 @@ type DynamicField struct {
 	// compiled path honours). Empty means <plural(entity)>By<Field>, such as
 	// postsByAuthor. Valid only with Ref, on a field of the entity itself.
 	ReverseRelation string
-	// AccessParent places each row below the row this reference points at in
-	// the access model (the same (syncplane.v1.field_behavior).access_parent
-	// the compiled path honours). Valid only with a singular Ref without
-	// RefWorkspace, on a field of the entity itself.
-	AccessParent bool
 	// Creator makes the field record who created the row: an enforced create
 	// stores the caller's primary subject in it, and only a trusted write
 	// changes it afterwards (the same (syncplane.v1.field_behavior).creator
@@ -414,9 +409,6 @@ func dynamicFieldProto(
 	if f.ReverseRelation != "" && !f.isRef() {
 		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: reverse_relation is only valid on a Ref field", ctx, f.Name)
 	}
-	if f.AccessParent && !f.isRef() {
-		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: access_parent is only valid on a Ref field", ctx, f.Name)
-	}
 	if f.Creator && (f.Kind != protoreflect.StringKind || f.Repeated || f.isMap() || f.isRef() || f.isMessage()) {
 		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: creator is only valid on a singular string field", ctx, f.Name)
 	}
@@ -440,13 +432,9 @@ func dynamicFieldProto(
 			return nil, nil, fmt.Errorf("server: dynamic entity %q field %q references unknown entity %q", ctx, f.Name, f.Ref)
 		}
 		fdp.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
-		if f.ReverseRelation != "" || f.AccessParent {
-			b := &syncplanev1.FieldBehavior{ReverseRelation: f.ReverseRelation}
-			if f.AccessParent {
-				b.AccessParent = &syncplanev1.AccessParentOptions{}
-			}
+		if f.ReverseRelation != "" {
 			fopts := &descriptorpb.FieldOptions{}
-			proto.SetExtension(fopts, syncplanev1.E_FieldBehavior, b)
+			proto.SetExtension(fopts, syncplanev1.E_FieldBehavior, &syncplanev1.FieldBehavior{ReverseRelation: f.ReverseRelation})
 			fdp.Options = fopts
 		}
 		if f.RefWorkspace {

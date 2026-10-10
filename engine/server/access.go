@@ -25,8 +25,8 @@ import (
 )
 
 // entityAccess is an entity's place in the access model: its
-// (syncplane.v1.entity).access rules and its access_parent field, checked and
-// resolved at registration. Nil on an entity that declares no access option.
+// (syncplane.v1.entity).access rules and access parents, checked and resolved
+// at registration. Nil on an entity that declares no access option.
 type entityAccess struct {
 	// rules are the entity's access rules, in declaration order.
 	rules []accessRule
@@ -43,8 +43,7 @@ type entityAccess struct {
 	// in the model is a catalog question, answered by compileAccessModel.
 	parents []parentCase
 	// parentUnits name the access parents in masks and errors, in field order:
-	// each marked field, and each oneof whose members are cases. A grant
-	// entity has at most one.
+	// each named field, and each named oneof. A grant entity has at most one.
 	parentUnits []string
 	// guards are the entity's field guards, in declaration order.
 	guards []fieldGuard
@@ -501,15 +500,6 @@ func (a *entityAccess) parentRule() string {
 	return strings.Join(cases, ",")
 }
 
-// parentDescription names the first access parent in an error: the marked
-// field, or the oneof whose members are the cases.
-func parentDescription(parents []parentCase, units []string) string {
-	if len(parents) > 0 && lww.OneofOf(parents[0].ref.fd) != nil {
-		return fmt.Sprintf("oneof %q", units[0])
-	}
-	return fmt.Sprintf("field %q", units[0])
-}
-
 // depthUnbounded is the access depth of an entity whose chain of parent
 // entities runs into a cycle, such as a folder whose parent is a folder. Its
 // rows can sit any number of hops below the root, up to
@@ -623,42 +613,37 @@ func (g *grantSpec) subjectSpec() string {
 	return g.subjectName + "(" + strings.Join(cases, ",") + ")"
 }
 
-// accessOf checks an entity's access option and its access_parent field, and
-// resolves the parent reference. It needs info.refFields, so it runs after
+// accessOf checks an entity's access option and resolves its access parents. It needs info.refFields, so it runs after
 // buildEntityInfo has collected them.
 //
 // Every rule here is local to the entity. The rules that need the rest of the
 // schema — the parent entity is registered and in the model, depth, role
 // names and permission coverage — are compileAccessModel's.
 func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions, info *entityInfo) (*entityAccess, error) {
-	parents, units, err := accessParentOf(desc, info)
-	if err != nil {
-		return nil, err
-	}
 	opt := eo.GetAccess()
 	if opt == nil {
-		if parents != nil {
-			return nil, fmt.Errorf("%s is marked access_parent, but the entity declares no access option; "+
-				"declare access: { allow: [...] }", parentDescription(parents, units))
-		}
 		return nil, nil
-	}
-	// A grant row applies at one anchor, which the checks of a grant and of a
-	// team membership compare as one row.
-	if eo.GetGrant() != nil {
-		const one = "a grant entity has one access parent: one singular field or the members of one oneof"
-		if len(units) > 1 {
-			return nil, fmt.Errorf("%s, and %q and %q are both marked access_parent", one, units[0], units[1])
-		}
-		if len(parents) > 0 && parents[0].ref.fd.IsList() {
-			return nil, fmt.Errorf("%s, and access_parent field %q is repeated", one, units[0])
-		}
 	}
 	// An option this build does not know could narrow access. Ignoring it would
 	// widen access on an older server than the one the schema was written for,
 	// so it is refused instead.
 	if err := refuseUnknownOptionFields("access", opt); err != nil {
 		return nil, err
+	}
+	parents, units, err := accessParentOf(desc, info, opt.GetParents())
+	if err != nil {
+		return nil, err
+	}
+	// A grant row applies at one anchor, which the checks of a grant and of a
+	// team membership compare as one row.
+	if eo.GetGrant() != nil {
+		const one = "a grant entity has one access parent: one singular field or one oneof"
+		if len(units) > 1 {
+			return nil, fmt.Errorf("%s, and access parents names %q and %q", one, units[0], units[1])
+		}
+		if len(parents) > 0 && parents[0].ref.fd.IsList() {
+			return nil, fmt.Errorf("%s, and access parent %q is repeated", one, units[0])
+		}
 	}
 	if len(opt.GetAllow()) == 0 {
 		return nil, fmt.Errorf("access declares no rule; add at least one rule to allow")
@@ -1182,70 +1167,76 @@ func fieldEqual(fd protoreflect.FieldDescriptor, a, b protoreflect.Message) bool
 	return a.Get(fd).Equal(b.Get(fd))
 }
 
-// accessParentOf finds the access parents of an entity: the cases of the
-// references marked access_parent, and the units that hold them (see
-// entityAccess.parentUnits). It returns nil when no field carries the mark.
+// accessParentOf resolves the access parents that names lists: the cases of
+// the named references, in field order, and the units that hold them in field
+// order (see entityAccess.parentUnits). It returns nil when names is empty.
 //
-// Each unit is one top-level field, or every member of one oneof on the
-// entity. A unit is polymorphic when it can hold more than one case: a marked
-// field whose type is a reference message with a oneof of entities, or a oneof
-// whose members are each a reference. A oneof with an unmarked member is
-// refused, so that every case a row can hold names a row it sits below.
-// accessParentOf also refuses the mark on a field nested inside a message
-// field, where it cannot take effect.
+// Each name is a top-level field outside any oneof, or a oneof whose members
+// are each a reference. A unit is polymorphic when it can hold more than one
+// case: a field whose type is a reference message with a oneof of entities,
+// or a oneof of references.
 //
 // A workspace-qualified reference is refused, since it can name a row outside
 // the workspace. That is a validation rule rather than a structural limit, so
 // accepting it later is additive.
-func accessParentOf(desc protoreflect.MessageDescriptor, info *entityInfo) ([]parentCase, []string, error) {
-	var (
-		marked []protoreflect.FieldDescriptor
-		units  []string
-	)
+func accessParentOf(desc protoreflect.MessageDescriptor, info *entityInfo, names []string) ([]parentCase, []string, error) {
+	if len(names) == 0 {
+		return nil, nil, nil
+	}
+	var marked []protoreflect.FieldDescriptor
+	named := map[string]int{}
+	for i, name := range names {
+		where := fmt.Sprintf("access parents[%d]", i)
+		if j, dup := named[name]; dup {
+			return nil, nil, fmt.Errorf("%s and parents[%d] both name %q", where, j, name)
+		}
+		named[name] = i
+		var members []protoreflect.FieldDescriptor
+		if od := desc.Oneofs().ByName(protoreflect.Name(name)); od != nil && !od.IsSynthetic() {
+			for j := 0; j < od.Fields().Len(); j++ {
+				members = append(members, od.Fields().Get(j))
+			}
+		} else {
+			fd := desc.Fields().ByName(protoreflect.Name(name))
+			switch {
+			case fd == nil:
+				return nil, nil, fmt.Errorf("%s names %q, which is not a field or a oneof of %s", where, name, desc.FullName())
+			case lww.OneofOf(fd) != nil:
+				return nil, nil, fmt.Errorf("%s names field %q, a member of oneof %q; name the oneof",
+					where, name, lww.OneofOf(fd).Name())
+			case fd.IsMap():
+				return nil, nil, fmt.Errorf("%s names field %q, which is a map; name a reference or a repeated reference",
+					where, name)
+			}
+			members = append(members, fd)
+		}
+		for _, fd := range members {
+			refs := lww.RefsOf(fd)
+			if len(refs) == 0 {
+				return nil, nil, fmt.Errorf("%s: field %q must be a reference: a field whose type is an entity message "+
+					"or a reference message", where, fd.Name())
+			}
+			if refs[0].Workspace != nil {
+				return nil, nil, fmt.Errorf("%s: field %q is a reference message with a workspace field; "+
+					"an access parent is a row of the holder's own workspace", where, fd.Name())
+			}
+			marked = append(marked, fd)
+		}
+	}
+	var units []string
 	fields := desc.Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
-		b := fieldBehaviorOf(fd)
-		if b.GetAccessParent() == nil {
+		if !slices.Contains(marked, fd) {
 			continue
-		}
-		if err := refuseUnknownOptionFields(fmt.Sprintf("field %q access_parent", fd.Name()), b.GetAccessParent()); err != nil {
-			return nil, nil, err
-		}
-		if fd.IsMap() {
-			return nil, nil, fmt.Errorf("access_parent field %q is a map; mark a reference or a repeated reference", fd.Name())
-		}
-		refs := lww.RefsOf(fd)
-		if len(refs) == 0 {
-			return nil, nil, fmt.Errorf("access_parent field %q must be a reference: a field whose type is an entity message "+
-				"or a reference message", fd.Name())
-		}
-		if refs[0].Workspace != nil {
-			return nil, nil, fmt.Errorf("access_parent field %q is a reference message with a workspace field; "+
-				"an access parent is a row of the holder's own workspace", fd.Name())
 		}
 		unit := string(fd.Name())
 		if od := lww.OneofOf(fd); od != nil {
 			unit = string(od.Name())
-			members := od.Fields()
-			for j := 0; j < members.Len(); j++ {
-				if m := members.Get(j); fieldBehaviorOf(m).GetAccessParent() == nil {
-					return nil, nil, fmt.Errorf("access_parent field %q is a member of oneof %q, whose member %q is not marked; "+
-						"mark every member, so that each case names the row it sits below",
-						fd.Name(), od.Name(), m.Name())
-				}
-			}
 		}
 		if !slices.Contains(units, unit) {
 			units = append(units, unit)
 		}
-		marked = append(marked, fd)
-	}
-	if err := refuseNestedMarks(desc, "access_parent", func(b *syncplanev1.FieldBehavior) bool { return b.GetAccessParent() != nil }); err != nil {
-		return nil, nil, err
-	}
-	if len(marked) == 0 {
-		return nil, nil, nil
 	}
 	var cases []parentCase
 	for i := range info.refFields {
@@ -1625,7 +1616,7 @@ type accessModel struct {
 	// sorted by name, itself included when the chain is recursive.
 	children map[string][]*accessEdge
 	below    map[string][]string
-	// depths maps each model entity to the largest number of access_parent
+	// depths maps each model entity to the largest number of access parent
 	// hops from its rows to an entity without a parent, or depthUnbounded.
 	depths map[string]int
 	// moving is set when a write to a row can change what the rows below it
@@ -1807,11 +1798,11 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 		for _, p := range a.parents {
 			target, ok := c.byType[p.ref.ref.Target.FullName()]
 			if !ok {
-				return nil, fmt.Errorf("server: entity %q access_parent field %q points at %s, which is not a registered entity",
+				return nil, fmt.Errorf("server: entity %q access parent %q points at %s, which is not a registered entity",
 					name, refCasePath(p.ref.ref), p.ref.ref.Target.FullName())
 			}
 			if target.access == nil {
-				return nil, fmt.Errorf("server: entity %q access_parent field %q points at entity %q, which is not in the access model; "+
+				return nil, fmt.Errorf("server: entity %q access parent %q points at entity %q, which is not in the access model; "+
 					"declare access on %q", name, refCasePath(p.ref.ref), target.name, target.name)
 			}
 			e := &accessEdge{child: info, target: target, ref: p.ref}
@@ -1865,7 +1856,7 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	for _, name := range names {
 		d := m.depthOf(name)
 		if d > maxDepth {
-			return nil, fmt.Errorf("server: entity %q can sit %d access_parent hops below an entity without a parent, "+
+			return nil, fmt.Errorf("server: entity %q can sit %d access parent hops below an entity without a parent, "+
 				"more than MaxAccessDepth (%d) allows", name, d, maxDepth)
 		}
 	}
@@ -2094,7 +2085,7 @@ func checkMembers(c *catalog, info *entityInfo) error {
 		return fmt.Errorf("server: entity %q members names entity %q, which is not a grant entity; "+
 			"its rows must grant a role at the team they make their subject a member of", info.name, member.name)
 	case member.access == nil || len(member.access.parents) != 1 || member.access.parents[0].entity != info.name:
-		return fmt.Errorf("server: entity %q members names entity %q, whose access_parent does not point at %q alone",
+		return fmt.Errorf("server: entity %q members names entity %q, whose access parent does not point at %q alone",
 			info.name, member.name, info.name)
 	case len(member.grant.subjects) != 1 || member.grant.subjects[0].team != nil:
 		return fmt.Errorf("server: entity %q members names entity %q, whose grant subject is not one string field; "+
@@ -2230,7 +2221,7 @@ func (m *accessModel) implies(p, q string) bool {
 	return granted
 }
 
-// depthOf returns the largest number of access_parent hops from rows of the
+// depthOf returns the largest number of access parent hops from rows of the
 // named entity to an entity without a parent, over every case of every
 // parent on the way, or depthUnbounded when some chain of parent entities
 // runs into a cycle. It memoizes into m.depths, so it runs once m.parents is
@@ -2480,7 +2471,7 @@ func validateAccessEvolution(old, next *entityInfo, allow bool) error {
 		return nil
 	}
 	if accessSpecOf(old) != accessSpecOf(next) {
-		return fmt.Errorf("server: entity %q changes its access model (access, grant or access_parent); %s",
+		return fmt.Errorf("server: entity %q changes its access model (access or grant); %s",
 			next.name, allowAccessChangeHint)
 	}
 	return nil

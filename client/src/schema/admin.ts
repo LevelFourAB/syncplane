@@ -40,8 +40,8 @@ export interface RegisterOptions {
 	expectedRevision?: string;
 	/**
 	 * Lets the registration change the access model of an entity that is
-	 * already registered: its `access`, `grant` or `.accessParent()`
-	 * declarations. Without it, the server refuses such a change.
+	 * already registered: its `access` options, access parents included, or
+	 * its `grant` options. Without it, the server refuses such a change.
 	 *
 	 * @defaultValue false
 	 */

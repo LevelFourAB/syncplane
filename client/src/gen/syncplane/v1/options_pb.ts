@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSJhCg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUSJwoFZ3VhcmQYAiADKAsyGC5zeW5jcGxhbmUudjEuRmllbGRHdWFyZCJFCgpGaWVsZEd1YXJkEg4KBmZpZWxkcxgBIAMoCRInCgVhbGxvdxgCIAMoCzIYLnN5bmNwbGFuZS52MS5BY2Nlc3NSdWxlIpECCgpBY2Nlc3NSdWxlEgwKBHJlYWQYASABKAgSDgoGY3JlYXRlGAIgASgIEg4KBnVwZGF0ZRgDIAEoCBIOCgZkZWxldGUYBCABKAgSDQoFd3JpdGUYBSABKAgSEAoIcmVxdWlyZXMYBiADKAkSLgoIYWRtaXR0ZWQYByABKAsyHC5zeW5jcGxhbmUudjEuQWRtaXR0ZWRDYWxsZXISEQoJY2FsbGVyX2lzGAggASgJEg4KBmZpZWxkcxgJIAMoCRIlCgR3aGVuGAogASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbhIqCgZ3aXRoaW4YCyADKAsyGi5zeW5jcGxhbmUudjEuQWNjZXNzV2l0aGluIlgKDEFjY2Vzc1dpdGhpbhIOCgZlbnRpdHkYASABKAkSEQoJY2FsbGVyX2lzGAIgASgJEiUKBHdoZW4YAyABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uIhAKDkFkbWl0dGVkQ2FsbGVyIlAKDEdyYW50T3B0aW9ucxIPCgdzdWJqZWN0GAEgASgJEgwKBHJvbGUYAiABKAkSIQoFcm9sZXMYAyADKAsyEi5zeW5jcGxhbmUudjEuUm9sZSI2CgRSb2xlEgwKBG5hbWUYASABKAkSDgoGZ3JhbnRzGAIgAygJEhAKCGluY2x1ZGVzGAMgAygJIiAKDk1lbWJlcnNPcHRpb25zEg4KBmVudGl0eRgBIAEoCSIVChNBY2Nlc3NQYXJlbnRPcHRpb25zIhAKDkNyZWF0b3JPcHRpb25zIhAKDkhpc3RvcnlPcHRpb25zIhIKEFJlZmVyZW5jZU9wdGlvbnMiGwoLU2VhcmNoRmllbGQSDAoEcGF0aBgBIAEoCSJPCgpTZWFyY2hTcGVjEigKBWZpZWxkGAEgAygLMhkuc3luY3BsYW5lLnYxLlNlYXJjaEZpZWxkEhcKD2tlZXBfZGlhY3JpdGljcxgCIAEoCCImCghJbmRleEtleRIMCgRwYXRoGAEgASgJEgwKBGRlc2MYAiABKAgiPgoJSW5kZXhTcGVjEgwKBG5hbWUYASABKAkSIwoDa2V5GAIgAygLMhYuc3luY3BsYW5lLnYxLkluZGV4S2V5IrUCCg1GaWVsZEJlaGF2aW9yEg4KBm9wYXF1ZRgBIAEoCBIRCglrZXlfZmllbGQYAiADKAkSEwoLb3JkZXJfZmllbGQYAyABKAkSDAoEdGV4dBgEIAEoCBIPCgdpbmRleGVkGAUgASgIEg8KB2hpc3RvcnkYBiABKAgSEgoKc2VhcmNoYWJsZRgHIAEoCBIRCgl3b3Jrc3BhY2UYCSABKAgSGAoQcmV2ZXJzZV9yZWxhdGlvbhgKIAEoCRI4Cg1hY2Nlc3NfcGFyZW50GAsgASgLMiEuc3luY3BsYW5lLnYxLkFjY2Vzc1BhcmVudE9wdGlvbnMSLQoHY3JlYXRvchgMIAEoCzIcLnN5bmNwbGFuZS52MS5DcmVhdG9yT3B0aW9uc0oECAgQCVIMd3JpdGVfcG9saWN5OlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpfCglyZWZlcmVuY2USHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtocDIAEoCzIeLnN5bmNwbGFuZS52MS5SZWZlcmVuY2VPcHRpb25zUglyZWZlcmVuY2U6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor, file_syncplane_v1_query]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSJyCg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUSDwoHcGFyZW50cxgDIAMoCRInCgVndWFyZBgCIAMoCzIYLnN5bmNwbGFuZS52MS5GaWVsZEd1YXJkIkUKCkZpZWxkR3VhcmQSDgoGZmllbGRzGAEgAygJEicKBWFsbG93GAIgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUikQIKCkFjY2Vzc1J1bGUSDAoEcmVhZBgBIAEoCBIOCgZjcmVhdGUYAiABKAgSDgoGdXBkYXRlGAMgASgIEg4KBmRlbGV0ZRgEIAEoCBINCgV3cml0ZRgFIAEoCBIQCghyZXF1aXJlcxgGIAMoCRIuCghhZG1pdHRlZBgHIAEoCzIcLnN5bmNwbGFuZS52MS5BZG1pdHRlZENhbGxlchIRCgljYWxsZXJfaXMYCCABKAkSDgoGZmllbGRzGAkgAygJEiUKBHdoZW4YCiABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uEioKBndpdGhpbhgLIAMoCzIaLnN5bmNwbGFuZS52MS5BY2Nlc3NXaXRoaW4iWAoMQWNjZXNzV2l0aGluEg4KBmVudGl0eRgBIAEoCRIRCgljYWxsZXJfaXMYAiABKAkSJQoEd2hlbhgDIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24iEAoOQWRtaXR0ZWRDYWxsZXIiUAoMR3JhbnRPcHRpb25zEg8KB3N1YmplY3QYASABKAkSDAoEcm9sZRgCIAEoCRIhCgVyb2xlcxgDIAMoCzISLnN5bmNwbGFuZS52MS5Sb2xlIjYKBFJvbGUSDAoEbmFtZRgBIAEoCRIOCgZncmFudHMYAiADKAkSEAoIaW5jbHVkZXMYAyADKAkiIAoOTWVtYmVyc09wdGlvbnMSDgoGZW50aXR5GAEgASgJIhAKDkNyZWF0b3JPcHRpb25zIhAKDkhpc3RvcnlPcHRpb25zIhIKEFJlZmVyZW5jZU9wdGlvbnMiGwoLU2VhcmNoRmllbGQSDAoEcGF0aBgBIAEoCSJPCgpTZWFyY2hTcGVjEigKBWZpZWxkGAEgAygLMhkuc3luY3BsYW5lLnYxLlNlYXJjaEZpZWxkEhcKD2tlZXBfZGlhY3JpdGljcxgCIAEoCCImCghJbmRleEtleRIMCgRwYXRoGAEgASgJEgwKBGRlc2MYAiABKAgiPgoJSW5kZXhTcGVjEgwKBG5hbWUYASABKAkSIwoDa2V5GAIgAygLMhYuc3luY3BsYW5lLnYxLkluZGV4S2V5IpACCg1GaWVsZEJlaGF2aW9yEg4KBm9wYXF1ZRgBIAEoCBIRCglrZXlfZmllbGQYAiADKAkSEwoLb3JkZXJfZmllbGQYAyABKAkSDAoEdGV4dBgEIAEoCBIPCgdpbmRleGVkGAUgASgIEg8KB2hpc3RvcnkYBiABKAgSEgoKc2VhcmNoYWJsZRgHIAEoCBIRCgl3b3Jrc3BhY2UYCSABKAgSGAoQcmV2ZXJzZV9yZWxhdGlvbhgKIAEoCRItCgdjcmVhdG9yGAwgASgLMhwuc3luY3BsYW5lLnYxLkNyZWF0b3JPcHRpb25zSgQICBAJSgQICxAMUgx3cml0ZV9wb2xpY3lSDWFjY2Vzc19wYXJlbnQ6VgoGZW50aXR5Eh8uZ29vZ2xlLnByb3RvYnVmLk1lc3NhZ2VPcHRpb25zGLSHAyABKAsyGy5zeW5jcGxhbmUudjEuRW50aXR5T3B0aW9uc1IGZW50aXR5Ol8KCXJlZmVyZW5jZRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi2hwMgASgLMh4uc3luY3BsYW5lLnYxLlJlZmVyZW5jZU9wdGlvbnNSCXJlZmVyZW5jZTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor, file_syncplane_v1_query]);
 
 /**
  * Declares a message as a syncable entity.
@@ -136,12 +136,12 @@ export const EntityOptionsSchema: GenMessage<EntityOptions> = /*@__PURE__*/
  * Declares who can read and write the rows of an entity in the access model.
  *
  * A caller holds a permission at an anchor: the workspace root, or one row
- * that a grant row's `access_parent` field points at. A permission held at
- * an anchor applies to the anchor row and to every row below it: the rows
- * whose `access_parent` fields point at it, the rows whose `access_parent`
- * fields point at those, and so on. A row whose `access_parent` fields are
- * unset, or name only rows that do not exist, has no parent and never falls
- * back to the workspace root. See `GrantOptions` and `AccessParentOptions`.
+ * that a grant row's access parent points at. A permission held at an anchor
+ * applies to the anchor row and to every row below it: the rows whose access
+ * parents point at it, the rows whose access parents point at those, and so
+ * on. A row whose access parents are unset, or name only rows that do not
+ * exist, has no parent and never falls back to the workspace root. See
+ * `parents` and `GrantOptions`.
  *
  * An operation on a row is allowed when at least one rule in `allow` admits
  * it. A rule only adds access: no rule takes away what another rule allows,
@@ -153,14 +153,17 @@ export const EntityOptionsSchema: GenMessage<EntityOptions> = /*@__PURE__*/
  * message Comment {
  *   option (syncplane.v1.entity) = {
  *     name: "comment" key_fields: ["id"]
- *     access: { allow: [
- *       { read: true requires: "view_tasks" },
- *       { create: true requires: "comment" },
- *       { update: true delete: true requires: "moderate_comments" }
- *     ] }
+ *     access: {
+ *       parents: ["task"]
+ *       allow: [
+ *         { read: true requires: "view_tasks" },
+ *         { create: true requires: "comment" },
+ *         { update: true delete: true requires: "moderate_comments" }
+ *       ]
+ *     }
  *   };
  *   string id = 1;
- *   Task task = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+ *   Task task = 2;
  * }
  * ```
  *
@@ -182,6 +185,57 @@ export type AccessOptions = Message<"syncplane.v1.AccessOptions"> & {
    * @generated from field: repeated syncplane.v1.AccessRule allow = 1;
    */
   allow: AccessRule[];
+
+  /**
+   * The access parents: references that place each row below another row.
+   *
+   * A permission held at the referenced row applies to the referencing row
+   * and to every row below it. The referenced row can have access parents
+   * of its own, and an entity can be its own access parent. An entity with
+   * no parents sits at the workspace root.
+   *
+   * Each entry names a top-level field outside any `oneof`, or a `oneof`,
+   * and no two entries are the same. A field is a reference: its type is an
+   * entity message, or a reference message without a `workspace` field. It
+   * can be repeated, but not a map. Each member of a named `oneof` is such a
+   * reference. A `FieldGuard` cannot name a parent.
+   *
+   * A row sits below every row its parents name, and a permission held at
+   * any of them, or at a row above any of them, applies to the row:
+   *
+   * ```protobuf
+   * message Task {
+   *   option (syncplane.v1.entity) = {
+   *     name: "task" key_fields: ["id"]
+   *     access: {
+   *       parents: ["project", "milestone", "labels"]
+   *       allow: [
+   *         { read: true requires: "view_tasks" },
+   *         { write: true requires: "edit_tasks" }
+   *       ]
+   *     }
+   *   };
+   *   string id = 1;
+   *   Project project = 2;
+   *   Milestone milestone = 3;
+   *   repeated Label labels = 4;
+   * }
+   * ```
+   *
+   * A write that adds or removes a parent needs its rule where that parent
+   * sits; see `AccessRule`. A write fails when the row would name more rows
+   * than the server's `MaxAccessParents` limit allows, or would sit below
+   * itself. A grant entity names at most one parent, and not a repeated
+   * field.
+   *
+   * A polymorphic parent points at one of several entities: a `oneof` of
+   * references, or a field whose reference message holds a `oneof` of
+   * entities. The case a row holds names the row it sits below, and a row
+   * that holds no case has no parent there.
+   *
+   * @generated from field: repeated string parents = 3;
+   */
+  parents: string[];
 
   /**
    * The field guards: each one restricts who can read and who can write a
@@ -334,16 +388,19 @@ export const FieldGuardSchema: GenMessage<FieldGuard> = /*@__PURE__*/
  * message Comment {
  *   option (syncplane.v1.entity) = {
  *     name: "comment" key_fields: ["id"]
- *     access: { allow: [
- *       { read: true requires: "view_tasks" },
- *       { create: true delete: true
- *         requires: "comment" caller_is: "author_id" },
- *       { update: true requires: "comment"
- *         caller_is: "author_id" fields: ["body"] }
- *     ] }
+ *     access: {
+ *       parents: ["task"]
+ *       allow: [
+ *         { read: true requires: "view_tasks" },
+ *         { create: true delete: true
+ *           requires: "comment" caller_is: "author_id" },
+ *         { update: true requires: "comment"
+ *           caller_is: "author_id" fields: ["body"] }
+ *       ]
+ *     }
  *   };
  *   string id = 1;
- *   Task task = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+ *   Task task = 2;
  *   string author_id = 3 [(syncplane.v1.field_behavior).creator = {}];
  *   string body = 4;
  * }
@@ -517,33 +574,39 @@ export const AccessRuleSchema: GenMessage<AccessRule> = /*@__PURE__*/
  * message Task {
  *   option (syncplane.v1.entity) = {
  *     name: "task" key_fields: ["id"]
- *     access: { allow: [
- *       { read: true requires: "view_tasks" },
- *       { read: true requires: "view_open_tasks"
- *         within: { entity: "project"
- *           when: { cmp: { path: ["private"] op: CMP_OP_EQ
- *             value: { bool_value: false } } } } },
- *       { write: true requires: "edit_tasks"
- *         within: { entity: "project"
- *           when: { cmp: { path: ["archived"] op: CMP_OP_EQ
- *             value: { bool_value: false } } } } }
- *     ] }
+ *     access: {
+ *       parents: ["project"]
+ *       allow: [
+ *         { read: true requires: "view_tasks" },
+ *         { read: true requires: "view_open_tasks"
+ *           within: { entity: "project"
+ *             when: { cmp: { path: ["private"] op: CMP_OP_EQ
+ *               value: { bool_value: false } } } } },
+ *         { write: true requires: "edit_tasks"
+ *           within: { entity: "project"
+ *             when: { cmp: { path: ["archived"] op: CMP_OP_EQ
+ *               value: { bool_value: false } } } } }
+ *       ]
+ *     }
  *   };
  *   string id = 1;
- *   Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+ *   Project project = 2;
  * }
  *
  * message Comment {
  *   option (syncplane.v1.entity) = {
  *     name: "comment" key_fields: ["id"]
- *     access: { allow: [
- *       { read: true requires: "view_docs" },
- *       { write: true requires: "view_docs"
- *         within: { entity: "doc" caller_is: "owner_id" } }
- *     ] }
+ *     access: {
+ *       parents: ["doc"]
+ *       allow: [
+ *         { read: true requires: "view_docs" },
+ *         { write: true requires: "view_docs"
+ *           within: { entity: "doc" caller_is: "owner_id" } }
+ *       ]
+ *     }
  *   };
  *   string id = 1;
- *   Doc doc = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+ *   Doc doc = 2;
  * }
  * ```
  *
@@ -619,11 +682,11 @@ export const AdmittedCallerSchema: GenMessage<AdmittedCaller> = /*@__PURE__*/
  *
  * Each row gives the subject in its `subject` field the role in its `role`
  * field. The subject is one caller, or every member of a team. The role
- * applies at the row's anchor: the row that its `access_parent` field points
- * at, or the workspace root when the entity has no `access_parent` field. A
+ * applies at the row's anchor: the row that its access parent points at, or
+ * the workspace root when the entity has no access parent. A
  * row grants nothing when its subject is empty or names a team that does not
- * exist, its role is not declared in `roles`, or its `access_parent` field is
- * unset or names a row that does not exist.
+ * exist, its role is not declared in `roles`, or its access parent is unset
+ * or names a row that does not exist.
  *
  * ```protobuf
  * message ProjectMember {
@@ -637,13 +700,16 @@ export const AdmittedCallerSchema: GenMessage<AdmittedCaller> = /*@__PURE__*/
  *         "edit_tasks"] }
  *       ]
  *     }
- *     access: { allow: [
- *       { read: true requires: "view_members" },
- *       { write: true requires: "manage_members" }
- *     ] }
+ *     access: {
+ *       parents: ["project"]
+ *       allow: [
+ *         { read: true requires: "view_members" },
+ *         { write: true requires: "manage_members" }
+ *       ]
+ *     }
  *   };
  *   string id = 1;
- *   Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+ *   Project project = 2;
  *   string user_id = 3;
  *   string role = 4;
  * }
@@ -665,7 +731,7 @@ export const AdmittedCallerSchema: GenMessage<AdmittedCaller> = /*@__PURE__*/
  * anchor, and of the new role at the new anchor. A caller can therefore grant
  * and revoke only what it holds itself. Every write path, trusted ones
  * included, refuses a grant row with an empty subject, an undeclared role, or
- * no `access_parent` on an entity that has one.
+ * no access parent on an entity that names one.
  *
  * Registration refuses unknown fields inside this message and inside `Role`.
  *
@@ -798,13 +864,16 @@ export const RoleSchema: GenMessage<Role> = /*@__PURE__*/
  *         { name: "team_lead" grants: ["view_teams", "manage_teams"] }
  *       ]
  *     }
- *     access: { allow: [
- *       { read: true requires: "view_teams" },
- *       { write: true requires: "manage_teams" }
- *     ] }
+ *     access: {
+ *       parents: ["team"]
+ *       allow: [
+ *         { read: true requires: "view_teams" },
+ *         { write: true requires: "manage_teams" }
+ *       ]
+ *     }
  *   };
  *   string id = 1;
- *   Team team = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+ *   Team team = 2;
  *   string user_id = 3;
  *   string role = 4;
  * }
@@ -822,9 +891,9 @@ export const RoleSchema: GenMessage<Role> = /*@__PURE__*/
 export type MembersOptions = Message<"syncplane.v1.MembersOptions"> & {
   /**
    * The name of the entity whose rows make members. It is a grant entity
-   * whose `access_parent` field is a reference to this entity and to no
-   * other, and whose subject is one `string` field, so a team cannot be a
-   * member of a team.
+   * whose access parent is a reference to this entity and to no other, and
+   * whose subject is one `string` field, so a team cannot be a member of a
+   * team.
    *
    * @generated from field: string entity = 1;
    */
@@ -837,66 +906,6 @@ export type MembersOptions = Message<"syncplane.v1.MembersOptions"> & {
  */
 export const MembersOptionsSchema: GenMessage<MembersOptions> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 8);
-
-/**
- * Marks a reference that places each row of an entity below another row in
- * the access model.
- *
- * A permission held at the referenced row applies to the referencing row and
- * to every row below it. The referenced row can have access parents of its
- * own, and an entity can be its own access parent.
- *
- * Each marked field is a top-level field, or a member of a `oneof` whose
- * members are all marked. Each is a reference: its type is an entity message,
- * or a reference message without a `workspace` field. A marked field cannot
- * be a map or be named by a `FieldGuard`.
- *
- * An entity can mark several fields, and a marked field can be repeated. A
- * row then sits below every row its marked fields name, and a permission held
- * at any of them, or at a row above any of them, applies to the row:
- *
- * ```protobuf
- * message Task {
- *   option (syncplane.v1.entity) = {
- *     name: "task" key_fields: ["id"]
- *     access: { allow: [
- *       { read: true requires: "view_tasks" },
- *       { write: true requires: "edit_tasks" }
- *     ] }
- *   };
- *   string id = 1;
- *   Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
- *   Milestone milestone = 3
- *     [(syncplane.v1.field_behavior).access_parent = {}];
- *   repeated Label labels = 4
- *     [(syncplane.v1.field_behavior).access_parent = {}];
- * }
- * ```
- *
- * A write that adds or removes a parent needs its rule where that parent
- * sits; see `AccessRule`. A write fails when the row would name more rows
- * than the server's `MaxAccessParents` limit allows, or would sit below
- * itself. A grant entity has one access parent: one singular field, or the
- * members of one `oneof`.
- *
- * A polymorphic parent points at one of several entities: a marked `oneof`,
- * or a marked field whose reference message holds a `oneof` of entities. The
- * case a row holds names the row it sits below, and a row that holds no case
- * has no parent there.
- *
- * Registration refuses unknown fields inside this message.
- *
- * @generated from message syncplane.v1.AccessParentOptions
- */
-export type AccessParentOptions = Message<"syncplane.v1.AccessParentOptions"> & {
-};
-
-/**
- * Describes the message syncplane.v1.AccessParentOptions.
- * Use `create(AccessParentOptionsSchema)` to create a new message.
- */
-export const AccessParentOptionsSchema: GenMessage<AccessParentOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 9);
 
 /**
  * Marks a field that records who created the row.
@@ -923,7 +932,7 @@ export type CreatorOptions = Message<"syncplane.v1.CreatorOptions"> & {
  * Use `create(CreatorOptionsSchema)` to create a new message.
  */
 export const CreatorOptionsSchema: GenMessage<CreatorOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 10);
+  messageDesc(file_syncplane_v1_options, 9);
 
 /**
  * Enables server-side field history tracking for an entity.
@@ -951,7 +960,7 @@ export type HistoryOptions = Message<"syncplane.v1.HistoryOptions"> & {
  * Use `create(HistoryOptionsSchema)` to create a new message.
  */
 export const HistoryOptionsSchema: GenMessage<HistoryOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 11);
+  messageDesc(file_syncplane_v1_options, 10);
 
 /**
  * Declares a message as a reference message: the stored shape of a typed
@@ -1029,7 +1038,7 @@ export type ReferenceOptions = Message<"syncplane.v1.ReferenceOptions"> & {
  * Use `create(ReferenceOptionsSchema)` to create a new message.
  */
 export const ReferenceOptionsSchema: GenMessage<ReferenceOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 12);
+  messageDesc(file_syncplane_v1_options, 11);
 
 /**
  * Specifies a single field read during full-text search.
@@ -1053,7 +1062,7 @@ export type SearchField = Message<"syncplane.v1.SearchField"> & {
  * Use `create(SearchFieldSchema)` to create a new message.
  */
 export const SearchFieldSchema: GenMessage<SearchField> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 13);
+  messageDesc(file_syncplane_v1_options, 12);
 
 /**
  * Configures full-text search over an entity, specifying searchable fields in
@@ -1099,7 +1108,7 @@ export type SearchSpec = Message<"syncplane.v1.SearchSpec"> & {
  * Use `create(SearchSpecSchema)` to create a new message.
  */
 export const SearchSpecSchema: GenMessage<SearchSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 14);
+  messageDesc(file_syncplane_v1_options, 13);
 
 /**
  * Specifies one field component of an index and its sort order.
@@ -1134,7 +1143,7 @@ export type IndexKey = Message<"syncplane.v1.IndexKey"> & {
  * Use `create(IndexKeySchema)` to create a new message.
  */
 export const IndexKeySchema: GenMessage<IndexKey> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 15);
+  messageDesc(file_syncplane_v1_options, 14);
 
 /**
  * Defines a secondary index for an entity.
@@ -1167,7 +1176,7 @@ export type IndexSpec = Message<"syncplane.v1.IndexSpec"> & {
  * Use `create(IndexSpecSchema)` to create a new message.
  */
 export const IndexSpecSchema: GenMessage<IndexSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 16);
+  messageDesc(file_syncplane_v1_options, 15);
 
 /**
  * Configures merge, indexing, and authorization behavior for a field.
@@ -1303,15 +1312,6 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
   reverseRelation: string;
 
   /**
-   * Places each row below the row that this reference points at in the
-   * access model, or below each row that a repeated reference points at.
-   * See `AccessParentOptions`.
-   *
-   * @generated from field: syncplane.v1.AccessParentOptions access_parent = 11;
-   */
-  accessParent?: AccessParentOptions | undefined;
-
-  /**
    * Stores the subject of the caller who creates the row. See
    * `CreatorOptions`.
    *
@@ -1325,7 +1325,7 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
  * Use `create(FieldBehaviorSchema)` to create a new message.
  */
 export const FieldBehaviorSchema: GenMessage<FieldBehavior> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 17);
+  messageDesc(file_syncplane_v1_options, 16);
 
 /**
  * Field numbers 50100, 50101 and 50102 are unregistered; fine for

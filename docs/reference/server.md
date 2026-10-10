@@ -80,35 +80,35 @@ The following table lists configuration options for `server.New`:
 
 The following table lists request and data bounds in `server.Limits`:
 
-| Field                     | Default | Description                                                                                                                                                                                                                                           |
-| ------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MaxRequestBytes`         | 16 MiB  | Maximum decompressed request body size, enforced before parsing.                                                                                                                                                                                      |
-| `MaxMutationsPerPush`     | 256     | Maximum mutations per `Push` across all per-workspace batches.                                                                                                                                                                                        |
-| `MaxWorkspacesPerRequest` | 64      | Maximum push batches or `Subscribe` scopes per request.                                                                                                                                                                                               |
-| `MaxValueBytes`           | 1 MiB   | Maximum serialized entity value size (`crud.value` or `custom.args`).                                                                                                                                                                                 |
-| `MaxFieldMaskPaths`       | 64      | Maximum field-mask paths per `PATCH` operation.                                                                                                                                                                                                       |
-| `MaxPullChanges`          | 4096    | Maximum row changes per `Pull` response. Larger result sets paginate with `has_more`.                                                                                                                                                                 |
-| `MaxResyncScan`           | 65536   | Maximum live rows examined per `Pull` while delta-resyncing a subscription or permission change. Values below `MaxPullChanges` are raised to it.                                                                                                      |
-| `MaxQueryRows`            | 1024    | Maximum rows returned per `Query` response.                                                                                                                                                                                                           |
-| `MaxQueryOffset`          | 16384   | Maximum offset permitted in a `Query`. Requests exceeding this offset are rejected. Specifying an offset alongside an `after` or `before` cursor is rejected.                                                                                         |
-| `MaxQueryCursorBytes`     | 4096    | Maximum byte length of an `after` or `before` query cursor.                                                                                                                                                                                           |
-| `MaxFollowDepth`          | 4       | Maximum recursive hops a `Subscription.follow` can evaluate.                                                                                                                                                                                          |
-| `MaxClosureSize`          | 10000   | Maximum rows in a reference-following closure for a single request.                                                                                                                                                                                   |
-| `MaxReverseFanOut`        | 1000    | Maximum source rows matched by a single reverse-follow hop.                                                                                                                                                                                           |
-| `MaxWindowSize`           | 1000    | Maximum rows held in a single `Subscription.window`. Must remain smaller than `MaxPullChanges`.                                                                                                                                                       |
-| `MaxSubscriptionKeys`     | 1000    | Maximum keys named by a single `Subscription.key_set`. A larger set is rejected. The set rides on every pull, so this also bounds request size.                                                                                                       |
-| `MaxIndexEntriesPerRow`   | 1024    | Maximum secondary-index entries a single row can occupy across all indexes for its entity. A write exceeding this limit is rejected with `invalid_argument`.                                                                                          |
-| `MaxIndexScanCandidates`  | 10000   | Maximum index entries evaluated during a range scan while a read filter rejects candidates, and maximum rows of one entity that `Query` reads by key for a caller below the access-model root. Exceeding this limit falls back to a table scan.       |
-| `MaxRelConditions`        | 8       | Maximum `matches()` conditions permitted in a single query predicate.                                                                                                                                                                                 |
-| `MaxQueryFacets`          | 8       | Maximum facet axes permitted in a single `Query`. A request carrying any facet walks every matching row rather than the page.                                                                                                                         |
-| `MaxRelKeys`              | 50000   | Maximum target rows selected by a single `matches()` condition. Exceeding this limit fails the query.                                                                                                                                                 |
-| `MaxAccessDepth`          | 32      | Maximum `access_parent` hops from a row up to a row without an access parent. Registration refuses an entity with a longer chain of parent entities in any case. A write refuses a row that would sit deeper on any path. A read stops at this depth. |
-| `MaxAccessParents`        | 64      | Maximum distinct rows the `access_parent` fields of one row may name. A write that changes a row's parents to more rows fails with `invalid_argument`, on every write path.                                                                           |
-| `MaxRoomsPerStream`       | 64      | Maximum rooms permitted on a single `Watch` stream, and maximum sessions kept alive on behalf of other clients.                                                                                                                                       |
-| `MaxPresenceStateBytes`   | 4 KiB   | Maximum presence state payload size for one participant.                                                                                                                                                                                              |
-| `MaxBroadcastBytes`       | 4 KiB   | Maximum broadcast message payload size.                                                                                                                                                                                                               |
-| `MaxPublishItems`         | 32      | Maximum items permitted in a single `Publish` request.                                                                                                                                                                                                |
-| `MaxParticipantsPerRoom`  | 128     | Maximum participant records retained per room. When full, the room retains the lowest session IDs, reports snapshot truncation, and rejects additional sessions.                                                                                      |
+| Field                     | Default | Description                                                                                                                                                                                                                                         |
+| ------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MaxRequestBytes`         | 16 MiB  | Maximum decompressed request body size, enforced before parsing.                                                                                                                                                                                    |
+| `MaxMutationsPerPush`     | 256     | Maximum mutations per `Push` across all per-workspace batches.                                                                                                                                                                                      |
+| `MaxWorkspacesPerRequest` | 64      | Maximum push batches or `Subscribe` scopes per request.                                                                                                                                                                                             |
+| `MaxValueBytes`           | 1 MiB   | Maximum serialized entity value size (`crud.value` or `custom.args`).                                                                                                                                                                               |
+| `MaxFieldMaskPaths`       | 64      | Maximum field-mask paths per `PATCH` operation.                                                                                                                                                                                                     |
+| `MaxPullChanges`          | 4096    | Maximum row changes per `Pull` response. Larger result sets paginate with `has_more`.                                                                                                                                                               |
+| `MaxResyncScan`           | 65536   | Maximum live rows examined per `Pull` while delta-resyncing a subscription or permission change. Values below `MaxPullChanges` are raised to it.                                                                                                    |
+| `MaxQueryRows`            | 1024    | Maximum rows returned per `Query` response.                                                                                                                                                                                                         |
+| `MaxQueryOffset`          | 16384   | Maximum offset permitted in a `Query`. Requests exceeding this offset are rejected. Specifying an offset alongside an `after` or `before` cursor is rejected.                                                                                       |
+| `MaxQueryCursorBytes`     | 4096    | Maximum byte length of an `after` or `before` query cursor.                                                                                                                                                                                         |
+| `MaxFollowDepth`          | 4       | Maximum recursive hops a `Subscription.follow` can evaluate.                                                                                                                                                                                        |
+| `MaxClosureSize`          | 10000   | Maximum rows in a reference-following closure for a single request.                                                                                                                                                                                 |
+| `MaxReverseFanOut`        | 1000    | Maximum source rows matched by a single reverse-follow hop.                                                                                                                                                                                         |
+| `MaxWindowSize`           | 1000    | Maximum rows held in a single `Subscription.window`. Must remain smaller than `MaxPullChanges`.                                                                                                                                                     |
+| `MaxSubscriptionKeys`     | 1000    | Maximum keys named by a single `Subscription.key_set`. A larger set is rejected. The set rides on every pull, so this also bounds request size.                                                                                                     |
+| `MaxIndexEntriesPerRow`   | 1024    | Maximum secondary-index entries a single row can occupy across all indexes for its entity. A write exceeding this limit is rejected with `invalid_argument`.                                                                                        |
+| `MaxIndexScanCandidates`  | 10000   | Maximum index entries evaluated during a range scan while a read filter rejects candidates, and maximum rows of one entity that `Query` reads by key for a caller below the access-model root. Exceeding this limit falls back to a table scan.     |
+| `MaxRelConditions`        | 8       | Maximum `matches()` conditions permitted in a single query predicate.                                                                                                                                                                               |
+| `MaxQueryFacets`          | 8       | Maximum facet axes permitted in a single `Query`. A request carrying any facet walks every matching row rather than the page.                                                                                                                       |
+| `MaxRelKeys`              | 50000   | Maximum target rows selected by a single `matches()` condition. Exceeding this limit fails the query.                                                                                                                                               |
+| `MaxAccessDepth`          | 32      | Maximum access parent hops from a row up to a row without an access parent. Registration refuses an entity with a longer chain of parent entities in any case. A write refuses a row that would sit deeper on any path. A read stops at this depth. |
+| `MaxAccessParents`        | 64      | Maximum distinct rows the access parents of one row may name. A write that changes a row's parents to more rows fails with `invalid_argument`, on every write path.                                                                                 |
+| `MaxRoomsPerStream`       | 64      | Maximum rooms permitted on a single `Watch` stream, and maximum sessions kept alive on behalf of other clients.                                                                                                                                     |
+| `MaxPresenceStateBytes`   | 4 KiB   | Maximum presence state payload size for one participant.                                                                                                                                                                                            |
+| `MaxBroadcastBytes`       | 4 KiB   | Maximum broadcast message payload size.                                                                                                                                                                                                             |
+| `MaxPublishItems`         | 32      | Maximum items permitted in a single `Publish` request.                                                                                                                                                                                              |
+| `MaxParticipantsPerRoom`  | 128     | Maximum participant records retained per room. When full, the room retains the lowest session IDs, reports snapshot truncation, and rejects additional sessions.                                                                                    |
 
 Increasing `MaxMutationsPerPush` or `MaxValueBytes` requires increasing `MaxRequestBytes` accordingly.
 
@@ -213,19 +213,23 @@ Dynamic schema construction helpers include `server.DynamicField` (`Message`, `R
 
 Schema registration validates that entity names conform to identifier rules and that `key_fields` match supported client types. See [Naming rules](naming.md).
 
-`server.DynamicEntity` carries `Access`, `Grant` and `Members` (the `syncplanev1.AccessOptions`, `syncplanev1.GrantOptions` and `syncplanev1.MembersOptions` messages), and `server.DynamicField.AccessParent` marks a `Ref` field as the access parent. See [Access model](proto-options.md#access-model) for the rules registration enforces on them.
+`server.DynamicEntity` carries `Access`, `Grant` and `Members` (the `syncplanev1.AccessOptions`, `syncplanev1.GrantOptions` and `syncplanev1.MembersOptions` messages). `Parents` on `Access` names the `Ref` fields that are access parents, by field name. See [Access model](proto-options.md#access-model) for the rules registration enforces on them.
 
 ```go
 server.DynamicEntity{
 	Name:      "task",
 	KeyFields: []string{"id"},
 	Fields:    fields,
-	Access: &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{
-		{Read: true, Source: &syncplanev1.AccessRule_Permission{Permission: "view_tasks"}},
-		{Write: true, Source: &syncplanev1.AccessRule_Permission{Permission: "edit_tasks"}},
-		// Every caller admitted to the workspace may create tasks.
-		{Create: true, Source: &syncplanev1.AccessRule_Admitted{Admitted: &syncplanev1.AdmittedCaller{}}},
-	}},
+	Access: &syncplanev1.AccessOptions{
+		// The "project" field of fields is a Ref to the project entity.
+		Parents: []string{"project"},
+		Allow: []*syncplanev1.AccessRule{
+			{Read: true, Source: &syncplanev1.AccessRule_Permission{Permission: "view_tasks"}},
+			{Write: true, Source: &syncplanev1.AccessRule_Permission{Permission: "edit_tasks"}},
+			// Every caller admitted to the workspace may create tasks.
+			{Create: true, Source: &syncplanev1.AccessRule_Admitted{Admitted: &syncplanev1.AdmittedCaller{}}},
+		},
+	},
 }
 ```
 

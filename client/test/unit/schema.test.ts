@@ -1,6 +1,7 @@
 import { create, fromBinary, getOption, hasOption, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
+import { accessParentFields } from '../../src/access.js';
 import { CrudOp } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import {
 	entity as entityExt,
@@ -400,7 +401,7 @@ describe('schema builder — access model', () => {
 	});
 	const member = entity('project_member', {
 		id: text().key(),
-		project: ref(() => project).accessParent(),
+		project: ref(() => project),
 		userId: text(),
 		role: text(),
 	}, {
@@ -410,6 +411,7 @@ describe('schema builder — access model', () => {
 			roles: [ { name: 'project_writer', grants: [ 'view_projects', 'edit_projects' ] } ],
 		},
 		access: {
+			parents: [ 'project' ],
 			allow: [
 				{ read: true, requires: 'view_projects' },
 				{ write: true, requires: 'edit_projects' },
@@ -474,7 +476,7 @@ describe('schema builder — access model', () => {
 	it('lowers role includes', () => {
 		const viewer = entity('viewer', {
 			id: text().key(),
-			project: ref(() => project).accessParent(),
+			project: ref(() => project),
 			userId: text(),
 			role: text(),
 		}, {
@@ -487,7 +489,7 @@ describe('schema builder — access model', () => {
 					{ name: 'project_lead', includes: [ 'project_editor' ] },
 				],
 			},
-			access: { allow: [ { read: true, requires: 'view_projects' } ] },
+			access: { parents: [ 'project' ], allow: [ { read: true, requires: 'view_projects' } ] },
 		});
 		const roles =
 			getOption(defineSchema(project, viewer).descMessage('viewer'), entityExt).grant!.roles;
@@ -505,7 +507,7 @@ describe('schema builder — access model', () => {
 		});
 		const teamMember = entity('team_member', {
 			id: text().key(),
-			team: ref(() => team).accessParent(),
+			team: ref(() => team),
 			userId: text(),
 			role: text(),
 		}, {
@@ -514,11 +516,11 @@ describe('schema builder — access model', () => {
 				role: 'role',
 				roles: [ { name: 'team_member', grants: [ 'view_teams' ] } ],
 			},
-			access: { allow: [ { read: true, write: true, requires: 'view_teams' } ] },
+			access: { parents: [ 'team' ], allow: [ { read: true, write: true, requires: 'view_teams' } ] },
 		});
 		const projectTeam = entity('project_team', {
 			id: text().key(),
-			project: ref(() => project).accessParent(),
+			project: ref(() => project),
 			ownerTeam: ref(() => team),
 			role: text(),
 		}, {
@@ -527,7 +529,10 @@ describe('schema builder — access model', () => {
 				role: 'role',
 				roles: [ { name: 'project_team_writer', grants: [ 'view_projects' ] } ],
 			},
-			access: { allow: [ { read: true, write: true, requires: 'view_projects' } ] },
+			access: {
+				parents: [ 'project' ],
+				allow: [ { read: true, write: true, requires: 'view_projects' } ],
+			},
 		});
 		const teams = defineSchema(project, team, teamMember, projectTeam);
 
@@ -535,9 +540,20 @@ describe('schema builder — access model', () => {
 		expect(getOption(teams.descMessage('project_team'), entityExt).grant?.subject).toBe('owner_team');
 	});
 
-	it('lowers .accessParent() onto the reference field', () => {
-		const field = bundle.descMessage('project_member').fields.find((f) => f.name === 'project')!;
-		expect(getOption(field, fieldBehaviorExt).accessParent).toBeDefined();
+	it('lowers access.parents onto the entity option with proto field names', () => {
+		const comment = entity('comment', {
+			id: text().key(),
+			parentProject: ref(() => project),
+			alsoIn: refList(() => project),
+		}, {
+			access: { parents: [ 'alsoIn', 'parentProject' ], allow: [ { read: true, admitted: true } ] },
+		});
+		const desc = defineSchema(project, comment).descMessage('comment');
+		expect(getOption(desc, entityExt).access!.parents).toEqual([ 'also_in', 'parent_project' ]);
+		// The client reads the parents in field order, whatever order they are named in.
+		expect(accessParentFields(desc).map((f) => f.name)).toEqual([ 'parent_project', 'also_in' ]);
+		expect(options('project_member').access!.parents).toEqual([ 'project' ]);
+		expect(options('project').access!.parents).toEqual([]);
 	});
 
 	it('leaves the options unset on an entity that declares none', () => {
@@ -556,9 +572,36 @@ describe('schema builder — access model', () => {
 		const allowing = (...allow: AccessRuleDecl[]) => () =>
 			entity('e', fields as Fields, { access: { allow } });
 
-		it('rejects accessParent() on anything but a ref() or a refList()', () => {
-			expect(() => text().accessParent()).toThrow(/only valid on a ref\(\) or refList\(\)/);
-			expect(() => refList(() => project).accessParent()).not.toThrow();
+		it('rejects an access parent that is not a declared ref() or refList()', () => {
+			const parented = (...parents: string[]) => () =>
+				entity('e', {
+					id: text().key(),
+					p: ref(() => project),
+					note: text(),
+					elsewhere: workspaceRef(() => project),
+				} as Fields, { access: { ...access, parents } });
+			expect(parented('missing')).toThrow(
+				'entity "e" access.parents[0]: names "missing", which is not declared',
+			);
+			expect(parented('p', 'note')).toThrow(
+				'entity "e" access.parents[1]: names "note", which is not a ref() or a refList() field',
+			);
+			expect(parented('elsewhere')).toThrow(
+				'entity "e" access.parents[0]: names "elsewhere", which is a workspace reference',
+			);
+			expect(() =>
+				entity('e', { id: text().key(), p: ref(() => project) }, {
+					// @ts-expect-error not a field of the entity
+					access: { ...access, parents: [ 'q' ] },
+				})
+			).toThrow(/names "q", which is not declared/);
+		});
+		it('rejects an access parent named twice', () => {
+			expect(() =>
+				entity('e', { id: text().key(), p: ref(() => project), q: ref(() => project) }, {
+					access: { ...access, parents: [ 'p', 'q', 'p' ] },
+				})
+			).toThrow('entity "e" access.parents[2] and access.parents[0] both name "p"');
 		});
 		it('rejects a permission name that is not an identifier', () => {
 			expect(allowing({ read: true, requires: 'view-all' })).toThrow(
@@ -621,34 +664,32 @@ describe('schema builder — access model', () => {
 			expect(() =>
 				entity('e', {
 					id: text().key(),
-					a: ref(() => project).accessParent(),
-					b: refList(() => project).accessParent(),
-				}, { access })
+					a: ref(() => project),
+					b: refList(() => project),
+				}, { access: { ...access, parents: [ 'a', 'b' ] } })
 			).not.toThrow();
 		});
 		it('rejects a grant entity with more than one access parent', () => {
 			expect(() =>
 				entity('e', {
 					...fields,
-					a: ref(() => project).accessParent(),
-					b: ref(() => project).accessParent(),
-				}, { access, grant: { subject: 'userId', role: 'role', roles } })
-			).toThrow('entity "e": a grant entity has one access parent');
-			expect(() =>
-				entity('e', { ...fields, a: refList(() => project).accessParent() }, {
-					access,
+					a: ref(() => project),
+					b: ref(() => project),
+				}, {
+					access: { ...access, parents: [ 'a', 'b' ] },
 					grant: { subject: 'userId', role: 'role', roles },
 				})
-			).toThrow('entity "e": a grant entity has one access parent');
-		});
-		it('rejects an access parent without access', () => {
-			expect(() => entity('e', { id: text().key(), p: ref(() => project).accessParent() })).toThrow(
-				'entity "e": field "p" is marked accessParent(), but the entity declares no access',
-			);
-			// Any access declaration will do, including one admitting every caller.
+			).toThrow('entity "e": a grant entity has at most one access parent');
 			expect(() =>
-				entity('e', { id: text().key(), p: ref(() => project).accessParent() }, {
-					access: { allow: [ { read: true, admitted: true } ] },
+				entity('e', { ...fields, a: refList(() => project) }, {
+					access: { ...access, parents: [ 'a' ] },
+					grant: { subject: 'userId', role: 'role', roles },
+				})
+			).toThrow('entity "e": a grant entity has at most one access parent');
+			expect(() =>
+				entity('e', { ...fields, a: ref(() => project) }, {
+					access: { ...access, parents: [ 'a' ] },
+					grant: { subject: 'userId', role: 'role', roles },
 				})
 			).not.toThrow();
 		});
@@ -760,12 +801,13 @@ describe('schema builder — owner rules', () => {
 	});
 	const post = entity('post', {
 		id: text().key(),
-		room: ref(() => room).accessParent(),
+		room: ref(() => room),
 		authorId: text().creator(),
 		body: text(),
 		title: text(),
 	}, {
 		access: {
+			parents: [ 'room' ],
 			allow: [
 				{ read: true, requires: 'view' },
 				{ create: true, delete: true, requires: 'post', callerIs: 'authorId' },
@@ -875,12 +917,13 @@ describe('schema builder — when checks', () => {
 	});
 	const thread = entity('thread', {
 		id: text().key(),
-		room: ref(() => room).accessParent(),
+		room: ref(() => room),
 		isArchived: bool(),
 		meta: message({ lockState: text() }),
 		tags: map('string', text()),
 	}, {
 		access: {
+			parents: [ 'room' ],
 			allow: [
 				{ read: true, requires: 'view' },
 				{
@@ -952,7 +995,7 @@ describe('schema builder — field guards', () => {
 	});
 	const expense = entity('expense', {
 		id: text().key(),
-		project: ref(() => project).accessParent(),
+		project: ref(() => project),
 		title: text(),
 		status: text(),
 		total: int64(),
@@ -962,6 +1005,7 @@ describe('schema builder — field guards', () => {
 		closed: bool(),
 	}, {
 		access: {
+			parents: [ 'project' ],
 			allow: [ { read: true, requires: 'view_tasks' }, { write: true, requires: 'edit_tasks' } ],
 			guard: [
 				{ fields: [ 'total' ], allow: [ { read: true, admitted: true } ] },
@@ -1036,7 +1080,7 @@ describe('schema builder — field guards', () => {
 	describe('validation', () => {
 		const fields = {
 			id: text().key(),
-			parent: ref(() => project).accessParent(),
+			parent: ref(() => project),
 			authorId: text().creator(),
 			ownerId: text(),
 			total: int64(),
@@ -1044,7 +1088,11 @@ describe('schema builder — field guards', () => {
 		};
 		const guarding = (...guard: FieldGuardDecl<typeof fields>[]) => () =>
 			entity('e', fields, {
-				access: { allow: [ { read: true, write: true, admitted: true } ], guard },
+				access: {
+					parents: [ 'parent' ],
+					allow: [ { read: true, write: true, admitted: true } ],
+					guard,
+				},
 			});
 		const read = { read: true, admitted: true } as const;
 
@@ -1172,9 +1220,10 @@ describe('schema builder — within entries', () => {
 	});
 	const task = entity('task', {
 		id: text().key(),
-		project: ref(() => project).accessParent(),
+		project: ref(() => project),
 	}, {
 		access: {
+			parents: [ 'project' ],
 			allow: [
 				{ read: true, requires: 'view_tasks' },
 				{
@@ -1208,11 +1257,13 @@ describe('schema builder — within entries', () => {
 	});
 
 	describe('validation', () => {
-		const fields = { id: text().key(), project: ref(() => project).accessParent() };
+		const fields = { id: text().key(), project: ref(() => project) };
 		const allowing = (...within: WithinDecl[]) => () =>
 			defineSchema(
 				project,
-				entity('e', fields, { access: { allow: [ { read: true, requires: 'p', within } ] } }),
+				entity('e', fields, {
+					access: { parents: [ 'project' ], allow: [ { read: true, requires: 'p', within } ] },
+				}),
 			);
 
 		it('rejects an entry without a check', () => {
@@ -1281,9 +1332,10 @@ describe('schema builder — within entries', () => {
 	it('names an entity declared later through a thunk, with when typed against its fields', () => {
 		const comment = entity('comment', {
 			id: text().key(),
-			doc: ref(() => doc).accessParent(),
+			doc: ref(() => doc),
 		}, {
 			access: {
+				parents: [ 'doc' ],
 				allow: [
 					{ read: true, requires: 'view_docs' },
 					{
@@ -1322,11 +1374,12 @@ describe('schema builder — within entries', () => {
 		};
 		const folder: EntitySchema<FolderFields> = entity('folder', {
 			id: text().key(),
-			parent: ref(() => folder).accessParent(),
+			parent: ref(() => folder),
 			isPrivate: bool(),
 			ownerId: text(),
 		}, {
 			access: {
+				parents: [ 'parent' ],
 				allow: [
 					{ read: true, requires: 'view_private' },
 					{ read: true, admitted: true, within: { self: true, when: (f) => f.isPrivate.eq(false) } },
@@ -1358,11 +1411,11 @@ describe('schema builder — checks across entities', () => {
 
 	it('rejects an access parent that points at an entity without access', () => {
 		const open = entity('open', { id: text().key() });
-		const child = entity('child', { id: text().key(), open: ref(() => open).accessParent() }, {
-			access,
+		const child = entity('child', { id: text().key(), open: ref(() => open) }, {
+			access: { ...access, parents: [ 'open' ] },
 		});
 		expect(() => defineSchema(open, child)).toThrow(
-			'entity "child" field "open" is marked accessParent(), but points at entity "open", which declares no access; '
+			'entity "child" access.parents names "open", which points at entity "open", which declares no access; '
 				+ 'declare access on "open"',
 		);
 	});
@@ -1383,10 +1436,11 @@ describe('schema builder — checks across entities', () => {
 		const team = entity('team', { id: text().key() }, { access, members: { entity: 'team_member' } });
 		const memberFields = {
 			id: text().key(),
-			team: ref(() => team).accessParent(),
+			team: ref(() => team),
 			userId: text(),
 			role: text(),
 		};
+		const memberAccess = { ...access, parents: [ 'team' ] as const };
 
 		it('rejects a members entity outside the schema', () => {
 			expect(() => defineSchema(team)).toThrow(
@@ -1403,26 +1457,26 @@ describe('schema builder — checks across entities', () => {
 			const other = entity('other', { id: text().key() }, { access });
 			const member = entity(
 				'team_member',
-				{ ...memberFields, team: ref(() => other).accessParent() },
+				{ ...memberFields, team: ref(() => other) },
 				{
-					access,
+					access: memberAccess,
 					grant: { subject: 'userId', role: 'role', roles },
 				},
 			);
 			expect(() => defineSchema(team, other, member)).toThrow(
-				'entity "team" members names entity "team_member", whose accessParent() does not point at "team" alone',
+				'entity "team" members names entity "team_member", whose access.parents does not point at "team" alone',
 			);
 			const rootMember = entity('team_member', { ...memberFields, team: ref(() => team) }, {
 				access,
 				grant: { subject: 'userId', role: 'role', roles },
 			});
 			expect(() => defineSchema(team, rootMember)).toThrow(
-				'whose accessParent() does not point at "team" alone',
+				'whose access.parents does not point at "team" alone',
 			);
 		});
 		it('rejects a members entity whose grant subject is a team', () => {
 			const member = entity('team_member', { ...memberFields, userId: ref(() => team) }, {
-				access,
+				access: memberAccess,
 				grant: { subject: 'userId', role: 'role', roles },
 			});
 			expect(() => defineSchema(team, member)).toThrow(
@@ -1438,10 +1492,11 @@ describe('schema builder — rules that need several permissions', () => {
 	});
 	const task = entity('task', {
 		id: text().key(),
-		project: ref(() => project).accessParent(),
+		project: ref(() => project),
 		title: text(),
 	}, {
 		access: {
+			parents: [ 'project' ],
 			allow: [
 				{ read: true, requires: 'view_tasks' },
 				{ update: true, requires: [ 'edit_tasks', 'use_billing', 'audit' ] },
@@ -1535,7 +1590,7 @@ describe('schema builder — typed access names', () => {
 	it('refuses a grant subject or role that is not a matching field, at compile time', () => {
 		const memberFields = {
 			id: text().key(),
-			team: ref(() => team).accessParent(),
+			team: ref(() => team),
 			userId: text(),
 			role: text(),
 			active: bool(),

@@ -10,7 +10,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
-// accessChains walks access_parent chains: from a row to its parents, to
+// accessChains walks access parent chains: from a row to its parents, to
 // their parents, and on until rows without a parent. A row with several
 // parents makes the rows above it a graph, which a walk visits breadth first.
 // It reads each row's parents at most once, so a read that classifies many

@@ -128,14 +128,16 @@ var _ = Describe("Access model registration of several access parents", func() {
 		Expect(register(nil)).To(Succeed())
 	})
 
-	It("accepts a marked field beside a marked oneof", func() {
+	It("accepts a field beside a oneof", func() {
 		Expect(register(func(file *descriptorpb.FileDescriptorProto) {
 			card := messageNamed(file, "Card")
 			card.Field = append(card.Field, &descriptorpb.FieldDescriptorProto{
 				Name: proto.String("home"), JsonName: proto.String("home"), Number: proto.Int32(9),
 				Type: descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(), Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
-				TypeName: proto.String(".syncplane.testdata.access.v1.Board"), Options: accessParentMark(),
+				TypeName: proto.String(".syncplane.testdata.access.v1.Board"),
 			})
+			a := entityOptionsOf(file, "Card").Access
+			a.Parents = append(a.Parents, "home")
 		})).To(Succeed())
 	})
 
@@ -154,8 +156,10 @@ var _ = Describe("Access model registration of several access parents", func() {
 			member.Field = append(member.Field, &descriptorpb.FieldDescriptorProto{
 				Name: proto.String("extra"), JsonName: proto.String("extra"), Number: proto.Int32(9),
 				Type: descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(), Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
-				TypeName: proto.String(".syncplane.testdata.access.v1.Product"), Options: accessParentMark(),
+				TypeName: proto.String(".syncplane.testdata.access.v1.Product"),
 			})
+			a := entityOptionsOf(file, "LaneMember").Access
+			a.Parents = append(a.Parents, "extra")
 		}, `entity "lane_member": a grant entity has one access parent`),
 		Entry("a grant entity with a repeated access parent", func(file *descriptorpb.FileDescriptorProto) {
 			fieldNamed(messageNamed(file, "ProjectMember"), "project").Label = descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum()
@@ -164,10 +168,17 @@ var _ = Describe("Access model registration of several access parents", func() {
 
 	It("treats a second access parent as a change to the access model", func() {
 		productOnly := func(file *descriptorpb.FileDescriptorProto) {
-			fieldNamed(messageNamed(file, "Story"), "cycle").Options = nil
+			entityOptionsOf(file, "Story").Access.Parents = []string{"product"}
 		}
 		Expect(register(productOnly)).To(Succeed())
 		Expect(register(nil)).To(MatchError(ContainSubstring(`entity "story" changes its access model`)))
+	})
+
+	It("does not treat the order of the access parents as a change to the access model", func() {
+		Expect(register(nil)).To(Succeed())
+		Expect(register(func(file *descriptorpb.FileDescriptorProto) {
+			entityOptionsOf(file, "Story").Access.Parents = []string{"cycle", "product"}
+		})).To(Succeed())
 	})
 })
 

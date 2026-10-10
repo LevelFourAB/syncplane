@@ -318,8 +318,9 @@ describe('runtime registration of an access-model schema', () => {
 				],
 			},
 		});
-		const task = entity('task', { id: text().key(), project: ref(() => project).accessParent() }, {
+		const task = entity('task', { id: text().key(), project: ref(() => project) }, {
 			access: {
+				parents: [ 'project' ],
 				allow: [
 					{ read: true, requires: 'view_tasks' },
 					{ create: true, update: true, requires: 'edit_tasks' },

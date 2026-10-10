@@ -74,12 +74,12 @@ message EntityOptions {
 // Declares who can read and write the rows of an entity in the access model.
 //
 // A caller holds a permission at an anchor: the workspace root, or one row
-// that a grant row's `access_parent` field points at. A permission held at
-// an anchor applies to the anchor row and to every row below it: the rows
-// whose `access_parent` fields point at it, the rows whose `access_parent`
-// fields point at those, and so on. A row whose `access_parent` fields are
-// unset, or name only rows that do not exist, has no parent and never falls
-// back to the workspace root. See `GrantOptions` and `AccessParentOptions`.
+// that a grant row's access parent points at. A permission held at an anchor
+// applies to the anchor row and to every row below it: the rows whose access
+// parents point at it, the rows whose access parents point at those, and so
+// on. A row whose access parents are unset, or name only rows that do not
+// exist, has no parent and never falls back to the workspace root. See
+// `parents` and `GrantOptions`.
 //
 // An operation on a row is allowed when at least one rule in `allow` admits
 // it. A rule only adds access: no rule takes away what another rule allows,
@@ -91,14 +91,17 @@ message EntityOptions {
 // message Comment {
 //   option (syncplane.v1.entity) = {
 //     name: "comment" key_fields: ["id"]
-//     access: { allow: [
-//       { read: true requires: "view_tasks" },
-//       { create: true requires: "comment" },
-//       { update: true delete: true requires: "moderate_comments" }
-//     ] }
+//     access: {
+//       parents: ["task"]
+//       allow: [
+//         { read: true requires: "view_tasks" },
+//         { create: true requires: "comment" },
+//         { update: true delete: true requires: "moderate_comments" }
+//       ]
+//     }
 //   };
 //   string id = 1;
-//   Task task = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//   Task task = 2;
 // }
 // ```
 //
@@ -113,6 +116,52 @@ message EntityOptions {
 message AccessOptions {
 	// The rules. At least one, and no two the same.
 	repeated AccessRule allow = 1;
+	// The access parents: references that place each row below another row.
+	//
+	// A permission held at the referenced row applies to the referencing row
+	// and to every row below it. The referenced row can have access parents
+	// of its own, and an entity can be its own access parent. An entity with
+	// no parents sits at the workspace root.
+	//
+	// Each entry names a top-level field outside any `oneof`, or a `oneof`,
+	// and no two entries are the same. A field is a reference: its type is an
+	// entity message, or a reference message without a `workspace` field. It
+	// can be repeated, but not a map. Each member of a named `oneof` is such a
+	// reference. A `FieldGuard` cannot name a parent.
+	//
+	// A row sits below every row its parents name, and a permission held at
+	// any of them, or at a row above any of them, applies to the row:
+	//
+	// ```protobuf
+	// message Task {
+	//   option (syncplane.v1.entity) = {
+	//     name: "task" key_fields: ["id"]
+	//     access: {
+	//       parents: ["project", "milestone", "labels"]
+	//       allow: [
+	//         { read: true requires: "view_tasks" },
+	//         { write: true requires: "edit_tasks" }
+	//       ]
+	//     }
+	//   };
+	//   string id = 1;
+	//   Project project = 2;
+	//   Milestone milestone = 3;
+	//   repeated Label labels = 4;
+	// }
+	// ```
+	//
+	// A write that adds or removes a parent needs its rule where that parent
+	// sits; see `AccessRule`. A write fails when the row would name more rows
+	// than the server's `MaxAccessParents` limit allows, or would sit below
+	// itself. A grant entity names at most one parent, and not a repeated
+	// field.
+	//
+	// A polymorphic parent points at one of several entities: a `oneof` of
+	// references, or a field whose reference message holds a `oneof` of
+	// entities. The case a row holds names the row it sits below, and a row
+	// that holds no case has no parent there.
+	repeated string parents = 3;
 	// The field guards: each one restricts who can read and who can write a
 	// set of fields, whatever rule in `allow` admits the read or the write. A
 	// field that no guard names follows `allow` alone. See `FieldGuard`.
@@ -232,16 +281,19 @@ message FieldGuard {
 // message Comment {
 //   option (syncplane.v1.entity) = {
 //     name: "comment" key_fields: ["id"]
-//     access: { allow: [
-//       { read: true requires: "view_tasks" },
-//       { create: true delete: true
-//         requires: "comment" caller_is: "author_id" },
-//       { update: true requires: "comment"
-//         caller_is: "author_id" fields: ["body"] }
-//     ] }
+//     access: {
+//       parents: ["task"]
+//       allow: [
+//         { read: true requires: "view_tasks" },
+//         { create: true delete: true
+//           requires: "comment" caller_is: "author_id" },
+//         { update: true requires: "comment"
+//           caller_is: "author_id" fields: ["body"] }
+//       ]
+//     }
 //   };
 //   string id = 1;
-//   Task task = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//   Task task = 2;
 //   string author_id = 3 [(syncplane.v1.field_behavior).creator = {}];
 //   string body = 4;
 // }
@@ -352,33 +404,39 @@ message AccessRule {
 // message Task {
 //   option (syncplane.v1.entity) = {
 //     name: "task" key_fields: ["id"]
-//     access: { allow: [
-//       { read: true requires: "view_tasks" },
-//       { read: true requires: "view_open_tasks"
-//         within: { entity: "project"
-//           when: { cmp: { path: ["private"] op: CMP_OP_EQ
-//             value: { bool_value: false } } } } },
-//       { write: true requires: "edit_tasks"
-//         within: { entity: "project"
-//           when: { cmp: { path: ["archived"] op: CMP_OP_EQ
-//             value: { bool_value: false } } } } }
-//     ] }
+//     access: {
+//       parents: ["project"]
+//       allow: [
+//         { read: true requires: "view_tasks" },
+//         { read: true requires: "view_open_tasks"
+//           within: { entity: "project"
+//             when: { cmp: { path: ["private"] op: CMP_OP_EQ
+//               value: { bool_value: false } } } } },
+//         { write: true requires: "edit_tasks"
+//           within: { entity: "project"
+//             when: { cmp: { path: ["archived"] op: CMP_OP_EQ
+//               value: { bool_value: false } } } } }
+//       ]
+//     }
 //   };
 //   string id = 1;
-//   Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//   Project project = 2;
 // }
 //
 // message Comment {
 //   option (syncplane.v1.entity) = {
 //     name: "comment" key_fields: ["id"]
-//     access: { allow: [
-//       { read: true requires: "view_docs" },
-//       { write: true requires: "view_docs"
-//         within: { entity: "doc" caller_is: "owner_id" } }
-//     ] }
+//     access: {
+//       parents: ["doc"]
+//       allow: [
+//         { read: true requires: "view_docs" },
+//         { write: true requires: "view_docs"
+//           within: { entity: "doc" caller_is: "owner_id" } }
+//       ]
+//     }
 //   };
 //   string id = 1;
-//   Doc doc = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//   Doc doc = 2;
 // }
 // ```
 //
@@ -417,11 +475,11 @@ message AdmittedCaller {}
 //
 // Each row gives the subject in its `subject` field the role in its `role`
 // field. The subject is one caller, or every member of a team. The role
-// applies at the row's anchor: the row that its `access_parent` field points
-// at, or the workspace root when the entity has no `access_parent` field. A
+// applies at the row's anchor: the row that its access parent points at, or
+// the workspace root when the entity has no access parent. A
 // row grants nothing when its subject is empty or names a team that does not
-// exist, its role is not declared in `roles`, or its `access_parent` field is
-// unset or names a row that does not exist.
+// exist, its role is not declared in `roles`, or its access parent is unset
+// or names a row that does not exist.
 //
 // ```protobuf
 // message ProjectMember {
@@ -435,13 +493,16 @@ message AdmittedCaller {}
 //         "edit_tasks"] }
 //       ]
 //     }
-//     access: { allow: [
-//       { read: true requires: "view_members" },
-//       { write: true requires: "manage_members" }
-//     ] }
+//     access: {
+//       parents: ["project"]
+//       allow: [
+//         { read: true requires: "view_members" },
+//         { write: true requires: "manage_members" }
+//       ]
+//     }
 //   };
 //   string id = 1;
-//   Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//   Project project = 2;
 //   string user_id = 3;
 //   string role = 4;
 // }
@@ -463,7 +524,7 @@ message AdmittedCaller {}
 // anchor, and of the new role at the new anchor. A caller can therefore grant
 // and revoke only what it holds itself. Every write path, trusted ones
 // included, refuses a grant row with an empty subject, an undeclared role, or
-// no `access_parent` on an entity that has one.
+// no access parent on an entity that names one.
 //
 // Registration refuses unknown fields inside this message and inside `Role`.
 message GrantOptions {
@@ -546,13 +607,16 @@ message Role {
 //         { name: "team_lead" grants: ["view_teams", "manage_teams"] }
 //       ]
 //     }
-//     access: { allow: [
-//       { read: true requires: "view_teams" },
-//       { write: true requires: "manage_teams" }
-//     ] }
+//     access: {
+//       parents: ["team"]
+//       allow: [
+//         { read: true requires: "view_teams" },
+//         { write: true requires: "manage_teams" }
+//       ]
+//     }
 //   };
 //   string id = 1;
-//   Team team = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//   Team team = 2;
 //   string user_id = 3;
 //   string role = 4;
 // }
@@ -566,59 +630,11 @@ message Role {
 // Registration refuses unknown fields inside this message.
 message MembersOptions {
 	// The name of the entity whose rows make members. It is a grant entity
-	// whose `access_parent` field is a reference to this entity and to no
-	// other, and whose subject is one `string` field, so a team cannot be a
-	// member of a team.
+	// whose access parent is a reference to this entity and to no other, and
+	// whose subject is one `string` field, so a team cannot be a member of a
+	// team.
 	string entity = 1;
 }
-
-// Marks a reference that places each row of an entity below another row in
-// the access model.
-//
-// A permission held at the referenced row applies to the referencing row and
-// to every row below it. The referenced row can have access parents of its
-// own, and an entity can be its own access parent.
-//
-// Each marked field is a top-level field, or a member of a `oneof` whose
-// members are all marked. Each is a reference: its type is an entity message,
-// or a reference message without a `workspace` field. A marked field cannot
-// be a map or be named by a `FieldGuard`.
-//
-// An entity can mark several fields, and a marked field can be repeated. A
-// row then sits below every row its marked fields name, and a permission held
-// at any of them, or at a row above any of them, applies to the row:
-//
-// ```protobuf
-// message Task {
-//   option (syncplane.v1.entity) = {
-//     name: "task" key_fields: ["id"]
-//     access: { allow: [
-//       { read: true requires: "view_tasks" },
-//       { write: true requires: "edit_tasks" }
-//     ] }
-//   };
-//   string id = 1;
-//   Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
-//   Milestone milestone = 3
-//     [(syncplane.v1.field_behavior).access_parent = {}];
-//   repeated Label labels = 4
-//     [(syncplane.v1.field_behavior).access_parent = {}];
-// }
-// ```
-//
-// A write that adds or removes a parent needs its rule where that parent
-// sits; see `AccessRule`. A write fails when the row would name more rows
-// than the server's `MaxAccessParents` limit allows, or would sit below
-// itself. A grant entity has one access parent: one singular field, or the
-// members of one `oneof`.
-//
-// A polymorphic parent points at one of several entities: a marked `oneof`,
-// or a marked field whose reference message holds a `oneof` of entities. The
-// case a row holds names the row it sits below, and a row that holds no case
-// has no parent there.
-//
-// Registration refuses unknown fields inside this message.
-message AccessParentOptions {}
 
 // Marks a field that records who created the row.
 //
@@ -864,16 +880,12 @@ message FieldBehavior {
 	// field that holds a polymorphic reference message gives its name to
 	// the reverse relation of every case.
 	string reverse_relation = 10;
-	// Places each row below the row that this reference points at in the
-	// access model, or below each row that a repeated reference points at.
-	// See `AccessParentOptions`.
-	AccessParentOptions access_parent = 11;
 	// Stores the subject of the caller who creates the row. See
 	// `CreatorOptions`.
 	CreatorOptions creator = 12;
 
-	reserved 8;
-	reserved "write_policy";
+	reserved 8, 11;
+	reserved "write_policy", "access_parent";
 }
 
 extend google.protobuf.MessageOptions {

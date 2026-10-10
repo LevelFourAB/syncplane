@@ -98,6 +98,7 @@ message ProjectMember {
 			]
 		}
 		access: {
+			parents: [ "project" ]
 			allow: [
 				{ read: true requires: "view_members" },
 				{ write: true requires: "manage_members" }
@@ -105,7 +106,7 @@ message ProjectMember {
 		}
 	};
 	string id = 1;
-	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Project project = 2;
 	string user_id = 3;
 	string role = 4;
 }
@@ -115,6 +116,7 @@ message Task {
 		name: "task"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "project" ]
 			allow: [
 				{ read: true requires: "view_tasks" },
 				{ write: true requires: "edit_tasks" }
@@ -122,17 +124,18 @@ message Task {
 		}
 	};
 	string id = 1;
-	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Project project = 2;
 	string title = 3;
 }
 
-// A comment on a task, two access_parent hops below its project. Registered
+// A comment on a task, two access parent hops below its project. Registered
 // with the org schema by the specs that walk chains deeper than one level.
 message Comment {
 	option (syncplane.v1.entity) = {
 		name: "comment"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "task" ]
 			allow: [
 				{ read: true requires: "view_tasks" },
 				{ write: true requires: "edit_tasks" }
@@ -140,11 +143,11 @@ message Comment {
 		}
 	};
 	string id = 1;
-	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Task task = 2;
 	string body = 3;
 }
 
-// A page on a task, two access_parent hops below its project, whose body is
+// A page on a task, two access parent hops below its project, whose body is
 // collaborative text. A caller who can read the task's tasks reads it, and so
 // does its owner where they can read the project. Registered with the org
 // schema by the specs that ship text to readers below the workspace root.
@@ -153,6 +156,7 @@ message Page {
 		name: "page"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "task" ]
 			allow: [
 				{ read: true requires: "view_tasks" },
 				{ read: true requires: "view_projects" caller_is: "owner_id" },
@@ -161,7 +165,7 @@ message Page {
 		}
 	};
 	string id = 1;
-	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Task task = 2;
 	string owner_id = 3;
 	bytes body = 4 [(syncplane.v1.field_behavior) = { text: true }];
 }
@@ -246,6 +250,7 @@ message TeamMember {
 			]
 		}
 		access: {
+			parents: [ "team" ]
 			allow: [
 				{ read: true requires: "view_team" },
 				{ write: true requires: "edit_team" }
@@ -253,7 +258,7 @@ message TeamMember {
 		}
 	};
 	string id = 1;
-	Team team = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Team team = 2;
 	string user_id = 3;
 	TeamRole role = 4;
 }
@@ -279,6 +284,7 @@ message Folder {
 		name: "folder"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "parent" ]
 			allow: [
 				{ read: true requires: "view_folders" },
 				{ write: true requires: "edit_folders" }
@@ -286,7 +292,7 @@ message Folder {
 		}
 	};
 	string id = 1;
-	Folder parent = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Folder parent = 2;
 	string name = 3;
 }
 
@@ -314,6 +320,7 @@ message FolderMember {
 			]
 		}
 		access: {
+			parents: [ "folder" ]
 			allow: [
 				{ read: true requires: "view_folders" },
 				{ write: true requires: "manage_folders" }
@@ -321,7 +328,7 @@ message FolderMember {
 		}
 	};
 	string id = 1;
-	Folder folder = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Folder folder = 2;
 	string user_id = 3;
 	string role = 4;
 }
@@ -332,6 +339,7 @@ message Doc {
 		name: "doc"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "folder" ]
 			allow: [
 				{ read: true requires: "view_folders" },
 				{ write: true requires: "edit_folders" }
@@ -339,7 +347,7 @@ message Doc {
 		}
 	};
 	string id = 1;
-	Folder folder = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Folder folder = 2;
 	string title = 3;
 }
 
@@ -420,6 +428,7 @@ message PlaceMember {
 			]
 		}
 		access: {
+			parents: [ "place" ]
 			allow: [
 				{ read: true requires: "view_place_members" },
 				{ write: true requires: "manage_place_members" }
@@ -428,8 +437,8 @@ message PlaceMember {
 	};
 	string id = 1;
 	oneof place {
-		Board board = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
-		Space space = 3 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+		Board board = 2;
+		Space space = 3;
 	}
 	string user_id = 4;
 	string role = 5;
@@ -441,6 +450,7 @@ message Card {
 		name: "card"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "place" ]
 			allow: [
 				{ read: true requires: "view_cards" },
 				{ write: true requires: "edit_cards" }
@@ -449,18 +459,19 @@ message Card {
 	};
 	string id = 1;
 	oneof place {
-		Board board = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
-		Space space = 3 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+		Board board = 2;
+		Space space = 3;
 	}
 	string title = 4;
 }
 
-// An item on a card, two access_parent hops below the card's board or space.
+// An item on a card, two access parent hops below the card's board or space.
 message CardItem {
 	option (syncplane.v1.entity) = {
 		name: "card_item"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "card" ]
 			allow: [
 				{ read: true requires: "view_cards" },
 				{ write: true requires: "edit_cards" }
@@ -468,7 +479,7 @@ message CardItem {
 		}
 	};
 	string id = 1;
-	Card card = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Card card = 2;
 	string text = 3;
 }
 
@@ -490,6 +501,7 @@ message Pin {
 		name: "pin"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "place" ]
 			allow: [
 				{ read: true requires: "view_pins" },
 				{ write: true requires: "edit_pins" }
@@ -497,7 +509,7 @@ message Pin {
 		}
 	};
 	string id = 1;
-	PlaceRef place = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	PlaceRef place = 2;
 	string label = 3;
 }
 
@@ -556,6 +568,7 @@ message RoomMember {
 			]
 		}
 		access: {
+			parents: [ "room" ]
 			allow: [
 				{ read: true requires: "view_room_members" },
 				{ write: true requires: "manage_room_members" },
@@ -564,7 +577,7 @@ message RoomMember {
 		}
 	};
 	string id = 1;
-	Room room = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Room room = 2;
 	string user_id = 3;
 	string role = 4;
 }
@@ -576,6 +589,7 @@ message Post {
 		name: "post"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "room" ]
 			allow: [
 				{ read: true requires: "view_posts" },
 				{
@@ -595,7 +609,7 @@ message Post {
 		}
 	};
 	string id = 1;
-	Room room = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Room room = 2;
 	string author_id = 3 [(syncplane.v1.field_behavior) = { creator: {} }];
 	string body = 4;
 	string title = 5;
@@ -608,6 +622,7 @@ message Draft {
 		name: "draft"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "room" ]
 			allow: [ {
 				read: true
 				write: true
@@ -617,7 +632,7 @@ message Draft {
 		}
 	};
 	string id = 1;
-	Room room = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Room room = 2;
 	string author_id = 3 [(syncplane.v1.field_behavior) = { creator: {} }];
 	string body = 4;
 }
@@ -629,6 +644,7 @@ message Ticket {
 		name: "ticket"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "room" ]
 			allow: [
 				{ read: true requires: "view_posts" },
 				{ write: true requires: "moderate_posts" },
@@ -642,7 +658,7 @@ message Ticket {
 		}
 	};
 	string id = 1;
-	Room room = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Room room = 2;
 	string assignee_id = 3;
 	string status = 4;
 	string title = 5;
@@ -676,6 +692,7 @@ message Thread {
 		name: "thread"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "room" ]
 			allow: [
 				{
 					read: true
@@ -707,7 +724,7 @@ message Thread {
 		}
 	};
 	string id = 1;
-	Room room = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Room room = 2;
 	bool archived = 3;
 	bool hidden = 4;
 	string title = 5;
@@ -785,6 +802,7 @@ message SquadMember {
 			]
 		}
 		access: {
+			parents: [ "squad" ]
 			allow: [
 				{ read: true requires: "view_squads" },
 				{ write: true requires: "manage_squads" }
@@ -792,7 +810,7 @@ message SquadMember {
 		}
 	};
 	string id = 1;
-	Squad squad = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Squad squad = 2;
 	string user_id = 3;
 	string role = 4;
 }
@@ -848,6 +866,7 @@ message RepoMember {
 			]
 		}
 		access: {
+			parents: [ "repo" ]
 			allow: [
 				{ read: true requires: "view_repo_members" },
 				{ write: true requires: "manage_repo_members" },
@@ -856,7 +875,7 @@ message RepoMember {
 		}
 	};
 	string id = 1;
-	Repo repo = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Repo repo = 2;
 	oneof member {
 		string user_id = 3;
 		Squad squad = 4;
@@ -879,6 +898,7 @@ message RepoSquad {
 			} ]
 		}
 		access: {
+			parents: [ "repo" ]
 			allow: [
 				{ read: true requires: "view_repo_members" },
 				{ write: true requires: "manage_repo_members" }
@@ -886,7 +906,7 @@ message RepoSquad {
 		}
 	};
 	string id = 1;
-	Repo repo = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Repo repo = 2;
 	Squad squad = 3;
 	string role = 4;
 }
@@ -897,6 +917,7 @@ message Issue {
 		name: "issue"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "repo" ]
 			allow: [
 				{ read: true requires: "view_issues" },
 				{ write: true requires: "edit_issues" }
@@ -904,7 +925,7 @@ message Issue {
 		}
 	};
 	string id = 1;
-	Repo repo = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Repo repo = 2;
 	string title = 3;
 }
 
@@ -950,6 +971,7 @@ message CommonsMember {
 			} ]
 		}
 		access: {
+			parents: [ "commons" ]
 			allow: [
 				{ read: true requires: "view_commons_members" },
 				{ write: true requires: "manage_commons_members" }
@@ -957,7 +979,7 @@ message CommonsMember {
 		}
 	};
 	string id = 1;
-	Commons commons = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Commons commons = 2;
 	string user_id = 3;
 	string role = 4;
 }
@@ -1005,6 +1027,7 @@ message Initiative {
 		name: "initiative"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "commons" ]
 			allow: [
 				{ read: true requires: "view_initiatives" },
 				{ write: true requires: "edit_initiatives" }
@@ -1012,7 +1035,7 @@ message Initiative {
 		}
 	};
 	string id = 1;
-	Commons commons = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Commons commons = 2;
 	string name = 3;
 }
 
@@ -1046,6 +1069,7 @@ message InitiativeMember {
 			]
 		}
 		access: {
+			parents: [ "initiative" ]
 			allow: [
 				{ read: true requires: "view_initiative_members" },
 				{ write: true requires: "manage_initiative_members" }
@@ -1053,8 +1077,7 @@ message InitiativeMember {
 		}
 	};
 	string id = 1;
-	Initiative initiative = 2
-		[(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Initiative initiative = 2;
 	oneof member {
 		string user_id = 3;
 		Squad squad = 4;
@@ -1068,6 +1091,7 @@ message Milestone {
 		name: "milestone"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "initiative" ]
 			allow: [
 				{ read: true requires: "view_milestones" },
 				{ write: true requires: "edit_milestones" }
@@ -1075,8 +1099,7 @@ message Milestone {
 		}
 	};
 	string id = 1;
-	Initiative initiative = 2
-		[(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Initiative initiative = 2;
 	string title = 3;
 }
 
@@ -1118,10 +1141,13 @@ message AccountMember {
 				}
 			]
 		}
-		access: { allow: [ { read: true requires: "view_accounts" } ] }
+		access: {
+			parents: [ "account" ]
+			allow: [ { read: true requires: "view_accounts" } ]
+		}
 	};
 	string id = 1;
-	Account account = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Account account = 2;
 	string user_id = 3;
 	string role = 4;
 }
@@ -1159,6 +1185,7 @@ message Invoice {
 		name: "invoice"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "account" ]
 			allow: [
 				{
 					read: true
@@ -1172,16 +1199,17 @@ message Invoice {
 		}
 	};
 	string id = 1;
-	Account account = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Account account = 2;
 	string title = 3;
 }
 
-// A charge on an invoice, two access_parent hops below its account.
+// A charge on an invoice, two access parent hops below its account.
 message Charge {
 	option (syncplane.v1.entity) = {
 		name: "charge"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "invoice" ]
 			allow: [
 				{
 					read: true
@@ -1195,7 +1223,7 @@ message Charge {
 		}
 	};
 	string id = 1;
-	Invoice invoice = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Invoice invoice = 2;
 	string memo = 3;
 }
 
@@ -1254,6 +1282,7 @@ message Topic {
 		name: "topic"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "parents" ]
 			allow: [
 				{ read: true requires: "view_topics" },
 				{ write: true requires: "edit_topics" }
@@ -1261,8 +1290,7 @@ message Topic {
 		}
 	};
 	string id = 1;
-	repeated Topic parents = 2
-		[(syncplane.v1.field_behavior) = { access_parent: {} }];
+	repeated Topic parents = 2;
 }
 
 // A role on one product, cycle, shelf or topic and the rows below it.
@@ -1302,6 +1330,7 @@ message LaneMember {
 			]
 		}
 		access: {
+			parents: [ "lane" ]
 			allow: [
 				{ read: true requires: "view_lane_members" },
 				{ write: true requires: "manage_lane_members" }
@@ -1310,11 +1339,10 @@ message LaneMember {
 	};
 	string id = 1;
 	oneof lane {
-		Product product = 2
-			[(syncplane.v1.field_behavior) = { access_parent: {} }];
-		Cycle cycle = 3 [(syncplane.v1.field_behavior) = { access_parent: {} }];
-		Shelf shelf = 4 [(syncplane.v1.field_behavior) = { access_parent: {} }];
-		Topic topic = 5 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+		Product product = 2;
+		Cycle cycle = 3;
+		Shelf shelf = 4;
+		Topic topic = 5;
 	}
 	string user_id = 6;
 	string role = 7;
@@ -1327,6 +1355,7 @@ message Story {
 		name: "story"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "product", "cycle" ]
 			allow: [
 				{ read: true requires: "view_stories" },
 				{ write: true requires: "edit_stories" },
@@ -1339,8 +1368,8 @@ message Story {
 		}
 	};
 	string id = 1;
-	Product product = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
-	Cycle cycle = 3 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Product product = 2;
+	Cycle cycle = 3;
 	string title = 4;
 }
 
@@ -1350,6 +1379,7 @@ message StoryNote {
 		name: "story_note"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "story" ]
 			allow: [
 				{ read: true requires: "view_stories" },
 				{ write: true requires: "edit_stories" }
@@ -1357,7 +1387,7 @@ message StoryNote {
 		}
 	};
 	string id = 1;
-	Story story = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Story story = 2;
 	string body = 3;
 }
 
@@ -1367,6 +1397,7 @@ message Leaflet {
 		name: "leaflet"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "shelves" ]
 			allow: [
 				{ read: true requires: "view_leaflets" },
 				{ write: true requires: "edit_leaflets" }
@@ -1374,8 +1405,7 @@ message Leaflet {
 		}
 	};
 	string id = 1;
-	repeated Shelf shelves = 2
-		[(syncplane.v1.field_behavior) = { access_parent: {} }];
+	repeated Shelf shelves = 2;
 	string title = 3;
 }
 
@@ -1473,6 +1503,7 @@ message DossierMember {
 			]
 		}
 		access: {
+			parents: [ "dossier" ]
 			allow: [
 				{ read: true requires: "view_dossiers" },
 				{ write: true requires: "manage_dossier_members" }
@@ -1480,7 +1511,7 @@ message DossierMember {
 		}
 	};
 	string id = 1;
-	Dossier dossier = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Dossier dossier = 2;
 	string user_id = 3;
 	string role = 4;
 }
@@ -1491,6 +1522,7 @@ message Matter {
 		name: "matter"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "dossier" ]
 			allow: [
 				{ read: true requires: "view_matters" },
 				{
@@ -1525,7 +1557,7 @@ message Matter {
 		}
 	};
 	string id = 1;
-	Dossier dossier = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Dossier dossier = 2;
 	string title = 3;
 }
 
@@ -1544,6 +1576,7 @@ message MatterWatcher {
 			} ]
 		}
 		access: {
+			parents: [ "matter" ]
 			allow: [
 				{ read: true requires: "view_matters" },
 				{ write: true requires: "edit_matters" }
@@ -1551,18 +1584,19 @@ message MatterWatcher {
 		}
 	};
 	string id = 1;
-	Matter matter = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Matter matter = 2;
 	string user_id = 3;
 	string role = 4;
 }
 
-// A memo on a matter, two access_parent hops below its dossier, whose body is
+// A memo on a matter, two access parent hops below its dossier, whose body is
 // collaborative text.
 message Memo {
 	option (syncplane.v1.entity) = {
 		name: "memo"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "matter" ]
 			allow: [
 				{ read: true requires: "view_matters" },
 				{
@@ -1589,7 +1623,7 @@ message Memo {
 		}
 	};
 	string id = 1;
-	Matter matter = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Matter matter = 2;
 	bytes body = 3 [(syncplane.v1.field_behavior) = { text: true }];
 	string title = 4;
 }
@@ -1601,6 +1635,7 @@ message Binder {
 		name: "binder"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "parent" ]
 			allow: [
 				{ read: true requires: "view_binders" },
 				{ write: true requires: "edit_binders" },
@@ -1614,7 +1649,7 @@ message Binder {
 		}
 	};
 	string id = 1;
-	Binder parent = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Binder parent = 2;
 	string owner_id = 3 [(syncplane.v1.field_behavior) = { indexed: true }];
 	string title = 4;
 }
@@ -1625,6 +1660,7 @@ message Sheet {
 		name: "sheet"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "binder" ]
 			allow: [
 				{ read: true requires: "view_binders" },
 				{ write: true requires: "edit_binders" },
@@ -1638,7 +1674,7 @@ message Sheet {
 		}
 	};
 	string id = 1;
-	Binder binder = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Binder binder = 2;
 	string title = 3;
 }
 
@@ -1651,6 +1687,7 @@ message Expense {
 		name: "expense"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "project" ]
 			allow: [
 				{ read: true requires: "view_tasks" },
 				{ write: true requires: "edit_tasks" }
@@ -1712,7 +1749,7 @@ message Expense {
 		}
 	};
 	string id = 1;
-	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Project project = 2;
 	string title = 3;
 	string status = 4;
 	int64 total = 5;
@@ -1734,6 +1771,7 @@ message Staff {
 		key_fields: [ "id" ]
 		history: {}
 		access: {
+			parents: [ "project" ]
 			allow: [
 				{ read: true requires: "view_tasks" },
 				{ write: true requires: "edit_tasks" }
@@ -1772,7 +1810,7 @@ message Staff {
 		}
 	};
 	string id = 1;
-	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Project project = 2;
 	string name = 3
 		[(syncplane.v1.field_behavior) = { searchable: true history: true }];
 	int64 salary = 4 [(syncplane.v1.field_behavior) = { history: true }];

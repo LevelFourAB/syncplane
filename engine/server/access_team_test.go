@@ -134,7 +134,7 @@ var _ = Describe("Access model registration of teams", func() {
 		}, `entity "squad" members names entity "repo", which is not a grant entity`),
 		Entry("members that names a grant entity anchored at another entity", func(file *descriptorpb.FileDescriptorProto) {
 			optionsOf(file, "Squad").Members.Entity = "repo_member"
-		}, `entity "squad" members names entity "repo_member", whose access_parent does not point at "squad" alone`),
+		}, `entity "squad" members names entity "repo_member", whose access parent does not point at "squad" alone`),
 		Entry("members whose subject is a team", func(file *descriptorpb.FileDescriptorProto) {
 			optionsOf(file, "SquadMember").Grant.Subject = "squad"
 		}, `entity "squad" members names entity "squad_member", whose grant subject is not one string field; a team cannot be a member of a team`),
@@ -176,14 +176,14 @@ var _ = Describe("Access model registration of teams", func() {
 				Name: "team_member", KeyFields: []string{"id"},
 				Fields: []server.DynamicField{
 					{Name: "id", Number: 1, Kind: str},
-					{Name: "team", Number: 2, Ref: "team", AccessParent: true},
+					{Name: "team", Number: 2, Ref: "team"},
 					{Name: "user_id", Number: 3, Kind: str},
 					{Name: "role", Number: 4, Kind: str},
 				},
 				Grant: &syncplanev1.GrantOptions{Subject: "user_id", Role: "role", Roles: []*syncplanev1.Role{
 					{Name: "team_lead", Grants: []string{"view_teams", "manage_teams"}},
 				}},
-				Access: readWrite("view_teams", "manage_teams"),
+				Access: withParents(readWrite("view_teams", "manage_teams"), "team"),
 			},
 		)
 		if !grants {
@@ -193,14 +193,14 @@ var _ = Describe("Access model registration of teams", func() {
 			Name: "project_team", KeyFields: []string{"id"},
 			Fields: []server.DynamicField{
 				{Name: "id", Number: 1, Kind: str},
-				{Name: "project", Number: 2, Ref: "project", AccessParent: true},
+				{Name: "project", Number: 2, Ref: "project"},
 				{Name: "team", Number: 3, Ref: "team"},
 				{Name: "role", Number: 4, Kind: str},
 			},
 			Grant: &syncplanev1.GrantOptions{Subject: "team", Role: "role", Roles: []*syncplanev1.Role{
 				{Name: "project_team_writer", Grants: []string{"view_projects", "view_tasks", "edit_tasks"}},
 			}},
-			Access: readWrite("view_projects", "edit_projects"),
+			Access: withParents(readWrite("view_projects", "edit_projects"), "project"),
 		})
 	}
 

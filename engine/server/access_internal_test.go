@@ -32,7 +32,7 @@ var _ = Describe("access model fingerprint", func() {
 				KeyFields: []string{"id"},
 				Fields: []DynamicField{
 					{Name: "id", Number: 1, Kind: str},
-					{Name: "project", Number: 2, Ref: "project", AccessParent: true},
+					{Name: "project", Number: 2, Ref: "project"},
 					{Name: "user_id", Number: 3, Kind: str},
 					{Name: "role", Number: 4, Kind: str},
 				},
@@ -40,7 +40,7 @@ var _ = Describe("access model fingerprint", func() {
 					{Name: "reader", Grants: []string{"view"}},
 					{Name: "writer", Grants: []string{"view", "edit"}},
 				}},
-				Access: rwAccess("view", "edit"),
+				Access: withParents(rwAccess("view", "edit"), "project"),
 			},
 			{
 				Name:      "project",
@@ -133,14 +133,20 @@ var _ = Describe("access model fingerprint", func() {
 			s[1].Access.Allow[0].Requires, s[1].Access.Allow[0].Admitted = nil, &syncplanev1.AdmittedCaller{}
 		}),
 		Entry("the access parent is dropped", func(s []DynamicEntity) {
-			s[0].Fields[1].AccessParent = false
+			s[0].Access.Parents = nil
 		}),
 		Entry("the access parent moves to another field", func(s []DynamicEntity) {
-			s[0].Fields[1].AccessParent = false
-			s[0].Fields = append(s[0].Fields, DynamicField{Name: "home", Number: 5, Ref: "project", AccessParent: true})
+			s[0].Fields = append(s[0].Fields, DynamicField{Name: "home", Number: 5, Ref: "project"})
+			s[0].Access.Parents = []string{"home"}
 		}),
 	)
 })
+
+// withParents sets the access parents of a and returns it.
+func withParents(a *syncplanev1.AccessOptions, parents ...string) *syncplanev1.AccessOptions {
+	a.Parents = parents
+	return a
+}
 
 // rwAccess returns access options with one rule that admits reads by read and
 // one that admits every write by write.

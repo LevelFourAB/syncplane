@@ -1365,7 +1365,6 @@ Field modifiers:
 - `.indexed()`: Declares a secondary index on the field.
 - `.order(posField)`: Sets the fractional index ordering property on `keyedList`.
 - `.reverseRelation(name)`: Names the reverse relation a reference adds to its target. Valid on `ref`, `refList`, `workspaceRef`, and `workspaceRefList`. See [Reverse relations](proto-options.md#reverse-relations).
-- `.accessParent()`: Places each row below the row the reference names in the access model. Valid on `ref` and `refList`. See [Access model](#access-model).
 - `.creator()`: Records who created the row. On a create that is not trusted, the server stores the caller's primary subject in the field, and later writes that are not trusted cannot change it. Valid on a `text()` field that is not a key field.
 
 ### Secondary indexes
@@ -1412,7 +1411,7 @@ See [proto options](proto-options.md#full-text-search) and [Search data](../how-
 
 ### Access model
 
-The `access`, `grant` and `members` entity options and the `.accessParent()` field mark declare who can read and write rows:
+The `access`, `grant` and `members` entity options declare who can read and write rows:
 
 ```ts
 const project = schema.entity('project', { id: schema.text().key() }, {
@@ -1426,7 +1425,7 @@ const project = schema.entity('project', { id: schema.text().key() }, {
 
 const projectMember = schema.entity('project_member', {
 	id: schema.text().key(),
-	project: schema.ref(() => project).accessParent(),
+	project: schema.ref(() => project),
 	userId: schema.text(),
 	role: schema.text(),
 }, {
@@ -1443,6 +1442,7 @@ const projectMember = schema.entity('project_member', {
 		],
 	},
 	access: {
+		parents: [ 'project' ],
 		allow: [
 			{ read: true, requires: 'view_projects' },
 			{ write: true, requires: 'edit_projects' },
@@ -1461,11 +1461,11 @@ const label = schema.entity('label', { id: schema.text().key() }, {
 
 Each rule in `access.allow` sets one or more of `read`, `create`, `update`, `delete` and `write`, and exactly one source: `requires: '<name>'` or `requires: [ '<name>', ... ]`, which needs every permission it names, or `admitted: true`. The rules lower to `syncplane.v1.AccessRule`; see [Access model](proto-options.md#access-model) for how they admit each operation.
 A rule can also set checks on the row: `callerIs` names a `text()` field by accessor name, `fields` lists accessor names, and `when` is a function that takes the row's field proxy, as a query's `where` does, and returns the condition the row must match, such as `when: (t) => t.archived.eq(false)`. `entity()` throws on a `when` that uses `matches()` or `match()`. `within` holds one entry or a list, each `{ entity, callerIs?, when? }`: `entity` names an entity of the schema by name, or as a thunk that returns it, and `callerIs` a `text()` field of it by accessor name. Build an entry with `when` with `schema.within(target, { when })`, which types the condition against `target`'s fields, such as `within: schema.within(project, { when: (p) => p.archived.eq(false) })`. `target` can be a thunk, `schema.within(() => project, { ... })`, for an entity declared later; `defineSchema()` calls it. For the rule's own entity, in an entity whose rows sit below rows of their own, write `{ self: true, callerIs?, when? }`, which types `callerIs` and `when` against the entity's own fields. `defineSchema()` throws on an entry whose entity is not in the schema or whose `callerIs` is not a singular `text()` field of it. See [Checks on the rows above](proto-options.md#checks-on-the-rows-above).
-`grant.subject` and `grant.role` name fields by accessor name. `grant.role` names a `text()` field. `grant.subject` names a `text()` field, or a singular `ref()` to an entity whose `members` option names its member entity, which grants to every member of the team the row names. See [Teams](proto-options.md#teams). `.accessParent()` is valid on a `ref()` or a `refList()`, and an entity can mark several fields; see [Several access parents](proto-options.md#several-access-parents). A grant entity marks one singular `ref()`.
-`access.guard` lists field guards, each `{ fields, allow }`: `fields` names the fields the guard restricts by accessor name, and `allow` holds rules with the shape of `access.allow` except `delete` and `fields`. A guard with the read rule `{ read: true, admitted: true }` shows its fields to every reader of the row; a narrower read rule, or none, hides them from some readers or from all. A guard lowers to `syncplane.v1.FieldGuard`; see [Field guards](proto-options.md#field-guards). `entity()` throws on a guard that names a key field, an `.accessParent()` field, a `.creator()` field or a field another guard names, on a guard rule whose `callerIs` or `when` reads a guarded field, and on a guard that can hide a field a rule in `allow` checks with `callerIs` or `when`, or the `grant.subject` or `grant.role` field.
+`grant.subject` and `grant.role` name fields by accessor name. `grant.role` names a `text()` field. `grant.subject` names a `text()` field, or a singular `ref()` to an entity whose `members` option names its member entity, which grants to every member of the team the row names. See [Teams](proto-options.md#teams). `access.parents` names the access parents by accessor name: `ref()` and `refList()` fields, in any order, no name twice; see [Several access parents](proto-options.md#several-access-parents). A `workspaceRef()` cannot be a parent. A grant entity names at most one parent, and not a `refList()`.
+`access.guard` lists field guards, each `{ fields, allow }`: `fields` names the fields the guard restricts by accessor name, and `allow` holds rules with the shape of `access.allow` except `delete` and `fields`. A guard with the read rule `{ read: true, admitted: true }` shows its fields to every reader of the row; a narrower read rule, or none, hides them from some readers or from all. A guard lowers to `syncplane.v1.FieldGuard`; see [Field guards](proto-options.md#field-guards). `entity()` throws on a guard that names a key field, a field that `parents` names, a `.creator()` field or a field another guard names, on a guard rule whose `callerIs` or `when` reads a guarded field, and on a guard that can hide a field a rule in `allow` checks with `callerIs` or `when`, or the `grant.subject` or `grant.role` field.
 Each role sets `grants`, `includes` or both. `includes` names roles of the same `grant`, and the role grants every permission of each of them.
-`entity()` throws on the rules that concern one entity. `defineSchema()` also throws on an `.accessParent()` reference to an entity without `access`, a `grant.subject` reference to an entity without `members`, and a `members` option that does not name a grant entity of the schema whose one access parent is the team entity and whose subject is a `text()` field. The server checks the remaining rules that span entities, such as permission coverage and unique role names, when the schema is registered.
-TypeScript checks the field names in `subject`, `fields`, `grant.subject` and `grant.role` against the entity's fields: `subject` and `grant.role` take a `text()` field, and `grant.subject` a `text()` field or a singular reference. Lists such as `grants`, `includes` and `fields` take `readonly` arrays. To share rules between entities, declare them with `satisfies schema.AccessDecl`, not with an `AccessDecl` annotation, which takes any name and does not fit an entity's options.
+`entity()` throws on the rules that concern one entity. `defineSchema()` also throws on a parent that references an entity without `access`, a `grant.subject` reference to an entity without `members`, and a `members` option that does not name a grant entity of the schema whose one access parent is the team entity and whose subject is a `text()` field. The server checks the remaining rules that span entities, such as permission coverage and unique role names, when the schema is registered.
+TypeScript checks the field names in `parents`, `subject`, `fields`, `grant.subject` and `grant.role` against the entity's fields: `subject` and `grant.role` take a `text()` field, and `grant.subject` a `text()` field or a singular reference. Lists such as `grants`, `includes` and `fields` take `readonly` arrays. To share rules between entities, declare them with `satisfies schema.AccessDecl`, not with an `AccessDecl` annotation, which takes any name and does not fit an entity's options.
 
 `put`, `patch`, `update` and `del` reject with an `Error` before they change local state when the write can only be an operation that no rule of the entity names: `del` without a delete rule, `patch` and `update` without an update rule, `put` with `expectedVersion: 0n` without a create rule, `put` with another `expectedVersion` without an update rule, and `put` with no `expectedVersion` when no rule names create or update. See [Operations no rule admits](proto-options.md#operations-no-rule-admits).
 

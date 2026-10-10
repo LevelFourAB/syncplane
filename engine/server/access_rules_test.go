@@ -95,7 +95,7 @@ var _ = Describe("Access rules", func() {
 		_, err := f.srv.RegisterDescriptorSet(accessFileSet(func(file *descriptorpb.FileDescriptorProto) {
 			task := messageNamed(file, "Task")
 			eo := proto.GetExtension(task.GetOptions(), syncplanev1.E_Entity).(*syncplanev1.EntityOptions)
-			eo.Access = &syncplanev1.AccessOptions{Allow: rules}
+			eo.Access.Allow = rules
 		}), server.AllowAccessChange())
 		Expect(err).NotTo(HaveOccurred())
 	}

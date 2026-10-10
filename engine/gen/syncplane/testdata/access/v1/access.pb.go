@@ -318,7 +318,7 @@ func (x *Task) GetTitle() string {
 	return ""
 }
 
-// A comment on a task, two access_parent hops below its project. Registered
+// A comment on a task, two access parent hops below its project. Registered
 // with the org schema by the specs that walk chains deeper than one level.
 type Comment struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -380,7 +380,7 @@ func (x *Comment) GetBody() string {
 	return ""
 }
 
-// A page on a task, two access_parent hops below its project, whose body is
+// A page on a task, two access parent hops below its project, whose body is
 // collaborative text. A caller who can read the task's tasks reads it, and so
 // does its owner where they can read the project. Registered with the org
 // schema by the specs that ship text to readers below the workspace root.
@@ -1263,7 +1263,7 @@ func (*Card_Board) isCard_Place() {}
 
 func (*Card_Space) isCard_Place() {}
 
-// An item on a card, two access_parent hops below the card's board or space.
+// An item on a card, two access parent hops below the card's board or space.
 type CardItem struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -3080,7 +3080,7 @@ func (x *Invoice) GetTitle() string {
 	return ""
 }
 
-// A charge on an invoice, two access_parent hops below its account.
+// A charge on an invoice, two access parent hops below its account.
 type Charge struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -4006,7 +4006,7 @@ func (x *MatterWatcher) GetRole() string {
 	return ""
 }
 
-// A memo on a matter, two access_parent hops below its dossier, whose body is
+// A memo on a matter, two access parent hops below its dossier, whose body is
 // collaborative text.
 type Memo struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -4458,15 +4458,15 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x04name\x18\x02 \x01(\tR\x04name:9\xa2\xbb\x185\n" +
 	"\aproject\x12\x02idR&\n" +
 	"\x11\b\x012\rview_projects\n" +
-	"\x11(\x012\redit_projects\"\xe1\x03\n" +
+	"\x11(\x012\redit_projects\"\xe2\x03\n" +
 	"\rProjectMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
-	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectB\x06\xaa\xbb\x18\x02Z\x00R\aproject\x12\x17\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12?\n" +
+	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectR\aproject\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\tR\x04role:\xc9\x02\xa2\xbb\x18\xc4\x02\n" +
-	"\x0eproject_member\x12\x02idR&\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xd2\x02\xa2\xbb\x18\xcd\x02\n" +
+	"\x0eproject_member\x12\x02idR/\n" +
 	"\x10\b\x012\fview_members\n" +
-	"\x12(\x012\x0emanage_membersZ\x85\x02\n" +
+	"\x12(\x012\x0emanage_members\x1a\aprojectZ\x85\x02\n" +
 	"\auser_id\x12\x04role\x1a9\n" +
 	"\x0eproject_reader\x12\rview_projects\x12\fview_members\x12\n" +
 	"view_tasks\x1a,\n" +
@@ -4475,36 +4475,36 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\rproject_admin\x12\x0emanage_members\x1a\x0eproject_writer\x1a+\n" +
 	"\x0eproject_editor\x12\rview_projects\x12\n" +
 	"edit_tasks\x1a-\n" +
-	"\rproject_owner\x12\redit_projects\x1a\rproject_admin\"\xa7\x01\n" +
+	"\rproject_owner\x12\redit_projects\x1a\rproject_admin\"\xa8\x01\n" +
 	"\x04Task\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
-	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectB\x06\xaa\xbb\x18\x02Z\x00R\aproject\x12\x14\n" +
-	"\x05title\x18\x03 \x01(\tR\x05title:0\xa2\xbb\x18,\n" +
-	"\x04task\x12\x02idR \n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12?\n" +
+	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectR\aproject\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:9\xa2\xbb\x185\n" +
+	"\x04task\x12\x02idR)\n" +
 	"\x0e\b\x012\n" +
 	"view_tasks\n" +
 	"\x0e(\x012\n" +
-	"edit_tasks\"\xa2\x01\n" +
+	"edit_tasks\x1a\aproject\"\xa0\x01\n" +
 	"\aComment\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
-	"\x04task\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.TaskB\x06\xaa\xbb\x18\x02Z\x00R\x04task\x12\x12\n" +
-	"\x04body\x18\x03 \x01(\tR\x04body:3\xa2\xbb\x18/\n" +
-	"\acomment\x12\x02idR \n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x04task\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.TaskR\x04task\x12\x12\n" +
+	"\x04body\x18\x03 \x01(\tR\x04body:9\xa2\xbb\x185\n" +
+	"\acomment\x12\x02idR&\n" +
 	"\x0e\b\x012\n" +
 	"view_tasks\n" +
 	"\x0e(\x012\n" +
-	"edit_tasks\"\xdc\x01\n" +
+	"edit_tasks\x1a\x04task\"\xda\x01\n" +
 	"\x04Page\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
-	"\x04task\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.TaskB\x06\xaa\xbb\x18\x02Z\x00R\x04task\x12\x19\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x04task\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.TaskR\x04task\x12\x19\n" +
 	"\bowner_id\x18\x03 \x01(\tR\aownerId\x12\x1a\n" +
-	"\x04body\x18\x04 \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x04body:M\xa2\xbb\x18I\n" +
-	"\x04page\x12\x02idR=\n" +
+	"\x04body\x18\x04 \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x04body:S\xa2\xbb\x18O\n" +
+	"\x04page\x12\x02idRC\n" +
 	"\x0e\b\x012\n" +
 	"view_tasks\n" +
 	"\x1b\b\x012\rview_projectsB\bowner_id\n" +
 	"\x0e(\x012\n" +
-	"edit_tasks\"O\n" +
+	"edit_tasks\x1a\x04task\"O\n" +
 	"\x05Label\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name:\"\xa2\xbb\x18\x1e\n" +
@@ -4524,16 +4524,16 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x0e\x10\x012\n" +
 	"view_tasks\"#\n" +
 	"\bTaskArgs\x12\x17\n" +
-	"\atask_id\x18\x01 \x01(\tR\x06taskId\"\xc4\x02\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\"\xc2\x02\n" +
 	"\n" +
 	"TeamMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
-	"\x04team\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.TeamB\x06\xaa\xbb\x18\x02Z\x00R\x04team\x12\x17\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x04team\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.TeamR\x04team\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12:\n" +
-	"\x04role\x18\x04 \x01(\x0e2&.syncplane.testdata.access.v1.TeamRoleR\x04role:\x90\x01\xa2\xbb\x18\x8b\x01\n" +
-	"\vteam_member\x12\x02idR\x1e\n" +
+	"\x04role\x18\x04 \x01(\x0e2&.syncplane.testdata.access.v1.TeamRoleR\x04role:\x96\x01\xa2\xbb\x18\x91\x01\n" +
+	"\vteam_member\x12\x02idR$\n" +
 	"\r\b\x012\tview_team\n" +
-	"\r(\x012\tedit_teamZX\n" +
+	"\r(\x012\tedit_team\x1a\x04teamZX\n" +
 	"\auser_id\x12\x04role\x1a\x1d\n" +
 	"\x10TEAM_ROLE_VIEWER\x12\tview_team\x1a(\n" +
 	"\x10TEAM_ROLE_EDITOR\x12\tview_team\x12\tedit_team\"F\n" +
@@ -4543,31 +4543,31 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\r\b\x012\tview_team\n" +
 	"\r(\x012\tedit_team\"\xaa\x01\n" +
 	"\x06Folder\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
-	"\x06parent\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.FolderB\x06\xaa\xbb\x18\x02Z\x00R\x06parent\x12\x12\n" +
-	"\x04name\x18\x03 \x01(\tR\x04name:6\xa2\xbb\x182\n" +
-	"\x06folder\x12\x02idR$\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12<\n" +
+	"\x06parent\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.FolderR\x06parent\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name:>\xa2\xbb\x18:\n" +
+	"\x06folder\x12\x02idR,\n" +
 	"\x10\b\x012\fview_folders\n" +
-	"\x10(\x012\fedit_folders\"\xf0\x02\n" +
+	"\x10(\x012\fedit_folders\x1a\x06parent\"\xf0\x02\n" +
 	"\fFolderMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
-	"\x06folder\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.FolderB\x06\xaa\xbb\x18\x02Z\x00R\x06folder\x12\x17\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12<\n" +
+	"\x06folder\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.FolderR\x06folder\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\tR\x04role:\xdc\x01\xa2\xbb\x18\xd7\x01\n" +
-	"\rfolder_member\x12\x02idR&\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xe4\x01\xa2\xbb\x18\xdf\x01\n" +
+	"\rfolder_member\x12\x02idR.\n" +
 	"\x10\b\x012\fview_folders\n" +
-	"\x12(\x012\x0emanage_foldersZ\x99\x01\n" +
+	"\x12(\x012\x0emanage_folders\x1a\x06folderZ\x99\x01\n" +
 	"\auser_id\x12\x04role\x1a\x1d\n" +
 	"\rfolder_viewer\x12\fview_folders\x1a+\n" +
 	"\rfolder_editor\x12\fview_folders\x12\fedit_folders\x1a<\n" +
 	"\x0efolder_manager\x12\fview_folders\x12\fedit_folders\x12\x0emanage_folders\"\xa6\x01\n" +
 	"\x03Doc\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
-	"\x06folder\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.FolderB\x06\xaa\xbb\x18\x02Z\x00R\x06folder\x12\x14\n" +
-	"\x05title\x18\x03 \x01(\tR\x05title:3\xa2\xbb\x18/\n" +
-	"\x03doc\x12\x02idR$\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12<\n" +
+	"\x06folder\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.FolderR\x06folder\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:;\xa2\xbb\x187\n" +
+	"\x03doc\x12\x02idR,\n" +
 	"\x10\b\x012\fview_folders\n" +
-	"\x10(\x012\fedit_folders\"L\n" +
+	"\x10(\x012\fedit_folders\x1a\x06folder\"L\n" +
 	"\x05Board\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id:3\xa2\xbb\x18/\n" +
 	"\x05board\x12\x02idR\"\n" +
@@ -4577,16 +4577,16 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id:3\xa2\xbb\x18/\n" +
 	"\x05space\x12\x02idR\"\n" +
 	"\x0f\b\x012\vview_places\n" +
-	"\x0f(\x012\vedit_places\"\xe5\x04\n" +
+	"\x0f(\x012\vedit_places\"\xdc\x04\n" +
 	"\vPlaceMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12C\n" +
-	"\x05board\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.BoardB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05board\x12C\n" +
-	"\x05space\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.SpaceB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05space\x12\x17\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12;\n" +
+	"\x05board\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.BoardH\x00R\x05board\x12;\n" +
+	"\x05space\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.SpaceH\x00R\x05space\x12\x17\n" +
 	"\auser_id\x18\x04 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\x05 \x01(\tR\x04role:\x85\x03\xa2\xbb\x18\x80\x03\n" +
-	"\fplace_member\x12\x02idR2\n" +
+	"\x04role\x18\x05 \x01(\tR\x04role:\x8c\x03\xa2\xbb\x18\x87\x03\n" +
+	"\fplace_member\x12\x02idR9\n" +
 	"\x16\b\x012\x12view_place_members\n" +
-	"\x18(\x012\x14manage_place_membersZ\xb7\x02\n" +
+	"\x18(\x012\x14manage_place_members\x1a\x05placeZ\xb7\x02\n" +
 	"\auser_id\x12\x04role\x1aF\n" +
 	"\fplace_viewer\x12\vview_places\x12\x12view_place_members\x12\n" +
 	"view_cards\x12\tview_pins\x1a]\n" +
@@ -4596,38 +4596,38 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\vplace_admin\x12\vview_places\x12\vedit_places\x12\x12view_place_members\x12\x14manage_place_members\x12\n" +
 	"view_cards\x12\n" +
 	"edit_cards\x12\tview_pins\x12\tedit_pinsB\a\n" +
-	"\x05place\"\xf1\x01\n" +
+	"\x05place\"\xe8\x01\n" +
 	"\x04Card\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12C\n" +
-	"\x05board\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.BoardB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05board\x12C\n" +
-	"\x05space\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.SpaceB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05space\x12\x14\n" +
-	"\x05title\x18\x04 \x01(\tR\x05title:0\xa2\xbb\x18,\n" +
-	"\x04card\x12\x02idR \n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12;\n" +
+	"\x05board\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.BoardH\x00R\x05board\x12;\n" +
+	"\x05space\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.SpaceH\x00R\x05space\x12\x14\n" +
+	"\x05title\x18\x04 \x01(\tR\x05title:7\xa2\xbb\x183\n" +
+	"\x04card\x12\x02idR'\n" +
 	"\x0e\b\x012\n" +
 	"view_cards\n" +
 	"\x0e(\x012\n" +
-	"edit_cardsB\a\n" +
-	"\x05place\"\xa5\x01\n" +
+	"edit_cards\x1a\x05placeB\a\n" +
+	"\x05place\"\xa3\x01\n" +
 	"\bCardItem\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
-	"\x04card\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.CardB\x06\xaa\xbb\x18\x02Z\x00R\x04card\x12\x12\n" +
-	"\x04text\x18\x03 \x01(\tR\x04text:5\xa2\xbb\x181\n" +
-	"\tcard_item\x12\x02idR \n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x04card\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.CardR\x04card\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text:;\xa2\xbb\x187\n" +
+	"\tcard_item\x12\x02idR&\n" +
 	"\x0e\b\x012\n" +
 	"view_cards\n" +
 	"\x0e(\x012\n" +
-	"edit_cards\"\x94\x01\n" +
+	"edit_cards\x1a\x04card\"\x94\x01\n" +
 	"\bPlaceRef\x12;\n" +
 	"\x05board\x18\x01 \x01(\v2#.syncplane.testdata.access.v1.BoardH\x00R\x05board\x12;\n" +
 	"\x05space\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.SpaceH\x00R\x05space:\x04\xb2\xbb\x18\x00B\b\n" +
-	"\x06target\"\xa0\x01\n" +
+	"\x06target\"\x9f\x01\n" +
 	"\x03Pin\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
-	"\x05place\x18\x02 \x01(\v2&.syncplane.testdata.access.v1.PlaceRefB\x06\xaa\xbb\x18\x02Z\x00R\x05place\x12\x14\n" +
-	"\x05label\x18\x03 \x01(\tR\x05label:-\xa2\xbb\x18)\n" +
-	"\x03pin\x12\x02idR\x1e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12<\n" +
+	"\x05place\x18\x02 \x01(\v2&.syncplane.testdata.access.v1.PlaceRefR\x05place\x12\x14\n" +
+	"\x05label\x18\x03 \x01(\tR\x05label:4\xa2\xbb\x180\n" +
+	"\x03pin\x12\x02idR%\n" +
 	"\r\b\x012\tview_pins\n" +
-	"\r(\x012\tedit_pins\"\\\n" +
+	"\r(\x012\tedit_pins\x1a\x05place\"\\\n" +
 	"\x04Room\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name:0\xa2\xbb\x18,\n" +
@@ -4635,18 +4635,18 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x0e\b\x012\n" +
 	"view_rooms\n" +
 	"\x0e(\x012\n" +
-	"edit_rooms\"\xed\x03\n" +
+	"edit_rooms\"\xeb\x03\n" +
 	"\n" +
 	"RoomMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
-	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomB\x06\xaa\xbb\x18\x02Z\x00R\x04room\x12\x17\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomR\x04room\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\tR\x04role:\xe1\x02\xa2\xbb\x18\xdc\x02\n" +
-	"\vroom_member\x12\x02idRI\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xe7\x02\xa2\xbb\x18\xe2\x02\n" +
+	"\vroom_member\x12\x02idRO\n" +
 	"\x15\b\x012\x11view_room_members\n" +
 	"\x17(\x012\x13manage_room_members\n" +
 	"\x17 \x012\n" +
-	"view_roomsB\auser_idZ\xfd\x01\n" +
+	"view_roomsB\auser_id\x1a\x04roomZ\xfd\x01\n" +
 	"\auser_id\x12\x04role\x1a8\n" +
 	"\vroom_viewer\x12\n" +
 	"view_rooms\x12\x11view_room_members\x12\n" +
@@ -4657,53 +4657,53 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x0eroom_moderator\x12\n" +
 	"view_rooms\x12\n" +
 	"edit_rooms\x12\x11view_room_members\x12\x13manage_room_members\x12\n" +
-	"view_posts\x12\x04post\x12\x0emoderate_posts\"\x8f\x02\n" +
+	"view_posts\x12\x04post\x12\x0emoderate_posts\"\x8d\x02\n" +
 	"\x04Post\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
-	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomB\x06\xaa\xbb\x18\x02Z\x00R\x04room\x12#\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomR\x04room\x12#\n" +
 	"\tauthor_id\x18\x03 \x01(\tB\x06\xaa\xbb\x18\x02b\x00R\bauthorId\x12\x12\n" +
 	"\x04body\x18\x04 \x01(\tR\x04body\x12\x14\n" +
-	"\x05title\x18\x05 \x01(\tR\x05title:h\xa2\xbb\x18d\n" +
-	"\x04post\x12\x02idRX\n" +
+	"\x05title\x18\x05 \x01(\tR\x05title:n\xa2\xbb\x18j\n" +
+	"\x04post\x12\x02idR^\n" +
 	"\x0e\b\x012\n" +
 	"view_posts\n" +
 	"\x15\x10\x01 \x012\x04postB\tauthor_id\n" +
 	"\x19\x18\x012\x04postB\tauthor_idJ\x04body\n" +
-	"\x14\x18\x01 \x012\x0emoderate_posts\"\xc0\x01\n" +
+	"\x14\x18\x01 \x012\x0emoderate_posts\x1a\x04room\"\xbe\x01\n" +
 	"\x05Draft\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
-	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomB\x06\xaa\xbb\x18\x02Z\x00R\x04room\x12#\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomR\x04room\x12#\n" +
 	"\tauthor_id\x18\x03 \x01(\tB\x06\xaa\xbb\x18\x02b\x00R\bauthorId\x12\x12\n" +
-	"\x04body\x18\x04 \x01(\tR\x04body:.\xa2\xbb\x18*\n" +
-	"\x05draft\x12\x02idR\x1d\n" +
+	"\x04body\x18\x04 \x01(\tR\x04body:4\xa2\xbb\x180\n" +
+	"\x05draft\x12\x02idR#\n" +
 	"\x1b\b\x01(\x012\n" +
-	"view_postsB\tauthor_id\"\x84\x02\n" +
+	"view_postsB\tauthor_id\x1a\x04room\"\x82\x02\n" +
 	"\x06Ticket\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
-	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomB\x06\xaa\xbb\x18\x02Z\x00R\x04room\x12\x1f\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomR\x04room\x12\x1f\n" +
 	"\vassignee_id\x18\x03 \x01(\tR\n" +
 	"assigneeId\x12\x16\n" +
 	"\x06status\x18\x04 \x01(\tR\x06status\x12\x14\n" +
-	"\x05title\x18\x05 \x01(\tR\x05title:[\xa2\xbb\x18W\n" +
-	"\x06ticket\x12\x02idRI\n" +
+	"\x05title\x18\x05 \x01(\tR\x05title:a\xa2\xbb\x18]\n" +
+	"\x06ticket\x12\x02idRO\n" +
 	"\x0e\b\x012\n" +
 	"view_posts\n" +
 	"\x12(\x012\x0emoderate_posts\n" +
 	"#\x18\x012\n" +
-	"view_postsB\vassignee_idJ\x06status\"c\n" +
+	"view_postsB\vassignee_idJ\x06status\x1a\x04room\"c\n" +
 	"\aSetting\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05theme\x18\x02 \x01(\tR\x05theme:)\xa2\xbb\x18%\n" +
 	"\asetting\x12\auser_idR\x11\n" +
 	"\x0f\b\x01(\x01:\x00B\auser_id\"\xc0\x02\n" +
 	"\x06Thread\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
-	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomB\x06\xaa\xbb\x18\x02Z\x00R\x04room\x12\x1a\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomR\x04room\x12\x1a\n" +
 	"\barchived\x18\x03 \x01(\bR\barchived\x12\x16\n" +
 	"\x06hidden\x18\x04 \x01(\bR\x06hidden\x12\x14\n" +
 	"\x05title\x18\x05 \x01(\tR\x05title\x12\x1c\n" +
-	"\x05notes\x18\x06 \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x05notes:~\xa2\xbb\x18z\n" +
-	"\x06thread\x12\x02idRl\n" +
+	"\x05notes\x18\x06 \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x05notes:\x85\x01\xa2\xbb\x18\x80\x01\n" +
+	"\x06thread\x12\x02idRr\n" +
 	" \b\x012\n" +
 	"view_postsR\x10\n" +
 	"\x0e\n" +
@@ -4712,7 +4712,7 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	" \x10\x01\x18\x01 \x012\x04postR\x12\n" +
 	"\x10\n" +
 	"\barchived\x10\x01\x1a\x02(\x00\n" +
-	"\x12(\x012\x0emoderate_posts\"\xb5\x01\n" +
+	"\x12(\x012\x0emoderate_posts\x1a\x04room\"\xb5\x01\n" +
 	"\bBulletin\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12#\n" +
 	"\tauthor_id\x18\x02 \x01(\tB\x06\xaa\xbb\x18\x02b\x00R\bauthorId\x12\x16\n" +
@@ -4729,15 +4729,15 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x05squad\x12\x02idR$\n" +
 	"\x0f\b\x012\vview_squads\n" +
 	"\x11(\x012\rmanage_squadsb\x0e\n" +
-	"\fsquad_member\"\xa5\x02\n" +
+	"\fsquad_member\"\xa4\x02\n" +
 	"\vSquadMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12A\n" +
-	"\x05squad\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.SquadB\x06\xaa\xbb\x18\x02Z\x00R\x05squad\x12\x17\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x129\n" +
+	"\x05squad\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.SquadR\x05squad\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\tR\x04role:\x95\x01\xa2\xbb\x18\x90\x01\n" +
-	"\fsquad_member\x12\x02idR$\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\x9c\x01\xa2\xbb\x18\x97\x01\n" +
+	"\fsquad_member\x12\x02idR+\n" +
 	"\x0f\b\x012\vview_squads\n" +
-	"\x11(\x012\rmanage_squadsZV\n" +
+	"\x11(\x012\rmanage_squads\x1a\x05squadZV\n" +
 	"\auser_id\x12\x04role\x1a\x1b\n" +
 	"\fsquad_member\x12\vview_squads\x1a(\n" +
 	"\n" +
@@ -4748,19 +4748,19 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x0e\b\x012\n" +
 	"view_repos\n" +
 	"\x0e(\x012\n" +
-	"edit_repos\"\xb2\x04\n" +
+	"edit_repos\"\xb0\x04\n" +
 	"\n" +
 	"RepoMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
-	"\x04repo\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RepoB\x06\xaa\xbb\x18\x02Z\x00R\x04repo\x12\x19\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x04repo\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RepoR\x04repo\x12\x19\n" +
 	"\auser_id\x18\x03 \x01(\tH\x00R\x06userId\x12;\n" +
 	"\x05squad\x18\x04 \x01(\v2#.syncplane.testdata.access.v1.SquadH\x00R\x05squad\x12\x12\n" +
-	"\x04role\x18\x05 \x01(\tR\x04role:\xdd\x02\xa2\xbb\x18\xd8\x02\n" +
-	"\vrepo_member\x12\x02idRI\n" +
+	"\x04role\x18\x05 \x01(\tR\x04role:\xe3\x02\xa2\xbb\x18\xde\x02\n" +
+	"\vrepo_member\x12\x02idRO\n" +
 	"\x15\b\x012\x11view_repo_members\n" +
 	"\x17(\x012\x13manage_repo_members\n" +
 	"\x17 \x012\n" +
-	"view_reposB\auser_idZ\xf9\x01\n" +
+	"view_reposB\auser_id\x1a\x04repoZ\xf9\x01\n" +
 	"\x06member\x12\x04role\x1a9\n" +
 	"\vrepo_reader\x12\n" +
 	"view_repos\x12\x11view_repo_members\x12\vview_issues\x1aF\n" +
@@ -4770,38 +4770,38 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"repo_admin\x12\n" +
 	"view_repos\x12\n" +
 	"edit_repos\x12\x11view_repo_members\x12\x13manage_repo_members\x12\vview_issues\x12\vedit_issuesB\b\n" +
-	"\x06member\"\xb0\x02\n" +
+	"\x06member\"\xaf\x02\n" +
 	"\tRepoSquad\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
-	"\x04repo\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RepoB\x06\xaa\xbb\x18\x02Z\x00R\x04repo\x129\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x04repo\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RepoR\x04repo\x129\n" +
 	"\x05squad\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.SquadR\x05squad\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\tR\x04role:\x83\x01\xa2\xbb\x18\x7f\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\x8a\x01\xa2\xbb\x18\x85\x01\n" +
 	"\n" +
-	"repo_squad\x12\x02idR0\n" +
+	"repo_squad\x12\x02idR6\n" +
 	"\x15\b\x012\x11view_repo_members\n" +
-	"\x17(\x012\x13manage_repo_membersZ;\n" +
+	"\x17(\x012\x13manage_repo_members\x1a\x04repoZ;\n" +
 	"\x05squad\x12\x04role\x1a,\n" +
 	"\x11repo_squad_reader\x12\n" +
-	"view_repos\x12\vview_issues\"\xa2\x01\n" +
+	"view_repos\x12\vview_issues\"\xa0\x01\n" +
 	"\x05Issue\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
-	"\x04repo\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RepoB\x06\xaa\xbb\x18\x02Z\x00R\x04repo\x12\x14\n" +
-	"\x05title\x18\x03 \x01(\tR\x05title:3\xa2\xbb\x18/\n" +
-	"\x05issue\x12\x02idR\"\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x126\n" +
+	"\x04repo\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RepoR\x04repo\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:9\xa2\xbb\x185\n" +
+	"\x05issue\x12\x02idR(\n" +
 	"\x0f\b\x012\vview_issues\n" +
-	"\x0f(\x012\vedit_issues\"4\n" +
+	"\x0f(\x012\vedit_issues\x1a\x04repo\"4\n" +
 	"\aCommons\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id:\x19\xa2\xbb\x18\x15\n" +
 	"\acommons\x12\x02idR\x06\n" +
-	"\x04\b\x01:\x00\"\x83\x03\n" +
+	"\x04\b\x01:\x00\"\x84\x03\n" +
 	"\rCommonsMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
-	"\acommons\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.CommonsB\x06\xaa\xbb\x18\x02Z\x00R\acommons\x12\x17\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12?\n" +
+	"\acommons\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.CommonsR\acommons\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\tR\x04role:\xeb\x01\xa2\xbb\x18\xe6\x01\n" +
-	"\x0ecommons_member\x12\x02idR6\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xf4\x01\xa2\xbb\x18\xef\x01\n" +
+	"\x0ecommons_member\x12\x02idR?\n" +
 	"\x18\b\x012\x14view_commons_members\n" +
-	"\x1a(\x012\x16manage_commons_membersZ\x97\x01\n" +
+	"\x1a(\x012\x16manage_commons_members\x1a\acommonsZ\x97\x01\n" +
 	"\auser_id\x12\x04role\x1a\x85\x01\n" +
 	"\x0ecommons_member\x12\x14view_commons_members\x12\x10view_initiatives\x12\x10edit_initiatives\x12\x17view_initiative_members\x12\x0fview_milestones\x12\x0fedit_milestones\"\xeb\x02\n" +
 	"\aSteward\x12\x0e\n" +
@@ -4812,52 +4812,54 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x11\b\x012\rview_stewards\n" +
 	"\x13(\x012\x0fmanage_stewardsZ\xe3\x01\n" +
 	"\auser_id\x12\x04role\x1a\xd1\x01\n" +
-	"\asteward\x12\rview_stewards\x12\x0fmanage_stewards\x12\x14view_commons_members\x12\x16manage_commons_members\x12\x10view_initiatives\x12\x10edit_initiatives\x12\x17view_initiative_members\x12\x19manage_initiative_members\x12\x0fview_milestones\x12\x0fedit_milestones\"\xbd\x01\n" +
+	"\asteward\x12\rview_stewards\x12\x0fmanage_stewards\x12\x14view_commons_members\x12\x16manage_commons_members\x12\x10view_initiatives\x12\x10edit_initiatives\x12\x17view_initiative_members\x12\x19manage_initiative_members\x12\x0fview_milestones\x12\x0fedit_milestones\"\xbe\x01\n" +
 	"\n" +
 	"Initiative\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
-	"\acommons\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.CommonsB\x06\xaa\xbb\x18\x02Z\x00R\acommons\x12\x12\n" +
-	"\x04name\x18\x03 \x01(\tR\x04name:B\xa2\xbb\x18>\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12?\n" +
+	"\acommons\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.CommonsR\acommons\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name:K\xa2\xbb\x18G\n" +
 	"\n" +
-	"initiative\x12\x02idR,\n" +
+	"initiative\x12\x02idR5\n" +
 	"\x14\b\x012\x10view_initiatives\n" +
-	"\x14(\x012\x10edit_initiatives\"\xb6\x04\n" +
+	"\x14(\x012\x10edit_initiatives\x1a\acommons\"\xba\x04\n" +
 	"\x10InitiativeMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12P\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12H\n" +
 	"\n" +
-	"initiative\x18\x02 \x01(\v2(.syncplane.testdata.access.v1.InitiativeB\x06\xaa\xbb\x18\x02Z\x00R\n" +
+	"initiative\x18\x02 \x01(\v2(.syncplane.testdata.access.v1.InitiativeR\n" +
 	"initiative\x12\x19\n" +
 	"\auser_id\x18\x03 \x01(\tH\x00R\x06userId\x12;\n" +
 	"\x05squad\x18\x04 \x01(\v2#.syncplane.testdata.access.v1.SquadH\x00R\x05squad\x12\x12\n" +
-	"\x04role\x18\x05 \x01(\tR\x04role:\xc9\x02\xa2\xbb\x18\xc4\x02\n" +
-	"\x11initiative_member\x12\x02idR<\n" +
+	"\x04role\x18\x05 \x01(\tR\x04role:\xd5\x02\xa2\xbb\x18\xd0\x02\n" +
+	"\x11initiative_member\x12\x02idRH\n" +
 	"\x1b\b\x012\x17view_initiative_members\n" +
-	"\x1d(\x012\x19manage_initiative_membersZ\xec\x01\n" +
+	"\x1d(\x012\x19manage_initiative_members\x1a\n" +
+	"initiativeZ\xec\x01\n" +
 	"\x06member\x12\x04role\x1aO\n" +
 	"\x11initiative_reader\x12\x10view_initiatives\x12\x17view_initiative_members\x12\x0fview_milestones\x1a7\n" +
 	"\x11initiative_writer\x12\x0fedit_milestones\x1a\x11initiative_reader\x1aR\n" +
 	"\x10initiative_admin\x12\x10edit_initiatives\x12\x19manage_initiative_members\x1a\x11initiative_writerB\b\n" +
-	"\x06member\"\xc4\x01\n" +
+	"\x06member\"\xc8\x01\n" +
 	"\tMilestone\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12P\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12H\n" +
 	"\n" +
-	"initiative\x18\x02 \x01(\v2(.syncplane.testdata.access.v1.InitiativeB\x06\xaa\xbb\x18\x02Z\x00R\n" +
+	"initiative\x18\x02 \x01(\v2(.syncplane.testdata.access.v1.InitiativeR\n" +
 	"initiative\x12\x14\n" +
-	"\x05title\x18\x03 \x01(\tR\x05title:?\xa2\xbb\x18;\n" +
-	"\tmilestone\x12\x02idR*\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:K\xa2\xbb\x18G\n" +
+	"\tmilestone\x12\x02idR6\n" +
 	"\x13\b\x012\x0fview_milestones\n" +
-	"\x13(\x012\x0fedit_milestones\"A\n" +
+	"\x13(\x012\x0fedit_milestones\x1a\n" +
+	"initiative\"A\n" +
 	"\aAccount\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id:&\xa2\xbb\x18\"\n" +
 	"\aaccount\x12\x02idR\x13\n" +
-	"\x11\b\x012\rview_accounts\"\xf5\x02\n" +
+	"\x11\b\x012\rview_accounts\"\xf6\x02\n" +
 	"\rAccountMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
-	"\aaccount\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.AccountB\x06\xaa\xbb\x18\x02Z\x00R\aaccount\x12\x17\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12?\n" +
+	"\aaccount\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.AccountR\aaccount\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\tR\x04role:\xdd\x01\xa2\xbb\x18\xd8\x01\n" +
-	"\x0eaccount_member\x12\x02idR\x13\n" +
-	"\x11\b\x012\rview_accountsZ\xac\x01\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xe6\x01\xa2\xbb\x18\xe1\x01\n" +
+	"\x0eaccount_member\x12\x02idR\x1c\n" +
+	"\x11\b\x012\rview_accounts\x1a\aaccountZ\xac\x01\n" +
 	"\auser_id\x12\x04role\x1a.\n" +
 	"\x0eaccount_viewer\x12\rview_accounts\x12\rview_invoices\x1a/\n" +
 	"\x0eaccount_editor\x12\redit_invoices\x1a\x0eaccount_viewer\x1a:\n" +
@@ -4870,21 +4872,21 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x10\b\x012\fview_billersZk\n" +
 	"\auser_id\x12\x04role\x1a,\n" +
 	"\x0ebilling_reader\x12\fview_billers\x12\fread_billing\x1a,\n" +
-	"\rbilling_clerk\x12\vuse_billing\x1a\x0ebilling_reader\"\xce\x01\n" +
+	"\rbilling_clerk\x12\vuse_billing\x1a\x0ebilling_reader\"\xcf\x01\n" +
 	"\aInvoice\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
-	"\aaccount\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.AccountB\x06\xaa\xbb\x18\x02Z\x00R\aaccount\x12\x14\n" +
-	"\x05title\x18\x03 \x01(\tR\x05title:T\xa2\xbb\x18P\n" +
-	"\ainvoice\x12\x02idRA\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12?\n" +
+	"\aaccount\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.AccountR\aaccount\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:]\xa2\xbb\x18Y\n" +
+	"\ainvoice\x12\x02idRJ\n" +
 	"\x1f\b\x012\rview_invoices2\fread_billing\n" +
-	"\x1e(\x012\redit_invoices2\vuse_billing\"\xca\x01\n" +
+	"\x1e(\x012\redit_invoices2\vuse_billing\x1a\aaccount\"\xcb\x01\n" +
 	"\x06Charge\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
-	"\ainvoice\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.InvoiceB\x06\xaa\xbb\x18\x02Z\x00R\ainvoice\x12\x12\n" +
-	"\x04memo\x18\x03 \x01(\tR\x04memo:S\xa2\xbb\x18O\n" +
-	"\x06charge\x12\x02idRA\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12?\n" +
+	"\ainvoice\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.InvoiceR\ainvoice\x12\x12\n" +
+	"\x04memo\x18\x03 \x01(\tR\x04memo:\\\xa2\xbb\x18X\n" +
+	"\x06charge\x12\x02idRJ\n" +
 	"\x1f\b\x012\rview_invoices2\fread_billing\n" +
-	"\x1e(\x012\redit_invoices2\vuse_billing\"N\n" +
+	"\x1e(\x012\redit_invoices2\vuse_billing\x1a\ainvoice\"N\n" +
 	"\aProduct\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id:3\xa2\xbb\x18/\n" +
 	"\aproduct\x12\x02idR \n" +
@@ -4905,25 +4907,25 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x0e\b\x012\n" +
 	"view_lanes\n" +
 	"\x0e(\x012\n" +
-	"edit_lanes\"\x93\x01\n" +
+	"edit_lanes\"\x94\x01\n" +
 	"\x05Topic\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12E\n" +
-	"\aparents\x18\x02 \x03(\v2#.syncplane.testdata.access.v1.TopicB\x06\xaa\xbb\x18\x02Z\x00R\aparents:3\xa2\xbb\x18/\n" +
-	"\x05topic\x12\x02idR\"\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12=\n" +
+	"\aparents\x18\x02 \x03(\v2#.syncplane.testdata.access.v1.TopicR\aparents:<\xa2\xbb\x188\n" +
+	"\x05topic\x12\x02idR+\n" +
 	"\x0f\b\x012\vview_topics\n" +
-	"\x0f(\x012\vedit_topics\"\xdb\x05\n" +
+	"\x0f(\x012\vedit_topics\x1a\aparents\"\xc1\x05\n" +
 	"\n" +
 	"LaneMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12I\n" +
-	"\aproduct\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProductB\x06\xaa\xbb\x18\x02Z\x00H\x00R\aproduct\x12C\n" +
-	"\x05cycle\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.CycleB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05cycle\x12C\n" +
-	"\x05shelf\x18\x04 \x01(\v2#.syncplane.testdata.access.v1.ShelfB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05shelf\x12C\n" +
-	"\x05topic\x18\x05 \x01(\v2#.syncplane.testdata.access.v1.TopicB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05topic\x12\x17\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12A\n" +
+	"\aproduct\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProductH\x00R\aproduct\x12;\n" +
+	"\x05cycle\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.CycleH\x00R\x05cycle\x12;\n" +
+	"\x05shelf\x18\x04 \x01(\v2#.syncplane.testdata.access.v1.ShelfH\x00R\x05shelf\x12;\n" +
+	"\x05topic\x18\x05 \x01(\v2#.syncplane.testdata.access.v1.TopicH\x00R\x05topic\x12\x17\n" +
 	"\auser_id\x18\x06 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\a \x01(\tR\x04role:\xed\x02\xa2\xbb\x18\xe8\x02\n" +
-	"\vlane_member\x12\x02idR0\n" +
+	"\x04role\x18\a \x01(\tR\x04role:\xf3\x02\xa2\xbb\x18\xee\x02\n" +
+	"\vlane_member\x12\x02idR6\n" +
 	"\x15\b\x012\x11view_lane_members\n" +
-	"\x17(\x012\x13manage_lane_membersZ\xa2\x02\n" +
+	"\x17(\x012\x13manage_lane_members\x1a\x04laneZ\xa2\x02\n" +
 	"\auser_id\x12\x04role\x1aV\n" +
 	"\vlane_viewer\x12\n" +
 	"view_lanes\x12\x11view_lane_members\x12\fview_stories\x12\rview_leaflets\x12\vview_topics\x1aD\n" +
@@ -4934,29 +4936,29 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"edit_lanes\x12\x13manage_lane_members\x1a\vlane_editor\x1a\flane_plannerB\x06\n" +
 	"\x04lane\"\x89\x02\n" +
 	"\x05Story\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
-	"\aproduct\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProductB\x06\xaa\xbb\x18\x02Z\x00R\aproduct\x12A\n" +
-	"\x05cycle\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.CycleB\x06\xaa\xbb\x18\x02Z\x00R\x05cycle\x12\x14\n" +
-	"\x05title\x18\x04 \x01(\tR\x05title:N\xa2\xbb\x18J\n" +
-	"\x05story\x12\x02idR=\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12?\n" +
+	"\aproduct\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProductR\aproduct\x129\n" +
+	"\x05cycle\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.CycleR\x05cycle\x12\x14\n" +
+	"\x05title\x18\x04 \x01(\tR\x05title:^\xa2\xbb\x18Z\n" +
+	"\x05story\x12\x02idRM\n" +
 	"\x10\b\x012\fview_stories\n" +
 	"\x10(\x012\fedit_stories\n" +
-	"\x17\x18\x012\fplan_storiesJ\x05cycle\"\xae\x01\n" +
+	"\x17\x18\x012\fplan_storiesJ\x05cycle\x1a\aproduct\x1a\x05cycle\"\xad\x01\n" +
 	"\tStoryNote\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12A\n" +
-	"\x05story\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.StoryB\x06\xaa\xbb\x18\x02Z\x00R\x05story\x12\x12\n" +
-	"\x04body\x18\x03 \x01(\tR\x04body::\xa2\xbb\x186\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x129\n" +
+	"\x05story\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.StoryR\x05story\x12\x12\n" +
+	"\x04body\x18\x03 \x01(\tR\x04body:A\xa2\xbb\x18=\n" +
 	"\n" +
-	"story_note\x12\x02idR$\n" +
+	"story_note\x12\x02idR+\n" +
 	"\x10\b\x012\fview_stories\n" +
-	"\x10(\x012\fedit_stories\"\xb1\x01\n" +
+	"\x10(\x012\fedit_stories\x1a\x05story\"\xb2\x01\n" +
 	"\aLeaflet\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12E\n" +
-	"\ashelves\x18\x02 \x03(\v2#.syncplane.testdata.access.v1.ShelfB\x06\xaa\xbb\x18\x02Z\x00R\ashelves\x12\x14\n" +
-	"\x05title\x18\x03 \x01(\tR\x05title:9\xa2\xbb\x185\n" +
-	"\aleaflet\x12\x02idR&\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12=\n" +
+	"\ashelves\x18\x02 \x03(\v2#.syncplane.testdata.access.v1.ShelfR\ashelves\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:B\xa2\xbb\x18>\n" +
+	"\aleaflet\x12\x02idR/\n" +
 	"\x11\b\x012\rview_leaflets\n" +
-	"\x11(\x012\redit_leaflets\"\xcc\x02\n" +
+	"\x11(\x012\redit_leaflets\x1a\ashelves\"\xcc\x02\n" +
 	"\x05Clerk\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
 	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x12\n" +
@@ -4978,23 +4980,23 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	")\b\x012\x12view_open_dossiersR\x11\n" +
 	"\x0f\n" +
 	"\aprivate\x10\x01\x1a\x02(\x00\n" +
-	"\x11\x18\x012\redit_dossiers\"\xe0\x02\n" +
+	"\x11\x18\x012\redit_dossiers\"\xe1\x02\n" +
 	"\rDossierMember\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
-	"\adossier\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.DossierB\x06\xaa\xbb\x18\x02Z\x00R\adossier\x12\x17\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12?\n" +
+	"\adossier\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.DossierR\adossier\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\tR\x04role:\xc8\x01\xa2\xbb\x18\xc3\x01\n" +
-	"\x0edossier_member\x12\x02idR/\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xd1\x01\xa2\xbb\x18\xcc\x01\n" +
+	"\x0edossier_member\x12\x02idR8\n" +
 	"\x11\b\x012\rview_dossiers\n" +
-	"\x1a(\x012\x16manage_dossier_membersZ|\n" +
+	"\x1a(\x012\x16manage_dossier_members\x1a\adossierZ|\n" +
 	"\auser_id\x12\x04role\x1a;\n" +
 	"\x0edossier_member\x12\rview_dossiers\x12\fview_matters\x12\fedit_matters\x1a.\n" +
-	"\x0edossier_editor\x12\rview_dossiers\x12\redit_dossiers\"\x85\x02\n" +
+	"\x0edossier_editor\x12\rview_dossiers\x12\redit_dossiers\"\x87\x02\n" +
 	"\x06Matter\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
-	"\adossier\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.DossierB\x06\xaa\xbb\x18\x02Z\x00R\adossier\x12\x14\n" +
-	"\x05title\x18\x03 \x01(\tR\x05title:\x8b\x01\xa2\xbb\x18\x86\x01\n" +
-	"\x06matter\x12\x02idRx\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12?\n" +
+	"\adossier\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.DossierR\adossier\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:\x95\x01\xa2\xbb\x18\x90\x01\n" +
+	"\x06matter\x12\x02idR\x81\x01\n" +
 	"\x10\b\x012\fview_matters\n" +
 	"3\b\x012\x11view_open_mattersZ\x1c\n" +
 	"\adossier\x1a\x11\n" +
@@ -5003,52 +5005,52 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"/(\x012\fedit_mattersZ\x1d\n" +
 	"\adossier\x1a\x12\n" +
 	"\x10\n" +
-	"\barchived\x10\x01\x1a\x02(\x00\"\x88\x02\n" +
+	"\barchived\x10\x01\x1a\x02(\x00\x1a\adossier\"\x88\x02\n" +
 	"\rMatterWatcher\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
-	"\x06matter\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.MatterB\x06\xaa\xbb\x18\x02Z\x00R\x06matter\x12\x17\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12<\n" +
+	"\x06matter\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.MatterR\x06matter\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\tR\x04role:t\xa2\xbb\x18p\n" +
-	"\x0ematter_watcher\x12\x02idR$\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:|\xa2\xbb\x18x\n" +
+	"\x0ematter_watcher\x12\x02idR,\n" +
 	"\x10\b\x012\fview_matters\n" +
-	"\x10(\x012\fedit_mattersZ4\n" +
+	"\x10(\x012\fedit_matters\x1a\x06matterZ4\n" +
 	"\auser_id\x12\x04role\x1a#\n" +
 	"\x0ematter_watcher\x12\x11view_open_matters\"\x84\x02\n" +
 	"\x04Memo\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
-	"\x06matter\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.MatterB\x06\xaa\xbb\x18\x02Z\x00R\x06matter\x12\x1a\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12<\n" +
+	"\x06matter\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.MatterR\x06matter\x12\x1a\n" +
 	"\x04body\x18\x03 \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x04body\x12\x14\n" +
-	"\x05title\x18\x04 \x01(\tR\x05title:t\xa2\xbb\x18p\n" +
-	"\x04memo\x12\x02idRd\n" +
+	"\x05title\x18\x04 \x01(\tR\x05title:|\xa2\xbb\x18x\n" +
+	"\x04memo\x12\x02idRl\n" +
 	"\x10\b\x012\fview_matters\n" +
 	"3\b\x012\x11view_open_mattersZ\x1c\n" +
 	"\adossier\x1a\x11\n" +
 	"\x0f\n" +
 	"\aprivate\x10\x01\x1a\x02(\x00\n" +
 	"\x1b\b\x01(\x01:\x00Z\x13\n" +
-	"\adossier\x12\bowner_id\"\xeb\x01\n" +
+	"\adossier\x12\bowner_id\x1a\x06matter\"\xeb\x01\n" +
 	"\x06Binder\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
-	"\x06parent\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.BinderB\x06\xaa\xbb\x18\x02Z\x00R\x06parent\x12!\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12<\n" +
+	"\x06parent\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.BinderR\x06parent\x12!\n" +
 	"\bowner_id\x18\x03 \x01(\tB\x06\xaa\xbb\x18\x02(\x01R\aownerId\x12\x14\n" +
-	"\x05title\x18\x04 \x01(\tR\x05title:R\xa2\xbb\x18N\n" +
-	"\x06binder\x12\x02idR@\n" +
+	"\x05title\x18\x04 \x01(\tR\x05title:Z\xa2\xbb\x18V\n" +
+	"\x06binder\x12\x02idRH\n" +
 	"\x10\b\x012\fview_binders\n" +
 	"\x10(\x012\fedit_binders\n" +
 	"\x1a\b\x01\x18\x01:\x00Z\x12\n" +
-	"\x06binder\x12\bowner_id\"\xc6\x01\n" +
+	"\x06binder\x12\bowner_id\x1a\x06parent\"\xc6\x01\n" +
 	"\x05Sheet\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
-	"\x06binder\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.BinderB\x06\xaa\xbb\x18\x02Z\x00R\x06binder\x12\x14\n" +
-	"\x05title\x18\x03 \x01(\tR\x05title:Q\xa2\xbb\x18M\n" +
-	"\x05sheet\x12\x02idR@\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12<\n" +
+	"\x06binder\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.BinderR\x06binder\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:Y\xa2\xbb\x18U\n" +
+	"\x05sheet\x12\x02idRH\n" +
 	"\x10\b\x012\fview_binders\n" +
 	"\x10(\x012\fedit_binders\n" +
 	"\x1a\b\x01(\x01:\x00Z\x12\n" +
-	"\x06binder\x12\bowner_id\"\xf3\x03\n" +
+	"\x06binder\x12\bowner_id\x1a\x06binder\"\xf4\x03\n" +
 	"\aExpense\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
-	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectB\x06\xaa\xbb\x18\x02Z\x00R\aproject\x12\x14\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12?\n" +
+	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectR\aproject\x12\x14\n" +
 	"\x05title\x18\x03 \x01(\tR\x05title\x12\x16\n" +
 	"\x06status\x18\x04 \x01(\tR\x06status\x12\x14\n" +
 	"\x05total\x18\x05 \x01(\x03R\x05total\x12'\n" +
@@ -5056,8 +5058,8 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"reporterId\x12\x14\n" +
 	"\x05notes\x18\a \x01(\tR\x05notes\x12\x1a\n" +
 	"\bestimate\x18\b \x01(\x05R\bestimate\x12\x16\n" +
-	"\x06closed\x18\t \x01(\bR\x06closed:\xd7\x01\xa2\xbb\x18\xd2\x01\n" +
-	"\aexpense\x12\x02idR\xc2\x01\n" +
+	"\x06closed\x18\t \x01(\bR\x06closed:\xe0\x01\xa2\xbb\x18\xdb\x01\n" +
+	"\aexpense\x12\x02idR\xcb\x01\n" +
 	"\x0e\b\x012\n" +
 	"view_tasks\n" +
 	"\x0e(\x012\n" +
@@ -5070,18 +5072,18 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"edit_tasks\x12 \x18\x012\n" +
 	"edit_tasksR\x10\n" +
 	"\x0e\n" +
-	"\x06closed\x10\x01\x1a\x02(\x00\"\xec\x03\n" +
+	"\x06closed\x10\x01\x1a\x02(\x00\x1a\aproject\"\xed\x03\n" +
 	"\x05Staff\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
-	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectB\x06\xaa\xbb\x18\x02Z\x00R\aproject\x12\x1c\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12?\n" +
+	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectR\aproject\x12\x1c\n" +
 	"\x04name\x18\x03 \x01(\tB\b\xaa\xbb\x18\x040\x018\x01R\x04name\x12\x1e\n" +
 	"\x06salary\x18\x04 \x01(\x03B\x06\xaa\xbb\x18\x020\x01R\x06salary\x12\x1e\n" +
 	"\x06review\x18\x05 \x01(\tB\x06\xaa\xbb\x18\x028\x01R\x06review\x12\x1b\n" +
 	"\tperson_id\x18\x06 \x01(\tR\bpersonId\x12\x14\n" +
 	"\x05bonus\x18\a \x01(\x03R\x05bonus\x12\x10\n" +
 	"\x03pin\x18\b \x01(\tR\x03pin\x12\x18\n" +
-	"\x03bio\x18\t \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x03bio:\xcc\x01\xa2\xbb\x18\xc7\x01\n" +
-	"\x05staff\x12\x02id2\x00R\xb7\x01\n" +
+	"\x03bio\x18\t \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x03bio:\xd5\x01\xa2\xbb\x18\xd0\x01\n" +
+	"\x05staff\x12\x02id2\x00R\xc0\x01\n" +
 	"\x0e\b\x012\n" +
 	"view_tasks\n" +
 	"\x0e(\x012\n" +
@@ -5092,7 +5094,7 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x03pin\x12\x0e(\x012\n" +
 	"edit_tasks\x12(\n" +
 	"\x03bio\x12\x11\b\x012\redit_projects\x12\x0e(\x012\n" +
-	"edit_tasks*Q\n" +
+	"edit_tasks\x1a\aproject*Q\n" +
 	"\bTeamRole\x12\x19\n" +
 	"\x15TEAM_ROLE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TEAM_ROLE_VIEWER\x10\x01\x12\x14\n" +

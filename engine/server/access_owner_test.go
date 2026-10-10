@@ -157,9 +157,7 @@ var _ = Describe("Access model registration of owner rules", func() {
 		}, `access allow[2] and allow[3] are the same rule`),
 		Entry("a creator field that is not a string", func(file *descriptorpb.FileDescriptorProto) {
 			post := messageNamed(file, "Post")
-			fieldNamed(post, "room").Options = withBehavior(&syncplanev1.FieldBehavior{
-				AccessParent: &syncplanev1.AccessParentOptions{}, Creator: &syncplanev1.CreatorOptions{},
-			})
+			fieldNamed(post, "room").Options = withBehavior(&syncplanev1.FieldBehavior{Creator: &syncplanev1.CreatorOptions{}})
 		}, `creator: field "room" is message; it must be a string`),
 		Entry("a creator mark on a key field", func(file *descriptorpb.FileDescriptorProto) {
 			fieldNamed(messageNamed(file, "Setting"), "user_id").Options = withBehavior(creatorMark())

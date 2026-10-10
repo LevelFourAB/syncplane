@@ -147,9 +147,11 @@ func withBehavior(b *syncplanev1.FieldBehavior) *descriptorpb.FieldOptions {
 	return opts
 }
 
-// accessParentMark is the option that marks a field access_parent.
-func accessParentMark() *descriptorpb.FieldOptions {
-	return withBehavior(&syncplanev1.FieldBehavior{AccessParent: &syncplanev1.AccessParentOptions{}})
+// entityOptionsOf returns the entity options of the named message of file, for
+// a change to edit in place.
+func entityOptionsOf(file *descriptorpb.FileDescriptorProto, message string) *syncplanev1.EntityOptions {
+	GinkgoHelper()
+	return proto.GetExtension(messageNamed(file, message).GetOptions(), syncplanev1.E_Entity).(*syncplanev1.EntityOptions)
 }
 
 var _ = Describe("Access model registration of a polymorphic access parent", func() {
@@ -179,22 +181,18 @@ var _ = Describe("Access model registration of a polymorphic access parent", fun
 		func(change func(*descriptorpb.FileDescriptorProto), want string) {
 			Expect(register(change)).To(MatchError(ContainSubstring(want)))
 		},
-		Entry("a oneof with a member that is not marked", func(file *descriptorpb.FileDescriptorProto) {
-			fieldNamed(messageNamed(file, "Card"), "space").Options = nil
-		}, `access_parent field "board" is a member of oneof "place", whose member "space" is not marked`),
-		Entry("a marked oneof member that is not a reference", func(file *descriptorpb.FileDescriptorProto) {
+		Entry("a member of a oneof named alone", func(file *descriptorpb.FileDescriptorProto) {
+			entityOptionsOf(file, "Card").Access.Parents = []string{"board"}
+		}, `access parents[0] names field "board", a member of oneof "place"; name the oneof`),
+		Entry("a oneof member that is not a reference", func(file *descriptorpb.FileDescriptorProto) {
 			// After space, since the members of a oneof are declared together.
 			card := messageNamed(file, "Card")
 			card.Field = slices.Insert(card.Field, 3, &descriptorpb.FieldDescriptorProto{
 				Name: proto.String("url"), JsonName: proto.String("url"), Number: proto.Int32(9),
 				Type: descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(), Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
-				OneofIndex: proto.Int32(0), Options: accessParentMark(),
+				OneofIndex: proto.Int32(0),
 			})
-		}, `access_parent field "url" must be a reference`),
-		Entry("a marked oneof on an entity without access", func(file *descriptorpb.FileDescriptorProto) {
-			card := messageNamed(file, "Card")
-			proto.GetExtension(card.GetOptions(), syncplanev1.E_Entity).(*syncplanev1.EntityOptions).Access = nil
-		}, `oneof "place" is marked access_parent, but the entity declares no access option`),
+		}, `access parents[0]: field "url" must be a reference`),
 		Entry("a polymorphic reference message with a workspace field", func(file *descriptorpb.FileDescriptorProto) {
 			ref := messageNamed(file, "PlaceRef")
 			ref.Field = append(ref.Field, &descriptorpb.FieldDescriptorProto{
@@ -202,7 +200,7 @@ var _ = Describe("Access model registration of a polymorphic access parent", fun
 				Type: descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(), Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
 				Options: withBehavior(&syncplanev1.FieldBehavior{Workspace: true}),
 			})
-		}, `access_parent field "place" is a reference message with a workspace field`),
+		}, `access parents[0]: field "place" is a reference message with a workspace field`),
 	)
 
 	// A pin on a board or in a space sits one hop below the root, and a pin on
@@ -216,7 +214,7 @@ var _ = Describe("Access model registration of a polymorphic access parent", fun
 				Type: descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(), Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
 				TypeName: proto.String(".syncplane.testdata.access.v1.CardItem"), OneofIndex: proto.Int32(0),
 			})
-		})).To(MatchError(ContainSubstring(`entity "pin" can sit 3 access_parent hops below an entity without a parent`)))
+		})).To(MatchError(ContainSubstring(`entity "pin" can sit 3 access parent hops below an entity without a parent`)))
 	})
 
 	It("treats a new case as a change to the access model", func() {

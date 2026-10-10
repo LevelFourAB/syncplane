@@ -21,8 +21,8 @@ import {
 	type AccessRuleDef,
 	type EntityDef,
 	entityDefOf,
+	entityOptionsOf,
 	type EntityRegistry,
-	fieldBehaviorOf,
 	fieldValueOf,
 	type GuardDef,
 	keyOf,
@@ -805,8 +805,8 @@ export function accessInputsOf(
 
 /**
  * The units a write changes to move a row of `def` to other access parents:
- * each marked field, and each oneof whose members are cases. Empty for an
- * entity without an access parent.
+ * each field and each oneof that `access.parents` names, by proto name, in
+ * field order. Empty for an entity without an access parent.
  */
 export function accessParentUnits(def: EntityDef): string[] {
 	return [ ...new Set(accessParentFields(def.schema).map((f) => f.oneof?.name ?? f.name)) ];
@@ -845,13 +845,17 @@ export function updateUnitsOf(schema: DescMessage, names: readonly string[]): st
 const parentFields = new WeakMap<DescMessage, readonly DescField[]>();
 
 /**
- * The fields of an entity marked `access_parent`: singular and repeated
- * fields, and the members of oneofs, in field order.
+ * The fields the entity's `access.parents` names, in field order: each named
+ * singular or repeated field, and every member of each named oneof. Empty for
+ * a message without an `access` option.
  */
 export function accessParentFields(schema: DescMessage): readonly DescField[] {
 	let fields = parentFields.get(schema);
 	if (fields === undefined) {
-		fields = schema.fields.filter((f) => fieldBehaviorOf(f)?.accessParent !== undefined);
+		const names = new Set(entityOptionsOf(schema)?.access?.parents ?? []);
+		fields = names.size === 0
+			? []
+			: schema.fields.filter((f) => names.has(f.oneof?.name ?? f.name));
 		parentFields.set(schema, fields);
 	}
 	return fields;

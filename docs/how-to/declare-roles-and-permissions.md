@@ -15,7 +15,7 @@ Start with one permission to read the rows of each entity and one to write them.
 
 ## 2. Declare the grant entities
 
-A grant entity holds one row per subject and role. Its rows apply at the row its `access_parent` field points at, or at the workspace root when it has no such field.
+A grant entity holds one row per subject and role. Its rows apply at the row its access parent points at, or at the workspace root when its `access` names no `parents`.
 
 ```proto
 message OrgMember {
@@ -55,6 +55,7 @@ message ProjectMember {
 			]
 		}
 		access: {
+			parents: [ "project" ]
 			allow: [
 				{ read: true requires: "view_roster" },
 				{ write: true requires: "manage_roster" }
@@ -62,7 +63,7 @@ message ProjectMember {
 		}
 	};
 	string id = 1;
-	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Project project = 2;
 	string user_id = 3;
 	string role = 4;
 }
@@ -80,7 +81,7 @@ First choose how your app uses teams:
 
 | Your app needs                                                     | Use                                                                                                           |
 | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
-| Each project belongs to one team                                   | Make `Team` the `access_parent` of `Project`, and grant roles on the team.                                    |
+| Each project belongs to one team                                   | Name `team` in the `parents` of `Project`, and grant roles on the team.                                       |
 | Teams come from your identity provider                             | Return the caller's groups from `WithCallerAccess`, such as `group:eng`, and grant to them.                   |
 | A team gets a role on projects that other teams or users also have | Team grants, below.                                                                                           |
 | A project is open to the whole workspace or to chosen teams        | [Share a project with the whole workspace or with chosen teams](share-with-the-workspace-or-chosen-teams.md). |
@@ -117,6 +118,7 @@ message TeamMember {
 			]
 		}
 		access: {
+			parents: [ "team" ]
 			allow: [
 				{ read: true requires: "view_teams" },
 				{ write: true requires: "manage_teams" }
@@ -124,7 +126,7 @@ message TeamMember {
 		}
 	};
 	string id = 1;
-	Team team = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Team team = 2;
 	string user_id = 3;
 	string role = 4;
 }
@@ -146,6 +148,7 @@ message ProjectMember {
 			]
 		}
 		access: {
+			parents: [ "project" ]
 			allow: [
 				{ read: true requires: "view_roster" },
 				{ write: true requires: "manage_roster" }
@@ -153,7 +156,7 @@ message ProjectMember {
 		}
 	};
 	string id = 1;
-	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Project project = 2;
 	oneof member {
 		string user_id = 3;
 		Team team = 4;
@@ -176,7 +179,7 @@ Before you ship, check these points:
 
 ## 3. Declare access on the entities the roles govern
 
-An entity that declares no `access` stays open to every caller that enters the workspace, so declare `access` on each entity whose rows a role decides, and leave the others alone. Mark the reference that places a row below another row with `access_parent`; the entity it points at must declare `access` too:
+An entity that declares no `access` stays open to every caller that enters the workspace, so declare `access` on each entity whose rows a role decides, and leave the others alone. Name the reference that places a row below another row in `parents`; the entity it points at must declare `access` too:
 
 ```proto
 message Project {
@@ -199,6 +202,7 @@ message Task {
 		name: "task"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "project" ]
 			allow: [
 				{ read: true requires: "view_tasks" },
 				{ write: true requires: "edit_tasks" }
@@ -206,7 +210,7 @@ message Task {
 		}
 	};
 	string id = 1;
-	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Project project = 2;
 	string title = 3;
 }
 ```
@@ -219,6 +223,7 @@ message Comment {
 		name: "comment"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "task" ]
 			allow: [
 				{ read: true requires: "view_tasks" },
 				{ write: true requires: "edit_tasks" }
@@ -226,7 +231,7 @@ message Comment {
 		}
 	};
 	string id = 1;
-	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Task task = 2;
 	string body = 3;
 }
 ```
@@ -239,6 +244,7 @@ message Folder {
 		name: "folder"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "parent" ]
 			allow: [
 				{ read: true requires: "view_folders" },
 				{ write: true requires: "edit_folders" }
@@ -246,13 +252,13 @@ message Folder {
 		}
 	};
 	string id = 1;
-	Folder parent = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Folder parent = 2;
 }
 ```
 
 A chain is at most `Limits.MaxAccessDepth` rows long (32 by default). The server refuses a folder moved below itself or below a chain that is already that long.
 
-A row can sit below one of several entities, such as a comment on a task or on a doc. Mark every member of a oneof with `access_parent`. The case a row holds decides where it sits:
+A row can sit below one of several entities, such as a comment on a task or on a doc. Name a oneof of references in `parents`. The case a row holds decides where it sits:
 
 ```proto
 message Comment {
@@ -260,6 +266,7 @@ message Comment {
 		name: "comment"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "subject" ]
 			allow: [
 				{ read: true requires: "view_comments" },
 				{ write: true requires: "edit_comments" }
@@ -268,18 +275,18 @@ message Comment {
 	};
 	string id = 1;
 	oneof subject {
-		Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
-		Doc doc = 3 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+		Task task = 2;
+		Doc doc = 3;
 	}
 	string body = 4;
 }
 ```
 
-The comment's rules apply in both cases. Add `view_comments` and `edit_comments` to the project roles and to the folder roles, so that a role in either tree reaches the comments below it. A reference message whose target is a oneof of entities works the same way: mark the field that holds it. See [Polymorphic access parents](../reference/proto-options.md#polymorphic-access-parents).
+The comment's rules apply in both cases. Add `view_comments` and `edit_comments` to the project roles and to the folder roles, so that a role in either tree reaches the comments below it. A reference message whose target is a oneof of entities works the same way: name the field that holds it. See [Polymorphic access parents](../reference/proto-options.md#polymorphic-access-parents).
 
 Registration refuses a schema with a permission no role grants, or a role that grants a permission nothing uses. Read the error: it names the permission and the entity.
 
-The TypeScript schema builder declares the same options with `access`, `grant` and `.accessParent()`; see the [TypeScript client reference](../reference/typescript-client.md#access-model). The builder has no `oneof` and no enum fields, so a subject that is a user or a team, a polymorphic access parent and an enum role field need a proto schema.
+The TypeScript schema builder declares the same options with `access`, its `parents` included, and `grant`; see the [TypeScript client reference](../reference/typescript-client.md#access-model). The builder has no `oneof` and no enum fields, so a subject that is a user or a team, a polymorphic access parent and an enum role field need a proto schema.
 
 ### Allow some operations and not others
 
@@ -293,6 +300,7 @@ message Comment {
 		name: "comment"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "task" ]
 			allow: [
 				{ read: true requires: "view_tasks" },
 				{ create: true requires: "post_comments" },
@@ -301,7 +309,7 @@ message Comment {
 		}
 	};
 	string id = 1;
-	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Task task = 2;
 	string body = 3;
 }
 ```
@@ -316,10 +324,13 @@ message Activity {
 	option (syncplane.v1.entity) = {
 		name: "activity"
 		key_fields: [ "id" ]
-		access: { allow: [ { read: true requires: "view_tasks" } ] }
+		access: {
+			parents: [ "task" ]
+			allow: [ { read: true requires: "view_tasks" } ]
+		}
 	};
 	string id = 1;
-	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Task task = 2;
 	string what = 3;
 }
 ```
@@ -334,6 +345,7 @@ message TaskNote {
 		name: "task_note"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "task" ]
 			allow: [
 				{ read: true requires: "view_tasks" },
 				{ create: true requires: "edit_tasks" }
@@ -341,7 +353,7 @@ message TaskNote {
 		}
 	};
 	string id = 1;
-	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Task task = 2;
 	string body = 3;
 }
 ```
@@ -382,6 +394,7 @@ message Task {
 		name: "task"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "project" ]
 			allow: [
 				{
 					read: true
@@ -399,7 +412,7 @@ message Task {
 		}
 	};
 	string id = 1;
-	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Project project = 2;
 	bool archived = 3;
 	bool hidden = 4;
 }
@@ -467,6 +480,7 @@ Add `within` to a rule to admit only rows that sit within a row that passes a ch
    		name: "task"
    		key_fields: [ "id" ]
    		access: {
+   			parents: [ "project" ]
    			allow: [
    				{ read: true requires: "view_tasks" },
    				{
@@ -489,7 +503,7 @@ Add `within` to a rule to admit only rows that sit within a row that passes a ch
    		}
    	};
    	string id = 1;
-   	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+   	Project project = 2;
    }
 
    message Comment {
@@ -497,6 +511,7 @@ Add `within` to a rule to admit only rows that sit within a row that passes a ch
    		name: "comment"
    		key_fields: [ "id" ]
    		access: {
+   			parents: [ "task" ]
    			allow: [
    				{ read: true requires: "view_tasks" },
    				{
@@ -517,7 +532,7 @@ Add `within` to a rule to admit only rows that sit within a row that passes a ch
    		}
    	};
    	string id = 1;
-   	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+   	Task task = 2;
    }
    ```
 
@@ -567,6 +582,7 @@ message Task {
 		name: "task"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "project" ]
 			allow: [
 				{ read: true requires: "view_tasks" },
 				{ write: true requires: [ "edit_tasks", "use_billing" ] }
@@ -574,7 +590,7 @@ message Task {
 		}
 	};
 	string id = 1;
-	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Project project = 2;
 }
 ```
 
@@ -601,6 +617,7 @@ message Task {
 		name: "task"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "project" ]
 			allow: [
 				{ read: true requires: "view_tasks" },
 				{ write: true requires: "edit_tasks" }
@@ -618,7 +635,7 @@ message Task {
 		}
 	};
 	string id = 1;
-	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Project project = 2;
 	string title = 3;
 	string status = 4;
 	int64 cost = 5;
@@ -642,6 +659,7 @@ message Staff {
 		name: "staff"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "project" ]
 			allow: [
 				{ read: true requires: "view_staff" },
 				{ write: true requires: "edit_staff" }
@@ -660,7 +678,7 @@ message Staff {
 		}
 	};
 	string id = 1;
-	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Project project = 2;
 	string name = 3;
 	int64 salary = 4;
 	string review = 5;
@@ -679,7 +697,7 @@ On the client, `can(schema, key, 'read', { fields: [ 'salary' ] })` predicts whe
 
 ### Put a row below several parents
 
-Mark each reference that places the row, or mark a repeated reference. Here a task sits below its project and below its milestone, and a milestone planner attaches tasks to milestones without the right to edit them:
+Name each reference that places the row in `parents`, or name a repeated reference. Here a task sits below its project and below its milestone, and a milestone planner attaches tasks to milestones without the right to edit them:
 
 ```proto
 message Task {
@@ -687,6 +705,7 @@ message Task {
 		name: "task"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "project", "milestone" ]
 			allow: [
 				{ read: true requires: "view_tasks" },
 				{ write: true requires: "edit_tasks" },
@@ -699,9 +718,8 @@ message Task {
 		}
 	};
 	string id = 1;
-	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
-	Milestone milestone = 3
-		[(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Project project = 2;
+	Milestone milestone = 3;
 }
 ```
 
@@ -712,7 +730,7 @@ message Task {
 - For a list, such as `repeated Space spaces`, add or remove one space with a `PATCH` whose mask names `spaces.<key>`. Two clients that add a space at the same time keep both.
 - A grant entity keeps one parent. Write one grant row for each row where a role applies.
 
-In the TypeScript schema builder, mark each field with `.accessParent()`, on a `ref()` or a `refList()`. `canCreate()` answers `'yes'` only when the client can place the permission through each parent of the new row.
+In the TypeScript schema builder, name each `ref()` or `refList()` field in `access.parents`, by accessor name. `canCreate()` answers `'yes'` only when the client can place the permission through each parent of the new row.
 
 ### Moving and deleting rows that other rows sit below
 

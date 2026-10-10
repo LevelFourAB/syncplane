@@ -182,12 +182,12 @@ func (x *EntityOptions) GetMembers() *MembersOptions {
 // Declares who can read and write the rows of an entity in the access model.
 //
 // A caller holds a permission at an anchor: the workspace root, or one row
-// that a grant row's `access_parent` field points at. A permission held at
-// an anchor applies to the anchor row and to every row below it: the rows
-// whose `access_parent` fields point at it, the rows whose `access_parent`
-// fields point at those, and so on. A row whose `access_parent` fields are
-// unset, or name only rows that do not exist, has no parent and never falls
-// back to the workspace root. See `GrantOptions` and `AccessParentOptions`.
+// that a grant row's access parent points at. A permission held at an anchor
+// applies to the anchor row and to every row below it: the rows whose access
+// parents point at it, the rows whose access parents point at those, and so
+// on. A row whose access parents are unset, or name only rows that do not
+// exist, has no parent and never falls back to the workspace root. See
+// `parents` and `GrantOptions`.
 //
 // An operation on a row is allowed when at least one rule in `allow` admits
 // it. A rule only adds access: no rule takes away what another rule allows,
@@ -200,14 +200,17 @@ func (x *EntityOptions) GetMembers() *MembersOptions {
 //	message Comment {
 //	  option (syncplane.v1.entity) = {
 //	    name: "comment" key_fields: ["id"]
-//	    access: { allow: [
-//	      { read: true requires: "view_tasks" },
-//	      { create: true requires: "comment" },
-//	      { update: true delete: true requires: "moderate_comments" }
-//	    ] }
+//	    access: {
+//	      parents: ["task"]
+//	      allow: [
+//	        { read: true requires: "view_tasks" },
+//	        { create: true requires: "comment" },
+//	        { update: true delete: true requires: "moderate_comments" }
+//	      ]
+//	    }
 //	  };
 //	  string id = 1;
-//	  Task task = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//	  Task task = 2;
 //	}
 //
 // ```
@@ -224,6 +227,54 @@ type AccessOptions struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The rules. At least one, and no two the same.
 	Allow []*AccessRule `protobuf:"bytes,1,rep,name=allow,proto3" json:"allow,omitempty"`
+	// The access parents: references that place each row below another row.
+	//
+	// A permission held at the referenced row applies to the referencing row
+	// and to every row below it. The referenced row can have access parents
+	// of its own, and an entity can be its own access parent. An entity with
+	// no parents sits at the workspace root.
+	//
+	// Each entry names a top-level field outside any `oneof`, or a `oneof`,
+	// and no two entries are the same. A field is a reference: its type is an
+	// entity message, or a reference message without a `workspace` field. It
+	// can be repeated, but not a map. Each member of a named `oneof` is such a
+	// reference. A `FieldGuard` cannot name a parent.
+	//
+	// A row sits below every row its parents name, and a permission held at
+	// any of them, or at a row above any of them, applies to the row:
+	//
+	// ```protobuf
+	//
+	//	message Task {
+	//	  option (syncplane.v1.entity) = {
+	//	    name: "task" key_fields: ["id"]
+	//	    access: {
+	//	      parents: ["project", "milestone", "labels"]
+	//	      allow: [
+	//	        { read: true requires: "view_tasks" },
+	//	        { write: true requires: "edit_tasks" }
+	//	      ]
+	//	    }
+	//	  };
+	//	  string id = 1;
+	//	  Project project = 2;
+	//	  Milestone milestone = 3;
+	//	  repeated Label labels = 4;
+	//	}
+	//
+	// ```
+	//
+	// A write that adds or removes a parent needs its rule where that parent
+	// sits; see `AccessRule`. A write fails when the row would name more rows
+	// than the server's `MaxAccessParents` limit allows, or would sit below
+	// itself. A grant entity names at most one parent, and not a repeated
+	// field.
+	//
+	// A polymorphic parent points at one of several entities: a `oneof` of
+	// references, or a field whose reference message holds a `oneof` of
+	// entities. The case a row holds names the row it sits below, and a row
+	// that holds no case has no parent there.
+	Parents []string `protobuf:"bytes,3,rep,name=parents,proto3" json:"parents,omitempty"`
 	// The field guards: each one restricts who can read and who can write a
 	// set of fields, whatever rule in `allow` admits the read or the write. A
 	// field that no guard names follows `allow` alone. See `FieldGuard`.
@@ -265,6 +316,13 @@ func (*AccessOptions) Descriptor() ([]byte, []int) {
 func (x *AccessOptions) GetAllow() []*AccessRule {
 	if x != nil {
 		return x.Allow
+	}
+	return nil
+}
+
+func (x *AccessOptions) GetParents() []string {
+	if x != nil {
+		return x.Parents
 	}
 	return nil
 }
@@ -439,16 +497,19 @@ func (x *FieldGuard) GetAllow() []*AccessRule {
 //	message Comment {
 //	  option (syncplane.v1.entity) = {
 //	    name: "comment" key_fields: ["id"]
-//	    access: { allow: [
-//	      { read: true requires: "view_tasks" },
-//	      { create: true delete: true
-//	        requires: "comment" caller_is: "author_id" },
-//	      { update: true requires: "comment"
-//	        caller_is: "author_id" fields: ["body"] }
-//	    ] }
+//	    access: {
+//	      parents: ["task"]
+//	      allow: [
+//	        { read: true requires: "view_tasks" },
+//	        { create: true delete: true
+//	          requires: "comment" caller_is: "author_id" },
+//	        { update: true requires: "comment"
+//	          caller_is: "author_id" fields: ["body"] }
+//	      ]
+//	    }
 //	  };
 //	  string id = 1;
-//	  Task task = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//	  Task task = 2;
 //	  string author_id = 3 [(syncplane.v1.field_behavior).creator = {}];
 //	  string body = 4;
 //	}
@@ -673,33 +734,39 @@ func (x *AccessRule) GetWithin() []*AccessWithin {
 //	message Task {
 //	  option (syncplane.v1.entity) = {
 //	    name: "task" key_fields: ["id"]
-//	    access: { allow: [
-//	      { read: true requires: "view_tasks" },
-//	      { read: true requires: "view_open_tasks"
-//	        within: { entity: "project"
-//	          when: { cmp: { path: ["private"] op: CMP_OP_EQ
-//	            value: { bool_value: false } } } } },
-//	      { write: true requires: "edit_tasks"
-//	        within: { entity: "project"
-//	          when: { cmp: { path: ["archived"] op: CMP_OP_EQ
-//	            value: { bool_value: false } } } } }
-//	    ] }
+//	    access: {
+//	      parents: ["project"]
+//	      allow: [
+//	        { read: true requires: "view_tasks" },
+//	        { read: true requires: "view_open_tasks"
+//	          within: { entity: "project"
+//	            when: { cmp: { path: ["private"] op: CMP_OP_EQ
+//	              value: { bool_value: false } } } } },
+//	        { write: true requires: "edit_tasks"
+//	          within: { entity: "project"
+//	            when: { cmp: { path: ["archived"] op: CMP_OP_EQ
+//	              value: { bool_value: false } } } } }
+//	      ]
+//	    }
 //	  };
 //	  string id = 1;
-//	  Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//	  Project project = 2;
 //	}
 //
 //	message Comment {
 //	  option (syncplane.v1.entity) = {
 //	    name: "comment" key_fields: ["id"]
-//	    access: { allow: [
-//	      { read: true requires: "view_docs" },
-//	      { write: true requires: "view_docs"
-//	        within: { entity: "doc" caller_is: "owner_id" } }
-//	    ] }
+//	    access: {
+//	      parents: ["doc"]
+//	      allow: [
+//	        { read: true requires: "view_docs" },
+//	        { write: true requires: "view_docs"
+//	          within: { entity: "doc" caller_is: "owner_id" } }
+//	      ]
+//	    }
 //	  };
 //	  string id = 1;
-//	  Doc doc = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//	  Doc doc = 2;
 //	}
 //
 // ```
@@ -827,11 +894,11 @@ func (*AdmittedCaller) Descriptor() ([]byte, []int) {
 //
 // Each row gives the subject in its `subject` field the role in its `role`
 // field. The subject is one caller, or every member of a team. The role
-// applies at the row's anchor: the row that its `access_parent` field points
-// at, or the workspace root when the entity has no `access_parent` field. A
+// applies at the row's anchor: the row that its access parent points at, or
+// the workspace root when the entity has no access parent. A
 // row grants nothing when its subject is empty or names a team that does not
-// exist, its role is not declared in `roles`, or its `access_parent` field is
-// unset or names a row that does not exist.
+// exist, its role is not declared in `roles`, or its access parent is unset
+// or names a row that does not exist.
 //
 // ```protobuf
 //
@@ -846,13 +913,16 @@ func (*AdmittedCaller) Descriptor() ([]byte, []int) {
 //	        "edit_tasks"] }
 //	      ]
 //	    }
-//	    access: { allow: [
-//	      { read: true requires: "view_members" },
-//	      { write: true requires: "manage_members" }
-//	    ] }
+//	    access: {
+//	      parents: ["project"]
+//	      allow: [
+//	        { read: true requires: "view_members" },
+//	        { write: true requires: "manage_members" }
+//	      ]
+//	    }
 //	  };
 //	  string id = 1;
-//	  Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//	  Project project = 2;
 //	  string user_id = 3;
 //	  string role = 4;
 //	}
@@ -877,7 +947,7 @@ func (*AdmittedCaller) Descriptor() ([]byte, []int) {
 // anchor, and of the new role at the new anchor. A caller can therefore grant
 // and revoke only what it holds itself. Every write path, trusted ones
 // included, refuses a grant row with an empty subject, an undeclared role, or
-// no `access_parent` on an entity that has one.
+// no access parent on an entity that names one.
 //
 // Registration refuses unknown fields inside this message and inside `Role`.
 type GrantOptions struct {
@@ -1071,13 +1141,16 @@ func (x *Role) GetIncludes() []string {
 //	        { name: "team_lead" grants: ["view_teams", "manage_teams"] }
 //	      ]
 //	    }
-//	    access: { allow: [
-//	      { read: true requires: "view_teams" },
-//	      { write: true requires: "manage_teams" }
-//	    ] }
+//	    access: {
+//	      parents: ["team"]
+//	      allow: [
+//	        { read: true requires: "view_teams" },
+//	        { write: true requires: "manage_teams" }
+//	      ]
+//	    }
 //	  };
 //	  string id = 1;
-//	  Team team = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//	  Team team = 2;
 //	  string user_id = 3;
 //	  string role = 4;
 //	}
@@ -1093,9 +1166,9 @@ func (x *Role) GetIncludes() []string {
 type MembersOptions struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The name of the entity whose rows make members. It is a grant entity
-	// whose `access_parent` field is a reference to this entity and to no
-	// other, and whose subject is one `string` field, so a team cannot be a
-	// member of a team.
+	// whose access parent is a reference to this entity and to no other, and
+	// whose subject is one `string` field, so a team cannot be a member of a
+	// team.
 	Entity        string `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1138,90 +1211,6 @@ func (x *MembersOptions) GetEntity() string {
 	return ""
 }
 
-// Marks a reference that places each row of an entity below another row in
-// the access model.
-//
-// A permission held at the referenced row applies to the referencing row and
-// to every row below it. The referenced row can have access parents of its
-// own, and an entity can be its own access parent.
-//
-// Each marked field is a top-level field, or a member of a `oneof` whose
-// members are all marked. Each is a reference: its type is an entity message,
-// or a reference message without a `workspace` field. A marked field cannot
-// be a map or be named by a `FieldGuard`.
-//
-// An entity can mark several fields, and a marked field can be repeated. A
-// row then sits below every row its marked fields name, and a permission held
-// at any of them, or at a row above any of them, applies to the row:
-//
-// ```protobuf
-//
-//	message Task {
-//	  option (syncplane.v1.entity) = {
-//	    name: "task" key_fields: ["id"]
-//	    access: { allow: [
-//	      { read: true requires: "view_tasks" },
-//	      { write: true requires: "edit_tasks" }
-//	    ] }
-//	  };
-//	  string id = 1;
-//	  Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
-//	  Milestone milestone = 3
-//	    [(syncplane.v1.field_behavior).access_parent = {}];
-//	  repeated Label labels = 4
-//	    [(syncplane.v1.field_behavior).access_parent = {}];
-//	}
-//
-// ```
-//
-// A write that adds or removes a parent needs its rule where that parent
-// sits; see `AccessRule`. A write fails when the row would name more rows
-// than the server's `MaxAccessParents` limit allows, or would sit below
-// itself. A grant entity has one access parent: one singular field, or the
-// members of one `oneof`.
-//
-// A polymorphic parent points at one of several entities: a marked `oneof`,
-// or a marked field whose reference message holds a `oneof` of entities. The
-// case a row holds names the row it sits below, and a row that holds no case
-// has no parent there.
-//
-// Registration refuses unknown fields inside this message.
-type AccessParentOptions struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *AccessParentOptions) Reset() {
-	*x = AccessParentOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[9]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *AccessParentOptions) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*AccessParentOptions) ProtoMessage() {}
-
-func (x *AccessParentOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[9]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use AccessParentOptions.ProtoReflect.Descriptor instead.
-func (*AccessParentOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{9}
-}
-
 // Marks a field that records who created the row.
 //
 // On a create that is not trusted, the server stores the caller's primary
@@ -1243,7 +1232,7 @@ type CreatorOptions struct {
 
 func (x *CreatorOptions) Reset() {
 	*x = CreatorOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[10]
+	mi := &file_syncplane_v1_options_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1255,7 +1244,7 @@ func (x *CreatorOptions) String() string {
 func (*CreatorOptions) ProtoMessage() {}
 
 func (x *CreatorOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[10]
+	mi := &file_syncplane_v1_options_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1268,7 +1257,7 @@ func (x *CreatorOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreatorOptions.ProtoReflect.Descriptor instead.
 func (*CreatorOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{10}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{9}
 }
 
 // Enables server-side field history tracking for an entity.
@@ -1293,7 +1282,7 @@ type HistoryOptions struct {
 
 func (x *HistoryOptions) Reset() {
 	*x = HistoryOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[11]
+	mi := &file_syncplane_v1_options_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1305,7 +1294,7 @@ func (x *HistoryOptions) String() string {
 func (*HistoryOptions) ProtoMessage() {}
 
 func (x *HistoryOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[11]
+	mi := &file_syncplane_v1_options_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1318,7 +1307,7 @@ func (x *HistoryOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryOptions.ProtoReflect.Descriptor instead.
 func (*HistoryOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{11}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{10}
 }
 
 // Declares a message as a reference message: the stored shape of a typed
@@ -1398,7 +1387,7 @@ type ReferenceOptions struct {
 
 func (x *ReferenceOptions) Reset() {
 	*x = ReferenceOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[12]
+	mi := &file_syncplane_v1_options_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1410,7 +1399,7 @@ func (x *ReferenceOptions) String() string {
 func (*ReferenceOptions) ProtoMessage() {}
 
 func (x *ReferenceOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[12]
+	mi := &file_syncplane_v1_options_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1423,7 +1412,7 @@ func (x *ReferenceOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReferenceOptions.ProtoReflect.Descriptor instead.
 func (*ReferenceOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{12}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{11}
 }
 
 // Specifies a single field read during full-text search.
@@ -1440,7 +1429,7 @@ type SearchField struct {
 
 func (x *SearchField) Reset() {
 	*x = SearchField{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[13]
+	mi := &file_syncplane_v1_options_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1452,7 +1441,7 @@ func (x *SearchField) String() string {
 func (*SearchField) ProtoMessage() {}
 
 func (x *SearchField) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[13]
+	mi := &file_syncplane_v1_options_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1465,7 +1454,7 @@ func (x *SearchField) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchField.ProtoReflect.Descriptor instead.
 func (*SearchField) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{13}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SearchField) GetPath() string {
@@ -1506,7 +1495,7 @@ type SearchSpec struct {
 
 func (x *SearchSpec) Reset() {
 	*x = SearchSpec{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[14]
+	mi := &file_syncplane_v1_options_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1518,7 +1507,7 @@ func (x *SearchSpec) String() string {
 func (*SearchSpec) ProtoMessage() {}
 
 func (x *SearchSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[14]
+	mi := &file_syncplane_v1_options_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1531,7 +1520,7 @@ func (x *SearchSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchSpec.ProtoReflect.Descriptor instead.
 func (*SearchSpec) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{14}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *SearchSpec) GetField() []*SearchField {
@@ -1568,7 +1557,7 @@ type IndexKey struct {
 
 func (x *IndexKey) Reset() {
 	*x = IndexKey{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[15]
+	mi := &file_syncplane_v1_options_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1580,7 +1569,7 @@ func (x *IndexKey) String() string {
 func (*IndexKey) ProtoMessage() {}
 
 func (x *IndexKey) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[15]
+	mi := &file_syncplane_v1_options_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1593,7 +1582,7 @@ func (x *IndexKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexKey.ProtoReflect.Descriptor instead.
 func (*IndexKey) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{15}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *IndexKey) GetPath() string {
@@ -1628,7 +1617,7 @@ type IndexSpec struct {
 
 func (x *IndexSpec) Reset() {
 	*x = IndexSpec{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[16]
+	mi := &file_syncplane_v1_options_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1640,7 +1629,7 @@ func (x *IndexSpec) String() string {
 func (*IndexSpec) ProtoMessage() {}
 
 func (x *IndexSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[16]
+	mi := &file_syncplane_v1_options_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1653,7 +1642,7 @@ func (x *IndexSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexSpec.ProtoReflect.Descriptor instead.
 func (*IndexSpec) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{16}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *IndexSpec) GetName() string {
@@ -1755,10 +1744,6 @@ type FieldBehavior struct {
 	// field that holds a polymorphic reference message gives its name to
 	// the reverse relation of every case.
 	ReverseRelation string `protobuf:"bytes,10,opt,name=reverse_relation,json=reverseRelation,proto3" json:"reverse_relation,omitempty"`
-	// Places each row below the row that this reference points at in the
-	// access model, or below each row that a repeated reference points at.
-	// See `AccessParentOptions`.
-	AccessParent *AccessParentOptions `protobuf:"bytes,11,opt,name=access_parent,json=accessParent,proto3" json:"access_parent,omitempty"`
 	// Stores the subject of the caller who creates the row. See
 	// `CreatorOptions`.
 	Creator       *CreatorOptions `protobuf:"bytes,12,opt,name=creator,proto3" json:"creator,omitempty"`
@@ -1768,7 +1753,7 @@ type FieldBehavior struct {
 
 func (x *FieldBehavior) Reset() {
 	*x = FieldBehavior{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[17]
+	mi := &file_syncplane_v1_options_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1780,7 +1765,7 @@ func (x *FieldBehavior) String() string {
 func (*FieldBehavior) ProtoMessage() {}
 
 func (x *FieldBehavior) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[17]
+	mi := &file_syncplane_v1_options_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1793,7 +1778,7 @@ func (x *FieldBehavior) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FieldBehavior.ProtoReflect.Descriptor instead.
 func (*FieldBehavior) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{17}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *FieldBehavior) GetOpaque() bool {
@@ -1857,13 +1842,6 @@ func (x *FieldBehavior) GetReverseRelation() string {
 		return x.ReverseRelation
 	}
 	return ""
-}
-
-func (x *FieldBehavior) GetAccessParent() *AccessParentOptions {
-	if x != nil {
-		return x.AccessParent
-	}
-	return nil
 }
 
 func (x *FieldBehavior) GetCreator() *CreatorOptions {
@@ -1940,9 +1918,10 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x06access\x18\n" +
 	" \x01(\v2\x1b.syncplane.v1.AccessOptionsR\x06access\x120\n" +
 	"\x05grant\x18\v \x01(\v2\x1a.syncplane.v1.GrantOptionsR\x05grant\x126\n" +
-	"\amembers\x18\f \x01(\v2\x1c.syncplane.v1.MembersOptionsR\amembersJ\x04\b\x04\x10\x05J\x04\b\a\x10\bJ\x04\b\b\x10\tR\rdelete_policyR\rcreate_policyR\rupdate_policy\"o\n" +
+	"\amembers\x18\f \x01(\v2\x1c.syncplane.v1.MembersOptionsR\amembersJ\x04\b\x04\x10\x05J\x04\b\a\x10\bJ\x04\b\b\x10\tR\rdelete_policyR\rcreate_policyR\rupdate_policy\"\x89\x01\n" +
 	"\rAccessOptions\x12.\n" +
-	"\x05allow\x18\x01 \x03(\v2\x18.syncplane.v1.AccessRuleR\x05allow\x12.\n" +
+	"\x05allow\x18\x01 \x03(\v2\x18.syncplane.v1.AccessRuleR\x05allow\x12\x18\n" +
+	"\aparents\x18\x03 \x03(\tR\aparents\x12.\n" +
 	"\x05guard\x18\x02 \x03(\v2\x18.syncplane.v1.FieldGuardR\x05guard\"T\n" +
 	"\n" +
 	"FieldGuard\x12\x16\n" +
@@ -1976,8 +1955,7 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x06grants\x18\x02 \x03(\tR\x06grants\x12\x1a\n" +
 	"\bincludes\x18\x03 \x03(\tR\bincludes\"(\n" +
 	"\x0eMembersOptions\x12\x16\n" +
-	"\x06entity\x18\x01 \x01(\tR\x06entity\"\x15\n" +
-	"\x13AccessParentOptions\"\x10\n" +
+	"\x06entity\x18\x01 \x01(\tR\x06entity\"\x10\n" +
 	"\x0eCreatorOptions\"\x10\n" +
 	"\x0eHistoryOptions\"\x12\n" +
 	"\x10ReferenceOptions\"!\n" +
@@ -1992,7 +1970,7 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x04desc\x18\x02 \x01(\bR\x04desc\"I\n" +
 	"\tIndexSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12(\n" +
-	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\xaa\x03\n" +
+	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\xf7\x02\n" +
 	"\rFieldBehavior\x12\x16\n" +
 	"\x06opaque\x18\x01 \x01(\bR\x06opaque\x12\x1b\n" +
 	"\tkey_field\x18\x02 \x03(\tR\bkeyField\x12\x1f\n" +
@@ -2006,9 +1984,8 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"searchable\x12\x1c\n" +
 	"\tworkspace\x18\t \x01(\bR\tworkspace\x12)\n" +
 	"\x10reverse_relation\x18\n" +
-	" \x01(\tR\x0freverseRelation\x12F\n" +
-	"\raccess_parent\x18\v \x01(\v2!.syncplane.v1.AccessParentOptionsR\faccessParent\x126\n" +
-	"\acreator\x18\f \x01(\v2\x1c.syncplane.v1.CreatorOptionsR\acreatorJ\x04\b\b\x10\tR\fwrite_policy:V\n" +
+	" \x01(\tR\x0freverseRelation\x126\n" +
+	"\acreator\x18\f \x01(\v2\x1c.syncplane.v1.CreatorOptionsR\acreatorJ\x04\b\b\x10\tJ\x04\b\v\x10\fR\fwrite_policyR\raccess_parent:V\n" +
 	"\x06entity\x12\x1f.google.protobuf.MessageOptions\x18\xb4\x87\x03 \x01(\v2\x1b.syncplane.v1.EntityOptionsR\x06entity:_\n" +
 	"\treference\x12\x1f.google.protobuf.MessageOptions\x18\xb6\x87\x03 \x01(\v2\x1e.syncplane.v1.ReferenceOptionsR\treference:c\n" +
 	"\x0efield_behavior\x12\x1d.google.protobuf.FieldOptions\x18\xb5\x87\x03 \x01(\v2\x1b.syncplane.v1.FieldBehaviorR\rfieldBehaviorBFZDgithub.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1b\x06proto3"
@@ -2025,7 +2002,7 @@ func file_syncplane_v1_options_proto_rawDescGZIP() []byte {
 	return file_syncplane_v1_options_proto_rawDescData
 }
 
-var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 18)
+var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_syncplane_v1_options_proto_goTypes = []any{
 	(*EntityOptions)(nil),               // 0: syncplane.v1.EntityOptions
 	(*AccessOptions)(nil),               // 1: syncplane.v1.AccessOptions
@@ -2036,23 +2013,22 @@ var file_syncplane_v1_options_proto_goTypes = []any{
 	(*GrantOptions)(nil),                // 6: syncplane.v1.GrantOptions
 	(*Role)(nil),                        // 7: syncplane.v1.Role
 	(*MembersOptions)(nil),              // 8: syncplane.v1.MembersOptions
-	(*AccessParentOptions)(nil),         // 9: syncplane.v1.AccessParentOptions
-	(*CreatorOptions)(nil),              // 10: syncplane.v1.CreatorOptions
-	(*HistoryOptions)(nil),              // 11: syncplane.v1.HistoryOptions
-	(*ReferenceOptions)(nil),            // 12: syncplane.v1.ReferenceOptions
-	(*SearchField)(nil),                 // 13: syncplane.v1.SearchField
-	(*SearchSpec)(nil),                  // 14: syncplane.v1.SearchSpec
-	(*IndexKey)(nil),                    // 15: syncplane.v1.IndexKey
-	(*IndexSpec)(nil),                   // 16: syncplane.v1.IndexSpec
-	(*FieldBehavior)(nil),               // 17: syncplane.v1.FieldBehavior
-	(*Condition)(nil),                   // 18: syncplane.v1.Condition
-	(*descriptorpb.MessageOptions)(nil), // 19: google.protobuf.MessageOptions
-	(*descriptorpb.FieldOptions)(nil),   // 20: google.protobuf.FieldOptions
+	(*CreatorOptions)(nil),              // 9: syncplane.v1.CreatorOptions
+	(*HistoryOptions)(nil),              // 10: syncplane.v1.HistoryOptions
+	(*ReferenceOptions)(nil),            // 11: syncplane.v1.ReferenceOptions
+	(*SearchField)(nil),                 // 12: syncplane.v1.SearchField
+	(*SearchSpec)(nil),                  // 13: syncplane.v1.SearchSpec
+	(*IndexKey)(nil),                    // 14: syncplane.v1.IndexKey
+	(*IndexSpec)(nil),                   // 15: syncplane.v1.IndexSpec
+	(*FieldBehavior)(nil),               // 16: syncplane.v1.FieldBehavior
+	(*Condition)(nil),                   // 17: syncplane.v1.Condition
+	(*descriptorpb.MessageOptions)(nil), // 18: google.protobuf.MessageOptions
+	(*descriptorpb.FieldOptions)(nil),   // 19: google.protobuf.FieldOptions
 }
 var file_syncplane_v1_options_proto_depIdxs = []int32{
-	16, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
-	11, // 1: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
-	14, // 2: syncplane.v1.EntityOptions.search:type_name -> syncplane.v1.SearchSpec
+	15, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
+	10, // 1: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
+	13, // 2: syncplane.v1.EntityOptions.search:type_name -> syncplane.v1.SearchSpec
 	1,  // 3: syncplane.v1.EntityOptions.access:type_name -> syncplane.v1.AccessOptions
 	6,  // 4: syncplane.v1.EntityOptions.grant:type_name -> syncplane.v1.GrantOptions
 	8,  // 5: syncplane.v1.EntityOptions.members:type_name -> syncplane.v1.MembersOptions
@@ -2060,25 +2036,24 @@ var file_syncplane_v1_options_proto_depIdxs = []int32{
 	2,  // 7: syncplane.v1.AccessOptions.guard:type_name -> syncplane.v1.FieldGuard
 	3,  // 8: syncplane.v1.FieldGuard.allow:type_name -> syncplane.v1.AccessRule
 	5,  // 9: syncplane.v1.AccessRule.admitted:type_name -> syncplane.v1.AdmittedCaller
-	18, // 10: syncplane.v1.AccessRule.when:type_name -> syncplane.v1.Condition
+	17, // 10: syncplane.v1.AccessRule.when:type_name -> syncplane.v1.Condition
 	4,  // 11: syncplane.v1.AccessRule.within:type_name -> syncplane.v1.AccessWithin
-	18, // 12: syncplane.v1.AccessWithin.when:type_name -> syncplane.v1.Condition
+	17, // 12: syncplane.v1.AccessWithin.when:type_name -> syncplane.v1.Condition
 	7,  // 13: syncplane.v1.GrantOptions.roles:type_name -> syncplane.v1.Role
-	13, // 14: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
-	15, // 15: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
-	9,  // 16: syncplane.v1.FieldBehavior.access_parent:type_name -> syncplane.v1.AccessParentOptions
-	10, // 17: syncplane.v1.FieldBehavior.creator:type_name -> syncplane.v1.CreatorOptions
-	19, // 18: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
-	19, // 19: syncplane.v1.reference:extendee -> google.protobuf.MessageOptions
-	20, // 20: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
-	0,  // 21: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
-	12, // 22: syncplane.v1.reference:type_name -> syncplane.v1.ReferenceOptions
-	17, // 23: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
-	24, // [24:24] is the sub-list for method output_type
-	24, // [24:24] is the sub-list for method input_type
-	21, // [21:24] is the sub-list for extension type_name
-	18, // [18:21] is the sub-list for extension extendee
-	0,  // [0:18] is the sub-list for field type_name
+	12, // 14: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
+	14, // 15: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
+	9,  // 16: syncplane.v1.FieldBehavior.creator:type_name -> syncplane.v1.CreatorOptions
+	18, // 17: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
+	18, // 18: syncplane.v1.reference:extendee -> google.protobuf.MessageOptions
+	19, // 19: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
+	0,  // 20: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
+	11, // 21: syncplane.v1.reference:type_name -> syncplane.v1.ReferenceOptions
+	16, // 22: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
+	23, // [23:23] is the sub-list for method output_type
+	23, // [23:23] is the sub-list for method input_type
+	20, // [20:23] is the sub-list for extension type_name
+	17, // [17:20] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_options_proto_init() }
@@ -2093,7 +2068,7 @@ func file_syncplane_v1_options_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_options_proto_rawDesc), len(file_syncplane_v1_options_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   18,
+			NumMessages:   17,
 			NumExtensions: 3,
 			NumServices:   0,
 		},

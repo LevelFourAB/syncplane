@@ -50,6 +50,7 @@ message WorkspaceMember {
 			} ]
 		}
 		access: {
+			parents: [ "commons" ]
 			allow: [
 				{ read: true requires: "view_members" },
 				{ write: true requires: "manage_members" }
@@ -57,13 +58,13 @@ message WorkspaceMember {
 		}
 	};
 	string id = 1;
-	Commons commons = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Commons commons = 2;
 	string user_id = 3;
 	string role = 4;
 }
 ```
 
-Workspace admins need their role at the root, so that it reaches restricted projects too. Declare a grant entity without an `access_parent` field for them, or return the role in `RootRoles` from `WithCallerAccess`:
+Workspace admins need their role at the root, so that it reaches restricted projects too. Declare a grant entity without `parents` for them, or return the role in `RootRoles` from `WithCallerAccess`:
 
 ```proto
 message Admin {
@@ -101,7 +102,7 @@ Do not use one grant entity for both roles. A `WorkspaceMember` row with an empt
 
 ## 2. Give the project an access parent at the commons
 
-Add a `commons` reference to the project, and mark it as the access parent. A project with `commons` set is shared. A project with `commons` empty is restricted:
+Add a `commons` reference to the project, and name it in `parents`. A project with `commons` set is shared. A project with `commons` empty is restricted:
 
 ```proto
 message Project {
@@ -109,6 +110,7 @@ message Project {
 		name: "project"
 		key_fields: [ "id" ]
 		access: {
+			parents: [ "commons" ]
 			allow: [
 				{ read: true requires: "view_projects" },
 				{ write: true requires: "edit_projects" }
@@ -116,12 +118,12 @@ message Project {
 		}
 	};
 	string id = 1;
-	Commons commons = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Commons commons = 2;
 	string name = 3;
 }
 ```
 
-Keep `Task` and `ProjectMember` as they are, with their `access_parent` on the project. A role on the commons row reaches them through a shared project.
+Keep `Task` and `ProjectMember` as they are, with `project` in their `parents`. A role on the commons row reaches them through a shared project.
 
 ## 3. Give roles on restricted projects to users and teams
 

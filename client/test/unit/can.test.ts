@@ -13,6 +13,8 @@ import { create, type DescMessage, type MessageInitShape, toBinary } from '@bufb
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+	accessParentFields,
+	accessParentUnits,
 	type CanAnswer,
 	countAccessChanges,
 	entitiesAboveOf,
@@ -454,6 +456,15 @@ describe('a row the client does not hold', () => {
 		expect(sets(entitiesAboveOf(entityDefOf(CardSchema)))).toMatchObject({
 			card: expect.arrayContaining([ 'board', 'space' ]),
 		});
+	});
+
+	it('reads the access parents from the entity option, a oneof as each of its members', () => {
+		expect(accessParentFields(CardSchema).map((f) => f.name)).toEqual([ 'board', 'space' ]);
+		expect(accessParentUnits(entityDefOf(CardSchema))).toEqual([ 'place' ]);
+		expect(accessParentFields(StorySchema).map((f) => f.name)).toEqual([ 'product', 'cycle' ]);
+		expect(accessParentUnits(entityDefOf(StorySchema))).toEqual([ 'product', 'cycle' ]);
+		expect(accessParentFields(SpaceSchema)).toEqual([]);
+		expect(accessParentFields(WidgetSchema)).toEqual([]);
 	});
 });
 

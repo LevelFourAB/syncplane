@@ -50,11 +50,17 @@ func orgSpecs() []server.DynamicEntity {
 			KeyFields: []string{"id"},
 			Fields: []server.DynamicField{
 				{Name: "id", Number: 1, Kind: str},
-				{Name: "project", Number: 2, Ref: "project", AccessParent: true},
+				{Name: "project", Number: 2, Ref: "project"},
 			},
-			Access: readWrite("view_tasks", "edit_tasks"),
+			Access: withParents(readWrite("view_tasks", "edit_tasks"), "project"),
 		},
 	}
+}
+
+// withParents sets the access parents of a and returns it.
+func withParents(a *syncplanev1.AccessOptions, parents ...string) *syncplanev1.AccessOptions {
+	a.Parents = parents
+	return a
 }
 
 // readWrite returns access options with one rule that admits reads by read
@@ -107,9 +113,9 @@ func commentSpec() server.DynamicEntity {
 		Name: "comment", KeyFields: []string{"id"},
 		Fields: []server.DynamicField{
 			{Name: "id", Number: 1, Kind: protoreflect.StringKind},
-			{Name: "task", Number: 2, Ref: "task", AccessParent: true},
+			{Name: "task", Number: 2, Ref: "task"},
 		},
-		Access: readWrite("view_tasks", "edit_tasks"),
+		Access: withParents(readWrite("view_tasks", "edit_tasks"), "task"),
 	}
 }
 
@@ -126,17 +132,17 @@ func withFolders(specs []server.DynamicEntity) []server.DynamicEntity {
 			Name: "folder", KeyFields: []string{"id"},
 			Fields: []server.DynamicField{
 				{Name: "id", Number: 1, Kind: str},
-				{Name: "parent", Number: 2, Ref: "folder", AccessParent: true},
+				{Name: "parent", Number: 2, Ref: "folder"},
 			},
-			Access: readWrite("view_files", "edit_files"),
+			Access: withParents(readWrite("view_files", "edit_files"), "parent"),
 		},
 		server.DynamicEntity{
 			Name: "file", KeyFields: []string{"id"},
 			Fields: []server.DynamicField{
 				{Name: "id", Number: 1, Kind: str},
-				{Name: "folder", Number: 2, Ref: "folder", AccessParent: true},
+				{Name: "folder", Number: 2, Ref: "folder"},
 			},
-			Access: readWrite("view_files", "edit_files"),
+			Access: withParents(readWrite("view_files", "edit_files"), "folder"),
 		},
 	)
 }
@@ -321,9 +327,9 @@ var _ = Describe("Access model registration", func() {
 			specNamed(specs, "project").Access = &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{
 				admittedRule("read"), permRule("edit_projects", "write"), permRule("view_projects", "read"),
 			}}
-			specNamed(specs, "task").Access = &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{
+			specNamed(specs, "task").Access.Allow = []*syncplanev1.AccessRule{
 				admittedRule("read", "write"), permRule("view_tasks", "read"), permRule("edit_tasks", "write"),
-			}}
+			}
 			specNamed(specs, "org_member").Access.Allow[0] = admittedRule("read")
 			specNamed(specs, "org_member").Access.Allow = append(specNamed(specs, "org_member").Access.Allow,
 				permRule("view_members", "read"))
@@ -332,10 +338,10 @@ var _ = Describe("Access model registration", func() {
 
 		It("registers rules that split the write operations across permissions", func() {
 			specs := orgSpecs()
-			specNamed(specs, "task").Access = &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{
+			specNamed(specs, "task").Access.Allow = []*syncplanev1.AccessRule{
 				permRule("view_tasks", "read"), permRule("view_tasks", "create"),
 				permRule("edit_tasks", "update", "delete"), permRule("edit_projects", "read"),
-			}}
+			}
 			Expect(register(specs)).To(Succeed())
 		})
 
@@ -350,13 +356,14 @@ var _ = Describe("Access model registration", func() {
 		It("refuses a chain of parent entities longer than MaxAccessDepth", func() {
 			srv = newBareServer(server.WithLimits(server.Limits{MaxAccessDepth: 1}))
 			Expect(register(append(orgSpecs(), commentSpec()))).To(MatchError(ContainSubstring(
-				`entity "comment" can sit 2 access_parent hops below an entity without a parent, more than MaxAccessDepth (1) allows`)))
+				`entity "comment" can sit 2 access parent hops below an entity without a parent, more than MaxAccessDepth (1) allows`)))
 		})
 
 		It("accepts two access parents", func() {
 			specs := orgSpecs()
 			task := specNamed(specs, "task")
-			task.Fields = append(task.Fields, server.DynamicField{Name: "other", Number: 3, Ref: "project", AccessParent: true})
+			task.Fields = append(task.Fields, server.DynamicField{Name: "other", Number: 3, Ref: "project"})
+			task.Access.Parents = append(task.Access.Parents, "other")
 			Expect(register(specs)).To(Succeed())
 		})
 
@@ -375,7 +382,7 @@ var _ = Describe("Access model registration", func() {
 			logs := &recordingHandler{}
 			srv = newBareServer(server.WithLogger(slog.New(logs)))
 			specs := withFolders(orgSpecs())
-			specNamed(specs, "file").Access = readWrite("view_tasks", "edit_files")
+			specNamed(specs, "file").Access.Allow = readWrite("view_tasks", "edit_files").Allow
 			Expect(register(specs)).To(Succeed())
 			Expect(logs.attrs("access model warning", "finding")).To(ConsistOf(
 				ContainSubstring(`permission "view_tasks"`),
@@ -408,18 +415,40 @@ var _ = Describe("Access model registration", func() {
 		Entry("a permission that is not an identifier", func(s []server.DynamicEntity) {
 			specNamed(s, "task").Access = readWrite("view-tasks", "edit_tasks")
 		}, `permission name "view-tasks" is not an identifier`),
-		Entry("an access parent on an entity without access", func(s []server.DynamicEntity) {
-			specNamed(s, "task").Access = nil
-		}, `field "project" is marked access_parent, but the entity declares no access option`),
+		Entry("an access parent that is not a field", func(s []server.DynamicEntity) {
+			specNamed(s, "task").Access.Parents = []string{"projekt"}
+		}, `access parents[0] names "projekt", which is not a field or a oneof of`),
+		Entry("an access parent that is not a reference", func(s []server.DynamicEntity) {
+			specNamed(s, "task").Access.Parents = []string{"id"}
+		}, `access parents[0]: field "id" must be a reference`),
+		Entry("an access parent named twice", func(s []server.DynamicEntity) {
+			specNamed(s, "task").Access.Parents = []string{"project", "project"}
+		}, `access parents[1] and parents[0] both name "project"`),
+		Entry("an access parent that is a map", func(s []server.DynamicEntity) {
+			task := specNamed(s, "task")
+			task.Fields = append(task.Fields, server.DynamicField{
+				Name: "tags", Number: 3, MapKey: protoreflect.StringKind, MapValue: protoreflect.StringKind,
+			})
+			task.Access.Parents = []string{"tags"}
+		}, `access parents[0] names field "tags", which is a map`),
 		Entry("a repeated access parent on a grant entity", func(s []server.DynamicEntity) {
 			member := specNamed(s, "org_member")
 			member.Fields = append(member.Fields, server.DynamicField{
-				Name: "projects", Number: 4, Ref: "project", Repeated: true, AccessParent: true,
+				Name: "projects", Number: 4, Ref: "project", Repeated: true,
 			})
+			member.Access.Parents = []string{"projects"}
 		}, `entity "org_member": a grant entity has one access parent`),
+		Entry("two access parents on a grant entity", func(s []server.DynamicEntity) {
+			member := specNamed(s, "org_member")
+			member.Fields = append(member.Fields,
+				server.DynamicField{Name: "project", Number: 4, Ref: "project"},
+				server.DynamicField{Name: "home", Number: 5, Ref: "project"},
+			)
+			member.Access.Parents = []string{"home", "project"}
+		}, `access parents names "project" and "home"`),
 		Entry("a workspace-qualified access parent", func(s []server.DynamicEntity) {
 			specNamed(s, "task").Fields[1].RefWorkspace = true
-		}, `access_parent field "project" is a reference message with a workspace field`),
+		}, `access parents[0]: field "project" is a reference message with a workspace field`),
 		Entry("unknown fields inside access", func(s []server.DynamicEntity) {
 			specNamed(s, "task").Access.ProtoReflect().SetUnknown(unknownField())
 		}, "access carries option fields this server does not know"),
@@ -521,7 +550,6 @@ var _ = Describe("Access model registration", func() {
 		Entry("an access parent outside the model", func(s []server.DynamicEntity) []server.DynamicEntity {
 			task := specNamed(s, "task")
 			task.Access = nil
-			task.Fields[1].AccessParent = false
 			return append(s, commentSpec())
 		}, `points at entity "task", which is not in the access model`),
 		Entry("a role declared by two entities", func(s []server.DynamicEntity) []server.DynamicEntity {
@@ -545,7 +573,7 @@ var _ = Describe("Access model registration", func() {
 			})
 		}, `grant role "org_guest" includes "org_admin", which is not a role of this grant`),
 		Entry("a permission that no role grants", func(s []server.DynamicEntity) []server.DynamicEntity {
-			specNamed(s, "task").Access = readWrite("view_tasks", "edit_everything")
+			specNamed(s, "task").Access.Allow = readWrite("view_tasks", "edit_everything").Allow
 			return s
 		}, `permission "edit_everything" of entity "task" is granted by no role`),
 	)
@@ -554,7 +582,7 @@ var _ = Describe("Access model registration", func() {
 		It("refuses New when an access parent is not registered", func() {
 			_, err := server.New(newTestStore(), server.WithEntities(&accessv1.OrgMember{}, &accessv1.Task{}))
 			Expect(err).To(MatchError(ContainSubstring(
-				"access_parent field \"project\" points at syncplane.testdata.access.v1.Project, which is not a registered entity")))
+				"access parent \"project\" points at syncplane.testdata.access.v1.Project, which is not a registered entity")))
 		})
 
 		It("refuses an enum role that is not a value of the enum", func() {
@@ -639,9 +667,6 @@ var _ = Describe("Access model registration", func() {
 			plain := orgSpecs()[1:]
 			for i := range plain {
 				plain[i].Access = nil
-				for j := range plain[i].Fields {
-					plain[i].Fields[j].AccessParent = false
-				}
 			}
 			Expect(register(plain)).To(Succeed())
 			Expect(register(orgSpecs())).To(MatchError(ContainSubstring("changes its access model")))

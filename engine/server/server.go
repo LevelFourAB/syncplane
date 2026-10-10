@@ -480,7 +480,7 @@ type Limits struct {
 	// Conditions selecting the same target rows share one pass, so the limit
 	// counts what a predicate WRITES rather than what it costs. Default 8.
 	MaxRelConditions int
-	// Maximum access_parent hops from a row up to a row without an access
+	// Maximum access parent hops from a row up to a row without an access
 	// parent, in a schema that uses the access model. Registration refuses an
 	// entity with a longer chain of parent entities, through any case of a
 	// polymorphic access parent. In a recursive chain,

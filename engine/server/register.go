@@ -50,9 +50,8 @@ type RegisterResult struct {
 // key_fields) is rejected without partially applying.
 //
 // A change to the access model of an entity that is already registered — its
-// access, grant or access_parent options, or the enum values its grant role
-// field matches — is rejected the same way unless opts include
-// AllowAccessChange. So is a set that declares the first role of a schema
+// access or grant options, or the enum values its grant role field matches —
+// is rejected the same way unless opts include AllowAccessChange. So is a set that declares the first role of a schema
 // that served callers without one, or removes the last role.
 func (s *Server) RegisterDescriptorSet(set []byte, opts ...RegisterOption) ([]string, error) {
 	r, err := s.registerDescriptorSet(set, opts...)
@@ -85,8 +84,8 @@ func registerConfigOf(opts []RegisterOption) registerConfig {
 }
 
 // AllowAccessChange lets a registration change the access model of an entity
-// that is already registered: its access, grant or access_parent options, or
-// the names of the enum values its grant role field matches. Every client
+// that is already registered: its access or grant options, or the names of
+// the enum values its grant role field matches. Every client
 // resyncs the rows the change affects.
 //
 // It also lets a registration declare the first role of a schema that served
