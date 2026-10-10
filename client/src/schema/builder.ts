@@ -843,7 +843,7 @@ export type AccessRuleDecl<F extends Fields = Fields> =
 		subject?: TextKeys<F>;
 		fields?: readonly FieldKeys<F>[];
 		when?(row: QueryRef<RowOf<F>>): Cond;
-		within?: WithinDecl | readonly WithinDecl[];
+		within?: WithinEntry<F> | readonly WithinEntry<F>[];
 	}
 	& (
 		| { requires: string | readonly [string, ...string[]]; admitted?: never }
@@ -857,13 +857,15 @@ export type AccessRuleDecl<F extends Fields = Fields> =
  * row above it through `.accessParent()` references, is such a row.
  *
  * `entity` names an entity of the same schema whose rows the rule's rows can
- * sit below, or the rule's own entity when its rows sit below rows of their
- * own. `subject` names a singular `text()` field of that entity, by accessor
- * name, that must hold one of the caller's subjects; `when` is a condition
- * that row must match, and reads only that row. At least one of the two is
- * set. Build an entry with `when` through {@link within}, which types the
- * condition against the entity's fields. A permission held at the root does
- * not skip the check.
+ * sit below, by its wire name or as a thunk that returns it. A thunk is
+ * called by `defineSchema()`, so it can name an entity declared later. For
+ * the rule's own entity, when its rows sit below rows of their own, use
+ * {@link SelfWithinDecl}. `subject` names a singular `text()` field of that
+ * entity, by accessor name, that must hold one of the caller's subjects;
+ * `when` is a condition that row must match, and reads only that row. At
+ * least one of the two is set. Build an entry with `when` through
+ * {@link within}, which types the condition against the entity's fields. A
+ * permission held at the root does not skip the check.
  *
  * A write to a row that changes whether it passes changes what the rows below
  * it show, as a move does, so it needs a read rule of each entity whose rows
@@ -886,14 +888,50 @@ export type AccessRuleDecl<F extends Fields = Fields> =
  * ```
  */
 export interface WithinDecl<F extends Fields = Fields> {
-	entity: string;
+	entity: string | (() => EntitySchema);
+	self?: never;
 	subject?: Extract<keyof F, string>;
 	when?(row: QueryRef<RowOf<F>>): Cond;
 }
 
 /**
+ * A within entry on rows of the rule's own entity, for an entity whose rows
+ * sit below rows of their own through an `.accessParent()` reference to
+ * itself. It means the same as a {@link WithinDecl} that names the entity,
+ * and types `subject` and `when` against the entity's fields.
+ *
+ * @example
+ * Folders that every caller reads when the folder, or a folder above it, is
+ * not private:
+ * ```ts
+ * const folder = schema.entity('folder', {
+ *   id: schema.text().key(),
+ *   parent: schema.ref(() => folder).accessParent(),
+ *   private: schema.bool(),
+ * }, {
+ *   access: {
+ *     allow: [
+ *       { read: true, requires: 'view_private' },
+ *       { read: true, admitted: true, within: { self: true, when: (f) => f.private.eq(false) } },
+ *     ],
+ *   },
+ * });
+ * ```
+ */
+export interface SelfWithinDecl<F extends Fields = Fields> {
+	self: true;
+	entity?: never;
+	subject?: TextKeys<F>;
+	when?(row: QueryRef<RowOf<F>>): Cond;
+}
+
+/** One entry of an access rule's `within`: {@link WithinDecl} or {@link SelfWithinDecl}. */
+export type WithinEntry<F extends Fields = Fields> = WithinDecl | SelfWithinDecl<F>;
+
+/**
  * Builds a within entry on rows of `target`, with `when` typed against its
- * fields. See {@link WithinDecl}.
+ * fields. See {@link WithinDecl}. Pass a thunk that returns the target when
+ * it is declared after the entity whose rule holds the entry.
  *
  * @example
  * Tasks that clerks read unless their project is private, and that nobody
@@ -909,23 +947,30 @@ export interface WithinDecl<F extends Fields = Fields> {
  *       {
  *         read: true,
  *         requires: 'view_open_tasks',
- *         within: schema.within(project, { when: (p) => p.private.eq(false) }),
+ *         within: schema.within(() => project, { when: (p) => p.private.eq(false) }),
  *       },
  *       {
  *         write: true,
  *         requires: 'edit_tasks',
- *         within: schema.within(project, { when: (p) => p.archived.eq(false) }),
+ *         within: schema.within(() => project, { when: (p) => p.archived.eq(false) }),
  *       },
  *     ],
  *   },
  * });
+ * const project = schema.entity('project', {
+ *   id: schema.text().key(),
+ *   private: schema.bool(),
+ *   archived: schema.bool(),
+ * }, {
+ *   access: { allow: [ { read: true, requires: 'view_tasks' } ] },
+ * });
  * ```
  */
 export function within<F extends Fields>(
-	target: EntitySchema<F>,
-	checks: Omit<WithinDecl<F>, 'entity'>,
+	target: EntitySchema<F> | (() => EntitySchema<F>),
+	checks: Omit<WithinDecl<F>, 'entity' | 'self'>,
 ): WithinDecl {
-	return { ...checks, entity: target.name } as WithinDecl;
+	return { ...checks, entity: typeof target === 'function' ? target : target.name } as WithinDecl;
 }
 
 /**
@@ -1218,9 +1263,9 @@ export interface EntityOptions<F extends Fields = Fields> {
 
 /**
  * Validates the access declarations of one entity against the rules the
- * engine enforces on one entity at registration. The rules that span entities
- * — coverage of permissions, unique role names, the parent's own place in the
- * model — need the whole schema, which only registration has.
+ * engine enforces on one entity at registration. defineSchema() checks the
+ * rules that span the entities of one schema, and registration the rest, such
+ * as coverage of permissions and unique role names.
  */
 function assertAccess(
 	entityName: string,
@@ -1229,7 +1274,7 @@ function assertAccess(
 ): void {
 	const where = `entity "${entityName}"`;
 	const access = options?.access;
-	if (access !== undefined) assertAccessRules(where, access, fields);
+	if (access !== undefined) assertAccessRules(where, entityName, access, fields, false);
 	const parents = Object.keys(fields).filter((key) => fields[key]!.spec.accessParent === true);
 	if (parents.length > 0 && access === undefined) {
 		throw new Error(
@@ -1337,10 +1382,18 @@ function assertRoleIncludes(where: string, roles: readonly RoleDecl[], names: Se
 const ACCESS_OPERATIONS = [ 'read', 'create', 'update', 'delete', 'write' ] as const;
 
 /**
- * Validates the rules of one entity's access declaration against the rules
- * the engine enforces on syncplane.v1.AccessOptions at registration.
+ * Validates the rules of entity `owner`'s access declaration against the rules
+ * the engine enforces on syncplane.v1.AccessOptions at registration. A within
+ * thunk is called only when `resolve` is set; until then a rule that holds one
+ * skips the check for repeated rules, which needs the entity it names.
  */
-function assertAccessRules(where: string, access: AccessDecl, fields: Fields): void {
+function assertAccessRules(
+	where: string,
+	owner: string,
+	access: AccessDecl,
+	fields: Fields,
+	resolve: boolean,
+): void {
 	// A plain-JS caller can pass a shape the types refuse, such as one with no
 	// `allow` array.
 	if (!Array.isArray(access.allow) || access.allow.length === 0) {
@@ -1402,7 +1455,8 @@ function assertAccessRules(where: string, access: AccessDecl, fields: Fields): v
 			}
 		}
 		const when = whenOf(at, rule.when, fields);
-		const within = withinKeysOf(at, rule);
+		const within = withinKeysOf(at, owner, rule, resolve);
+		if (within === undefined) return;
 		// The key is the rule as the proto message holds it: an operation left
 		// unset and one set to false encode the same, so they must collide, and
 		// the order of a requires, a fields or a within list does not count.
@@ -1423,61 +1477,98 @@ function assertAccessRules(where: string, access: AccessDecl, fields: Fields): v
 }
 
 /** A rule's within entries as a list. */
-function withinListOf(rule: AccessRuleDecl): readonly WithinDecl[] {
+function withinListOf(rule: AccessRuleDecl): readonly WithinEntry[] {
 	const within = rule.within;
 	if (within === undefined) return [];
-	return Array.isArray(within) ? within : [ within as WithinDecl ];
+	return Array.isArray(within) ? within : [ within as WithinEntry ];
+}
+
+/**
+ * The wire name of the entity that a within entry of a rule of entity `owner`
+ * names. A thunk is called only when `resolve` is set, because before
+ * defineSchema() the entity it returns can be one not declared yet; until then
+ * it reads as undefined, as does a thunk that returns nothing.
+ */
+function withinEntityOf(owner: string, w: WithinEntry, resolve: boolean): string | undefined {
+	if (w.self === true) return owner;
+	if (typeof w.entity !== 'function') return w.entity;
+	return resolve ? w.entity()?.name : undefined;
 }
 
 /**
  * Checks what a rule's within entries say by themselves, and returns a key for
- * each, sorted: an entity and at least one check, and no entry twice. That the
- * entity is in the schema and its fields fit the checks is
- * validateWithinTargets's to check. `at` names the rule in an error.
+ * each, sorted: an entity and at least one check, and no entry twice. Returns
+ * undefined when an entry names its entity with a thunk that `resolve` does
+ * not allow to call. That the entity is in the schema and its fields fit the
+ * checks is validateWithinTargets's to check. `at` names the rule in an error.
  */
-function withinKeysOf(at: string, rule: AccessRuleDecl): string[] {
+function withinKeysOf(
+	at: string,
+	owner: string,
+	rule: AccessRuleDecl,
+	resolve: boolean,
+): string[] | undefined {
 	const keys: string[] = [];
+	let lazy = false;
 	withinListOf(rule).forEach((w, j) => {
 		const where = `${at} within[${j}]`;
-		if (!w.entity) throw new Error(`${where}: names no entity`);
-		validateEntityName(w.entity, where);
+		// A plain-JS caller can set both, which the types refuse.
+		if (w.self !== undefined && w.entity !== undefined) {
+			throw new Error(`${where}: sets both self and entity; set one`);
+		}
+		if (w.self !== undefined && w.self !== true) throw new Error(`${where}: self must be true`);
+		if (w.self === undefined && !w.entity) throw new Error(`${where}: names no entity`);
+		const entity = withinEntityOf(owner, w, resolve);
+		if (entity !== undefined) validateEntityName(entity, where);
 		if (w.subject === undefined && w.when === undefined) {
 			throw new Error(`${where}: sets no check; set subject or when`);
+		}
+		if (entity === undefined) {
+			lazy = true;
+			return;
 		}
 		// The condition is keyed as built, before its paths are lowered, which
 		// needs the entity's fields.
 		const key = JSON.stringify([
-			w.entity,
+			entity,
 			w.subject ?? null,
 			w.when === undefined ? null : w.when(rootRef()),
 		]);
 		if (keys.includes(key)) throw new Error(`${where}: repeats an earlier entry`);
 		keys.push(key);
 	});
-	return keys.sort();
+	return lazy ? undefined : keys.sort();
 }
 
 /**
  * Checks each within entry of every rule against the entity it names: one of
  * `entities`, with a singular `text()` subject field, and a condition over its
- * fields that reads only its row. Whether the rule's rows can sit below that
- * entity's rows is the server's to check at registration.
+ * fields that reads only its row. Then checks the rules that hold a within
+ * thunk for repeats, which entity() could not. Whether the rule's rows can sit
+ * below that entity's rows is the server's to check at registration.
  */
 function validateWithinTargets(entities: readonly EntitySchema[]): void {
 	const byName = new Map(entities.map((e) => [ e.name, e ]));
 	for (const e of entities) {
+		let lazy = false;
 		e.access?.allow.forEach((rule, i) => {
 			withinListOf(rule).forEach((w, j) => {
 				const where = `entity "${e.name}" access.allow[${i}] within[${j}]`;
-				const target = byName.get(w.entity);
+				const name = withinEntityOf(e.name, w, true);
+				const target = name === undefined ? undefined : byName.get(name);
 				if (target === undefined) {
-					throw new Error(`${where}: names entity "${w.entity}", which is not part of this schema`);
+					throw new Error(
+						`${where}: names entity ${
+							name === undefined ? '<unresolved>' : `"${name}"`
+						}, which is not part of this schema`,
+					);
 				}
+				if (typeof w.entity === 'function') lazy = true;
 				if (w.subject !== undefined) {
 					const spec = target.fields[w.subject]?.spec;
 					if (spec === undefined) {
 						throw new Error(
-							`${where}: subject field "${w.subject}" is not declared on entity "${w.entity}"`,
+							`${where}: subject field "${w.subject}" is not declared on entity "${target.name}"`,
 						);
 					}
 					if (spec.kind !== 'scalar' || spec.scalar !== 'string' || spec.repeated) {
@@ -1487,6 +1578,73 @@ function validateWithinTargets(entities: readonly EntitySchema[]): void {
 				whenOf(where, w.when, target.fields);
 			});
 		});
+		if (lazy) assertAccessRules(`entity "${e.name}"`, e.name, e.access!, e.fields, true);
+	}
+}
+
+/**
+ * Checks the references that join entities in the access model, which the
+ * server refuses at registration: each access parent points at an entity that
+ * declares access, each grant subject that is a reference points at an entity
+ * that declares members, and each members option names a grant entity of the
+ * schema whose one access parent points at the team entity alone and whose
+ * subject is a `text()` field. Reference targets must already be checked.
+ */
+function validateAccessTargets(entities: readonly EntitySchema[]): void {
+	const byName = new Map(entities.map((e) => [ e.name, e ]));
+	for (const e of entities) {
+		for (const [ key, field ] of Object.entries(e.fields)) {
+			if (field.spec.accessParent !== true) continue;
+			const target = field.spec.ref!();
+			if (target.access === undefined) {
+				throw new Error(
+					`entity "${e.name}" field "${key}" is marked accessParent(), but points at entity "${target.name}", `
+						+ `which declares no access; declare access on "${target.name}"`,
+				);
+			}
+		}
+		const subject = e.grant === undefined ? undefined : e.fields[e.grant.subject]!.spec;
+		if (subject?.kind === 'ref') {
+			const target = subject.ref!();
+			if (target.members === undefined) {
+				throw new Error(
+					`entity "${e.name}" grant subject field "${
+						e.grant!.subject
+					}" points at entity "${target.name}", `
+						+ `which declares no members; declare members on "${target.name}" to grant to its members`,
+				);
+			}
+		}
+		if (e.members !== undefined) validateMembers(e, byName);
+	}
+}
+
+/** Checks the members option of `team` against the entities of its schema; see validateAccessTargets. */
+function validateMembers(team: EntitySchema, byName: ReadonlyMap<string, EntitySchema>): void {
+	const where = `entity "${team.name}" members`;
+	const member = byName.get(team.members!.entity);
+	if (member === undefined) {
+		throw new Error(
+			`${where} names entity "${team.members!.entity}", which is not part of this schema`,
+		);
+	}
+	if (member.grant === undefined) {
+		throw new Error(
+			`${where} names entity "${member.name}", which is not a grant entity; `
+				+ 'its rows must grant a role at the team they make their subject a member of',
+		);
+	}
+	const parents = Object.values(member.fields).filter((f) => f.spec.accessParent === true);
+	if (parents.length !== 1 || parents[0]!.spec.ref!().name !== team.name) {
+		throw new Error(
+			`${where} names entity "${member.name}", whose accessParent() does not point at "${team.name}" alone`,
+		);
+	}
+	if (member.fields[member.grant.subject]!.spec.kind === 'ref') {
+		throw new Error(
+			`${where} names entity "${member.name}", whose grant subject is not a text() field; `
+				+ 'a team cannot be a member of a team',
+		);
 	}
 }
 
@@ -1689,6 +1847,7 @@ export function defineSchema(...entities: EntitySchema[]): SchemaBundle {
 		seen.add(e.name);
 	}
 	validateRefTargets(entities);
+	validateAccessTargets(entities);
 	validateWithinTargets(entities);
 
 	const fdset = buildSet(entities);
@@ -1765,12 +1924,13 @@ function oneSchemaFile(entities: readonly EntitySchema[]): FileDescriptorProto {
 }
 
 /**
- * Lowers one access rule of an entity with `fields` to its
+ * Lowers one access rule of entity `owner`, with `fields`, to its
  * syncplane.v1.AccessRule. `entities` are the schema's, which within entries
  * name.
  */
 function accessRuleOf(
 	rule: AccessRuleDecl,
+	owner: string,
 	fields: Fields,
 	entities: readonly EntitySchema[],
 ): AccessRule {
@@ -1787,9 +1947,10 @@ function accessRuleOf(
 		fields: (rule.fields ?? []).map(snakeCase),
 		when: whenOf('', rule.when, fields),
 		within: withinListOf(rule).map((w) => {
-			const target = entities.find((e) => e.name === w.entity)!;
+			const entity = withinEntityOf(owner, w, true)!;
+			const target = entities.find((e) => e.name === entity)!;
 			return create(AccessWithinSchema, {
-				entity: w.entity,
+				entity,
 				subject: w.subject === undefined ? '' : snakeCase(w.subject),
 				when: whenOf('', w.when, target.fields),
 			});
@@ -1818,7 +1979,7 @@ function entityMessageOf(e: EntitySchema, entities: readonly EntitySchema[]): De
 			keyFields: keyFieldNames,
 			...(e.access === undefined ? {} : {
 				access: create(AccessOptionsSchema, {
-					allow: e.access.allow.map((r) => accessRuleOf(r, e.fields, entities)),
+					allow: e.access.allow.map((r) => accessRuleOf(r, e.name, e.fields, entities)),
 				}),
 			}),
 			...(e.grant === undefined ? {} : {

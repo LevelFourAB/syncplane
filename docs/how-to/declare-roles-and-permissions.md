@@ -526,11 +526,17 @@ Add `within` to a rule to admit only rows that sit within a row that passes a ch
 - A write that changes `private` or `owner_id` changes what other callers read below the project, so it needs, where the project is, a read rule of each entity below it. A caller that edits projects but cannot read their tasks cannot make a project public.
 - In a tree of one entity, such as folders inside folders, one row that passes is enough. A private inner folder below a folder that is not private does not hide its documents through such a rule.
 
-In the TypeScript schema builder, an entry with `subject` is a plain object. Build an entry with `when` through `schema.within`, which types the condition against the parent's fields:
+In the TypeScript schema builder, an entry with `subject` is a plain object. Build an entry with `when` through `schema.within`, which types the condition against the parent's fields. Pass a thunk, `() => project`, when `project` is declared after the entity:
 
 ```ts
-{ read: true, requires: 'view_open_tasks', within: schema.within(project, { when: (p) => p.private.eq(false) }) },
+{ read: true, requires: 'view_open_tasks', within: schema.within(() => project, { when: (p) => p.private.eq(false) }) },
 { read: true, write: true, admitted: true, within: { entity: 'project', subject: 'ownerId' } },
+```
+
+In a tree of one entity, write `{ self: true, when }` for an entry on the entity's own rows. TypeScript types `when` against the entity's fields:
+
+```ts
+{ read: true, admitted: true, within: { self: true, when: (f) => f.private.eq(false) } },
 ```
 
 `can()` reads the rows above the row from the rows the client holds. It answers `'unknown'` when a row on the way is not held and a row of the named entity can be that row or sit above it, and for an update that moves the row.

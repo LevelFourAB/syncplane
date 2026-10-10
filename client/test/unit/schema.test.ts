@@ -1066,6 +1066,191 @@ describe('schema builder — within entries', () => {
 			expect(allowing(within(project, { when: (p) => or(p.ownerId.eq('x'), p.match('y')) })))
 				.toThrow('entity "e" access.allow[0] within[0]: when uses match(), which cannot decide access');
 		});
+		it('rejects a thunk that returns an entity outside the schema, or nothing', () => {
+			const other = entity('other', { id: text().key(), ownerId: text() }, {
+				access: { allow: [ { read: true, requires: 'p' } ] },
+			});
+			expect(allowing(within(() => other, { subject: 'ownerId' })))
+				.toThrow(
+					'entity "e" access.allow[0] within[0]: names entity "other", which is not part of this schema',
+				);
+			const missing = undefined as unknown as EntitySchema;
+			expect(allowing({ entity: () => missing, subject: 'ownerId' }))
+				.toThrow(
+					'entity "e" access.allow[0] within[0]: names entity <unresolved>, which is not part of this schema',
+				);
+		});
+		it('rejects an entry that sets both self and entity', () => {
+			const both = { self: true, entity: 'project', subject: 'ownerId' } as unknown as WithinDecl;
+			expect(allowing(both)).toThrow(
+				'entity "e" access.allow[0] within[0]: sets both self and entity; set one',
+			);
+		});
+		it('rejects rules that repeat each other through within thunks, in defineSchema()', () => {
+			const repeated = entity('e', fields, {
+				access: {
+					allow: [
+						{ read: true, requires: 'p', within: within(() => project, { subject: 'ownerId' }) },
+						{ read: true, requires: 'p', within: within(() => project, { subject: 'ownerId' }) },
+					],
+				},
+			});
+			expect(() => defineSchema(project, repeated))
+				.toThrow('entity "e" access.allow[1]: the rule repeats access.allow[0]');
+		});
+	});
+
+	it('names an entity declared later through a thunk, with when typed against its fields', () => {
+		const comment = entity('comment', {
+			id: text().key(),
+			doc: ref(() => doc).accessParent(),
+		}, {
+			access: {
+				allow: [
+					{ read: true, requires: 'view_docs' },
+					{
+						read: true,
+						admitted: true,
+						within: within(() => doc, { when: (d) => d.published.eq(true) }),
+					},
+				],
+			},
+		});
+		const doc = entity('doc', { id: text().key(), published: bool() }, {
+			access: { allow: [ { read: true, requires: 'view_docs' } ] },
+		});
+		within(() => doc, {
+			// @ts-expect-error not a field of a doc
+			when: (d) => d.publishd.eq(true),
+		});
+		const bundle = defineSchema(comment, doc);
+		const [ entry ] = getOption(bundle.descMessage('comment'), entityExt).access!.allow[1]!.within;
+		expect(entry!.entity).toBe('doc');
+		expect(condFromProto(entry!.when!)).toEqual({
+			kind: 'cmp',
+			path: [ 'published' ],
+			op: 'eq',
+			value: true,
+		});
+	});
+
+	it("names the rule's own entity through self, with subject and when typed against its fields", () => {
+		// A self reference needs a named field map; see the issue entity above.
+		type FolderFields = {
+			id: Field<string>;
+			parent: Field<Infer<EntitySchema<FolderFields>>>;
+			isPrivate: Field<boolean>;
+			ownerId: Field<string>;
+		};
+		const folder: EntitySchema<FolderFields> = entity('folder', {
+			id: text().key(),
+			parent: ref(() => folder).accessParent(),
+			isPrivate: bool(),
+			ownerId: text(),
+		}, {
+			access: {
+				allow: [
+					{ read: true, requires: 'view_private' },
+					{ read: true, admitted: true, within: { self: true, when: (f) => f.isPrivate.eq(false) } },
+					{ write: true, admitted: true, within: { self: true, subject: 'ownerId' } },
+				],
+			},
+		});
+		const allow = (
+			within: AccessRuleDecl<FolderFields>['within'],
+		) => [ { read: true, admitted: true, within } ];
+		// @ts-expect-error a subject is a text() field
+		allow({ self: true, subject: 'isPrivate' });
+		// @ts-expect-error not a field of a folder
+		allow({ self: true, when: (f) => f.private.eq(false) });
+		const rules = getOption(defineSchema(folder).descMessage('folder'), entityExt).access!.allow;
+		expect(rules[1]!.within.map((w) => w.entity)).toEqual([ 'folder' ]);
+		expect(condFromProto(rules[1]!.within[0]!.when!))
+			.toEqual({ kind: 'cmp', path: [ 'is_private' ], op: 'eq', value: false });
+		expect(rules[2]!.within.map((w) => [ w.entity, w.subject ])).toEqual([ [
+			'folder',
+			'owner_id',
+		] ]);
+	});
+});
+
+describe('schema builder — checks across entities', () => {
+	const access = { allow: [ { read: true, requires: 'view' } ] } satisfies AccessDecl;
+	const roles = [ { name: 'member', grants: [ 'view' ] } ];
+
+	it('rejects an access parent that points at an entity without access', () => {
+		const open = entity('open', { id: text().key() });
+		const child = entity('child', { id: text().key(), open: ref(() => open).accessParent() }, {
+			access,
+		});
+		expect(() => defineSchema(open, child)).toThrow(
+			'entity "child" field "open" is marked accessParent(), but points at entity "open", which declares no access; '
+				+ 'declare access on "open"',
+		);
+	});
+
+	it('rejects a grant subject that points at an entity without members', () => {
+		const group = entity('group', { id: text().key() }, { access });
+		const grantee = entity('grantee', { id: text().key(), group: ref(() => group), role: text() }, {
+			access,
+			grant: { subject: 'group', role: 'role', roles },
+		});
+		expect(() => defineSchema(group, grantee)).toThrow(
+			'entity "grantee" grant subject field "group" points at entity "group", which declares no members; '
+				+ 'declare members on "group" to grant to its members',
+		);
+	});
+
+	describe('members', () => {
+		const team = entity('team', { id: text().key() }, { access, members: { entity: 'team_member' } });
+		const memberFields = {
+			id: text().key(),
+			team: ref(() => team).accessParent(),
+			userId: text(),
+			role: text(),
+		};
+
+		it('rejects a members entity outside the schema', () => {
+			expect(() => defineSchema(team)).toThrow(
+				'entity "team" members names entity "team_member", which is not part of this schema',
+			);
+		});
+		it('rejects a members entity that is not a grant entity', () => {
+			const plain = entity('team_member', memberFields, { access });
+			expect(() => defineSchema(team, plain)).toThrow(
+				'entity "team" members names entity "team_member", which is not a grant entity',
+			);
+		});
+		it('rejects a members entity whose access parent is not the team', () => {
+			const other = entity('other', { id: text().key() }, { access });
+			const member = entity(
+				'team_member',
+				{ ...memberFields, team: ref(() => other).accessParent() },
+				{
+					access,
+					grant: { subject: 'userId', role: 'role', roles },
+				},
+			);
+			expect(() => defineSchema(team, other, member)).toThrow(
+				'entity "team" members names entity "team_member", whose accessParent() does not point at "team" alone',
+			);
+			const rootMember = entity('team_member', { ...memberFields, team: ref(() => team) }, {
+				access,
+				grant: { subject: 'userId', role: 'role', roles },
+			});
+			expect(() => defineSchema(team, rootMember)).toThrow(
+				'whose accessParent() does not point at "team" alone',
+			);
+		});
+		it('rejects a members entity whose grant subject is a team', () => {
+			const member = entity('team_member', { ...memberFields, userId: ref(() => team) }, {
+				access,
+				grant: { subject: 'userId', role: 'role', roles },
+			});
+			expect(() => defineSchema(team, member)).toThrow(
+				'entity "team" members names entity "team_member", whose grant subject is not a text() field',
+			);
+		});
 	});
 });
 
