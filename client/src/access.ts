@@ -15,7 +15,12 @@ import {
 	toBinary,
 } from '@bufbuild/protobuf';
 
-import { type CrudMutation, CrudOp, type Mutation } from './gen/syncplane/v1/mutation_pb.js';
+import {
+	type CrudMutation,
+	CrudOp,
+	type CustomMutation,
+	type Mutation,
+} from './gen/syncplane/v1/mutation_pb.js';
 import type { Condition } from './gen/syncplane/v1/query_pb.js';
 import {
 	type AnchorGroup,
@@ -33,6 +38,7 @@ import {
 	entityOptionsOf,
 	type EntityRegistry,
 	fieldValueOf,
+	type GrantSpec,
 	type GuardDef,
 	keyOf,
 	refShapes,
@@ -60,16 +66,17 @@ export type CanAnswer = 'yes' | 'no' | 'unknown';
  * - `'no_summary'`: no summary of the caller's access has arrived for the
  *   workspace.
  * - `'pending_grant'`: a local write the server has not acked can change the
- *   caller's grants: a write to a grant row, or a delete of a row that other
- *   rows sit below.
+ *   caller's grants: a write to a grant row, a delete of a row that other
+ *   rows sit below, or a custom mutation in a schema with grant entities.
  * - `'row_not_held'`: a row the answer depends on is not held locally: the
  *   row itself, a row up its chain of access parents, or a row a `within`
  *   entry reads.
  * - `'new_value'`: the update changes a field a `callerIs` check reads,
  *   the access parent, or a field a condition reads, and the new value
  *   decides.
- * - `'chain_too_deep'`: the chain of access parents is longer than
- *   {@link MAX_ACCESS_CHAIN} rows.
+ * - `'chain_too_deep'`: the chain of access parents is longer than the
+ *   server's `MaxAccessDepth`, which the summary carries, or
+ *   {@link MAX_ACCESS_CHAIN} rows when it does not.
  * - `'error'`: the read of the local store failed. Only the React hooks give
  *   it; the client methods reject.
  */
@@ -125,7 +132,8 @@ export type AccessOperation = 'read' | 'create' | 'update' | 'delete';
 
 /**
  * How many rows up a row's chains of access parents `can` walks on each path
- * before it answers `'unknown'`: the server's default `MaxAccessDepth`.
+ * before it answers `'unknown'`, when the summary does not carry the server's
+ * `MaxAccessDepth`: the server's default.
  */
 export const MAX_ACCESS_CHAIN = 32;
 
@@ -149,9 +157,16 @@ export class AccessSummary {
 	private readonly entities = new Map<string, Set<string>>();
 	/** The caller's subjects, the primary subject first. */
 	readonly subjects: readonly string[];
+	/**
+	 * How many access parent hops above a row the server follows: its
+	 * `MaxAccessDepth`, or {@link MAX_ACCESS_CHAIN} for a summary that does
+	 * not carry it.
+	 */
+	readonly maxAccessDepth: number;
 
 	constructor(access: CallerAccess) {
 		this.subjects = access.subjects;
+		this.maxAccessDepth = access.maxAccessDepth > 0 ? access.maxAccessDepth : MAX_ACCESS_CHAIN;
 		this.roots = new Set(access.rootPermissions);
 		this.groups = access.anchorGroups.map((g) => new Set(g.permissions));
 		// Nested maps and not one map of entity and key joined: a joined string
@@ -287,6 +302,7 @@ export function applyAccessDelta(held: CallerAccess, delta: CallerAccessDelta): 
 		rootPermissions: held.rootPermissions,
 		anchorGroups: anchorGroupsOf(rows.values()),
 		version: delta.version,
+		maxAccessDepth: held.maxAccessDepth,
 	});
 }
 
@@ -518,9 +534,15 @@ export function decideRead(
 }
 
 /** `'no'` when either is, else the first unknown of the two, else `'yes'`. */
-function and(a: Verdict, b: Verdict): Verdict {
+export function and(a: Verdict, b: Verdict): Verdict {
 	if (a === 'no' || b === 'no') return 'no';
 	return a === 'yes' ? b : a;
+}
+
+/** `'yes'` when either is, else the first unknown of the two, else `'no'`. */
+function or(a: Verdict, b: Verdict): Verdict {
+	if (a === 'yes' || b === 'yes') return 'yes';
+	return a === 'no' ? b : a;
 }
 
 /** One row of a workspace. */
@@ -551,6 +573,12 @@ export type ParentRefs = readonly (AccessRow & { def: EntityDef })[] | undefined
  */
 export interface AccessChain {
 	readonly parents: readonly AccessRow[] | undefined;
+	/**
+	 * How many hops above the row a walk follows before it answers
+	 * `'unknown'`: {@link AccessSummary.maxAccessDepth}.
+	 * @defaultValue {@link MAX_ACCESS_CHAIN}
+	 */
+	readonly maxHops?: number;
 	above(row: AccessRow): readonly AccessRow[] | undefined;
 	row?(row: AccessRow): { def: EntityDef; row: Message } | undefined;
 	entitiesAbove?(entity: string): ReadonlySet<string> | undefined;
@@ -613,7 +641,8 @@ export function canAtEach(
 
 /**
  * Whether `permission` is held at one of `start` or a row above them, at
- * most MAX_ACCESS_CHAIN hops above the row they sit above.
+ * most `chain.maxHops` hops above the row they sit above, or the summary's
+ * `maxAccessDepth` when the chain sets none.
  */
 function reach(
 	summary: AccessSummary,
@@ -642,7 +671,9 @@ function reach(
 				if (heldAbove(summary, permission, row.entity, chain)) complete = false;
 			} else next.push(...fresh(up));
 		}
-		if (hops >= MAX_ACCESS_CHAIN && next.length > 0) return unknownBecause('chain_too_deep');
+		if (hops >= (chain.maxHops ?? summary.maxAccessDepth) && next.length > 0) {
+			return unknownBecause('chain_too_deep');
+		}
 		level = next;
 	}
 	return complete ? 'no' : unknownBecause('row_not_held');
@@ -676,9 +707,10 @@ export function accessRowId(row: AccessRow): string {
 /**
  * The row of `def` with `key` as {@link decideRules} reads it from local
  * data: a permission is decided by {@link canAt} over `chain`, or by
- * {@link canAtEach} with `throughEach`, and a field a `callerIs` check reads
- * and a `when` condition read `row`, which is unknown when the client does
- * not hold the row.
+ * {@link canAtEach} with `throughEach`, the `within` entries by
+ * {@link withinAt}, or by {@link withinAtEach} with `throughEach`, and a field
+ * a `callerIs` check reads and a `when` condition read `row`, which is unknown
+ * when the client does not hold the row.
  */
 export function ruleRowOf(
 	summary: AccessSummary,
@@ -704,8 +736,95 @@ export function ruleRowOf(
 			if (row === undefined) return unknownBecause('row_not_held');
 			return evalCond(row, ruleWhenOf(def.schema, rule.when).cond, def.schema) ? 'yes' : 'no';
 		},
-		within: (rule) => withinAt(summary.subjects, def, key, row, chain, rule),
+		within: (rule) =>
+			(throughEach ? withinAtEach : withinAt)(summary.subjects, def, key, row, chain, rule),
 	};
+}
+
+/**
+ * {@link withinAt} through each of the row's access parents on its own: each
+ * entry holds at the row itself, or at that parent or a row above it. A write
+ * that adds a row below a parent shows the row to the readers of that parent,
+ * so the server checks the entries there and not only through another parent.
+ */
+export function withinAtEach(
+	subjects: readonly string[],
+	def: EntityDef,
+	key: string,
+	row: Message | undefined,
+	chain: AccessChain,
+	rule: AccessRuleDef,
+): Verdict {
+	const parents = chain.parents;
+	if (parents === undefined || parents.length < 2) {
+		return withinAt(subjects, def, key, row, chain, rule);
+	}
+	let answer: Verdict = 'yes';
+	for (const parent of parents) {
+		answer = and(answer, withinAt(subjects, def, key, row, chainFrom(chain, [ parent ]), rule));
+		if (answer === 'no') return 'no';
+	}
+	return answer;
+}
+
+/** `chain`, with `parents` as the rows directly above the row. */
+function chainFrom(chain: AccessChain, parents: readonly AccessRow[] | undefined): AccessChain {
+	return {
+		parents,
+		maxHops: chain.maxHops,
+		above: (at) => chain.above(at),
+		row: chain.row === undefined ? undefined : (at) => chain.row!(at),
+		entitiesAbove: chain.entitiesAbove === undefined ? undefined : (e) => chain.entitiesAbove!(e),
+	};
+}
+
+/**
+ * Whether a chain of access parents from `def` can lead back to an entity it
+ * passes: rows of `def` can then sit any number of hops deep. The server
+ * refuses a client write of such a row that adds an access parent the caller
+ * does not read (see {@link parentsRead}).
+ */
+export function inRecursiveChain(def: EntityDef): boolean {
+	const graph = entitiesAboveOf(def);
+	for (const name of [ def.name, ...(graph.get(def.name) ?? []) ]) {
+		if (graph.get(name)?.has(name)) return true;
+	}
+	return false;
+}
+
+/**
+ * Whether the caller reads each row of `parents`, the rows directly above a
+ * row whose rows above it `chain` holds: the row is held locally, live, and a
+ * read rule of its entity admits the caller there. An entity outside the
+ * access model is read by every caller. A parent the client does not hold
+ * answers `'unknown'`, as it can be missing or hidden.
+ */
+export function parentsRead(
+	summary: AccessSummary,
+	parents: ParentRefs,
+	chain: AccessChain,
+): Verdict {
+	if (parents === undefined) return unknownBecause('row_not_held');
+	let answer: Verdict = 'yes';
+	for (const parent of parents) {
+		const rules = parent.def.accessRules;
+		if (rules === undefined) continue;
+		const held = chain.row?.(parent);
+		if (held === undefined) {
+			answer = and(answer, unknownBecause('row_not_held'));
+			continue;
+		}
+		const at = ruleRowOf(
+			summary,
+			held.def,
+			parent.key,
+			held.row,
+			chainFrom(chain, chain.above(parent)),
+		);
+		answer = and(answer, decideRules(rules, 'read', summary.subjects, at));
+		if (answer === 'no') return 'no';
+	}
+	return answer;
 }
 
 /**
@@ -742,7 +861,7 @@ export function withinAt(
 
 /**
  * Decides whether `row` itself, or a row above it on any path of at most
- * MAX_ACCESS_CHAIN hops, is a row of `entity` that `passes` admits. `passes`
+ * `chain.maxHops` hops, is a row of `entity` that `passes` admits. `passes`
  * is asked only for rows of `entity`. The walk the server's
  * accessChains.withinAll makes; testdata/access/within.json pins the two.
  */
@@ -784,7 +903,9 @@ export function withinReach(
 				if (canSitAbove(entity, at.entity, chain)) missing ??= unknownBecause('row_not_held');
 			} else next.push(...fresh(up));
 		}
-		if (hops >= MAX_ACCESS_CHAIN && next.length > 0) return unknownBecause('chain_too_deep');
+		if (hops >= (chain.maxHops ?? MAX_ACCESS_CHAIN) && next.length > 0) {
+			return unknownBecause('chain_too_deep');
+		}
 		level = next;
 	}
 	return missing ?? 'no';
@@ -902,37 +1023,73 @@ export function whenReads(
 /**
  * The inputs a prediction for a row of `def` reads from the row itself, as a
  * string: whether the client holds the row, what its access parents name,
- * and with `subjects`, the value of each subject field the entity's access
- * rules name. `row` is undefined when the client does not hold the row. Two
- * rows with equal strings give the same {@link ruleRowOf} and
+ * and with `checks`, the value of each field that a check of the entity's
+ * access rules or field guards reads from the row: a `callerIs` field, a
+ * field a `when` condition reads, and the same for each `within` entry on the
+ * entity itself. `row` is undefined when the client does not hold the row.
+ * Two rows with equal strings give the same {@link ruleRowOf} and
  * {@link parentRefsOf}, so a change of the row that keeps the string cannot
  * change an answer for it.
  */
 export function accessInputsOf(
 	def: EntityDef,
 	row: Message | undefined,
-	subjects: boolean,
+	checks: boolean,
 ): string {
 	if (row === undefined) return '';
 	const parents = parentRefsOf(def, row) ?? [];
-	const inputs: (string | string[][])[] = [ parents.map((p) => [ p.entity, p.key ]) ];
-	if (subjects) {
-		const rec = row as unknown as Record<string, unknown>;
-		for (const rule of def.accessRules ?? []) {
-			if (rule.callerIs !== undefined) {
-				// Read as ruleRowOf reads it.
-				const value = fieldValueOf(rec, rule.callerIs);
-				inputs.push(typeof value === 'string' ? value : '');
-			}
-			for (const entry of rule.within) {
-				if (entry.entity !== def.name || entry.callerIs === undefined) continue;
-				const field = def.schema.fields.find((f) => f.name === entry.callerIs);
-				const value = field === undefined ? undefined : fieldValueOf(rec, field);
-				inputs.push(typeof value === 'string' ? value : '');
-			}
+	const inputs: unknown[] = [ parents.map((p) => [ p.entity, p.key ]) ];
+	if (checks) {
+		const units = checkedUnitsOf(def);
+		if (units.length > 0) {
+			// The checked units copied into an empty row and encoded: equal
+			// bytes are equal values, of any field kind.
+			const rec = row as unknown as Record<string, unknown>;
+			const pick = create(def.schema) as unknown as Record<string, unknown>;
+			for (const unit of units) pick[unit] = rec[unit];
+			inputs.push(toBinary(def.schema, pick as unknown as Message).join(','));
 		}
 	}
 	return JSON.stringify(inputs);
+}
+
+const checkedUnits = new WeakMap<DescMessage, readonly string[]>();
+
+/**
+ * The top-level units of `def`, by accessor name, that a check of its access
+ * rules or field guards reads from the row: a `callerIs` field, a unit a
+ * `when` condition reads, and the same for each `within` entry on `def`
+ * itself. A oneof counts by its name.
+ */
+function checkedUnitsOf(def: EntityDef): readonly string[] {
+	let out = checkedUnits.get(def.schema);
+	if (out === undefined) {
+		const protoNames = new Set<string>();
+		const add = (name: string) => {
+			const field = def.schema.fields.find((f) => f.name === name);
+			protoNames.add(field?.oneof?.name ?? name);
+		};
+		const rules = [ ...def.accessRules ?? [], ...def.guards.flatMap((g) => g.rules) ];
+		for (const rule of rules) {
+			if (rule.callerIs !== undefined) add(rule.callerIs.name);
+			if (rule.when !== undefined) ruleWhenOf(def.schema, rule.when).units.forEach(add);
+			for (const entry of rule.within) {
+				if (entry.entity !== def.name) continue;
+				if (entry.callerIs !== undefined) add(entry.callerIs);
+				if (entry.when !== undefined) ruleWhenOf(def.schema, entry.when).units.forEach(add);
+			}
+		}
+		const local: string[] = [];
+		for (const field of def.schema.fields) {
+			if (field.oneof === undefined && protoNames.has(field.name)) local.push(field.localName);
+		}
+		for (const oneof of def.schema.oneofs) {
+			if (protoNames.has(oneof.name)) local.push(oneof.localName);
+		}
+		out = local;
+		checkedUnits.set(def.schema, out);
+	}
+	return out;
 }
 
 /**
@@ -1091,15 +1248,36 @@ function targetDefOf(schema: DescMessage): EntityDef {
 
 /**
  * Whether a local write the server has not acked can change what the caller
- * holds: a write to a grant row, or a delete of a row that rows of another
- * entity sit below.
+ * holds: a write to a grant row, a delete of a row that rows of another
+ * entity sit below, or a custom mutation that `custom` says can change it.
+ * Without `custom`, a custom mutation can change it in a schema with grant
+ * entities or such rows.
  */
 export function pendingChangesAccess(
 	registry: EntityRegistry,
 	pending: readonly Mutation[],
+	custom?: (mutation: CustomMutation) => boolean,
 ): boolean {
 	const anchors = anchorEntities(registry);
-	return pending.some((m) => changesAccess(registry, anchors, m));
+	return pending.some((m) =>
+		custom !== undefined && m.payload.case === 'custom'
+			? custom(m.payload.value)
+			: changesAccess(registry, anchors, m)
+	);
+}
+
+/**
+ * Whether a local write of a row of `entity` can change what the caller
+ * holds: a write to a grant row, or a delete (`del`) of a row that rows of
+ * another entity sit below.
+ */
+export function writeChangesAccess(
+	registry: EntityRegistry,
+	entity: string,
+	del: boolean,
+): boolean {
+	if (registry.get(entity)?.grant) return true;
+	return del && anchorEntities(registry).has(entity);
 }
 
 /**
@@ -1124,8 +1302,7 @@ function changesAccess(
 	m: Mutation,
 ): boolean {
 	const touches = (crud: CrudMutation): boolean => {
-		const def = registry.get(crud.entity);
-		if (def?.grant) return true;
+		if (registry.get(crud.entity)?.grant) return true;
 		return crud.op === CrudOp.DELETE && anchors.has(crud.entity);
 	};
 	switch (m.payload.case) {
@@ -1133,9 +1310,23 @@ function changesAccess(
 			return touches(m.payload.value);
 		case 'batch':
 			return m.payload.value.mutations.some(touches);
+		case 'custom':
+			return anchors.size > 0 || hasGrantEntities(registry);
 		default:
 			return false;
 	}
+}
+
+const grantRegistries = new WeakMap<EntityRegistry, boolean>();
+
+/** Whether `registry` holds a grant entity. */
+export function hasGrantEntities(registry: EntityRegistry): boolean {
+	let out = grantRegistries.get(registry);
+	if (out === undefined) {
+		out = registry.names().some((name) => registry.get(name)!.grant);
+		grantRegistries.set(registry, out);
+	}
+	return out;
 }
 
 /**
@@ -1170,4 +1361,330 @@ export function anchorEntities(registry: EntityRegistry): ReadonlySet<string> {
 		anchorSets.set(registry, set);
 	}
 	return set;
+}
+
+const childSets = new WeakMap<EntityRegistry, Map<string, readonly EntityDef[]>>();
+
+/**
+ * The registered entities whose access parents can point at `entity`: the
+ * entities whose rows can sit directly below its rows.
+ */
+export function childEntitiesOf(registry: EntityRegistry, entity: string): readonly EntityDef[] {
+	let byEntity = childSets.get(registry);
+	if (byEntity === undefined) {
+		byEntity = new Map();
+		childSets.set(registry, byEntity);
+	}
+	let out = byEntity.get(entity);
+	if (out === undefined) {
+		out = registry.names().map((name) => registry.get(name)!).filter((def) =>
+			accessParentFields(def.schema).some((field) =>
+				refShapes(field).some((shape) => targetDefOf(shape.targetSchema).name === entity)
+			)
+		);
+		byEntity.set(entity, out);
+	}
+	return out;
+}
+
+/**
+ * Who reads rows of an entity, or the fields of one of its guards, as the
+ * server groups the read rules: every admitted caller, a caller with one of
+ * `perms`, or a caller that one of `checked` admits, which are the rules with
+ * a check on the row, a `within` entry, or more than one permission.
+ */
+interface Readers {
+	readonly all: boolean;
+	readonly perms: readonly string[];
+	readonly checked: readonly AccessRuleDef[];
+}
+
+/** The {@link Readers} of the read rules among `rules`. */
+function readersOf(rules: readonly AccessRuleDef[]): Readers {
+	const perms = new Set<string>();
+	const checked: AccessRuleDef[] = [];
+	for (const rule of rules) {
+		if (!rule.read) continue;
+		if (
+			rule.callerIs !== undefined || rule.when !== undefined || rule.within.length > 0
+			|| rule.requires.length > 1
+		) checked.push(rule);
+		else if (rule.requires.length === 0) return { all: true, perms: [], checked: [] };
+		else perms.add(rule.requires[0]!);
+	}
+	return { all: false, perms: [ ...perms ], checked };
+}
+
+/**
+ * Who reads every row where a row sits: `r` without the rules that check the
+ * row with `callerIs` or `when`, which admit a caller on some rows only, and
+ * without the rules that one of `r.perms` admits every caller of.
+ */
+function everyRowReaders(r: Readers): Readers {
+	if (r.all) return r;
+	return {
+		all: false,
+		perms: r.perms,
+		checked: r.checked.filter((o) =>
+			o.callerIs === undefined && o.when === undefined
+			&& !o.requires.some((p) => r.perms.includes(p))
+		),
+	};
+}
+
+/**
+ * The guards of `def` that can hide their fields from a caller that reads the
+ * row: each guard whose read rules do not admit every admitted caller.
+ */
+function hidingGuards(def: EntityDef): readonly GuardDef[] {
+	return def.guards.filter((g) => !readersOf(g.rules).all);
+}
+
+const belowReaders = new WeakMap<EntityRegistry, Map<string, readonly Readers[]>>();
+
+/**
+ * Who reads every row of each registered entity whose rows can sit below rows
+ * of `entity`, any number of hops down, and every field of each guard of such
+ * an entity that can hide its fields (see {@link everyRowReaders}).
+ */
+function moveReadersBelow(registry: EntityRegistry, entity: string): readonly Readers[] {
+	let byEntity = belowReaders.get(registry);
+	if (byEntity === undefined) belowReaders.set(registry, byEntity = new Map());
+	let out = byEntity.get(entity);
+	if (out === undefined) {
+		const children = new Map<string, Set<string>>();
+		for (const name of registry.names()) {
+			for (const field of accessParentFields(registry.get(name)!.schema)) {
+				for (const shape of refShapes(field)) {
+					const target = targetDefOf(shape.targetSchema).name;
+					let set = children.get(target);
+					if (set === undefined) children.set(target, set = new Set());
+					set.add(name);
+				}
+			}
+		}
+		const below = new Set<string>();
+		const queue = [ entity ];
+		for (let at = queue.shift(); at !== undefined; at = queue.shift()) {
+			for (const child of children.get(at) ?? []) {
+				if (!below.has(child)) {
+					below.add(child);
+					queue.push(child);
+				}
+			}
+		}
+		const readers: Readers[] = [];
+		for (const name of below) {
+			const def = registry.get(name)!;
+			// An entity with an access parent declares access.
+			readers.push(everyRowReaders(readersOf(def.accessRules ?? [])));
+			for (const g of hidingGuards(def)) readers.push(everyRowReaders(readersOf(g.rules)));
+		}
+		out = readers.filter((r) => !r.all);
+		byEntity.set(entity, out);
+	}
+	return out;
+}
+
+const withinInputs = new WeakMap<EntityRegistry, Map<string, ReadonlySet<string>>>();
+
+/**
+ * The units of a row of `entity`, by proto name, that a `within` entry naming
+ * `entity` reads, in a rule or a guard rule of any registered entity: the
+ * field its `callerIs` names and the units its condition reads.
+ */
+function withinInputUnits(registry: EntityRegistry, entity: string): ReadonlySet<string> {
+	let byEntity = withinInputs.get(registry);
+	if (byEntity === undefined) withinInputs.set(registry, byEntity = new Map());
+	let out = byEntity.get(entity);
+	if (out === undefined) {
+		const units = new Set<string>();
+		const target = registry.get(entity);
+		if (target !== undefined) {
+			for (const name of registry.names()) {
+				const def = registry.get(name)!;
+				for (const rule of [ ...def.accessRules ?? [], ...def.guards.flatMap((g) => g.rules) ]) {
+					for (const entry of rule.within) {
+						if (entry.entity !== entity) continue;
+						if (entry.callerIs !== undefined) {
+							const field = target.schema.fields.find((f) => f.name === entry.callerIs);
+							units.add(field?.oneof?.name ?? entry.callerIs);
+						}
+						if (entry.when !== undefined) {
+							for (const u of ruleWhenOf(target.schema, entry.when).units) units.add(u);
+						}
+					}
+				}
+			}
+		}
+		out = units;
+		byEntity.set(entity, out);
+	}
+	return out;
+}
+
+/**
+ * Decides whether the caller holds what `readers` needs at the row of `def`
+ * with `key`, whose value is `row`, given the rows above it: for each entry,
+ * one of its permissions, or every permission of one of its checked rules and
+ * the rule's `within` entries.
+ */
+function decideReadersAt(
+	summary: AccessSummary,
+	def: EntityDef,
+	key: string,
+	row: Message | undefined,
+	chain: AccessChain,
+	readers: readonly Readers[],
+): Verdict {
+	let answer: Verdict = 'yes';
+	for (const r of readers) {
+		let one: Verdict = 'no';
+		for (const p of r.perms) {
+			if (one === 'yes') break;
+			one = or(one, canAt(summary, p, def.name, key, chain));
+		}
+		for (const o of r.checked) {
+			if (one === 'yes') break;
+			let rule: Verdict = 'yes';
+			for (const p of o.requires) rule = and(rule, canAt(summary, p, def.name, key, chain));
+			if (rule !== 'no' && o.within.length > 0) {
+				rule = and(rule, withinAt(summary.subjects, def, key, row, chain, o));
+			}
+			one = or(one, rule);
+		}
+		answer = and(answer, one);
+		if (answer === 'no') return 'no';
+	}
+	return answer;
+}
+
+/**
+ * The units of a grant row of `def` that decide what the row grants, by proto
+ * name: the subject, the role and the access parents. Empty for an entity
+ * that is not a grant entity.
+ */
+function grantUnitsOf(def: EntityDef): readonly string[] {
+	const spec = def.grantSpec;
+	if (spec === undefined) return [];
+	const out = [ spec.subjectUnit, ...accessParentUnits(def) ];
+	if (spec.roleField !== undefined) out.push(spec.roleField.name);
+	return out;
+}
+
+/** The role a grant row of `spec` holds; empty for none. */
+function grantRoleOf(spec: GrantSpec, row: Message): string {
+	const field = spec.roleField;
+	if (field === undefined) return '';
+	const value = fieldValueOf(row as unknown as Record<string, unknown>, field);
+	if (field.fieldKind === 'enum') {
+		return field.enum.values.find((v) => v.number === value)?.name ?? '';
+	}
+	return typeof value === 'string' ? value : '';
+}
+
+/**
+ * Decides the server's subset rule for grant row `row` of `def`, given the
+ * rows above it: the caller must hold every permission of the row's role
+ * where the row applies, at the workspace root for an entity without an
+ * access parent, else at the row its access parent names or a row above
+ * that. A row whose role grants nothing, or whose access parent is unset,
+ * passes, as does a row of an entity that is not a grant entity. `row` is
+ * undefined when the client does not hold it.
+ */
+export function grantSubsetAt(
+	summary: AccessSummary,
+	def: EntityDef,
+	row: Message | undefined,
+	chain: AccessChain,
+): Verdict {
+	const spec = def.grantSpec;
+	if (spec === undefined) return 'yes';
+	if (row === undefined) return unknownBecause('row_not_held');
+	const perms = spec.roles.get(grantRoleOf(spec, row)) ?? [];
+	if (perms.length === 0) return 'yes';
+	let at: AccessRow | undefined;
+	if (accessParentFields(def.schema).length > 0) {
+		const parents = chain.parents;
+		if (parents === undefined) return unknownBecause('row_not_held');
+		if (parents.length === 0) return 'yes';
+		at = parents[0]!;
+	}
+	let answer: Verdict = 'yes';
+	for (const p of perms) {
+		answer = and(
+			answer,
+			at === undefined ? (summary.holdsRoot(p) ? 'yes' : 'no') : reach(summary, p, [ at ], chain),
+		);
+		if (answer === 'no') return 'no';
+	}
+	return answer;
+}
+
+/**
+ * Decides the checks the server makes on an update beside the entity's rules
+ * and guards, for an update of the row of `def` with `key` that changes the
+ * units in `changed`, by proto name. `row` is the stored row, undefined when
+ * the client does not hold it, `stored` is the row as {@link decideRules}
+ * reads it, and `moves` tells whether the update changes the access parent.
+ * The new value of a changed unit is not known.
+ *
+ * - A move needs the right to read the row, and each field a guard can hide,
+ *   where the row is.
+ * - A move, or a change of a unit that a `within` entry naming the entity
+ *   reads, needs the right to read every row of each entity whose rows can
+ *   sit below the row, where the row is.
+ * - A change of a unit that a read rule of a hiding guard checks needs the
+ *   right to read the guard's fields before and after the update.
+ * - On a grant entity, a change of the subject, the role or the access parent
+ *   needs every permission of the stored role where the row applies, and of
+ *   the new role where it will apply.
+ */
+export function decideUpdateChecks(
+	registry: EntityRegistry,
+	summary: AccessSummary,
+	def: EntityDef,
+	key: string,
+	row: Message | undefined,
+	stored: RuleRow,
+	chain: AccessChain,
+	changed: readonly string[],
+	moves: boolean,
+): Verdict {
+	const subjects = summary.subjects;
+	const newValue = unknownBecause('new_value');
+	let answer: Verdict = 'yes';
+	if (moves) {
+		const hidden = hidingGuards(def).flatMap((g) => g.units);
+		answer = decideRead(def.accessRules ?? [], def.guards, subjects, stored, hidden);
+	}
+	if (
+		answer !== 'no' && (moves || changed.some((u) => withinInputUnits(registry, def.name).has(u)))
+	) {
+		answer = and(
+			answer,
+			decideReadersAt(summary, def, key, row, chain, moveReadersBelow(registry, def.name)),
+		);
+	}
+	for (const g of hidingGuards(def)) {
+		if (answer === 'no') return 'no';
+		const inputs = g.rules.filter((r) => r.read).flatMap((r) => [
+			...(r.callerIs === undefined ? [] : [ r.callerIs.oneof?.name ?? r.callerIs.name ]),
+			...(r.when === undefined ? [] : ruleWhenOf(def.schema, r.when).units),
+		]);
+		if (!inputs.some((u) => changed.includes(u))) continue;
+		answer = and(answer, and(decideRules(g.rules, 'read', subjects, stored), newValue));
+	}
+	const grantUnits = grantUnitsOf(def);
+	if (answer !== 'no' && changed.some((u) => grantUnits.includes(u))) {
+		answer = and(answer, grantSubsetAt(summary, def, row, chain));
+		// The subject alone leaves the role and where the row applies as they are.
+		const spec = def.grantSpec!;
+		const decides = [
+			...accessParentUnits(def),
+			...(spec.roleField === undefined ? [] : [ spec.roleField.name ]),
+		];
+		if (changed.some((u) => decides.includes(u))) answer = and(answer, newValue);
+	}
+	return answer;
 }

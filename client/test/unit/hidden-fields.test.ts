@@ -209,4 +209,40 @@ describe('hidden fields', () => {
 			await t.close();
 		}
 	});
+	it('keeps the hidden fields on the rows a watcher receives after a local write', async () => {
+		// Given a reader of p1 who watches s1 by key and by query
+		const server = seeded();
+		server.setCallerAccess(reader);
+		const t = await createTestClient({ server });
+		const byKey: (readonly string[] | undefined)[] = [];
+		const byQuery: (readonly string[] | undefined)[] = [];
+		const keyed = t.client.watchRows(StaffSchema, [ 's1' ], (rows) => {
+			if (rows.has('s1')) byKey.push(rows.get('s1')?.hidden);
+		});
+		const queried = t.db.staff.watchQuery({}, (rows) => {
+			const row = rows.find((r) => r.key === 's1');
+			if (row !== undefined) byQuery.push(row.hidden);
+		});
+		try {
+			await t.sync();
+			await expect.poll(() => byKey.at(-1)).toEqual([ 'bio', 'bonus', 'pin', 'salary' ]);
+			await expect.poll(() => byQuery.at(-1)).toEqual([ 'bio', 'bonus', 'pin', 'salary' ]);
+			const keyedBefore = byKey.length;
+			const queriedBefore = byQuery.length;
+
+			// When the client renames the record locally
+			t.net.offline();
+			await t.db.staff.mutate.patch('s1', { name: 'anna' });
+
+			// Then each watcher gets the row again, with the same fields hidden
+			await expect.poll(() => byKey.length).toBeGreaterThan(keyedBefore);
+			await expect.poll(() => byQuery.length).toBeGreaterThan(queriedBefore);
+			expect(byKey.at(-1)).toEqual([ 'bio', 'bonus', 'pin', 'salary' ]);
+			expect(byQuery.at(-1)).toEqual([ 'bio', 'bonus', 'pin', 'salary' ]);
+		} finally {
+			keyed.close();
+			queried.close();
+			await t.close();
+		}
+	});
 });

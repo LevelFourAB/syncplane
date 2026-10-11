@@ -1460,7 +1460,7 @@ const label = schema.entity('label', { id: schema.text().key() }, {
 ```
 
 Each rule in `access.allow` sets one or more of `read`, `create`, `update`, `delete` and `write`, and exactly one source: `requires: '<name>'` or `requires: [ '<name>', ... ]`, which needs every permission it names, or `admitted: true`. The rules lower to `syncplane.v1.AccessRule`; see [Access model](proto-options.md#access-model) for how they admit each operation.
-A rule can also set checks on the row: `callerIs` names a `text()` field by accessor name, `fields` lists accessor names, and `when` is a function that takes the row's field proxy, as a query's `where` does, and returns the condition the row must match, such as `when: (t) => t.archived.eq(false)`. `entity()` throws on a `when` that uses `matches()` or `match()`. `within` holds one entry or a list, each `{ entity, callerIs?, when? }`: `entity` names an entity of the schema by name, or as a thunk that returns it, and `callerIs` a `text()` field of it by accessor name. Build an entry with `when` with `schema.within(target, { when })`, which types the condition against `target`'s fields, such as `within: schema.within(project, { when: (p) => p.archived.eq(false) })`. `target` can be a thunk, `schema.within(() => project, { ... })`, for an entity declared later; `defineSchema()` calls it. For the rule's own entity, in an entity whose rows sit below rows of their own, write `{ self: true, callerIs?, when? }`, which types `callerIs` and `when` against the entity's own fields. `defineSchema()` throws on an entry whose entity is not in the schema or whose `callerIs` is not a singular `text()` field of it. See [Checks on the rows above](proto-options.md#checks-on-the-rows-above).
+A rule can also set checks on the row: `callerIs` names a `text()` field by accessor name, `fields` lists accessor names, and `when` is a function that takes the row's field proxy, as a query's `where` does, and returns the condition the row must match, such as `when: (t) => t.archived.eq(false)`. `entity()` throws on a `when` that uses `matches()` or `match()`. `within` holds one entry or a list. Build each entry with `schema.within(target, { callerIs?, when? })`: `callerIs` names a `text()` field of `target` by accessor name, and `when` is a condition on `target`'s fields, such as `within: schema.within(project, { when: (p) => p.archived.eq(false) })`. TypeScript types both against `target`'s fields, and a rule does not take a plain `{ entity, callerIs }` object. `target` can be a thunk, `schema.within(() => project, { ... })`, for an entity declared later; `defineSchema()` calls it. For the rule's own entity, in an entity whose rows sit below rows of their own, write `{ self: true, callerIs?, when? }`, which types `callerIs` and `when` against the entity's own fields. `defineSchema()` throws on an entry whose entity is not in the schema, whose `callerIs` is not a singular `text()` field of it, or that reads a field a guard of that entity can hide. See [Checks on the rows above](proto-options.md#checks-on-the-rows-above).
 `grant.subject` and `grant.role` name fields by accessor name. `grant.role` names a `text()` field. `grant.subject` names a `text()` field, or a singular `ref()` to an entity whose `members` option names its member entity, which grants to every member of the team the row names. See [Teams](proto-options.md#teams). `access.parents` names the access parents by accessor name: `ref()` and `refList()` fields, in any order, no name twice; see [Several access parents](proto-options.md#several-access-parents). A `workspaceRef()` cannot be a parent. A grant entity names at most one parent, and not a `refList()`.
 `access.guard` lists field guards, each `{ fields, allow }`: `fields` names the fields the guard restricts by accessor name, and `allow` holds rules with the shape of `access.allow` except `delete` and `fields`. A guard with the read rule `{ read: true, admitted: true }` shows its fields to every reader of the row; a narrower read rule, or none, hides them from some readers or from all. A guard lowers to `syncplane.v1.FieldGuard`; see [Field guards](proto-options.md#field-guards). `entity()` throws on a guard that names a key field, a field that `parents` names, a `.creator()` field or a field another guard names, on a guard rule whose `callerIs` or `when` reads a guarded field, and on a guard that can hide a field a rule in `allow` checks with `callerIs` or `when`, or the `grant.subject` or `grant.role` field.
 Each role sets `grants`, `includes` or both. `includes` names roles of the same `grant`, and the role grants every permission of each of them.
@@ -1487,7 +1487,7 @@ client.ws(id).can(...); // also canCreate and hasPermission
 client.onAccessChange((workspaceId) => { ... }): () => void;
 ```
 
-Each method predicts from two inputs: the `CallerAccess` summary the server sends when the caller's grants change, and the rows held locally, queued writes included. The client stores the summary with the cursor, so it survives a restart. A prediction walks at most 32 rows up a chain of access parents.
+Each method predicts from two inputs: the `CallerAccess` summary the server sends when the caller's grants change, and the rows held locally, queued writes included. The client stores the summary with the cursor, so it survives a restart. A prediction walks up a chain of access parents at most as many rows as the server's `MaxAccessDepth`, which the summary carries, or 32 rows when the summary does not carry it.
 
 The answer is advisory. The client does not refuse writes from it: every write is queued, and a write the server refuses comes back as a rejection ack. A row the caller lost access to keeps showing a pending local write until that ack arrives.
 
@@ -1511,6 +1511,15 @@ const canComment = await client.canCreate(CommentSchema, {
 - Without `fields`, the answer is for some update: `'yes'` when a rule admits an update of one field its `fields` list names, or a rule without a list admits an update. Use it for an Edit control, and pass `fields` to decide each input of a form.
 - For `'read'`, `fields` names the fields to read. Each guarded field among them needs a read rule of its guard that admits the caller on the row, so the answer is `'no'` for a field the server sends hidden. Without `fields`, the answer is for reading the row.
 - For an entity that declares no `access`, both answer `'yes'`. Such an entity is open to every caller in the workspace.
+- The answer also covers the checks the server makes beside the rules, from the rows the client holds:
+  - An update that changes the access parent needs, where the row is now, the right to read the row and each field of it a guard can hide, and the right to read every row of each entity whose rows can sit below it. A read rule with a `callerIs` or `when` check does not give the right to read every row.
+  - An update of a field that a `within` entry reads needs the same right to read the rows below.
+  - An update of a field that a read rule of a hiding guard checks needs the right to read the guarded fields. The answer is `'unknown'` at best, because the new value decides who reads them after the update.
+  - On a grant entity, `canCreate`, a `'delete'`, and an update of the subject, the role or the access parent need every permission of the row's role where the row applies. An update of the role or the access parent answers `'unknown'` at best.
+  - For `canCreate`, each permission a rule requires and each of its `within` entries must hold through each access parent of the row on its own: at the row, or at that parent or a row above it. A row below two parents shows to the readers of both, so an entry that holds through one parent only does not admit the create.
+  - Where a chain of access parents can lead back to an entity it passes, as a folder in a folder does, a write that adds an access parent needs the right to read that parent. `canCreate` answers `'no'` when the caller does not read a parent the row names, and `'unknown'` (`row_not_held`) when the client does not hold that parent, which can be missing or hidden. An update that changes the access parent answers `'unknown'` at best (`new_value`), because the new parent decides.
+  - A `'delete'` answers `'no'` while the client holds a live row whose access parent names the row, because the server refuses that delete with `conflict`. To find one, `can` scans the rows held locally of each entity whose rows can sit below the row.
+  - An `'update'` or a `'delete'` of a row the client does not hold answers `'unknown'` at best (`row_not_held`), because the server refuses both for a row it does not hold live.
 
 | Answer      | When                                                                      |
 | ----------- | ------------------------------------------------------------------------- |
@@ -1532,11 +1541,11 @@ const canInvite = await client.hasPermission(
 );
 ```
 
-| Answer      | When                                                                                                                                                                                                                                                                                                                      |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `'yes'`     | The summary holds the permission at the root, the row, or a row up its chain.                                                                                                                                                                                                                                             |
-| `'no'`      | It does not, and each path up the chain ends at a row without an access parent or with its reference unset, or at a row the client does not hold where the caller holds the permission at no row of an entity that can sit above it.                                                                                      |
-| `'unknown'` | No summary has arrived, the answer depends on a row of the chain the client does not hold (the row itself included) and the caller holds the permission at a row of an entity that can sit above it, or on a chain longer than 32 rows, or a local write to a grant row (or a delete of an anchor row) waits for its ack. |
+| Answer      | When                                                                                                                                                                                                                                                                                                                                                            |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'yes'`     | The summary holds the permission at the root, the row, or a row up its chain.                                                                                                                                                                                                                                                                                   |
+| `'no'`      | It does not, and each path up the chain ends at a row without an access parent or with its reference unset, or at a row the client does not hold where the caller holds the permission at no row of an entity that can sit above it.                                                                                                                            |
+| `'unknown'` | No summary has arrived, the answer depends on a row of the chain the client does not hold (the row itself included) and the caller holds the permission at a row of an entity that can sit above it, or on a chain longer than 32 rows, or a local write to a grant row (or a delete of an anchor row, or such a write by a custom mutation) waits for its ack. |
 
 ##### Why an answer is unknown
 
@@ -1552,15 +1561,15 @@ const { answer, reason } = await client.can(TaskSchema, id, 'delete', {
 | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `'loading'`        | The hook has no answer yet. Only the hooks give it.                                                                                                                                                                                                             |
 | `'no_summary'`     | No summary has arrived for the workspace.                                                                                                                                                                                                                       |
-| `'pending_grant'`  | A local write to a grant row, or a delete of a row that other rows sit below, waits for its ack.                                                                                                                                                                |
+| `'pending_grant'`  | A local write to a grant row or a delete of a row that other rows sit below waits for its ack. That includes such a write by the mirror of a custom mutation, and, in a schema with grant entities, a custom mutation that has no mirror.                       |
 | `'row_not_held'`   | A rule's `callerIs` check or condition reads a row the client does not hold, or a permission depends on a row of the chain the client does not hold (the row itself included) and the caller holds that permission at a row of an entity that can sit above it. |
 | `'new_value'`      | An update changes a field whose new value decides: the access parent, a field a `callerIs` check reads, or a field that a `when` or `within` check reads.                                                                                                       |
-| `'chain_too_deep'` | The chain is longer than 32 rows.                                                                                                                                                                                                                               |
+| `'chain_too_deep'` | The chain is longer than the server's `MaxAccessDepth`, or 32 rows when the summary does not carry it.                                                                                                                                                          |
 | `'error'`          | The read of the local store failed. Only the hooks give it; the methods reject.                                                                                                                                                                                 |
 
 ##### Following changes
 
-`onAccessChange` calls back with the workspace id once for each commit that stores or removes the summary, queues, acks or rolls back a local write to a grant row (or a delete of an anchor row), or writes a row of an entity that other rows sit below, locally or from the server. It runs for commits by this tab and by other tabs sharing the store, and can run when no answer changed. It does not report a change of the row an answer is for unless that row is of such an entity, so to follow the answer for one row, watch that row too. The React hooks `useCan`, `useCanCreate` and `useHasPermission` do both.
+`onAccessChange` calls back with the workspace id once for each commit that stores or removes the summary, queues, acks or rolls back a local write to a grant row (or a delete of an anchor row), replays the mirror of a queued custom mutation that writes such a row, or writes a row of an entity that other rows sit below, locally or from the server. It runs for commits by this tab and by other tabs sharing the store, and can run when no answer changed. It does not report a change of the row an answer is for unless that row is of such an entity, so to follow the answer for one row, watch that row too. The React hooks `useCan`, `useCanCreate` and `useHasPermission` do both. It does not report a change of the rows below a row either, which the answer for a `'delete'` reads; watch them to follow that answer.
 
 ### Schema compilation: defineSchema
 
@@ -1916,8 +1925,10 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
 
 - **`useCan(schema, key, operation, opts?)`** — `client.can` as a hook. `opts`
   takes `fields`, `detail` and `workspaceId`. Asks again when an access input in
-  the row changes (whether the row is held, its access parent, or a subject
-  field the access rules name) and when `onAccessChange` reports the workspace. A change
+  the row changes (whether the row is held, its access parent, or a field that
+  a check of the access rules or field guards reads: a `callerIs` field, a field
+  a `when` condition reads, and the same for a `within` entry on the entity
+  itself) and when `onAccessChange` reports the workspace. A change
   of any other field of the row does not ask again. The first render gives an
   answer at once: `'yes'` or `'no'` when the summary the client read last
   decides it without a row, else the answer the same question got last in this
@@ -1929,7 +1940,7 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   **`useCanCreate(schema, row, opts?)`** — `client.canCreate` as a hook; asks
   again when `row` changes by value. **`useHasPermission(schema, key,
   permission, opts?)`** — `client.hasPermission` as a hook; asks again as
-  `useCan` does, except that a subject field is not an input. Both take
+  `useCan` does, except that the fields the checks read are not inputs. Both take
   `detail` and `workspaceId`, and start as `useCan` does.
 
 - **`useSyncStatus()`** — the live account-wide status object.
@@ -2025,18 +2036,18 @@ Anchoring a room to a schema and key inherits the read authorization of that row
 
 The `Room<S, M>` interface provides the following members:
 
-| Member                                                     | Description                                                                              |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `name: string`                                             | The room name.                                                                           |
-| `sessionId: string`                                        | Unique identifier for the local session.                                                 |
-| `setPresence(state: S, opts?): void`                       | Updates local session state. Re-transmits when stream reconvenes.                        |
-| `send(message: M): Promise<void>`                          | Broadcasts a message to active peers. Rejects with `RoomSendError` if closed or dropped. |
-| `peers(): readonly Peer<S>[]`                              | Returns the active peer roster including the local session, sorted by `sessionId`.       |
-| `subscribe(cb: () => void): () => void`                    | Subscribes to roster changes. Returns an unsubscribe function.                           |
-| `onMessage(cb: (msg: RoomMessage<M>) => void): () => void` | Subscribes to broadcast messages. Returns an unsubscribe function.                       |
-| `onError(cb: (err: RoomError) => void): () => void`        | Subscribes to room errors and disconnections. Returns an unsubscribe function.           |
-| `status(): RoomStatus`                                     | Returns `'joining'`, `'open'`, `'dropped'`, or `'closed'`.                               |
-| `close(): void`                                            | Closes the room and withdraws local presence. Idempotent.                                |
+| Member                                                     | Description                                                                                             |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| `name: string`                                             | The room name.                                                                                          |
+| `sessionId: string`                                        | Unique identifier for the local session.                                                                |
+| `setPresence(state: S, opts?): void`                       | Updates local session state. Re-transmits when stream reconvenes.                                       |
+| `send(message: M): Promise<void>`                          | Broadcasts a message to active peers. Rejects with `RoomSendError` if closed or dropped.                |
+| `peers(): readonly Peer<S>[]`                              | Returns the active peer roster including the local session, sorted by `sessionId`.                      |
+| `subscribe(cb: () => void): () => void`                    | Subscribes to roster changes. Returns an unsubscribe function.                                          |
+| `onMessage(cb: (msg: RoomMessage<M>) => void): () => void` | Subscribes to broadcast messages. Returns an unsubscribe function.                                      |
+| `onError(cb: (err: RoomError) => void): () => void`        | Subscribes to room errors and disconnections. Returns an unsubscribe function.                          |
+| `status(): RoomStatus`                                     | Returns `'joining'`, `'open'`, `'waiting'` (no grant in the workspace yet), `'dropped'`, or `'closed'`. |
+| `close(): void`                                            | Closes the room and withdraws local presence. Idempotent.                                               |
 
 ### Peer interface
 
@@ -2094,7 +2105,7 @@ Exported functions and types:
 - `createTestClient(opts: TestClientOptions): Promise<TestClient>`: Returns an instance configured with an in-memory server.
 - `createTestServer(opts?: TestServerOptions): TestServer`: Creates a shared in-memory sync server.
 - `TestClient`: Implements `client`, `db`, `server`, `net` (`offline()`, `online()`, `isOffline`), `clientId`, `rejections`, `sync()`, and `close()`.
-- `TestServer`: Implements `transport()`, `reject(match?, code?, message?)`, `holdPushes()`, `gc(workspace?)`, `revoke(id)`, `withholdAccess(id)`, `restore(id)`, `mutator(name, m)`, `setCallerAccess(access, { workspace? })`, and data inspection helpers (`put`, `del`, `get`, `rows`). `setCallerAccess` takes a `TestCallerAccess`: the caller's `subjects`, the `roles` it holds, and the `permissions` it holds outside a role. A role is held at the workspace root, or `at` a row (`[ ProjectSchema, 'p1' ]`), and grants the permissions of its declaration and of its `includes`. `setCallerAccess` throws for a role that no registered entity declares, and for an `at` row that the role's grant rows cannot point at. A permission is held at `root: true` or at the `anchors` rows. The call sets the access summary that every later bootstrap and pull carries, which `can` and `useCan` answer from. The test server does not check writes against it.
+- `TestServer`: Implements `transport()`, `reject(match?, code?, message?)`, `holdPushes()`, `gc(workspace?)`, `revoke(id)`, `withholdAccess(id)`, `restore(id)`, `mutator(name, m)`, `setCallerAccess(access, { workspace? })`, and data inspection helpers (`put`, `del`, `get`, `rows`). `setCallerAccess` takes a `TestCallerAccess`: the caller's `subjects`, the `roles` it holds, and the `permissions` it holds outside a role. A role is held at the workspace root, or `at` a row (`[ ProjectSchema, 'p1' ]`), and grants the permissions of its declaration and of its `includes`. `setCallerAccess` throws for a role that no registered entity declares, and for an `at` row that the role's grant rows cannot point at. A permission is held at `root: true` or at the `anchors` rows. The call sets the access summary that every later bootstrap and pull carries, which `can` and `useCan` answer from. The test server does not check writes against it. The `maxAccessDepth` option of `new TestServer(...)` sets the `MaxAccessDepth` that each summary carries (default `32`).
 - `TestServerOptions.serve`: `'all'` (default) sends every row. `'readable'` sends only the rows that a read rule lets the caller read, as the real server does. With it, a client does not hold the rows the caller cannot read, so `can` answers `'unknown'` for them.
 - `Rejection`: Error class thrown inside test mutators to simulate server rejections.
 - `DEFAULT_WORKSPACE`: Constant string `'main'`.

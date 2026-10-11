@@ -19,6 +19,20 @@ func widgetField(name string) protoreflect.FieldDescriptor {
 	return fd
 }
 
+var _ = Describe("IsReservedEntityName", func() {
+	It("reserves the names that start with the engine's prefix", func() {
+		for _, name := range []string{"syncplane_field_history", "syncplane_access_moves", "syncplane_"} {
+			Expect(naming.IsReservedEntityName(name)).To(BeTrue(), name)
+		}
+	})
+
+	It("leaves other names to the schema", func() {
+		for _, name := range []string{"syncplane", "Syncplane_x", "my_syncplane_x", "todo"} {
+			Expect(naming.IsReservedEntityName(name)).To(BeFalse(), name)
+		}
+	})
+})
+
 var _ = Describe("ValidateEntityName", func() {
 	It("accepts identifiers", func() {
 		for _, name := range []string{"todo", "Todo", "todo_list", "_private", "a1", "t2m"} {

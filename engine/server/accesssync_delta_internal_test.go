@@ -104,7 +104,10 @@ func applyDelta(held *syncplanev1.CallerAccess, delta *syncplanev1.CallerAccessD
 			delete(rows, a.GetEntity()+"/"+key)
 		}
 	}
-	return &syncplanev1.CallerAccess{Subjects: held.Subjects, RootPermissions: held.RootPermissions, AnchorGroups: groupedRows(rows)}
+	return &syncplanev1.CallerAccess{
+		Subjects: held.Subjects, RootPermissions: held.RootPermissions, AnchorGroups: groupedRows(rows),
+		MaxAccessDepth: held.MaxAccessDepth,
+	}
 }
 
 var _ = Describe("CallerAccess delta conformance vectors", func() {

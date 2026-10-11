@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sort"
 
+	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -139,9 +140,25 @@ func (s *Server) callerAccessOf(ctx context.Context, p Principal, workspaceID st
 	}
 	access, err := s.callerAccess(ctx, p, workspaceID)
 	if err != nil {
-		return CallerAccess{}, fmt.Errorf("server: resolving caller access: %w", err)
+		return CallerAccess{}, callerAccessError(err)
 	}
 	return access, nil
+}
+
+// callerAccessError wraps an error of the WithCallerAccess hook. A hook error
+// is a failure to decide, never a denial, so an error that holds a
+// WorkspaceDenial loses its chain: the gate would otherwise refuse the caller
+// as revoked, and a client would drop its local data. It keeps the code of a
+// *connect.Error in the chain, and is internal otherwise.
+func callerAccessError(err error) error {
+	if _, denied := AsWorkspaceDenial(err); !denied {
+		return fmt.Errorf("server: resolving caller access: %w", err)
+	}
+	code := connect.CodeOf(err)
+	if code == connect.CodeUnknown {
+		code = connect.CodeInternal
+	}
+	return connect.NewError(code, fmt.Errorf("server: resolving caller access: %v", err))
 }
 
 // primarySubject returns the first non-empty subject of access, "" when there

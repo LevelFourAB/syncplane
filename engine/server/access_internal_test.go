@@ -365,3 +365,34 @@ var _ = Describe("readers.loose", func() {
 		Expect(r.loose()).To(Equal(readers{checked: []accessRule{rule("view_own")}}))
 	})
 })
+
+// A move needs, where the row is, the right to read every row below it. A
+// rule that checks the row admits a caller on some rows only.
+var _ = Describe("readers.everyRow", func() {
+	subject := (&accessv1.Page{}).ProtoReflect().Descriptor().Fields().ByName("owner_id")
+	own := func(requires ...string) accessRule {
+		return accessRule{ops: opRead, requires: requires, callerIs: subject}
+	}
+	rule := func(requires ...string) accessRule {
+		return accessRule{ops: opRead, requires: requires}
+	}
+
+	It("drops a rule with a caller_is check", func() {
+		r := readers{perms: []string{"view_all"}, checked: []accessRule{own("view_own")}}
+		Expect(r.everyRow()).To(Equal(readers{perms: []string{"view_all"}}))
+	})
+
+	It("drops an admitted rule with a caller_is check instead of reading every row", func() {
+		r := readers{checked: []accessRule{own()}}
+		Expect(r.everyRow()).To(Equal(readers{}))
+	})
+
+	It("keeps a rule that needs several permissions and checks nothing on the row", func() {
+		r := readers{checked: []accessRule{own("view_own"), rule("use", "view_own")}}
+		Expect(r.everyRow()).To(Equal(readers{checked: []accessRule{rule("use", "view_own")}}))
+	})
+
+	It("keeps a set that every admitted caller reads", func() {
+		Expect(readers{all: true}.everyRow()).To(Equal(readers{all: true}))
+	})
+})

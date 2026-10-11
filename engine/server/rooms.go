@@ -63,8 +63,8 @@ func (s *Server) Watch(
 		return err
 	}
 
-	subject := principalOf(ctx).Subject
-	watch := s.rooms.Open(subject, msg.GetSessionId(), msg.GetFrontedSessionIds()...)
+	principal := principalOf(ctx)
+	watch := s.rooms.Open(principal.Issuer, principal.Subject, msg.GetSessionId(), msg.GetFrontedSessionIds()...)
 	defer watch.Close()
 
 	// Every session this stream speaks for is bound to the principal that
@@ -73,11 +73,11 @@ func (s *Server) Watch(
 	// released when the stream ends.
 	sessions := append([]string{msg.GetSessionId()}, msg.GetFrontedSessionIds()...)
 	for _, id := range sessions {
-		s.roomSessions.bind(id, subject, watch)
+		s.roomSessions.bind(id, principal, watch)
 	}
 	defer func() {
 		for _, id := range sessions {
-			s.roomSessions.release(id, subject, watch)
+			s.roomSessions.release(id, principal, watch)
 		}
 	}()
 
@@ -289,8 +289,9 @@ func (s *Server) sendRoomEvent(
 // timer the client cannot influence, and the anchor cache keeps the cost at one
 // row read per document per interval however many people have it open.
 //
-// A settled denial drops the topic as ACCESS_REVOKED, the same permanent
-// verdict the open-time gate sends. A gate that cannot DECIDE drops it as
+// A settled denial drops the topic with the reason the open-time gate sends:
+// NO_ACCESS for a caller whose last grant went, ACCESS_REVOKED for any other
+// denial. A gate that cannot DECIDE drops it as
 // ERROR: an outage must never read as revocation, but continuing to serve a
 // room whose access can no longer be affirmed is the wrong side to fail on.
 func (s *Server) regateRooms(

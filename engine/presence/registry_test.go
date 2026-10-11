@@ -91,7 +91,7 @@ var _ = Describe("Registry", func() {
 	// stamps, so a stream opened with it owns its session's record.
 	openAs := func(subject, session string, fronted ...string) *presence.Watch {
 		GinkgoHelper()
-		w := reg.Open(subject, session, fronted...)
+		w := reg.Open("", subject, session, fronted...)
 		DeferCleanup(w.Close)
 		return w
 	}
@@ -286,6 +286,31 @@ var _ = Describe("Registry", func() {
 				"the record's own subject and state must survive the spoof")
 		})
 
+		// Two issuers can each have a caller with one subject. They are two
+		// callers, so neither may change or withdraw the other's record.
+		It("ignores a state overwrite and a leave from another issuer with the same subject", func() {
+			w := open("s9")
+			join(w, topic)
+			owner := presence.Participant{SessionID: "s1", Issuer: "a", Subject: "u1", State: []byte("mine"), Revision: 1}
+			Expect(reg.Publish(ctx, presence.Event{Topic: topic, Kind: presence.KindState, Participant: owner})).To(Succeed())
+			receive(w)
+
+			spoof := presence.Participant{SessionID: "s1", Issuer: "b", Subject: "u1", State: []byte("spoofed"), Revision: 1 << 62}
+			Expect(reg.Publish(ctx, presence.Event{Topic: topic, Kind: presence.KindState, Participant: spoof})).To(Succeed())
+			Expect(reg.Publish(ctx, presence.Event{
+				Topic:       topic,
+				Kind:        presence.KindLeave,
+				Participant: presence.Participant{SessionID: "s1", Issuer: "b", Subject: "u1"},
+			})).To(Succeed())
+
+			Consistently(w.Events(), "100ms").ShouldNot(Receive(),
+				"another issuer's state or leave must not reach a watcher")
+			got := join(open("late"), topic)
+			Expect(got).To(HaveLen(1))
+			Expect(got[0].Issuer).To(Equal("a"))
+			Expect(string(got[0].State)).To(Equal("mine"))
+		})
+
 		// First-writer sets the owner: an unclaimed session id is still admitted,
 		// which is what makes a record arriving over the bus from another node work
 		// at all.
@@ -410,6 +435,28 @@ var _ = Describe("Registry", func() {
 
 			Consistently(elsewhere, "100ms").ShouldNot(Receive(),
 				"a stream of another subject must not announce the record")
+		})
+
+		It("does not re-announce a record that only another issuer's stream with the same subject names", func() {
+			w := open("s2")
+			join(w, topic)
+			Expect(reg.Publish(ctx, presence.Event{
+				Topic:       topic,
+				Kind:        presence.KindState,
+				Participant: presence.Participant{SessionID: "s1", Issuer: "a", Subject: "u1", Revision: 1},
+			})).To(Succeed())
+			receive(w)
+			stranger := reg.Open("b", "u1", "s1")
+			DeferCleanup(stranger.Close)
+			join(stranger, topic)
+
+			elsewhere, cancel := bus.Subscribe(topic)
+			DeferCleanup(cancel)
+			clk.advance(announce)
+			reg.Sweep(ctx)
+
+			Consistently(elsewhere, "100ms").ShouldNot(Receive(),
+				"a stream of another issuer must not announce the record")
 		})
 
 		It("keeps a record alive for a stream of its own subject that fronts it", func() {
@@ -559,7 +606,7 @@ var _ = Describe("Registry", func() {
 			events, cancel := shared.Subscribe(presence.Topic{WorkspaceID: "app-a/ws", Name: "cursors"})
 			DeferCleanup(cancel)
 
-			w := a.Open("u:s1", "s1")
+			w := a.Open("", "u:s1", "s1")
 			DeferCleanup(w.Close)
 			_, _, err := w.Join(topic)
 			Expect(err).NotTo(HaveOccurred())
@@ -576,7 +623,7 @@ var _ = Describe("Registry", func() {
 		})
 
 		It("hands its own watchers the topic they joined", func() {
-			w := a.Open("u:s1", "s1")
+			w := a.Open("", "u:s1", "s1")
 			DeferCleanup(w.Close)
 			_, _, err := w.Join(topic)
 			Expect(err).NotTo(HaveOccurred())
@@ -594,12 +641,12 @@ var _ = Describe("Registry", func() {
 		})
 
 		It("keeps two prefixes of one workspace id apart", func() {
-			wa := a.Open("u:s1", "s1")
+			wa := a.Open("", "u:s1", "s1")
 			DeferCleanup(wa.Close)
 			_, _, err := wa.Join(topic)
 			Expect(err).NotTo(HaveOccurred())
 
-			wb := b.Open("u:s2", "s2")
+			wb := b.Open("", "u:s2", "s2")
 			DeferCleanup(wb.Close)
 			_, _, err = wb.Join(topic)
 			Expect(err).NotTo(HaveOccurred())
@@ -648,7 +695,7 @@ var _ = Describe("Registry", func() {
 		It("refuses a publish and a join once closed", func() {
 			reg.Close()
 			Expect(reg.Publish(ctx, presence.Event{Topic: topic})).To(MatchError(presence.ErrClosed))
-			_, _, err := reg.Open("u:s1", "s1").Join(topic)
+			_, _, err := reg.Open("", "u:s1", "s1").Join(topic)
 			Expect(err).To(MatchError(presence.ErrClosed))
 		})
 

@@ -45,7 +45,7 @@ Workspace access has these values:
 
 - Unset: The server has not refused the workspace.
 - `'revoked'`: Terminal. The application's `CanAccessWorkspace` denied the caller (`workspace_access_revoked` on the wire). The client stops syncing the workspace and keeps its local rows.
-- `'none'`: Not terminal. The caller holds no permission in the workspace's access model (`workspace_no_access` on the wire). The client keeps the local rows and the queue, and asks again with backoff, 1 to 30 seconds apart, and at once on `syncNow()`.
+- `'none'`: Not terminal. The caller holds no permission in the workspace's access model (`workspace_no_access` on the wire). The client keeps the local rows and the queue, and asks again with backoff, 1 to 30 seconds apart, and at once on `syncNow()`. When the caller loses its last permission, the pull before this answer removes the rows of the access model that it read, and `can()` then answers from a summary that holds nothing.
 - `'granted'`: The server admitted the caller after `'none'`. The client syncs the workspace again, queued writes included.
 - `TextHandle.status()` and `TextHandle.onError`: Report errors on an individual live text handle without affecting client status.
 - `Room.status()`, `Room.onError`, and `RoomSendError`: Report errors on an individual open room without affecting client status.
@@ -53,6 +53,7 @@ Workspace access has these values:
 Room failure codes have the following behaviors:
 
 - `room_dropped`: Terminal. The server re-evaluates access on every heartbeat.
+- A room of a caller that holds no grant in the workspace yet is not dropped: `Room.status()` reports `'waiting'`, with no error. The client asks again with backoff, 1 to 30 seconds apart, and at once when the caller's access in the workspace changes. The room goes to `'open'` when a grant admits the caller. The same happens when the caller's last grant goes while the room is open.
 - `room_offline`: Non-terminal. Indicates that a publish did not reach the server. The room re-sends state when the stream reconnects.
 - Room data is not durable. Room failure codes do not indicate data loss. For more information, see [Rooms](../explanation/rooms.md).
 

@@ -789,9 +789,14 @@ type CallerAccess struct {
 	AnchorGroups []*AnchorGroup `protobuf:"bytes,5,rep,name=anchor_groups,json=anchorGroups,proto3" json:"anchor_groups,omitempty"`
 	// Identifies what the summary holds: equal summaries have equal versions,
 	// whatever their seq. Never 0 in a summary from the server.
-	Version       uint64 `protobuf:"fixed64,6,opt,name=version,proto3" json:"version,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Version uint64 `protobuf:"fixed64,6,opt,name=version,proto3" json:"version,omitempty"`
+	// The most access parent hops the server follows up from a row: its
+	// MaxAccessDepth. A permission held at a row further up does not apply to
+	// the row. 0 from a server that does not send it, and a client then
+	// assumes 32, the default.
+	MaxAccessDepth uint32 `protobuf:"varint,7,opt,name=max_access_depth,json=maxAccessDepth,proto3" json:"max_access_depth,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *CallerAccess) Reset() {
@@ -859,9 +864,16 @@ func (x *CallerAccess) GetVersion() uint64 {
 	return 0
 }
 
+func (x *CallerAccess) GetMaxAccessDepth() uint32 {
+	if x != nil {
+		return x.MaxAccessDepth
+	}
+	return 0
+}
+
 // A change to a CallerAccess: applied to the summary whose version is
-// base_version, it gives the summary whose version is version. Subjects and
-// root_permissions do not change.
+// base_version, it gives the summary whose version is version. Subjects,
+// root_permissions and max_access_depth do not change.
 //
 // To apply it, put each row that anchor_groups lists in the group with the
 // permissions listed there, and take it out of the group it was in. Then
@@ -2366,13 +2378,14 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x03seq\x18\x06 \x01(\x04R\x03seq\x12'\n" +
 	"\x0fschema_revision\x18\a \x01(\tR\x0eschemaRevision\x12?\n" +
 	"\rcaller_access\x18\b \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\x12O\n" +
-	"\x13caller_access_delta\x18\t \x01(\v2\x1f.syncplane.v1.CallerAccessDeltaR\x11callerAccessDelta\"\xc1\x01\n" +
+	"\x13caller_access_delta\x18\t \x01(\v2\x1f.syncplane.v1.CallerAccessDeltaR\x11callerAccessDelta\"\xeb\x01\n" +
 	"\fCallerAccess\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x1a\n" +
 	"\bsubjects\x18\x03 \x03(\tR\bsubjects\x12)\n" +
 	"\x10root_permissions\x18\x04 \x03(\tR\x0frootPermissions\x12>\n" +
 	"\ranchor_groups\x18\x05 \x03(\v2\x19.syncplane.v1.AnchorGroupR\fanchorGroups\x12\x18\n" +
-	"\aversion\x18\x06 \x01(\x06R\aversion\"\xd6\x01\n" +
+	"\aversion\x18\x06 \x01(\x06R\aversion\x12(\n" +
+	"\x10max_access_depth\x18\a \x01(\rR\x0emaxAccessDepth\"\xd6\x01\n" +
 	"\x11CallerAccessDelta\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12!\n" +
 	"\fbase_version\x18\x02 \x01(\x06R\vbaseVersion\x12\x18\n" +

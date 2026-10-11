@@ -42,6 +42,12 @@ If the row is hidden by your `ReadFilter`, deleted, or was never created, the
 room is dropped with `room_dropped` and `Room.status()` reports `dropped`. This
 status is terminal, and reopening returns the same result.
 
+In a schema that uses the access model, a caller that holds no grant in the
+workspace yet is not dropped. `Room.status()` reports `waiting` and the roster
+is empty. The client asks again with backoff, 1 to 30 seconds apart, and at
+once when the caller's access in the workspace changes. When a grant admits the
+caller, the room goes to `open` and publishes the state set while it waited.
+
 If you send raw bytes rather than JSON (for example, with text anchors), provide
 custom codec functions in the room options:
 
@@ -220,6 +226,8 @@ scenarios:
 | Offline when `setPresence` is called            | Remembered and re-sent; the record is re-published when the stream reopens    |
 | Offline when `send` is called                   | Rejects. A broadcast is not queued — one that arrives late is worse than none |
 | Access revoked while the room is open           | `room_dropped` within one heartbeat; terminal                                 |
+| The caller holds no grant in the workspace yet  | `Room.status()` is `waiting`; the room opens when a grant admits the caller   |
+| The caller's last grant goes while it is open   | `waiting` within one heartbeat, as above                                      |
 | A peer's tab is killed                          | Disappears within three announce intervals (~15 seconds by default)           |
 | A peer publishes state your build cannot decode | That peer's `state` is `undefined`; the room carries on                       |
 

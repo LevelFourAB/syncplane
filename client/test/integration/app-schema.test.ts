@@ -1,6 +1,6 @@
 import { createConnectTransport } from '@connectrpc/connect-node';
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,11 +73,20 @@ let adminUrl = '';
 
 beforeAll(async () => {
 	const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
-	const bin = join(mkdtempSync(join(tmpdir(), 'syncplaned-')), 'syncplaned');
-	execFileSync('go', [ 'build', '-o', bin, './cmd/syncplaned' ], {
-		cwd: repoRoot,
-		stdio: 'inherit',
-	});
+	const dir = mkdtempSync(join(tmpdir(), 'syncplaned-'));
+	const bin = join(dir, 'syncplaned');
+	// The running process keeps its executable after the unlink; see
+	// startTestServer.
+	const removeBuild = () => rmSync(dir, { recursive: true, force: true });
+	try {
+		execFileSync('go', [ 'build', '-o', bin, './cmd/syncplaned' ], {
+			cwd: repoRoot,
+			stdio: 'inherit',
+		});
+	} catch (err) {
+		removeBuild();
+		throw err;
+	}
 
 	proc = spawn(bin, [ `-token=${TOKEN}`, '-heartbeat=250ms', '-chunk-size=8' ], {
 		stdio: [ 'ignore', 'pipe', 'inherit' ],
@@ -96,7 +105,7 @@ beforeAll(async () => {
 		});
 		proc.on('error', reject);
 		proc.on('exit', (code) => reject(new Error(`syncplaned exited with ${code} before listening`)));
-	});
+	}).finally(removeBuild);
 });
 
 afterAll(() => {

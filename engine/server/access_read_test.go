@@ -382,6 +382,43 @@ var _ = Describe("Access model reads", func() {
 			Expect(watch("t1").GetSnapshot()).NotTo(BeNil())
 			Expect(watch("t2").GetDropped().GetReason()).To(Equal(syncplanev1.TopicDropped_REASON_ACCESS_REVOKED))
 		})
+
+		It("drops a room anchored on a row the caller cannot read as it drops one anchored on no row", func() {
+			dropped := func(entity, key string) *syncplanev1.TopicDropped {
+				GinkgoHelper()
+				streamCtx, cancel := context.WithCancel(f.ctx)
+				DeferCleanup(cancel)
+				req := connect.NewRequest(&syncplanev1.WatchRequest{
+					SessionId: "s-" + entity + "-" + key,
+					Topics:    []*syncplanev1.Topic{{WorkspaceId: ws, Name: "cursors", Entity: entity, Key: key}},
+				})
+				as("guest", req.Header())
+				stream, err := f.presence.Watch(streamCtx, req)
+				Expect(err).NotTo(HaveOccurred())
+				for stream.Receive() {
+					if !stream.Msg().GetHeartbeat() {
+						Expect(stream.Msg().GetDropped()).NotTo(BeNil())
+						return stream.Msg().GetDropped()
+					}
+				}
+				Fail("stream closed early: " + stream.Err().Error())
+				return nil
+			}
+			// Given t2 exists in p2, which guest cannot read, and t9 does not exist
+			// When guest watches a room anchored on each
+			hidden, absent := dropped("task", "t2"), dropped("task", "t9")
+
+			// Then both drops read the same apart from the key, so the drop does
+			// not tell guest that t2 exists
+			Expect(hidden.GetReason()).To(Equal(absent.GetReason()))
+			Expect(strings.ReplaceAll(hidden.GetMessage(), "t2", "KEY")).
+				To(Equal(strings.ReplaceAll(absent.GetMessage(), "t9", "KEY")))
+
+			// And the same holds for a grant row of an entity guest reads none of
+			om := dropped("org_member", "om-admin")
+			Expect(strings.ReplaceAll(om.GetMessage(), "om-admin", "KEY")).
+				To(Equal(strings.ReplaceAll(dropped("org_member", "om-nobody").GetMessage(), "om-nobody", "KEY")))
+		})
 	})
 
 	// A guest's sync should cost what the guest receives, not the size of the

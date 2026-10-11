@@ -67,14 +67,19 @@ type MutatorOption interface {
 // not exist refuses the invocation. With both empty, the caller must hold
 // Permission at the workspace root.
 //
+// With TrustedOnly set, only a Trusted caller may invoke the mutator, and the
+// other fields stay empty. This is also what a mutator without a MutatorAccess
+// gets, but registration logs a warning for such a mutator and not for one
+// that sets TrustedOnly.
+//
 // In a schema that uses the access model, an invocation of a mutator without a
 // MutatorAccess is refused for every caller who is not Trusted. The check runs
 // inside the write transaction before the body, and is refused with
 // CodeAccessDenied. The rows the body writes are not checked unless it
 // writes them through EntityTx.AsCaller; the body can also ask EntityTx.Can.
 //
-// Registration fails, with the rest of the access model, when Admitted is set
-// together with another field, Permission is granted by no role, Entity is not
+// Registration fails, with the rest of the access model, when Admitted or
+// TrustedOnly is set together with another field, Permission is granted by no role, Entity is not
 // in the model, or KeyField is not a singular string field of the args. In a
 // schema without the access model, it has no effect.
 //
@@ -82,11 +87,14 @@ type MutatorOption interface {
 //		server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
 //	server.WithMutator("send_feedback", &feedbackv1.SendArgs{}, sendFeedback,
 //		server.MutatorAccess{Admitted: true})
+//	server.WithMutator("rebuild_index", nil, rebuildIndex,
+//		server.MutatorAccess{TrustedOnly: true})
 type MutatorAccess struct {
-	Permission string
-	Entity     string
-	KeyField   string
-	Admitted   bool
+	Permission  string
+	Entity      string
+	KeyField    string
+	Admitted    bool
+	TrustedOnly bool
 }
 
 func (ma MutatorAccess) applyMutator(mi *mutatorInfo) {
@@ -186,6 +194,61 @@ type EntityTx struct {
 	root *EntityTx
 	// view is the AsCaller view, kept so that each call returns the same one.
 	view *EntityTx
+	// writes counts the writes of the transaction, on the transaction itself
+	// and not on its view. Reads that apply the caller's read gate bind the
+	// caller's access again after a write, which can change what it reads.
+	writes uint64
+	// reads is what the reads of a transaction with a write gate apply, nil
+	// until its first read and on every transaction without one.
+	reads *callerReads
+}
+
+// callerReads is the caller's read gate (see Server.readGate) that the reads
+// of a transaction with a write gate apply. writes is the transaction's write
+// count when the gate was bound.
+type callerReads struct {
+	visible func(storage.Row) (bool, error)
+	project rowProjector
+	refuse  specRefuser
+	writes  uint64
+}
+
+// unfilteredReads is the callerReads of a transaction without a write gate:
+// it filters and refuses nothing.
+var unfilteredReads = &callerReads{}
+
+// callerReadGate returns what this transaction's reads apply. A transaction
+// with a write gate reads as its caller: an AsCaller view, and a
+// Server.Mutate for a caller who is not Trusted. Its reads apply the caller's
+// read rules, guards and ReadFilter, bound on the first read and again after
+// the transaction writes. Every other transaction reads unfiltered.
+func (e *EntityTx) callerReadGate() (*callerReads, error) {
+	if e.gate == nil {
+		return unfilteredReads, nil
+	}
+	owner := e
+	if e.root != nil {
+		owner = e.root
+	}
+	writes := owner.writes
+	if e.reads != nil && e.reads.writes == writes {
+		return e.reads, nil
+	}
+	adm := admission{principal: e.gate.p, creator: e.gate.creator}
+	if a := e.gate.accessOf(); a != nil {
+		// The transaction reached the gate's verdict before the body ran, so
+		// none is left for the bind.
+		adm.caller, adm.access = a.caller, a.admitted
+	}
+	visible, project, refuse, bind, err := e.srv.readGate(e.ctx, e.ws, adm, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := bind(e.tx); err != nil {
+		return nil, err
+	}
+	e.reads = &callerReads{visible: visible, project: project, refuse: refuse, writes: writes}
+	return e.reads, nil
 }
 
 // AsCaller returns a view of this transaction whose writes are checked as the
@@ -197,13 +260,25 @@ type EntityTx struct {
 // Permissions.CanMutate does not run for these writes, since the verdict on
 // the invocation covers them.
 //
-// Reads, Can and Seq answer as on this transaction, and writes through either
-// one share its sequence. In a transaction whose writes are already checked,
-// such as one Server.Mutate runs for a caller who is not Trusted, and in a
-// Trusted transaction, AsCaller returns this transaction itself.
+// Reads through the view read as the invoking caller's client would: a row the
+// caller may not read reads as absent from Get, GetMeta, Scan, ScanPage and
+// Query, and each field a field guard hides from the caller reads as its zero
+// value. A Query whose predicate or order names a field that a guard hides
+// from the caller on some row fails with code permission_denied. The reads
+// see the transaction's own earlier writes, grants included. Reads through a
+// mutator body's own transaction are not filtered.
 //
-// A write through the view can call the application's WriteFilter, ReadFilter
-// and FieldPermissions hooks inside the transaction.
+// Can and Seq answer as on this transaction, and writes through either one
+// share its sequence. In a transaction whose writes are already checked, such
+// as one Server.Mutate runs for a caller who is not Trusted, AsCaller returns
+// this transaction itself, whose reads are filtered for that caller as above.
+// In a Trusted transaction, AsCaller returns this transaction itself, whose
+// reads are not filtered.
+//
+// A write or a read through the view can call the application's WriteFilter,
+// ReadFilter and FieldPermissions hooks inside the transaction. The first read
+// through the view, and the first after a write, calls ReadFilter once for
+// each registered entity.
 //
 //	func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
 //		id := args.(*taskv1.CompleteTaskArgs).GetTaskId()
@@ -323,6 +398,7 @@ func (e *EntityTx) writeSeq() (uint64, error) {
 		e.seq = seq
 	}
 	e.wrote = true
+	e.writes++
 	return e.seq, nil
 }
 
@@ -331,13 +407,20 @@ func (e *EntityTx) info(msg proto.Message) (*entityInfo, error) {
 }
 
 // Get loads the row with the given key into dst. Returns false if the row
-// does not exist (or is deleted).
+// does not exist (or is deleted). Through an AsCaller view, and in a
+// Server.Mutate for a caller who is not Trusted, it also returns false for a
+// row the caller may not read and clears the fields a guard hides from the
+// caller (see AsCaller).
 func (e *EntityTx) Get(dst proto.Message, key string) (bool, error) {
 	info, err := e.info(dst)
 	if err != nil {
 		return false, err
 	}
-	found, _, err := readRowInto(e.tx, info, dst, key)
+	g, err := e.callerReadGate()
+	if err != nil {
+		return false, err
+	}
+	found, _, err := readRowVisible(e.tx, info, dst, key, g.visible, g.project)
 	return found, err
 }
 
@@ -374,7 +457,11 @@ func (e *EntityTx) GetMeta(dst proto.Message, key string) (found bool, meta RowM
 	if err != nil {
 		return false, RowMeta{}, err
 	}
-	return readRowMeta(e.tx, info, dst, key, nil, nil)
+	g, err := e.callerReadGate()
+	if err != nil {
+		return false, RowMeta{}, err
+	}
+	return readRowMeta(e.tx, info, dst, key, g.visible, g.project)
 }
 
 // Put stores msg as a full-row snapshot; the key derives from key_fields.
@@ -543,6 +630,9 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 		return err
 	}
 	if err := e.srv.checkGrantRow(info, key, syncplanev1.CrudOp_CRUD_OP_PUT, nil, msg); err != nil {
+		return err
+	}
+	if err := aw.checkNewParentsRead(e.tx, msg); err != nil {
 		return err
 	}
 	if err := e.srv.checkAccessChain(e.ctx, e.ws, e.tx, info, key, currentRow, msg); err != nil {
@@ -750,6 +840,9 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	if err := e.srv.checkGrantRow(info, key, syncplanev1.CrudOp_CRUD_OP_PATCH, mask, base); err != nil {
 		return err
 	}
+	if err := aw.checkNewParentsRead(e.tx, base); err != nil {
+		return err
+	}
 	if err := e.srv.checkAccessChain(e.ctx, e.ws, e.tx, info, key,
 		func() (storage.Row, bool, error) { return row, live, nil }, base); err != nil {
 		return err
@@ -871,15 +964,31 @@ func (e *EntityTx) Delete(prototype proto.Message, key string) error {
 }
 
 // Scan iterates all live rows of the entity identified by prototype,
-// decoding each into a fresh message.
+// decoding each into a fresh message. Through an AsCaller view, and in a
+// Server.Mutate for a caller who is not Trusted, it skips the rows the caller
+// may not read and clears the fields a guard hides from the caller (see
+// AsCaller).
 func (e *EntityTx) Scan(prototype proto.Message, fn func(msg proto.Message) error) error {
 	info, err := e.info(prototype)
 	if err != nil {
 		return err
 	}
+	g, err := e.callerReadGate()
+	if err != nil {
+		return err
+	}
 	return e.tx.ScanEntity(info.name, func(r storage.Row) error {
+		if g.visible != nil {
+			ok, err := g.visible(r)
+			if err != nil || !ok {
+				return err
+			}
+		}
 		msg, err := info.decode(r.Value)
 		if err != nil {
+			return err
+		}
+		if err := g.project.apply(info, r.Key, msg); err != nil {
 			return err
 		}
 		return fn(msg)
@@ -896,12 +1005,22 @@ func (e *EntityTx) Scan(prototype proto.Message, fn func(msg proto.Message) erro
 // every other writer for its duration — and it is a full scan of the entity
 // unless a declared secondary index covers its predicate and ordering. A spec
 // with no Limit also retains every match in memory. See query.Spec.
+//
+// Through an AsCaller view, and in a Server.Mutate for a caller who is not
+// Trusted, it answers as ViewTx.Query does for the caller (see AsCaller).
 func (e *EntityTx) Query(prototype proto.Message, spec query.Spec, fn func(msg proto.Message) error) error {
 	info, err := e.info(prototype)
 	if err != nil {
 		return err
 	}
-	rows, err := runQuerySpec(e.srv, e.tx, e.ws, info, spec, nil, nil)
+	g, err := e.callerReadGate()
+	if err != nil {
+		return err
+	}
+	if err := g.refuse.check(info, spec); err != nil {
+		return err
+	}
+	rows, err := runQuerySpec(e.srv, e.tx, e.ws, info, spec, g.visible, g.project)
 	if err != nil {
 		return err
 	}
@@ -915,13 +1034,20 @@ func (e *EntityTx) Query(prototype proto.Message, spec query.Spec, fn func(msg p
 
 // ScanPage iterates up to limit live rows with key > afterKey, in key order.
 // It returns the key of the last row visited and whether more rows follow;
-// pass lastKey back as afterKey to continue. limit must be positive.
+// pass lastKey back as afterKey to continue. limit must be positive. Through
+// an AsCaller view, and in a Server.Mutate for a caller who is not Trusted, it
+// skips the rows the caller may not read (see AsCaller); a skipped row still
+// counts toward limit.
 func (e *EntityTx) ScanPage(prototype proto.Message, afterKey string, limit int, fn func(msg proto.Message) error) (lastKey string, more bool, err error) {
 	info, err := e.info(prototype)
 	if err != nil {
 		return "", false, err
 	}
-	return scanPageRows(e.tx, info, afterKey, limit, nil, nil, func(msg proto.Message, _ uint64) error {
+	g, err := e.callerReadGate()
+	if err != nil {
+		return "", false, err
+	}
+	return scanPageRows(e.tx, info, afterKey, limit, g.visible, g.project, func(msg proto.Message, _ uint64) error {
 		return fn(msg)
 	})
 }

@@ -230,4 +230,33 @@ describe('syncplane/testing access', () => {
 			}
 		});
 	});
+	describe('the summary on the wire', () => {
+		it('sends the summary on a pull only when it differs from the one the client holds, as the real server does', async () => {
+			// Given a client that synced once with ann's access set
+			const t = await createTestClient({ entities });
+			try {
+				seed(t.server);
+				t.server.setCallerAccess({
+					subjects: [ 'ann' ],
+					roles: [ { role: 'project_reader', at: [ ProjectSchema, 'p1' ] } ],
+				});
+				await t.sync();
+				const changes: string[] = [];
+				t.client.onAccessChange((ws) => changes.push(ws));
+
+				// When it pulls again, and neither the rows nor the access changed
+				await t.sync();
+				await t.sync();
+
+				// Then no pull stored a summary, so nothing told the access
+				// listeners. The real server leaves CallerAccess out of a response
+				// whose cursor already carries it, so an app test against this
+				// server sees the access hooks asked again only when production
+				// asks them again.
+				expect(changes).toEqual([]);
+			} finally {
+				await t.close();
+			}
+		});
+	});
 });

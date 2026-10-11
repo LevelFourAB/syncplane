@@ -304,6 +304,7 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 	emitter.callerAccessDeltas = want.CallerAccessVersion != nil
 	emitter.heldCallerAccess = want.GetCallerAccessVersion()
 	emitter.admit(adm)
+	emitter.heldSubs = cur.subs
 	epoch, err := s.perms.FilterEpoch(ctx, principal, ws)
 	if err != nil {
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
@@ -350,6 +351,7 @@ func (s *Server) refreshEpoch(ctx context.Context, sc *subScope) error {
 	emitter.noDeltaEntities = sc.emitter.noDeltaEntities
 	emitter.callerAccessDeltas, emitter.heldCallerAccess = sc.emitter.callerAccessDeltas, sc.emitter.heldCallerAccess
 	emitter.caller, emitter.prior = sc.emitter.caller, sc.emitter.prior
+	emitter.heldSubs, emitter.subsAdmitted = sc.emitter.heldSubs, sc.emitter.subsAdmitted
 	if err := emitter.warmFilters(); err != nil {
 		return err
 	}
@@ -451,7 +453,7 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		var page *syncplanev1.PullResponse
 		var next cursorState
 		var reason resetReason
-		if err := s.readTx(ctx, sc.ws, max(sc.cur.seq, sc.minSeq), func(tx storage.ReadTx) error {
+		if err := s.readTx(ctx, sc.ws, sc.cur.readFloor(sc.minSeq), func(tx storage.ReadTx) error {
 			var e error
 			page, next, reason, e = s.servePullPage(ctx, tx, route, sc.cur, sc.emitter, sc.wantHash, sc.epoch, sc.subs, sc.ackKey, sc.rawCursor, limit)
 			return e

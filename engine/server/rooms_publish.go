@@ -53,7 +53,7 @@ func (s *Server) Publish(
 	}
 
 	principal := principalOf(ctx)
-	if !s.roomSessions.check(msg.GetSessionId(), principal.Subject) {
+	if !s.roomSessions.check(msg.GetSessionId(), principal) {
 		return nil, connect.NewError(connect.CodePermissionDenied,
 			errors.New("session id is held on this node by a different principal only"))
 	}
@@ -127,7 +127,7 @@ func (s *Server) publishEvent(
 	item *syncplanev1.PublishItem,
 ) (presence.Event, error) {
 	t := topicOf(item.GetTopic())
-	if !s.roomSessions.joined(sessionID, principal.Subject, t) {
+	if !s.roomSessions.joined(sessionID, principal, t) {
 		if _, _, err := s.openRoom(ctx, t); err != nil {
 			if connect.CodeOf(err) != connect.CodeUnknown {
 				return presence.Event{}, err
@@ -136,7 +136,7 @@ func (s *Server) publishEvent(
 		}
 	}
 
-	who := presence.Participant{SessionID: sessionID, Subject: principal.Subject}
+	who := presence.Participant{SessionID: sessionID, Issuer: principal.Issuer, Subject: principal.Subject}
 	switch body := item.GetBody().(type) {
 	case *syncplanev1.PublishItem_Presence:
 		who.State = body.Presence.GetState()

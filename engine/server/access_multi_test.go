@@ -254,14 +254,15 @@ var _ = Describe("Access model reads below several access parents", func() {
 
 	It("reaches a row through a short path when a long path passes MaxAccessDepth", func() {
 		f = newMultiFixtureOn(newTestStore(), server.WithLimits(server.Limits{MaxAccessDepth: 2}))
-		// A write checks the depth of the row it writes and not of the rows
-		// below it, so t3 ends up three hops below top through t2.
+		// Every write path refuses a write that puts a row below it too deep,
+		// so t2 is planted below t1, as a limit lowered since can leave it.
+		// That puts t3 three hops below top through t2.
 		f.seed(
 			topic("top"), topic("t1", "top"), topic("t2"), topic("near"),
 			topic("t3", "t2", "near"),
 			laneOnTopic("lm-near", "near", "nview", "lane_viewer"),
 		)
-		f.seed(topic("t2", "t1"))
+		f.plant("topic", "t2", topic("t2", "t1"))
 		Expect(rowsOf("topic", f.pull("nview"))).To(ContainElement("topic/t3"))
 	})
 })
@@ -400,7 +401,7 @@ var _ = Describe("Access model writes below several access parents", func() {
 		f.seed(&accessv1.Shelf{Id: "h1"}, &accessv1.Shelf{Id: "h3"}, leaflet("l-13", "h1", "h3"))
 		r := one("root", del("shelf", "h3"))
 		refused(r, server.CodeConflict)
-		Expect(r.GetErrorMessage()).To(ContainSubstring("access parent of a live leaflet row"))
+		Expect(r.GetErrorMessage()).To(ContainSubstring("access parent of a live row"))
 		applied(one("root", patch("leaflet", "l-13", leaflet("l-13"), "shelves.h3")))
 		applied(one("root", del("shelf", "h3")))
 	})

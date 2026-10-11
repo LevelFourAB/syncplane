@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 import type { SyncClient } from '../../src/client.js';
 import {
 	CommentSchema,
+	ExpenseSchema,
 	LabelSchema,
 	NoteSchema,
 	OrgMemberSchema,
@@ -18,6 +19,7 @@ import {
 	RoomMemberSchema,
 	RoomSchema,
 	TaskSchema,
+	ThreadSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { createReactSync, useCan, useCanCreate, useHasPermission } from '../../src/react/index.js';
@@ -531,6 +533,105 @@ describe('the first render of an access hook', () => {
 			wrapper: wrapper(t.client),
 		});
 		await waitFor(() => expect(result.current).toEqual({ answer: 'unknown', reason: 'no_summary' }));
+		await t.client.close();
+	});
+});
+
+describe('useCan on a row whose fields a rule or a guard checks', () => {
+	it("answers again when a field that a rule's when condition reads changes", async () => {
+		// Given thread th1 in room r1, not archived, and ann, who may post in r1.
+		// The summary stops after the first sync, as the server sends it only
+		// when it changes.
+		const t = await createTestClient({ entities: [ RoomSchema, ThreadSchema ] });
+		t.server.put(RoomSchema, { id: 'r1' });
+		t.server.put(ThreadSchema, { id: 'th1', room: { id: 'r1' } });
+		t.server.setCallerAccess(posting('view_posts', 'post'));
+		await t.sync();
+		t.server.setCallerAccess(undefined);
+		const { result } = renderHook(
+			() => useCan(ThreadSchema, 'th1', 'update', { fields: [ 'title' ] }),
+			{ wrapper: wrapper(t.client) },
+		);
+		await waitFor(() => expect(result.current).toBe('yes'));
+
+		// When a moderator archives th1 and the client pulls it
+		t.server.put(ThreadSchema, { id: 'th1', room: { id: 'r1' }, archived: true });
+		await act(() => t.sync());
+		await settle();
+
+		// Then the client answers no, and the hook follows it
+		expect(await t.client.can(ThreadSchema, 'th1', 'update', { fields: [ 'title' ] })).toBe('no');
+		expect(result.current).toBe('no');
+		await t.client.close();
+	});
+
+	it("answers again when a field that a field guard's condition reads changes", async () => {
+		// Given expense e1 in project p1, open, reported by padmin, who edits
+		// tasks in p1. The estimate guard admits an update while the expense is
+		// open.
+		const t = await createTestClient({ entities: [ ProjectSchema, ExpenseSchema ] });
+		t.server.put(ProjectSchema, { id: 'p1' });
+		t.server.put(ExpenseSchema, { id: 'e1', project: { id: 'p1' }, reporterId: 'padmin' });
+		t.server.setCallerAccess({
+			subjects: [ 'padmin' ],
+			permissions: [ 'view_tasks', 'edit_tasks' ].map((permission) => ({
+				permission,
+				anchors: [ { entity: 'project', keys: [ 'p1' ] } ],
+			})),
+		});
+		await t.sync();
+		t.server.setCallerAccess(undefined);
+		const { result } = renderHook(
+			() => useCan(ExpenseSchema, 'e1', 'update', { fields: [ 'estimate' ] }),
+			{ wrapper: wrapper(t.client) },
+		);
+		await waitFor(() => expect(result.current).toBe('yes'));
+
+		// When the expense is closed on the server and the client pulls it
+		t.server.put(ExpenseSchema, {
+			id: 'e1',
+			project: { id: 'p1' },
+			reporterId: 'padmin',
+			closed: true,
+		});
+		await act(() => t.sync());
+		await settle();
+
+		// Then
+		expect(await t.client.can(ExpenseSchema, 'e1', 'update', { fields: [ 'estimate' ] })).toBe('no');
+		expect(result.current).toBe('no');
+		await t.client.close();
+	});
+
+	it("answers again when the subject field that a field guard's rule reads changes", async () => {
+		// Given expense e1 reported by padmin, whose notes only the reporter
+		// writes.
+		const t = await createTestClient({ entities: [ ProjectSchema, ExpenseSchema ] });
+		t.server.put(ProjectSchema, { id: 'p1' });
+		t.server.put(ExpenseSchema, { id: 'e1', project: { id: 'p1' }, reporterId: 'padmin' });
+		t.server.setCallerAccess({
+			subjects: [ 'padmin' ],
+			permissions: [ 'view_tasks', 'edit_tasks' ].map((permission) => ({
+				permission,
+				anchors: [ { entity: 'project', keys: [ 'p1' ] } ],
+			})),
+		});
+		await t.sync();
+		t.server.setCallerAccess(undefined);
+		const { result } = renderHook(
+			() => useCan(ExpenseSchema, 'e1', 'update', { fields: [ 'notes' ] }),
+			{ wrapper: wrapper(t.client) },
+		);
+		await waitFor(() => expect(result.current).toBe('yes'));
+
+		// When a trusted write makes someone else the reporter
+		t.server.put(ExpenseSchema, { id: 'e1', project: { id: 'p1' }, reporterId: 'zed' });
+		await act(() => t.sync());
+		await settle();
+
+		// Then
+		expect(await t.client.can(ExpenseSchema, 'e1', 'update', { fields: [ 'notes' ] })).toBe('no');
+		expect(result.current).toBe('no');
 		await t.client.close();
 	});
 });

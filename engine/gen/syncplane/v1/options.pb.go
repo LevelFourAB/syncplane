@@ -935,7 +935,7 @@ func (*AdmittedCaller) Descriptor() ([]byte, []int) {
 //
 //	oneof member {
 //	  string user_id = 3;
-//	  Team team = 4;
+//	  Team team = 5;
 //	}
 //
 // ```

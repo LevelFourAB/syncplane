@@ -146,8 +146,10 @@ func (s *Server) writeAuthorizer(
 // readGate resolves the read filters for an in-process read and returns the
 // per-row visibility predicate the transaction applies, and the projector
 // that clears the fields a guard hides from the caller in each row a read
-// returns. A nil predicate means everything live is visible, and a nil
-// projector clears nothing, which is what a Trusted call gets.
+// returns, and the refuser that refuses a query naming a field a guard hides
+// from the caller on some row. A nil predicate means everything live is
+// visible, a nil projector clears nothing and a nil refuser refuses nothing,
+// which is what a Trusted call gets.
 //
 // bind must run first inside the read transaction: it resolves the caller's
 // access in the access model from that snapshot. It is never nil.
@@ -168,13 +170,13 @@ func (s *Server) readGate(
 	workspaceID string,
 	adm admission,
 	enforced bool,
-) (visible func(storage.Row) (bool, error), project rowProjector, bind func(storage.ReadTx) error, err error) {
+) (visible func(storage.Row) (bool, error), project rowProjector, refuse specRefuser, bind func(storage.ReadTx) error, err error) {
 	if !enforced {
-		return nil, nil, func(storage.ReadTx) error { return nil }, nil
+		return nil, nil, nil, func(storage.ReadTx) error { return nil }, nil
 	}
 	emitter, err := newRowEmitter(ctx, s, workspaceID, nil)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	emitter.admit(adm)
 	// In-process reads are a READ path: an app handler that scans a server-only
@@ -184,7 +186,7 @@ func (s *Server) readGate(
 	emitter.includeServerOnly = true
 	for _, name := range s.catalogPtr().entityNames() {
 		if _, err := emitter.appFilterOf(name); err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 	}
 	visible = func(row storage.Row) (bool, error) {
@@ -198,5 +200,5 @@ func (s *Server) readGate(
 		_, err := emitter.project(info, key, msg)
 		return err
 	}
-	return visible, project, emitter.bindAccess, nil
+	return visible, project, emitter.refuseHiddenSpec, emitter.bindAccess, nil
 }

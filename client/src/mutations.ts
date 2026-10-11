@@ -33,6 +33,7 @@ import {
 	type EntityOptions,
 	field_behavior as fieldBehaviorExt,
 	type FieldBehavior,
+	type GrantOptions,
 	reference as referenceExt,
 } from './gen/syncplane/v1/options_pb.js';
 import type { Condition } from './gen/syncplane/v1/query_pb.js';
@@ -174,6 +175,18 @@ export interface EntityDef {
 	 * the caller holds before the server says so.
 	 */
 	grant: boolean;
+	/** The entity's `(syncplane.v1.entity).grant`, resolved; `undefined` when `grant` is false. */
+	grantSpec: GrantSpec | undefined;
+}
+
+/** The grant option of a grant entity, resolved against its schema. */
+export interface GrantSpec {
+	/** The unit that holds the subject, by proto name: a field, or a oneof by its name. */
+	subjectUnit: string;
+	/** The field that holds the role: a `string` field, or an enum field whose value names are roles. */
+	roleField: DescField | undefined;
+	/** Every permission each declared role grants, its `includes` followed, sorted. */
+	roles: ReadonlyMap<string, readonly string[]>;
 }
 
 /** Whether at least one of an entity's access rules admits each write
@@ -303,8 +316,36 @@ export function entityDefOf(schema: DescMessage): EntityDef {
 		clearedOnCreate: closedUnits(guards, 'create'),
 		creatorFields,
 		grant: opts.grant !== undefined,
+		grantSpec: opts.grant === undefined ? undefined : grantSpecOf(schema, opts.grant),
 		writeAccess: writeAccessOf(accessRules),
 		accessRules,
+	};
+}
+
+/**
+ * Resolves a grant option against the entity's schema. The server refuses an
+ * unknown role field, an unknown include and an include cycle at
+ * registration, so none of them stops a client here.
+ */
+function grantSpecOf(schema: DescMessage, grant: GrantOptions): GrantSpec {
+	const declared = new Map(grant.roles.map((r) => [ r.name, r ]));
+	const expand = (name: string, into: Set<string>, seen: Set<string>) => {
+		const role = declared.get(name);
+		if (role === undefined || seen.has(name)) return;
+		seen.add(name);
+		for (const permission of role.grants) into.add(permission);
+		for (const included of role.includes) expand(included, into, seen);
+	};
+	const roles = new Map<string, readonly string[]>();
+	for (const role of grant.roles) {
+		const permissions = new Set<string>();
+		expand(role.name, permissions, new Set());
+		roles.set(role.name, [ ...permissions ].sort());
+	}
+	return {
+		subjectUnit: grant.subject,
+		roleField: schema.fields.find((f) => f.name === grant.role),
+		roles,
 	};
 }
 

@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"fmt"
+	"slices"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -297,7 +298,11 @@ var _ = Describe("Access model field read rules", func() {
 		It("sends a row again when a write changes what a guard decides on the row", func() {
 			first, err := pullFrom("guest", nil)
 			Expect(err).NotTo(HaveOccurred())
-			applied(patch("padmin", "s1", &accessv1.Staff{PersonId: "member"}, "person_id"))
+			// A client that does not read the review on both sides may not
+			// change who reads it, so a trusted write does.
+			Expect(f.srv.Mutate(server.Trusted(f.ctx), ws, func(tx *server.EntityTx) error {
+				return tx.Patch(&accessv1.Staff{Id: "s1", PersonId: "member"}, []string{"person_id"}, nil)
+			})).To(Succeed())
 
 			next, err := pullFrom("guest", first.GetNextCursor())
 			Expect(err).NotTo(HaveOccurred())
@@ -321,6 +326,73 @@ var _ = Describe("Access model field read rules", func() {
 			Expect(staffIn(resp.GetPatch().GetChanges())).To(HaveKey("s2"))
 			_, err = pullFrom("guest", nil, &syncplanev1.Subscription{Entity: "staff", Predicate: query.Eq("name", "ann")})
 			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
+	Describe("a subscription the client holds when a grant change hides a field it names", func() {
+		role := func(r string) {
+			GinkgoHelper()
+			f.seed(&accessv1.OrgMember{Id: "om-admin", UserId: "admin", Role: r})
+		}
+		gone := func(resp *syncplanev1.PullResponse) []string {
+			var out []string
+			if slices.Contains(resp.GetPatch().GetDropEntities(), "staff") {
+				return []string{"s1", "s2"}
+			}
+			for key, rc := range staffIn(resp.GetPatch().GetChanges()) {
+				if rc.GetTombstone() {
+					out = append(out, key)
+				}
+			}
+			return out
+		}
+		sub := func() *syncplanev1.Subscription {
+			return &syncplanev1.Subscription{Entity: "staff", Predicate: query.Gt("salary", int64(0))}
+		}
+
+		It("removes the rows it selected and keeps syncing, and sends them again once the field is read again", func() {
+			// Given admin, who reads salary on every row, holds s1 and s2
+			// through a subscription to the staff earning more than 0
+			first, err := pullFrom("admin", nil, sub())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(staffIn(first.GetPatch().GetChanges())).To(SatisfyAll(HaveKey("s1"), HaveKey("s2")))
+
+			// When admin becomes an org member, who does not read salary, and
+			// pulls with the same subscription
+			role("org_member")
+			resp, err := pullFrom("admin", first.GetNextCursor(), sub())
+
+			// Then the pull removes s1 and s2, whose salary admin no longer
+			// reads, and the pulls after it keep syncing
+			Expect(err).NotTo(HaveOccurred())
+			Expect(gone(resp)).To(ConsistOf("s1", "s2"))
+			cursor := resp.GetNextCursor()
+			for resp.GetHasMore() {
+				resp, err = pullFrom("admin", cursor, sub())
+				Expect(err).NotTo(HaveOccurred())
+				cursor = resp.GetNextCursor()
+			}
+			f.seed(&accessv1.Staff{Id: "s3", Project: project("p1"), Name: "cy", Salary: 7000})
+			resp, err = pullFrom("admin", cursor, sub())
+			Expect(err).NotTo(HaveOccurred())
+			for key, rc := range staffIn(resp.GetPatch().GetChanges()) {
+				Expect(rc.GetTombstone()).To(BeTrue(), "the pull sent %q", key)
+			}
+			cursor = resp.GetNextCursor()
+
+			// ... while a client without that subscription is refused it
+			_, err = pullFrom("admin", nil, sub())
+			permissionDenied(err)
+
+			// When admin reads salary again
+			role("org_admin")
+			resp, err = pullFrom("admin", cursor, sub())
+
+			// Then the pull sends the rows the subscription selects again
+			Expect(err).NotTo(HaveOccurred())
+			got := staffIn(resp.GetPatch().GetChanges())
+			Expect(got).To(SatisfyAll(HaveKey("s1"), HaveKey("s2"), HaveKey("s3")))
+			Expect(decoded(got["s1"]).GetSalary()).To(BeEquivalentTo(5000))
 		})
 	})
 
@@ -466,6 +538,57 @@ var _ = Describe("Access model field read rules", func() {
 				Expect(row.GetReview()).To(Equal("good"))
 				return err
 			})).To(Succeed())
+		})
+
+		// viewQuery runs spec over staff in a View as user and returns the keys
+		// it shows, or the error the View fails with.
+		viewQuery := func(user string, spec query.Spec) ([]string, error) {
+			ctx := server.WithPrincipal(f.ctx, server.Principal{Subject: user})
+			var keys []string
+			err := f.srv.View(ctx, ws, func(tx *server.ViewTx) error {
+				return tx.Query(&accessv1.Staff{}, spec, func(msg proto.Message, _ uint64) error {
+					keys = append(keys, msg.(*accessv1.Staff).GetId())
+					return nil
+				})
+			})
+			return keys, err
+		}
+
+		It("refuses in a View a query whose predicate names a field the caller does not read on every row", func() {
+			// Given guest reads s1 (salary 5000) with salary hidden
+			// When guest queries staff with salary > 4999 and with salary > 5000
+			above, errAbove := viewQuery("guest", query.Spec{Where: query.Gt("salary", int64(4999))})
+			below, errBelow := viewQuery("guest", query.Spec{Where: query.Gt("salary", int64(5000))})
+
+			// Then both are refused, and the two answers do not bracket the salary
+			Expect(errAbove).To(HaveOccurred(), "guest saw %v", above)
+			Expect(errBelow).To(HaveOccurred(), "guest saw %v", below)
+		})
+
+		It("refuses in a View a query ordered by a field the caller does not read on every row", func() {
+			// Given member reads s1 (salary 5000) and s2 (salary 6000) with salary hidden
+			// When member orders staff by salary, highest first
+			keys, err := viewQuery("member", query.Spec{OrderBy: []*syncplanev1.OrderKey{query.Desc("salary")}})
+
+			// Then the query is refused rather than answered in salary order
+			Expect(err).To(HaveOccurred(), "member saw %v in salary order", keys)
+		})
+
+		It("refuses in an Apply a query whose predicate names a field the caller does not read on every row", func() {
+			// Given guest reads s1 (salary 5000) with salary hidden
+			// When guest queries staff with salary > 4999 in an Apply
+			ctx := server.WithPrincipal(f.ctx, server.Principal{Subject: "guest"})
+			var keys []string
+			err := f.srv.Apply(ctx, ws, func(tx *server.ApplyTx) error {
+				return tx.Query(&accessv1.Staff{}, query.Spec{Where: query.Gt("salary", int64(4999))},
+					func(msg proto.Message, _ uint64) error {
+						keys = append(keys, msg.(*accessv1.Staff).GetId())
+						return nil
+					})
+			})
+
+			// Then the query is refused
+			Expect(err).To(HaveOccurred(), "guest saw %v", keys)
 		})
 	})
 })

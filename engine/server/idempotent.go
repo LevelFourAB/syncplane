@@ -90,7 +90,8 @@ type WriteOutcome struct {
 //
 // Everything else matches Mutate: each write fn makes is authorized for the ctx
 // principal (CanMutate, the schema's write rules and the row check) unless ctx
-// is Trusted, all writes share one lazily allocated sequence, clients are
+// is Trusted, reads apply the principal's read rules unless ctx is Trusted,
+// all writes share one lazily allocated sequence, clients are
 // notified on commit, and fn may run more than once if the adapter retries the
 // transaction, so keep side effects out of it until the call returns. A replay
 // runs no hook: the record is the outcome of a call the same principal made.

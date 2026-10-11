@@ -199,15 +199,35 @@ func (a *txAccess) admits(tx storage.ReadTx, rule accessRule, info *entityInfo, 
 	return true, nil
 }
 
-// admitsThrough reports whether rule's source holds for the caller through
-// each of parents on its own, as of tx: each permission it needs at the
-// workspace root, at the row of info with key, or at that parent or a row
-// above it. It reports true for no parents and for a rule that admits every
-// admitted caller. A write that adds a row below a parent shows the row to
-// the readers of that parent, and one that takes it away hides the row from
-// them, so the rule must hold there and not only through another parent.
-func (a *txAccess) admitsThrough(tx storage.ReadTx, rule accessRule, info *entityInfo, key string, parents []anchorRow) (bool, error) {
-	if len(parents) == 0 || len(rule.requires) == 0 {
+// admitsThrough reports whether rule's source and its within entries hold
+// for the caller through each of parents on its own, as of tx: each
+// permission it needs at the workspace root, at the row of info with key, or
+// at that parent or a row above it, and each within entry at the row, whose
+// value is row, or at that parent or a row above it. It reports true for no
+// parents and for a rule that admits every admitted caller and sets no within
+// entry. A write that adds a row below a parent shows the row to the readers
+// of that parent, and one that takes it away hides the row from them, so the
+// rule must hold there and not only through another parent.
+func (a *txAccess) admitsThrough(
+	tx storage.ReadTx,
+	rule accessRule,
+	info *entityInfo,
+	key string,
+	row protoreflect.Message,
+	parents []anchorRow,
+) (bool, error) {
+	if len(parents) == 0 || (len(rule.requires) == 0 && !rule.checksAbove()) {
+		return true, nil
+	}
+	if rule.checksAbove() {
+		chains := a.chainsOf(tx)
+		for _, p := range parents {
+			if ok, err := withinThrough(chains, rule, a.caller.subjects, info, key, row, p); err != nil || !ok {
+				return false, err
+			}
+		}
+	}
+	if len(rule.requires) == 0 {
 		return true, nil
 	}
 	set, err := a.get(tx)
@@ -221,6 +241,34 @@ func (a *txAccess) admitsThrough(tx storage.ReadTx, rule accessRule, info *entit
 			continue
 		}
 		if ok, err := chains.holdsAtEach(anchors, parents); err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// withinThrough reports whether each within entry of rule holds for a caller
+// with subjects at the row of info with key, whose value is row, through the
+// parent at on its own: the row passes the entry, or at or a row above it
+// does, on any path of at most the walker's depth.
+func withinThrough(
+	chains *accessChains,
+	rule accessRule,
+	subjects []string,
+	info *entityInfo,
+	key string,
+	row protoreflect.Message,
+	at anchorRow,
+) (bool, error) {
+	for _, entry := range rule.within {
+		w := chains.model.withins[entry.spec()]
+		if w == nil {
+			return false, nil
+		}
+		if w.target.name == info.name && chains.firstWithin(info, key, row).passes(w, subjects) {
+			continue
+		}
+		if ok, err := chains.withinAbove(w, subjects, edgeTo(at)); err != nil || !ok {
 			return false, err
 		}
 	}
@@ -449,10 +497,11 @@ func (s *Server) checkGrantRow(info *entityInfo, key string, op syncplanev1.Crud
 // model cannot walk: a row below itself, a row more than
 // Limits.MaxAccessDepth hops below a row without an access parent on any
 // path, or a row whose access parents name more than Limits.MaxAccessParents
-// rows. Every write path runs it, Trusted ones included, on the row as it will
-// be stored. Only an entity whose chain of parent entities is recursive can
-// put a row below itself or too deep, since registration bounds every other
-// chain, and only a write that changes the row's access parents is checked.
+// rows. A row below the written row counts as well, since it moves with it.
+// Every write path runs it, Trusted ones included, on the row as it will be
+// stored. Only an entity whose chain of parent entities is recursive can put a
+// row below itself or too deep, since registration bounds every other chain,
+// and only a write that changes the row's access parents is checked.
 func (s *Server) checkAccessChain(
 	ctx context.Context,
 	ws string,
@@ -462,11 +511,11 @@ func (s *Server) checkAccessChain(
 	load func() (storage.Row, bool, error),
 	final proto.Message,
 ) error {
-	model := s.catalogPtr().access
-	if model == nil || info.access == nil || !info.access.hasParent() {
-		return nil
+	model, info, fr, err := s.trackedAccess(info, final)
+	if err != nil || model == nil || info.access == nil || !info.access.hasParent() {
+		return err
 	}
-	e := edgeOf(model, info, final.ProtoReflect())
+	e := edgeOf(model, info, fr)
 	maxParents := s.limits.maxAccessParents()
 	recursive := model.depths[info.name] == depthUnbounded
 	if !e.ok() || (len(e.parents) <= maxParents && !recursive) {
@@ -476,9 +525,12 @@ func (s *Server) checkAccessChain(
 	if err != nil {
 		return err
 	}
+	var stored chainEdge
 	if live {
-		if stored, err := info.decode(row.Value); err == nil && edgeOf(model, info, stored.ProtoReflect()).equal(e) {
-			return nil
+		if msg, err := info.decode(row.Value); err == nil {
+			if stored = edgeOf(model, info, msg.ProtoReflect()); stored.equal(e) {
+				return nil
+			}
 		}
 	}
 	if len(e.parents) > maxParents {
@@ -534,12 +586,269 @@ func (s *Server) checkAccessChain(
 		height[at] = h
 		return h, nil
 	}
+	above := 0
 	for _, p := range e.parents {
-		if _, err := walk(p, 1); err != nil {
+		h, err := walk(p, 1)
+		if err != nil {
 			return err
+		}
+		above = max(above, h+1)
+	}
+	// A write that does not lengthen the longest path above the row puts no
+	// row below it deeper than it already was, which spares the walk down. A
+	// path above the stored row that does not fit the limit any more, which a
+	// lowered limit leaves, does not spare it.
+	if stored.ok() {
+		was, fits := 0, true
+		for _, p := range stored.parents {
+			h, err := walk(p, 1)
+			if err != nil {
+				fits = false
+				break
+			}
+			was = max(was, h+1)
+		}
+		if fits && above <= was {
+			return nil
+		}
+	}
+	// The rows below the row move with it, so the longest path down from it
+	// must fit in what the path up leaves.
+	deeper, err := rowsBelowDeeper(tx, model, self, maxDepth-above, s.limits, report)
+	if err != nil {
+		return err
+	}
+	if deeper {
+		return Reject(CodeInvalidArgument, fmt.Sprintf(
+			"entity %q: row %q would put a row below it more than MaxAccessDepth (%d) hops below a row without an access parent",
+			info.name, key, maxDepth))
+	}
+	return nil
+}
+
+// checkNewParentsRead refuses a write in a recursive chain that adds an
+// access parent the caller does not read, as of tx: a row that does not exist
+// or that no read rule of its entity admits the caller at. Such a write gets
+// the refusal a write the rules refuse gets. Callers run it before
+// checkAccessChain, whose depth and cycle checks read the rows above the new
+// parents, so their answer does not tell the caller where a row it cannot
+// read sits.
+func (w *accessWrite) checkNewParentsRead(tx storage.ReadTx, final proto.Message) error {
+	if w == nil {
+		return nil
+	}
+	model := w.access.model()
+	if !w.info.access.hasParent() || model.depths[w.info.name] != depthUnbounded {
+		return nil
+	}
+	for _, p := range edgeOf(model, w.info, final.ProtoReflect()).parents {
+		if slices.Contains(w.storedParents.parents, p) {
+			continue
+		}
+		ok, err := w.readsRow(tx, model, p)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			w.gate.logRefusal(opUpdate, w.info, w.key, func() []string {
+				return []string{fmt.Sprintf("the caller does not read %s %q, which the write names as an access parent", p.entity, p.key)}
+			})
+			return accessRefusal(w.info, w.key)
 		}
 	}
 	return nil
+}
+
+// readsRow reports whether a read rule admits the caller at the row at, as of
+// tx. A row that does not exist, or does not decode, is not read.
+func (w *accessWrite) readsRow(tx storage.ReadTx, model *accessModel, at anchorRow) (bool, error) {
+	info := model.entities[at.entity]
+	if info == nil || info.access == nil {
+		return info != nil, nil
+	}
+	row, err := tx.GetRow(at.entity, at.key)
+	if errors.Is(err, storage.ErrNotFound) || (err == nil && row.Deleted) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	msg, err := info.decode(row.Value)
+	if err != nil {
+		w.gate.srv.reportPoison(w.gate.ctx, w.gate.ws, row, err)
+		return false, nil
+	}
+	reading, err := w.access.admitting(tx, opRead, info, at.key, msg.ProtoReflect())
+	return len(reading) > 0, err
+}
+
+// trackedAccess returns the access model that the engine's own bookkeeping of
+// a write to info runs against, the chain checks and the move log, with info
+// and final, a row of info or nil, as that model knows them. That is the live
+// model or, while a registration leaves the model incomplete, the last model
+// that compiled. model is nil when there is neither, or when that model does
+// not know the entity.
+func (s *Server) trackedAccess(info *entityInfo, final proto.Message) (
+	model *accessModel,
+	tracked *entityInfo,
+	row protoreflect.Message,
+	err error,
+) {
+	c := s.catalogPtr()
+	model, tracked = c.access, info
+	if model == nil && c.accessErr != nil && c.lastAccess != nil {
+		model, tracked = c.lastAccess, c.lastAccess.entities[info.name]
+	}
+	if model == nil || tracked == nil {
+		return nil, nil, nil, nil
+	}
+	if final == nil {
+		return model, tracked, nil, nil
+	}
+	row = final.ProtoReflect()
+	if tracked.msgType.Descriptor() != info.msgType.Descriptor() {
+		// A registration since that model replaced the entity's message, and
+		// the model reads fields by its own descriptors.
+		b, err := proto.Marshal(final)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		msg, err := tracked.decode(b)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		row = msg.ProtoReflect()
+	}
+	return model, tracked, row, nil
+}
+
+// rowsBelowDeeper reports whether a live row sits more than budget hops below
+// the row at, on some path down the access parent edges, as of tx. A row that
+// does not decode names no parent, and report is told about it.
+func rowsBelowDeeper(
+	tx storage.ReadTx,
+	model *accessModel,
+	at anchorRow,
+	budget int,
+	limits Limits,
+	report func(storage.Row, error),
+) (bool, error) {
+	// Level by level, keeping each row once per level and not once overall: a
+	// row on two paths of different lengths sits as deep as the longer one.
+	// The walk ends after budget+1 levels, so a stored cycle cannot hold it.
+	frontier := []anchorRow{at}
+	for level := 1; len(frontier) > 0; level++ {
+		next, err := rowsOneBelow(tx, model, frontier, limits, report)
+		if err != nil {
+			return false, err
+		}
+		if len(next) > 0 && level > budget {
+			return true, nil
+		}
+		frontier = next
+	}
+	return false, nil
+}
+
+// rowsOneBelow returns the live rows whose access parents name one of
+// frontier, as of tx, without repeats. It probes the reference index of each
+// edge into a frontier entity, and scans the edge's entity, once for all of
+// frontier, while that index is not ready. A hit in the index is read back,
+// since only the row says what it names now.
+func rowsOneBelow(
+	tx storage.ReadTx,
+	model *accessModel,
+	frontier []anchorRow,
+	limits Limits,
+	report func(storage.Row, error),
+) ([]anchorRow, error) {
+	inFrontier := make(map[anchorRow]bool, len(frontier))
+	var entities []string
+	byEntity := map[string][]anchorRow{}
+	for _, at := range frontier {
+		inFrontier[at] = true
+		if _, ok := byEntity[at.entity]; !ok {
+			entities = append(entities, at.entity)
+		}
+		byEntity[at.entity] = append(byEntity[at.entity], at)
+	}
+	seen := map[anchorRow]bool{}
+	var out []anchorRow
+	// keep adds the row of child if it names one of frontier.
+	keep := func(child *entityInfo, row storage.Row) {
+		if row.Deleted {
+			return
+		}
+		msg, err := child.decode(row.Value)
+		if err != nil {
+			report(row, err)
+			return
+		}
+		r := anchorRow{entity: child.name, key: row.Key}
+		if seen[r] {
+			return
+		}
+		for _, p := range parentsOf(msg.ProtoReflect(), model.parents[child.name]) {
+			if inFrontier[p] {
+				seen[r] = true
+				out = append(out, r)
+				return
+			}
+		}
+	}
+	scanned := map[string]bool{}
+	for _, entity := range entities {
+		parent := model.entities[entity]
+		for _, e := range model.children[entity] {
+			child := e.child
+			ci := child.indexByName(refIndexName(e.ref.ref))
+			ready := false
+			if ci != nil && !limits.DisableIndexes {
+				var err error
+				if ready, err = ci.ready(tx, child.name); err != nil {
+					return nil, err
+				}
+			}
+			if !ready {
+				if scanned[child.name] {
+					continue
+				}
+				scanned[child.name] = true
+				if err := tx.ScanEntity(child.name, func(row storage.Row) error {
+					keep(child, row)
+					return nil
+				}); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			for _, at := range byEntity[entity] {
+				values, ok := keyValuesOf(parent, at.key)
+				if !ok {
+					continue
+				}
+				lo, hi, err := ci.probeRefIndex(values)
+				if err != nil {
+					return nil, err
+				}
+				err = tx.ScanIndex(child.name, ci.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
+					row, err := tx.GetRow(child.name, rowKey)
+					if errors.Is(err, storage.ErrNotFound) {
+						return nil
+					}
+					if err != nil {
+						return err
+					}
+					keep(child, row)
+					return nil
+				})
+				if err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
+	return out, nil
 }
 
 // accessWrite carries one enforced CRUD write of a model entity through the
@@ -575,7 +884,9 @@ type accessWrite struct {
 // of a row that other rows name as their access parent, or that grant rows
 // name as their subject, is refused while one of them is live: deleting it
 // would leave them pointing at nothing, and a row created later with the same
-// key would take them over.
+// key would take them over. A PATCH or a DELETE of a row that does not exist,
+// or is a tombstone, gets the refusal a row the caller may not change gets,
+// whatever the caller holds.
 func (g *writeGate) beginAccessWrite(
 	tx storage.ReadTx,
 	info *entityInfo,
@@ -589,8 +900,22 @@ func (g *writeGate) beginAccessWrite(
 	}
 	w := &accessWrite{gate: g, access: g.access, info: info, key: key, op: op, mask: mask}
 	row, live, err := load()
-	if err != nil || !live {
-		return w, err
+	if err != nil {
+		return nil, err
+	}
+	if !live {
+		if op == syncplanev1.CrudOp_CRUD_OP_PUT {
+			return w, nil
+		}
+		// A missing row gets the answer of a row the caller may not change, so
+		// the answer does not tell which keys exist. A DELETE also writes no
+		// tombstone, which would reach every reader.
+		want := opUpdate
+		if op == syncplanev1.CrudOp_CRUD_OP_DELETE {
+			want = opDelete
+		}
+		g.logRefusal(want, info, key, func() []string { return g.access.explainRules(tx, want, info, key, nil) })
+		return nil, accessRefusal(info, key)
 	}
 	stored, err := info.decode(row.Value)
 	if err != nil {
@@ -624,9 +949,14 @@ func (g *writeGate) beginAccessWrite(
 			return nil, err
 		}
 		if below != "" {
+			// The message leaves out the entity below, which the caller may
+			// not read; the debug log names it.
+			g.logRefusal(opDelete, info, key, func() []string {
+				return []string{fmt.Sprintf("a live %s row names the row as its access parent", below)}
+			})
 			return nil, Reject(CodeConflict, fmt.Sprintf(
-				"entity %q: row %q is the access parent of a live %s row; delete or move the rows below it first",
-				info.name, key, below))
+				"entity %q: row %q is the access parent of a live row; delete or move the rows below it first",
+				info.name, key))
 		}
 	}
 	if op == syncplanev1.CrudOp_CRUD_OP_DELETE && len(model.subjectsOf[info.name]) > 0 {
@@ -635,9 +965,12 @@ func (g *writeGate) beginAccessWrite(
 			return nil, err
 		}
 		if grant != "" {
+			g.logRefusal(opDelete, info, key, func() []string {
+				return []string{fmt.Sprintf("a live %s row names the row as its subject", grant)}
+			})
 			return nil, Reject(CodeConflict, fmt.Sprintf(
-				"entity %q: row %q is the subject of a live %s row; delete the grant rows that name it first",
-				info.name, key, grant))
+				"entity %q: row %q is the subject of a live grant row; delete the grant rows that name it first",
+				info.name, key))
 		}
 	}
 	w.live, w.stored = true, sr
@@ -653,17 +986,28 @@ func (g *writeGate) beginAccessWrite(
 // the reference projection, before the index update.
 //
 // A create needs a create rule that admits the caller and the new row, with
-// its source held through each parent the row names. An update needs one of
-// the update rules that admitted the caller at the stored row to admit the
-// row as it will be stored as well, and the fields the write changes. When
-// the update changes the row's access parents, that rule's source must also
-// hold through each parent the write adds and each one it removes. A move
-// also needs, where the row sits before it, the right to read every entity
-// whose rows can sit below it: the rows below move with it, and the caller
-// would otherwise show them to whoever reads at the new parent. An update
-// that changes what a within entry reads of the row needs the same, since it
-// changes what the rows below show to whoever reads them. On
-// a grant entity, a write that can change what the row grants also needs
+// its source held through each parent the row names. A create is refused with
+// CodeConflict while a live row names the new row's key as its access parent,
+// or a live grant row names it as its subject.
+//
+// An update needs one of the update rules that admitted the caller at the
+// stored row to admit the row as it will be stored as well, and the fields
+// the write changes. When the update changes the row's access parents, that
+// rule's source must also hold through each parent the write adds and each
+// one it removes. An update that changes a field that a read rule of a hiding
+// guard checks with caller_is or when needs the right to read the guard's
+// fields before and after it.
+//
+// A move also needs, where the row sits before it, the right to read the row
+// and each unit of it that a guard can hide, and to read every row of each
+// entity whose rows can sit below it: the row and the rows below move
+// together, and the caller would otherwise show them to whoever reads at the
+// new parent, itself included. A read rule with a caller_is or a when check
+// does not give the right to read every row. An update that changes what a
+// within entry reads of the row needs the same right for the rows below,
+// since it changes what they show to whoever reads them.
+//
+// On a grant entity, a write that can change what the row grants also needs
 // every permission of the new role at the new anchor, so a caller cannot
 // grant more than it holds.
 func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
@@ -684,7 +1028,7 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 		}
 		admitted := false
 		for _, rule := range admitting {
-			if admitted, err = w.access.admitsThrough(tx, rule, w.info, w.key, parents.parents); err != nil {
+			if admitted, err = w.access.admitsThrough(tx, rule, w.info, w.key, fr, parents.parents); err != nil {
 				return err
 			}
 			if admitted {
@@ -694,6 +1038,9 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 		if !admitted {
 			w.gate.logRefusal(opCreate, w.info, w.key, func() []string { return w.explainCreate(tx, fr, parents.parents) })
 			return accessRefusal(w.info, w.key)
+		}
+		if err := w.checkNothingNames(tx); err != nil {
+			return err
 		}
 	default:
 		if w.op == syncplanev1.CrudOp_CRUD_OP_PATCH {
@@ -718,7 +1065,7 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 				if err != nil || !ok || !moved {
 					return ok, err
 				}
-				return w.access.admitsThrough(tx, rule, w.info, w.key, changed)
+				return w.access.admitsThrough(tx, rule, w.info, w.key, fr, changed)
 			})
 		if err != nil {
 			return err
@@ -727,6 +1074,9 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 			w.gate.logRefusal(opUpdate, w.info, w.key, func() []string { return w.explainUpdate(tx, fr, moved, changed) })
 			return accessRefusal(w.info, w.key)
 		}
+		if err := w.checkGuardInputs(tx, fr); err != nil {
+			return err
+		}
 		// A change of what a within entry reads of the row changes what the rows
 		// below it show, as a move does.
 		rechecked := !moved && len(model.withinOn[w.info.name]) > 0 &&
@@ -734,13 +1084,18 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 		if !moved && !rechecked {
 			break
 		}
+		if moved {
+			if err := w.checkReadsStored(tx); err != nil {
+				return err
+			}
+		}
 		set, err := w.access.get(tx)
 		if err != nil {
 			return err
 		}
 		chains := w.access.chainsOf(tx)
 		subjects := w.access.caller.subjects
-		for _, r := range model.readersBelow(w.info.name) {
+		for _, r := range model.moveReadersBelow(w.info.name) {
 			ok, err := chains.holds(set.readAnchors(r), w.info, w.key, w.stored)
 			for _, o := range r.checked {
 				if err != nil || ok {
@@ -759,14 +1114,86 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 				if rechecked {
 					what = "changing"
 				}
+				if sources := r.sources(); len(sources) > 0 {
+					return Reject(CodeAccessDenied, fmt.Sprintf(
+						"entity %q: %s row %q needs one of the permissions %s where it is now, to change what the rows below it show",
+						w.info.name, what, w.key, strings.Join(sources, ", ")))
+				}
 				return Reject(CodeAccessDenied, fmt.Sprintf(
-					"entity %q: %s row %q needs one of the permissions %s where it is now, to change what the rows below it show",
-					w.info.name, what, w.key, strings.Join(r.sources(), ", ")))
+					"entity %q: %s row %q needs the right to read every row below it, which only a read rule without caller_is or when gives",
+					w.info.name, what, w.key))
 			}
 		}
 	}
 	if touchesGrant(w.info, w.op, w.mask) {
 		return checkGrantSubset(tx, w.access, w.info, w.key, fr)
+	}
+	return nil
+}
+
+// checkNothingNames refuses a create while a live row names the new row's key
+// as its access parent, or a live grant row names it as its subject, as of
+// tx. Those rows were left by an earlier row with the key, or written before
+// it, and the create would put them below the new row: the caller would show
+// them to whoever reads the new row, and a grant row would hold its role
+// again.
+func (w *accessWrite) checkNothingNames(tx storage.ReadTx) error {
+	model := w.access.model()
+	limits := w.gate.srv.limits
+	if model.anchors[w.info.name] {
+		below, err := liveRowBelow(tx, model, w.info, w.key, limits)
+		if err != nil {
+			return err
+		}
+		if below != "" {
+			// The message leaves out the entity below, which the caller may
+			// not read; the debug log names it.
+			w.gate.logRefusal(opCreate, w.info, w.key, func() []string {
+				return []string{fmt.Sprintf("a live %s row names the key as its access parent", below)}
+			})
+			return Reject(CodeConflict, fmt.Sprintf(
+				"entity %q: row %q would become the access parent of a live row that names its key; delete or move that row first",
+				w.info.name, w.key))
+		}
+	}
+	if len(model.subjectsOf[w.info.name]) > 0 {
+		grant, err := liveRowNaming(tx, w.info, w.key, model.subjectsOf[w.info.name], model.teamSubjects, limits)
+		if err != nil {
+			return err
+		}
+		if grant != "" {
+			w.gate.logRefusal(opCreate, w.info, w.key, func() []string {
+				return []string{fmt.Sprintf("a live %s row names the key as its subject", grant)}
+			})
+			return Reject(CodeConflict, fmt.Sprintf(
+				"entity %q: row %q would become the subject of a live grant row that names its key; delete that grant row first",
+				w.info.name, w.key))
+		}
+	}
+	return nil
+}
+
+// checkReadsStored refuses the write unless the caller reads the stored row
+// and each unit of it that a guard can hide, as of tx. A move shows the row
+// to whoever reads at its new parents, the caller included, so it must not
+// carry what the caller could not read where the row was.
+func (w *accessWrite) checkReadsStored(tx storage.ReadTx) error {
+	reading, err := w.access.admitting(tx, opRead, w.info, w.key, w.stored)
+	if err != nil {
+		return err
+	}
+	ok := len(reading) > 0
+	for i := range w.info.access.guards {
+		if g := &w.info.access.guards[i]; ok && g.hides() {
+			if ok, err = w.guardReads(tx, g); err != nil {
+				return err
+			}
+		}
+	}
+	if !ok {
+		return Reject(CodeAccessDenied, fmt.Sprintf(
+			"entity %q: moving row %q needs the right to read it, and each field of it a guard can hide, where it is now",
+			w.info.name, w.key))
 	}
 	return nil
 }
@@ -810,13 +1237,89 @@ func unitSet(info *entityInfo, msg protoreflect.Message, unit string) bool {
 // guardReads reports whether a read rule of g admits the caller on the stored
 // row, as of tx.
 func (w *accessWrite) guardReads(tx storage.ReadTx, g *fieldGuard) (bool, error) {
+	return w.guardReadsOn(tx, g, w.stored)
+}
+
+// guardReadsOn reports whether a read rule of g admits the caller on row, as
+// of tx.
+func (w *accessWrite) guardReadsOn(tx storage.ReadTx, g *fieldGuard, row protoreflect.Message) (bool, error) {
 	for _, rule := range g.reads {
-		ok, err := w.access.admits(tx, rule, w.info, w.key, w.stored)
+		ok, err := w.access.admits(tx, rule, w.info, w.key, row)
 		if err != nil || ok {
 			return ok, err
 		}
 	}
 	return false, nil
+}
+
+// checkGuardInputs refuses an update that changes a unit that a read rule of a
+// hiding guard checks on the row, with caller_is or when, unless the caller
+// reads the guard's units on the stored row and on final, the row as it will
+// be stored, as of tx. Such a change decides anew who reads the units, so a
+// caller that did not read them could otherwise point the row at itself, or
+// at another reader, and show them.
+func (w *accessWrite) checkGuardInputs(tx storage.ReadTx, final protoreflect.Message) error {
+	var changed []string
+	read := false
+	for i := range w.info.access.guards {
+		g := &w.info.access.guards[i]
+		if !g.hides() {
+			continue
+		}
+		inputs := guardRowInputs(g)
+		if len(inputs) == 0 {
+			continue
+		}
+		if !read {
+			changed, read = changedUnits(w.info.msgType.Descriptor(), w.stored, final), true
+		}
+		var hit []string
+		for _, unit := range inputs {
+			if slices.Contains(changed, unit) {
+				hit = append(hit, unit)
+			}
+		}
+		if len(hit) == 0 {
+			continue
+		}
+		ok, err := w.guardReadsOn(tx, g, w.stored)
+		if err == nil && ok {
+			ok, err = w.guardReadsOn(tx, g, final)
+		}
+		if err != nil {
+			return err
+		}
+		if !ok {
+			w.gate.logRefusal(opUpdate, w.info, w.key, func() []string {
+				return []string{fmt.Sprintf("the update changes %s, which decides who reads %s, and the caller does not read %s before and after it",
+					strings.Join(hit, ", "), strings.Join(g.units, ", "), strings.Join(g.units, ", "))}
+			})
+			return Reject(CodeAccessDenied, fmt.Sprintf(
+				"entity %q: changing %s of row %q needs the right to read %s before and after the change",
+				w.info.name, strings.Join(hit, ", "), w.key, strings.Join(g.units, ", ")))
+		}
+	}
+	return nil
+}
+
+// guardRowInputs returns the units that the read rules of g check on the row,
+// with caller_is or when, without repeats.
+func guardRowInputs(g *fieldGuard) []string {
+	var out []string
+	add := func(unit string) {
+		if !slices.Contains(out, unit) {
+			out = append(out, unit)
+		}
+	}
+	for _, rule := range g.reads {
+		if rule.callerIs != nil {
+			add(unitOf(rule.callerIs))
+		}
+		for _, unit := range rule.whenReads {
+			add(unit)
+		}
+	}
+	return out
 }
 
 // guardRefusal is the verdict on a write that names a guarded field its guard
@@ -1020,7 +1523,7 @@ func (w *accessWrite) explainUpdate(tx storage.ReadTx, final protoreflect.Messag
 			if why != "admits" {
 				why = "the row as it will be stored: " + why
 			} else if moved {
-				ok, err := w.access.admitsThrough(tx, rule, w.info, w.key, changed)
+				ok, err := w.access.admitsThrough(tx, rule, w.info, w.key, final, changed)
 				switch {
 				case err != nil:
 					why = "not decided: " + err.Error()
@@ -1173,6 +1676,9 @@ func (s *Server) checkInvocation(
 	if ma == nil {
 		return Reject(CodeAccessDenied, fmt.Sprintf(
 			"mutator %q declares no MutatorAccess, so only a trusted caller may invoke it", mi.name))
+	}
+	if ma.TrustedOnly {
+		return Reject(CodeAccessDenied, fmt.Sprintf("mutator %q is open only to trusted callers", mi.name))
 	}
 	if ma.Admitted {
 		return nil

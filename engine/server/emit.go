@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
@@ -74,18 +75,26 @@ type entityScope struct {
 type scopePred struct {
 	compiled *query.Compiled
 	cond     *syncplanev1.Condition
+	// sub is the index of the subscription the predicate is of.
+	sub int
 }
 
-func (sc *entityScope) matches(msg protoreflect.Message) bool {
+// matches reports whether msg is in sc. A predicate that e's bound access
+// makes select nothing does not match (see blindSubs).
+func (sc *entityScope) matches(e *rowEmitter, msg protoreflect.Message) (bool, error) {
 	if sc.whole {
-		return true
+		return true, nil
 	}
 	for _, p := range sc.preds {
-		if p.compiled.Eval(msg) {
-			return true
+		blind, err := e.blindBase(p.sub)
+		if err != nil {
+			return false, err
+		}
+		if !blind && p.compiled.Eval(msg) {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // rowEmitter decides row visibility for one request, combining read filters
@@ -124,6 +133,19 @@ type rowEmitter struct {
 	verdict    *pendingVerdict
 	chains     *accessChains
 	combined   map[string]readFilter
+	// heldSubs are the subscriptions of the cursor the request came with,
+	// and subsAdmitted records that a binding admitted every subscription of
+	// the emitter: refuseHiddenSubs refuses neither. blind memoizes
+	// blindSubs, when blindKnown is set, and is cleared with combined.
+	heldSubs     []*syncplanev1.Subscription
+	subsAdmitted bool
+	blind        []subBlind
+	blindKnown   bool
+	// noAccess is the workspace gate's refusal of a caller that holds no
+	// permission, which a pull from a cursor answers with a revocation resync
+	// first when it can (see Server.lastGrantRefusal). access is then a set
+	// that holds nothing. Nil for an admitted caller.
+	noAccess error
 	// guardReads memoizes, per entity, how the bound caller reads the units
 	// of each guard that can hide them (see guardReadsOf). Cleared with
 	// combined.
@@ -133,6 +155,9 @@ type rowEmitter struct {
 	// the old side of a resync reads nothing of (see hideOnOldSide).
 	readAccess     *syncplanecursorv1.ReadAccess
 	readAccessHash uint64
+	// accessUsedAt is when accessEntryHeld last read the access entry the
+	// emitter's cursors reissue, zero before the first read.
+	accessUsedAt time.Time
 	// callerAccess, callerAccessHash and callerAccessSize render access for
 	// the client, once per binding (see boundCallerAccess).
 	callerAccess     *syncplanev1.CallerAccess
@@ -150,8 +175,9 @@ type rowEmitter struct {
 	// match the new side's, so only the caller's access differs between them.
 	accessOnly bool
 	// movesThrough is the sequence through which the rows this emitter
-	// classifies reflect every access move: the newest move the read has
-	// accounted for. A cursor issued from the emitter records it.
+	// classifies reflect every access move: the position its read
+	// transaction reads at, or the newest move a snapshot accounted for. A
+	// cursor issued from the emitter records it.
 	movesThrough uint64
 	// movedBelow holds, on the old side of a resync, the entities whose rows
 	// can sit below a row whose move changed what the caller can read, and
@@ -299,7 +325,7 @@ func newRowEmitter(ctx context.Context, srv *Server, ws string, subs []*syncplan
 			return nil, connect.NewError(connect.CodeInvalidArgument,
 				fmt.Errorf("subscription for %q: %w", info.name, err))
 		}
-		sc.preds = append(sc.preds, scopePred{compiled: compiled, cond: sub.GetPredicate()})
+		sc.preds = append(sc.preds, scopePred{compiled: compiled, cond: sub.GetPredicate(), sub: i})
 	}
 	// Resolve the static follow-reachable entity set so they count as
 	// subscribed even without a base scope of their own.
@@ -482,6 +508,9 @@ func (e *rowEmitter) bindAccess(tx storage.ReadTx) error {
 		if err != nil {
 			return err
 		}
+		if e.verdict.noAccess != nil {
+			e.noAccess = &gateError{e.verdict.noAccess}
+		}
 		e.prior, e.verdict = set, nil
 	}
 	set, err := accessIn(tx, e.caller, e.srv.limits, e.prior)
@@ -527,6 +556,7 @@ func (e *rowEmitter) useAccess(set *accessSet, chains *accessChains) {
 	e.callerAccess, e.callerAccessHash, e.callerAccessSize = nil, 0, 0
 	clear(e.combined)
 	clear(e.guardReads)
+	e.blind, e.blindKnown = nil, false
 }
 
 // appFilterOf resolves and memoizes the application's ReadFilter for entity.
@@ -659,8 +689,10 @@ func (e *rowEmitter) classify(row storage.Row) (rowClass, error) {
 	} else if !ok {
 		return rowHidden, nil
 	}
-	if needPred && !scope.matches(msg.ProtoReflect()) {
-		return rowHidden, nil
+	if needPred {
+		if ok, err := scope.matches(e, msg.ProtoReflect()); err != nil || !ok {
+			return rowHidden, err
+		}
 	}
 	return rowVisible, nil
 }

@@ -1080,6 +1080,9 @@ func (s *Server) applyCrud(
 		if err := s.checkGrantRow(info, crud.GetKey(), crud.GetOp(), nil, msg); err != nil {
 			return err
 		}
+		if err := aw.checkNewParentsRead(tx, msg); err != nil {
+			return err
+		}
 		if err := s.checkAccessChain(ctx, ws, tx, info, crud.GetKey(), currentRow, msg); err != nil {
 			return err
 		}
@@ -1222,6 +1225,9 @@ func (s *Server) applyCrud(
 			return err
 		}
 		if err := s.checkGrantRow(info, crud.GetKey(), crud.GetOp(), crud.GetFieldMask().GetPaths(), base); err != nil {
+			return err
+		}
+		if err := aw.checkNewParentsRead(tx, base); err != nil {
 			return err
 		}
 		if err := s.checkAccessChain(ctx, ws, tx, info, crud.GetKey(), currentRow, base); err != nil {

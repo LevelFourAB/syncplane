@@ -6,6 +6,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
+	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
@@ -22,9 +23,9 @@ import (
 // same filter, resolved by the same machinery, that decides what a sync client
 // may pull. A filtered-out row reads as absent: Get reports not-found, scans and
 // queries skip it. Each field a field guard hides from the caller reads as its
-// zero value in the rows the closure receives; a query's predicate and order
-// still read the stored value. Authorization is against the ctx principal, so a ctx with no
-// principal reads as anonymous.
+// zero value in the rows the closure receives, and a query whose predicate or
+// order names such a field fails with code permission_denied. Authorization
+// is against the ctx principal, so a ctx with no principal reads as anonymous.
 //
 // Both hooks are resolved BEFORE the snapshot opens, so neither can pin it.
 // Because the closure may touch any entity, every registered entity's filter is
@@ -46,7 +47,7 @@ func (s *Server) View(ctx context.Context, workspaceID string, fn func(tx *ViewT
 	if err != nil {
 		return err
 	}
-	visible, project, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
+	visible, project, refuse, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
 	if err != nil {
 		return adm.verdict.settle(ctx, err)
 	}
@@ -54,7 +55,7 @@ func (s *Server) View(ctx context.Context, workspaceID string, fn func(tx *ViewT
 		if err := bind(tx); err != nil {
 			return err
 		}
-		return fn(&ViewTx{srv: s, tx: tx, ws: workspaceID, visible: visible, project: project})
+		return fn(&ViewTx{srv: s, tx: tx, ws: workspaceID, visible: visible, project: project, refuse: refuse})
 	})
 	return adm.verdict.settle(ctx, err)
 }
@@ -75,6 +76,9 @@ type ViewTx struct {
 	// project clears the fields a guard hides from the caller in each row the
 	// read returns, or is nil for a Trusted read.
 	project rowProjector
+	// refuse refuses a query that names a field a guard hides from the
+	// caller, or is nil for a Trusted read.
+	refuse specRefuser
 }
 
 // RowMeta is what the engine recorded about a stored row, returned alongside
@@ -152,7 +156,11 @@ func (v *ViewTx) ScanPage(prototype proto.Message, afterKey string, limit int, f
 //	}, func(msg proto.Message, version uint64) error { … })
 //
 // The caller's read filter applies (a Trusted view sees every live row), so the
-// page counts only rows this caller may see. No engine limit caps the result,
+// page counts only rows this caller may see. A spec whose predicate or order
+// names a field that a field guard hides from the caller on some row, on this
+// entity or on an entity a rel condition reaches, fails with code
+// permission_denied: which rows match, and their order, would tell the caller
+// about values it does not read. No engine limit caps the result,
 // though, so unlike the RPC a spec with no Limit returns — and holds in memory —
 // every match.
 //
@@ -172,6 +180,9 @@ func (v *ViewTx) ScanPage(prototype proto.Message, afterKey string, limit int, f
 func (v *ViewTx) Query(prototype proto.Message, spec query.Spec, fn func(msg proto.Message, version uint64) error) error {
 	info, err := v.info(prototype)
 	if err != nil {
+		return err
+	}
+	if err := v.refuse.check(info, spec); err != nil {
 		return err
 	}
 	rows, err := runQuerySpec(v.srv, v.tx, v.ws, info, spec, v.visible, v.project)
@@ -260,6 +271,30 @@ func runQuerySpec(
 		}
 	}
 	return rows, nil
+}
+
+// specRefuser refuses a Spec on rows of info that names a field a guard hides
+// from the bound caller on some row.
+type specRefuser func(info *entityInfo, spec query.Spec) error
+
+// check runs r on spec, and refuses nothing for a nil r.
+func (r specRefuser) check(info *entityInfo, spec query.Spec) error {
+	if r == nil {
+		return nil
+	}
+	return r(info, spec)
+}
+
+// refuseHiddenSpec refuses a Spec on rows of info whose predicate or order
+// names a field a guard hides from the bound caller on some row, on info or on
+// a rel target, as the Query RPC refuses one. It runs inside the read
+// transaction, after bindAccess.
+func (e *rowEmitter) refuseHiddenSpec(info *entityInfo, spec query.Spec) error {
+	err := refuseHiddenQuery(e, info, &syncplanev1.QueryRequest{Predicate: spec.Where, OrderBy: spec.OrderBy})
+	if err != nil {
+		return fmt.Errorf("server: query %s: %w", info.name, err)
+	}
+	return nil
 }
 
 // decodeSpecCursor unwraps one of a Spec's cursors. Nothing bounds its length

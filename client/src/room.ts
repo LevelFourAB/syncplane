@@ -101,11 +101,16 @@ export class RoomSendError extends Error {
 /** Lifecycle of a room (see Room.status). */
 export interface RoomStatus {
 	/**
-	 * `joining` — opened, no roster yet. `open` — live. `dropped` — the server
-	 * refused or withdrew the room, see `error`; this is terminal and reopening
-	 * will not change it. `closed` — the app closed it.
+	 * `joining` — opened, no roster yet. `open` — live. `waiting` — the caller
+	 * holds no grant in the workspace yet, so the server refused the room; the
+	 * roster is empty, and the client asks again with backoff, 1 to 30 seconds
+	 * apart, and at once when the caller's access in the workspace changes.
+	 * The room goes to `open` when a grant admits the caller. `dropped` — the
+	 * server refused or withdrew the room for another reason, see `error`;
+	 * this is terminal and reopening will not change it. `closed` — the app
+	 * closed it.
 	 */
-	state: 'joining' | 'open' | 'dropped' | 'closed';
+	state: 'joining' | 'open' | 'waiting' | 'dropped' | 'closed';
 	/** Set exactly when the room was dropped, whether or not it was closed after. */
 	error?: RoomError;
 }
@@ -237,6 +242,8 @@ export interface RoomSink {
 	onLeft(sessionId: string): void;
 	onMessage(senderSessionId: string, senderSubject: string, payload: Uint8Array): void;
 	onDropped(message: string): void;
+	/** The server refused the room until the caller holds a grant in the workspace. */
+	onWaiting(): void;
 	/**
 	 * Asks the room to keep its own record alive every `intervalMs`, because no
 	 * Watch stream is doing it. Called with the interval the server reported;
@@ -330,8 +337,15 @@ export function createRoom<S, M>(
 			// of the room, and anything held that is not in it is gone.
 			records.clear();
 			for (const p of participants) records.set(p.sessionId, toPeer(p));
-			if (status.state === 'joining') status = { state: 'open' };
+			const wasWaiting = status.state === 'waiting';
+			if (status.state === 'joining' || wasWaiting) status = { state: 'open' };
 			notifyPeers();
+			// A state set while waiting was held back, as the server refuses
+			// a publish from a caller it does not admit.
+			if (wasWaiting && pending !== undefined && timer === undefined) {
+				flush();
+				return;
+			}
 			// The server holds a record only while it is watching the session's
 			// stream, so a publish that beat the stream to the server — or one
 			// made across a reconnect — left nothing behind. A snapshot without
@@ -367,6 +381,12 @@ export function createRoom<S, M>(
 		onDropped(message) {
 			fail(CodeRoomDropped, message);
 		},
+		onWaiting() {
+			if (status.state === 'dropped' || status.state === 'closed') return;
+			status = { state: 'waiting' };
+			records.clear();
+			notifyPeers();
+		},
 		onKeepalive(intervalMs) {
 			if (intervalMs <= 0 || intervalMs === keepaliveMs) return;
 			keepaliveMs = intervalMs;
@@ -386,6 +406,7 @@ export function createRoom<S, M>(
 
 	const flush = (): void => {
 		timer = undefined;
+		if (status.state === 'waiting') return;
 		const next = pending;
 		pending = undefined;
 		if (next === undefined || status.state === 'closed' || status.state === 'dropped') return;
@@ -421,7 +442,7 @@ export function createRoom<S, M>(
 
 	const sendKeepalive = (): void => {
 		if (published === undefined) return;
-		if (status.state === 'closed' || status.state === 'dropped') return;
+		if (status.state === 'closed' || status.state === 'dropped' || status.state === 'waiting') return;
 		void link.publishState(published.state, published.seq, revision).catch(() => {
 			// A missed keepalive costs nothing on its own: the expiry window is
 			// three intervals wide, so the next one still lands inside it.

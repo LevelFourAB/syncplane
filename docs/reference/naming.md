@@ -19,6 +19,12 @@ The following table lists the syntax rules for entity names:
 | Character set | ASCII letter or `_`, followed by ASCII letters, digits, or `_` (`^[A-Za-z_]\w*$`) |
 | Length        | 1 to 64 characters                                                                |
 
+A schema cannot declare an entity whose name starts with `syncplane_`. The
+engine keeps its own entities under that prefix, such as
+`syncplane_field_history` and `syncplane_access_moves`. The match is
+case-sensitive. The server refuses such a name at registration, and the
+TypeScript schema builder's `entity()` throws on it.
+
 Validation timing:
 
 - **Server:** Checked during registration by `RegisterEntity` and `RegisterDescriptorSet`.

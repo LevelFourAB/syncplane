@@ -77,6 +77,7 @@ import {
 	resequencePending,
 	rollbackRejected,
 } from '../../src/optimistic/rebase.js';
+import type { MirrorTx, MutatorMirror } from '../../src/optimistic/rebase.js';
 import { callerAccessOf } from '../../src/testing/access.js';
 import {
 	createTestClient,
@@ -626,8 +627,12 @@ describe('can()', () => {
 
 		const cards = await createTestClient({ entities: [ CardSchema, CardItemSchema ] });
 		cards.server.put(CardSchema, { id: 'c-b', place: { case: 'board', value: { id: 'x' } } });
+		// The caller reads the card and the items below it, which a move needs.
 		cards.server.setCallerAccess({
-			permissions: [ { permission: 'edit_cards', anchors: [ { entity: 'board', keys: [ 'x' ] } ] } ],
+			permissions: [ 'view_cards', 'edit_cards' ].map((permission) => ({
+				permission,
+				anchors: [ { entity: 'board', keys: [ 'x' ] } ],
+			})),
 		});
 		await cards.sync();
 		// A change of the access parent's oneof is a move. A caller that does not
@@ -2026,3 +2031,228 @@ async function generationIn(kv: KVStore, workspaceId: string): Promise<unknown> 
 		tx.release();
 	}
 }
+
+describe('a queued custom mutation', () => {
+	it('answers unknown while a custom mutation whose mirror writes a grant row waits for its ack', async () => {
+		// Given ann, who holds view_projects at the root and nothing at p-new,
+		// and a mutator that creates a project and makes its caller the owner:
+		// the case a mutator exists for, since the subset rule refuses the
+		// grant to a plain write.
+		const kv = new MemoryKVStore();
+		await storeSummary(kv, {
+			subjects: [ 'ann' ],
+			permissions: [ { permission: 'view_projects', root: true } ],
+		});
+		const createProject: MutatorMirror<typeof ProjectSchema> = {
+			args: ProjectSchema,
+			async apply(tx: MirrorTx, args) {
+				await tx.put(ProjectSchema, create(ProjectSchema, { id: args!.id }));
+				await tx.put(
+					ProjectMemberSchema,
+					create(ProjectMemberSchema, {
+						id: `pm-${args!.id}`,
+						project: { id: args!.id },
+						userId: 'ann',
+						role: 'project_owner',
+					}),
+				);
+			},
+		};
+		const c = new SyncClient({
+			workspaceId: WS,
+			kvStore: kv,
+			entities: [ ProjectSchema, ProjectMemberSchema, TaskSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+			mutators: { createProject: createProject as MutatorMirror<DescMessage> },
+		});
+		expect(await c.hasPermission(ProjectSchema, 'p-new', 'edit_projects')).toBe('no');
+
+		// When the mutation is queued, and the mirror wrote the grant row locally
+		await c.mutate.custom('createProject', ProjectSchema, { id: 'p-new' });
+		expect(await c.get(ProjectMemberSchema, 'pm-p-new')).toBeDefined();
+
+		// Then the prediction waits for the ack, as it does for a grant row
+		// that a put queues
+		expect(await c.hasPermission(ProjectSchema, 'p-new', 'edit_projects', { detail: true })).toEqual({
+			answer: 'unknown',
+			reason: 'pending_grant',
+		});
+		await c.close();
+	});
+
+	it('does not wait for the ack of a custom mutation whose mirror writes no grant row', async () => {
+		// Given ann, who holds view_projects at the root and nothing at p1, and
+		// a mutator that renames a project
+		const kv = new MemoryKVStore();
+		await storeSummary(kv, {
+			subjects: [ 'ann' ],
+			permissions: [ { permission: 'view_projects', root: true } ],
+		});
+		const renameProject: MutatorMirror<typeof ProjectSchema> = {
+			args: ProjectSchema,
+			async apply(tx: MirrorTx, args) {
+				await tx.put(ProjectSchema, create(ProjectSchema, { id: args!.id, name: args!.name }));
+			},
+		};
+		const c = new SyncClient({
+			workspaceId: WS,
+			kvStore: kv,
+			entities: [ ProjectSchema, ProjectMemberSchema, TaskSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+			mutators: { renameProject: renameProject as MutatorMirror<DescMessage> },
+		});
+
+		// When the mutation is queued
+		await c.mutate.custom('renameProject', ProjectSchema, { id: 'p1', name: 'renamed' });
+		expect((await c.get(ProjectSchema, 'p1'))?.name).toBe('renamed');
+
+		// Then the prediction does not wait for its ack
+		expect(await c.hasPermission(ProjectSchema, 'p1', 'edit_projects', { detail: true })).toEqual({
+			answer: 'no',
+		});
+		expect(await c.hasPermission(ProjectSchema, 'p1', 'view_projects')).toBe('yes');
+		await c.close();
+	});
+
+	it('answers unknown while a custom mutation without a mirror waits for its ack, when the schema has grant entities', async () => {
+		// Given ann, who holds view_projects at the root, and no mirror for the
+		// mutator: the client cannot see what the server's mutator writes
+		const kv = new MemoryKVStore();
+		await storeSummary(kv, {
+			subjects: [ 'ann' ],
+			permissions: [ { permission: 'view_projects', root: true } ],
+		});
+		const c = new SyncClient({
+			workspaceId: WS,
+			kvStore: kv,
+			entities: [ ProjectSchema, ProjectMemberSchema, TaskSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		});
+
+		// When
+		await c.mutate.custom('createProject', ProjectSchema, { id: 'p-new' });
+
+		// Then
+		expect(await c.hasPermission(ProjectSchema, 'p-new', 'edit_projects', { detail: true })).toEqual({
+			answer: 'unknown',
+			reason: 'pending_grant',
+		});
+		await c.close();
+	});
+
+	it('does not wait for the ack of a custom mutation without a mirror, when the schema has no grant entities', async () => {
+		// Given a schema of projects and tasks, with no grant entity
+		const kv = new MemoryKVStore();
+		await storeSummary(kv, {
+			subjects: [ 'ann' ],
+			permissions: [ { permission: 'view_projects', root: true } ],
+		});
+		const c = new SyncClient({
+			workspaceId: WS,
+			kvStore: kv,
+			entities: [ ProjectSchema, TaskSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		});
+
+		// When
+		await c.mutate.custom('archiveProject', ProjectSchema, { id: 'p1' });
+
+		// Then
+		expect(await c.hasPermission(ProjectSchema, 'p1', 'view_projects')).toBe('yes');
+		await c.close();
+	});
+
+	it('answers again when a replay changes what the mirror writes', async () => {
+		// Given ann, who holds view_projects at the root, and a mutator that
+		// makes its caller the owner of a project when the project exists
+		const joinProject: MutatorMirror<typeof ProjectSchema> = {
+			args: ProjectSchema,
+			async apply(tx: MirrorTx, args) {
+				if ((await tx.get(ProjectSchema, args!.id)) === undefined) return;
+				await tx.put(
+					ProjectMemberSchema,
+					create(ProjectMemberSchema, {
+						id: `pm-${args!.id}`,
+						project: { id: args!.id },
+						userId: 'ann',
+						role: 'project_owner',
+					}),
+				);
+			},
+		};
+		const t = await createTestClient({
+			entities: [ ProjectSchema, ProjectMemberSchema, TaskSchema ],
+			mutators: { joinProject: joinProject as MutatorMirror<DescMessage> },
+			streamEnabled: true,
+		});
+		t.server.setCallerAccess({
+			subjects: [ 'ann' ],
+			permissions: [ { permission: 'view_projects', root: true } ],
+		});
+		// Writes that stamp the overlay of both entities, so the client can
+		// tell when a replay moves it
+		await t.client.mutate.put(ProjectSchema, { id: 'p0' });
+		await t.client.mutate.put(ProjectMemberSchema, {
+			id: 'pm-bob',
+			project: { id: 'p0' },
+			userId: 'bob',
+			role: 'project_reader',
+		});
+		await t.sync();
+
+		// And the mutation queued before p1 reached the client, so the mirror
+		// wrote nothing. The server holds its push, so it waits for its ack.
+		const hold = t.server.holdPushes();
+		await t.client.mutate.custom('joinProject', ProjectSchema, { id: 'p1' });
+		expect(await t.client.hasPermission(ProjectSchema, 'p1', 'edit_projects')).toBe('no');
+		expect(await t.client.hasPermission(ProjectSchema, 'p1', 'edit_projects')).toBe('no');
+
+		// When p1 arrives while the mutation waits, and the replay writes the
+		// grant row
+		t.server.put(ProjectSchema, { id: 'p1' });
+		await vi.waitFor(async () => {
+			expect(await t.client.get(ProjectSchema, 'p1')).toBeDefined();
+			expect(await t.client.get(ProjectMemberSchema, 'pm-p1')).toBeDefined();
+		});
+
+		// Then the prediction waits for the ack
+		expect(await t.client.hasPermission(ProjectSchema, 'p1', 'edit_projects', { detail: true }))
+			.toEqual({ answer: 'unknown', reason: 'pending_grant' });
+		hold.release();
+		await t.close();
+	});
+});
+
+describe('can() for an update that moves a row other rows sit below', () => {
+	it('does not answer yes for a caller who does not read the rows below the row where it is', async () => {
+		// Given a caller with project_editor at the workspace root, as a root
+		// role from WithCallerAccess gives it: view_projects and edit_tasks,
+		// but not view_tasks, which the comments below a task need. Task t1
+		// sits in p1 and holds comment c1.
+		const t = await createTestClient({
+			entities: [ ProjectSchema, ProjectMemberSchema, TaskSchema, CommentSchema ],
+		});
+		t.server.put(ProjectSchema, { id: 'p1' });
+		t.server.put(ProjectSchema, { id: 'p2' });
+		t.server.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		t.server.put(CommentSchema, { id: 'c1', task: { id: 't1' } });
+		t.server.setCallerAccess({ subjects: [ 'ed' ], roles: [ { role: 'project_editor' } ] });
+		await t.sync();
+
+		// When
+		const rename = await t.client.can(TaskSchema, 't1', 'update', { fields: [ 'title' ] });
+		const move = await t.client.can(TaskSchema, 't1', 'update', { fields: [ 'project' ] });
+
+		// Then the rename is admitted, and the move is not predicted as admitted:
+		// the server refuses it ("moving row t1 needs one of the permissions
+		// view_tasks where it is now"), and the summary shows that the caller
+		// holds view_tasks nowhere.
+		expect(rename).toBe('yes');
+		expect(move).not.toBe('yes');
+		await t.close();
+	});
+});

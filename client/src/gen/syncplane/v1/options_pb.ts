@@ -720,7 +720,7 @@ export const AdmittedCallerSchema: GenMessage<AdmittedCaller> = /*@__PURE__*/
  * ```protobuf
  *   oneof member {
  *     string user_id = 3;
- *     Team team = 4;
+ *     Team team = 5;
  *   }
  * ```
  *

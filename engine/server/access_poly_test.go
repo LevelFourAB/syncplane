@@ -353,11 +353,11 @@ var _ = Describe("Access model writes below a polymorphic access parent", func()
 	It("refuses to delete a board or a space while a row below it is live, through any case", func() {
 		r := one("admin", del("board", "b2"))
 		refused(r, server.CodeConflict)
-		Expect(r.GetErrorMessage()).To(ContainSubstring("access parent of a live pin row"))
+		Expect(r.GetErrorMessage()).To(ContainSubstring("access parent of a live row"))
 		applied(one("admin", del("pin", "p-b2")))
 		r = one("admin", del("board", "b2"))
 		refused(r, server.CodeConflict)
-		Expect(r.GetErrorMessage()).To(ContainSubstring("access parent of a live place_member row"))
+		Expect(r.GetErrorMessage()).To(ContainSubstring("access parent of a live row"))
 	})
 
 	// A caller with a role on a board has a grant row below it, so only a

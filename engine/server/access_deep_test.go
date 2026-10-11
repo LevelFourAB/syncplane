@@ -229,6 +229,44 @@ var _ = Describe("Access model reads below more than one parent", func() {
 			// d-low is three hops below top: low, mid, top.
 			Expect(rowsOf("doc", f.pull("boss"))).To(Equal([]string{"doc/d-mid", "doc/d-side", "doc/d-top"}))
 		})
+
+		It("takes a row past a lowered MaxAccessDepth from a client that synced it under the old limit", func() {
+			pullFrom := func(f *accessFixture, cursor []byte) *syncplanev1.PullResponse {
+				GinkgoHelper()
+				req := connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: ws, ClientId: "c-boss", Cursor: cursor})
+				as("boss", req.Header())
+				resp, err := f.sync.Pull(f.ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+				return resp.Msg
+			}
+			// Given boss, who manages top, synced d-low (three hops below top)
+			// on a server with the default MaxAccessDepth
+			store := newTestStore()
+			before := newFolderFixtureOn(store)
+			before.seedFolders()
+			first := pullFrom(before, nil)
+			var held []string
+			for _, rc := range first.GetPatch().GetChanges() {
+				held = append(held, rc.GetEntity()+"/"+rc.GetKey())
+			}
+			Expect(held).To(ContainElement("doc/d-low"))
+
+			// When the server restarts with MaxAccessDepth 2, under which boss
+			// no longer reads d-low, and boss pulls from its cursor
+			after := newFolderFixtureOn(store, server.WithLimits(server.Limits{MaxAccessDepth: 2}))
+			Expect(rowsOf("doc", after.pull("boss"))).NotTo(ContainElement("doc/d-low"))
+			next := pullFrom(after, first.GetNextCursor())
+
+			// Then the pull resets the client or tombstones d-low
+			tombstoned := false
+			for _, rc := range next.GetPatch().GetChanges() {
+				if rc.GetEntity() == "doc" && rc.GetKey() == "d-low" && rc.GetTombstone() {
+					tombstoned = true
+				}
+			}
+			Expect(next.GetReset_() || tombstoned).To(BeTrue(),
+				"boss keeps d-low, which the server no longer lets it read")
+		})
 	})
 })
 
@@ -320,7 +358,7 @@ var _ = Describe("Access model writes below more than one parent", func() {
 		It("refuses to delete a task while a comment below it is live", func() {
 			r := one("writer", del("task", "t2"))
 			refused(r, server.CodeConflict)
-			Expect(r.GetErrorMessage()).To(ContainSubstring(`access parent of a live comment row`))
+			Expect(r.GetErrorMessage()).To(ContainSubstring(`access parent of a live row`))
 			results := write("writer", del("comment", "c2"), del("task", "t2"))
 			applied(results[0])
 			applied(results[1])

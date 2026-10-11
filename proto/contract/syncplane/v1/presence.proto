@@ -139,6 +139,10 @@ message TopicDropped {
 		// A failure scoped to this topic that may not persist (a storage error,
 		// a permission hook that could not decide). Reopen with backoff.
 		REASON_ERROR = 2;
+		// The caller holds no permission in the workspace's access model. A
+		// grant written later lifts it, so the room can be reopened with
+		// backoff. It is the room's form of WorkspaceDropped.REASON_NO_ACCESS.
+		REASON_NO_ACCESS = 3;
 	}
 	// The reason why the topic was dropped.
 	Reason reason = 1;

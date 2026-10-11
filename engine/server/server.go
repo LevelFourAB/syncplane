@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -664,6 +665,12 @@ type catalog struct {
 	// at a time; see accessModelOrErr.
 	access    *accessModel
 	accessErr error
+	// lastAccess is the last access model that compiled without an error,
+	// carried across the catalogs a run of RegisterEntity calls passes
+	// through, and nil before one did. The engine's own bookkeeping of a
+	// Trusted write runs against it while accessErr is set; see
+	// Server.trackedAccess.
+	lastAccess *accessModel
 	// gate is how the workspace gate admits callers, as settleGate last
 	// recorded it. Registration refuses to change it without
 	// AllowAccessChange.
@@ -686,6 +693,9 @@ func (c *catalog) accessModelOrErr() (*accessModel, error) {
 // replaces an entity calls it.
 func (c *catalog) recompileAccess(s *Server) {
 	c.access, c.accessErr = compileAccessModel(c, s.mutators, s.limits.maxAccessDepth(), s.strictAccess)
+	if c.accessErr == nil {
+		c.lastAccess = c.access
+	}
 }
 
 // indexBuildMark fingerprints every index of every registered entity, so that
@@ -722,12 +732,13 @@ func (c *catalog) indexBuildMark() string {
 // over; callers override it when the schema changes.
 func (c *catalog) clone() *catalog {
 	nc := &catalog{
-		entities:  make(map[string]*entityInfo, len(c.entities)+1),
-		byType:    make(map[protoreflect.FullName]*entityInfo, len(c.byType)+1),
-		schemaRev: c.schemaRev,
-		access:    c.access,
-		accessErr: c.accessErr,
-		gate:      c.gate,
+		entities:   make(map[string]*entityInfo, len(c.entities)+1),
+		byType:     make(map[protoreflect.FullName]*entityInfo, len(c.byType)+1),
+		schemaRev:  c.schemaRev,
+		access:     c.access,
+		accessErr:  c.accessErr,
+		lastAccess: c.lastAccess,
+		gate:       c.gate,
 	}
 	for k, v := range c.entities {
 		nc.entities[k] = v
@@ -1336,11 +1347,16 @@ func (s *Server) HTTPHandler() http.Handler {
 
 // RegisterEntity registers a message type carrying syncplane.v1.entity options as
 // a syncable entity. It returns an error for an entity whose name is already
-// registered.
+// registered, whose name starts with the reserved prefix "syncplane_", or
+// whose entity options or field behaviors carry a field this server does not
+// know, such as a write policy that the access model replaced.
 //
 // The access model is judged once the schema is complete, so RegisterEntity
-// accepts an entity that leaves the model incomplete; until a later call
-// completes it, every request fails with failed_precondition. An entity that
+// accepts an entity that leaves the model incomplete because it names an
+// entity, or a permission whose role, no registered entity declares yet; until
+// a later call completes it, every request fails with failed_precondition. It
+// returns an error for an entity that breaks any other rule of the model, and
+// the server keeps serving the schema it served before. An entity that
 // declares the first role of a schema that served callers without one is
 // refused unless opts include AllowAccessChange: it makes the workspace gate
 // refuse every caller that holds no permission. The entities New registers,
@@ -1361,6 +1377,13 @@ func (s *Server) RegisterEntity(msg proto.Message, opts ...RegisterOption) error
 			return err
 		}
 		c.recompileAccess(s)
+		// Only an entity that a later call adds can repair the model. Any other
+		// error stays until a descriptor set replaces the schema, and every
+		// request fails while it does.
+		var missing *missingEntityError
+		if c.accessErr != nil && !errors.As(c.accessErr, &missing) {
+			return c.accessErr
+		}
 		return c.settleGate(cfg.allowAccessChange)
 	}); err != nil {
 		return err
@@ -1400,6 +1423,17 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	// has to satisfy the shared naming rules before anything is built from it.
 	if err := naming.ValidateEntityName(eo.GetName()); err != nil {
 		return nil, fmt.Errorf("server: %s: %w", desc.FullName(), err)
+	}
+	// The engine keeps rows of its own entities beside the schema's, under
+	// names with the reserved prefix. The field history type is the one
+	// such entity that goes through registration.
+	if naming.IsReservedEntityName(eo.GetName()) &&
+		desc.FullName() != (&syncplanev1.FieldHistory{}).ProtoReflect().Descriptor().FullName() {
+		return nil, fmt.Errorf("server: %s: entity name %q starts with %q, which is reserved for the engine's own entities",
+			desc.FullName(), eo.GetName(), naming.ReservedEntityPrefix)
+	}
+	if err := refuseStaleOptions(desc, eo); err != nil {
+		return nil, err
 	}
 	if len(eo.GetKeyFields()) == 0 {
 		return nil, fmt.Errorf("server: entity %q declares no key_fields", eo.GetName())
@@ -1531,6 +1565,11 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	}
 	if info.creatorFields, err = creatorFieldsOf(desc, info.keyFields); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	// After every reader of an option message has refused what it does not
+	// know with its own path, so that those errors keep naming the rule.
+	if err := refuseUnknownNestedOptions(desc, eo); err != nil {
+		return nil, err
 	}
 	// After the create, no caller changes a creator field: a PATCH naming it is
 	// refused and a PUT keeps the stored value. Only the create differs, where

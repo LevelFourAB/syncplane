@@ -4,6 +4,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -112,6 +113,25 @@ var _ = Describe("Protoopts", func() {
 			Expect(proto.HasExtension(fopts, syncplanev1.E_FieldBehavior)).To(BeFalse())
 
 			Expect(protoopts.FieldBehavior(fd).GetText()).To(BeTrue())
+		})
+
+		// Registration refuses an access option that carries fields it does
+		// not know, since such a field could narrow access. That check reads
+		// the unknown bytes off the recovered options, so recovery must keep
+		// them.
+		It("keeps fields this build does not know inside recovered access options", func() {
+			// Given entity options whose access rule carries field 999, as a
+			// newer options.proto would write it, behind a divergent extension
+			access := &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{{Read: true, Requires: []string{"view"}}}}
+			access.GetAllow()[0].ProtoReflect().SetUnknown(protowire.AppendVarint(protowire.AppendTag(nil, 999, protowire.VarintType), 1))
+			md := buildMessage(uninterpretedEntity(&syncplanev1.EntityOptions{Name: "thing", Access: access}), nil)
+
+			// When the options are read
+			eo := protoopts.Entity(md)
+
+			// Then the rule still carries the unknown field
+			Expect(eo.GetAccess().GetAllow()).To(HaveLen(1))
+			Expect(eo.GetAccess().GetAllow()[0].ProtoReflect().GetUnknown()).NotTo(BeEmpty())
 		})
 
 		It("reports uninterpreted options so the caller can name the cause", func() {

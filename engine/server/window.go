@@ -67,6 +67,11 @@ type compiledWindow struct {
 	// only meaningful against a subscription list that lines up with the one the
 	// cursor was issued under (see sameSubscriptions).
 	subIndex int
+	// blind is set while the bound access hides a field the window selects or
+	// orders by: it holds no member, and a cursor carries no state for it, so
+	// it is resolved from scratch once the caller reads the field again (see
+	// rowEmitter.blindSubs).
+	blind bool
 	// pred is always non-nil (query.Compile of a nil condition matches
 	// everything); hasPred says whether evaluating it can change the outcome,
 	// which is what keeps a predicate-less recency window from decoding rows.
@@ -150,6 +155,12 @@ func (e *rowEmitter) buildWindows(tx storage.ReadTx) (closureRows, error) {
 	}
 	union := closureRows{}
 	for _, w := range e.windows {
+		if blind, err := w.blindOn(e); err != nil || blind {
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
 		rows, boundary, err := w.compute(tx, e)
 		if err != nil {
 			return nil, err
@@ -158,6 +169,20 @@ func (e *rowEmitter) buildWindows(tx storage.ReadTx) (closureRows, error) {
 		w.mergeInto(union)
 	}
 	return union, nil
+}
+
+// blindOn records on w whether e's bound access hides a field the window
+// selects or orders by, and empties it when it does.
+func (w *compiledWindow) blindOn(e *rowEmitter) (bool, error) {
+	blind, err := e.blindBase(w.subIndex)
+	if err != nil {
+		return false, err
+	}
+	w.blind = blind
+	if blind {
+		w.adopt(nil, nil)
+	}
+	return blind, nil
 }
 
 // adopt records a resolved membership, best-first, with the position that
@@ -286,6 +311,12 @@ func (e *rowEmitter) refreshWindows(tx storage.ReadTx, prev []*syncplanecursorv1
 	}
 	union := closureRows{}
 	for _, w := range e.windows {
+		if blind, err := w.blindOn(e); err != nil || blind {
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
 		maintained := false
 		if st := states[w.subIndex]; st != nil {
 			var err error
@@ -556,6 +587,9 @@ func (e *rowEmitter) windowStates() []*syncplanecursorv1.WindowState {
 	}
 	out := make([]*syncplanecursorv1.WindowState, 0, len(e.windows))
 	for _, w := range e.windows {
+		if w.blind {
+			continue
+		}
 		keys := w.ordered
 		if keys == nil {
 			keys = make([]string, 0, len(w.members))

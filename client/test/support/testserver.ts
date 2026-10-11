@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,11 +22,22 @@ export interface TestServer {
  */
 export async function startTestServer(args: string[] = []): Promise<TestServer> {
 	const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
-	const bin = join(mkdtempSync(join(tmpdir(), 'synctest-')), 'testserver');
-	execFileSync('go', [ 'build', '-o', bin, './cmd/testserver' ], {
-		cwd: repoRoot,
-		stdio: 'inherit',
-	});
+	const dir = mkdtempSync(join(tmpdir(), 'synctest-'));
+	const bin = join(dir, 'testserver');
+	// Every run builds a fresh binary of about 40 MB. The running process
+	// keeps its executable after the unlink, so the folder goes as soon as
+	// the server listens, or when the build or the start fails, and an
+	// aborted run leaves nothing behind.
+	const removeBuild = () => rmSync(dir, { recursive: true, force: true });
+	try {
+		execFileSync('go', [ 'build', '-o', bin, './cmd/testserver' ], {
+			cwd: repoRoot,
+			stdio: 'inherit',
+		});
+	} catch (err) {
+		removeBuild();
+		throw err;
+	}
 
 	const proc = spawn(bin, args, { stdio: [ 'ignore', 'pipe', 'inherit' ] });
 
@@ -42,7 +53,7 @@ export async function startTestServer(args: string[] = []): Promise<TestServer> 
 			'exit',
 			(code) => reject(new Error(`testserver exited with ${code} before listening`)),
 		);
-	});
+	}).finally(removeBuild);
 
 	return {
 		url,

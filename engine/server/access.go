@@ -1,9 +1,8 @@
 package server
 
 import (
+	"cmp"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -134,15 +133,15 @@ type labeledRule struct {
 // where the access option declares it.
 func (a *entityAccess) allRules() []labeledRule {
 	out := make([]labeledRule, 0, len(a.rules))
-	for i, r := range a.rules {
-		out = append(out, labeledRule{where: fmt.Sprintf("access allow[%d]", i), rule: r})
+	for _, r := range a.rules {
+		out = append(out, labeledRule{where: r.where, rule: r})
 	}
-	for i, g := range a.guards {
+	for _, g := range a.guards {
 		for _, r := range g.rules {
-			out = append(out, labeledRule{where: fmt.Sprintf("access guard[%d]", i), rule: r})
+			out = append(out, labeledRule{where: r.where, rule: r})
 		}
 		for _, r := range g.reads {
-			out = append(out, labeledRule{where: fmt.Sprintf("access guard[%d]", i), rule: r})
+			out = append(out, labeledRule{where: r.where, rule: r})
 		}
 	}
 	return out
@@ -171,7 +170,10 @@ var accessOpNames = []struct {
 
 // accessRule is one rule of an entity's access option.
 type accessRule struct {
-	ops accessOp
+	// where is the path of the rule in the access option, for errors:
+	// "access allow[i]" or "access guard[i] allow[j]".
+	where string
+	ops   accessOp
 	// requires are the permissions the rule needs, sorted. Empty for a rule
 	// that admits every admitted caller.
 	requires []string
@@ -186,6 +188,9 @@ type accessRule struct {
 	// check. whenSpec renders it in a canonical form, "" without one.
 	when     *query.Compiled
 	whenSpec string
+	// whenCond is the condition when compiles from, nil without a when
+	// check.
+	whenCond *syncplanev1.Condition
 	// whenReads are the units the when check reads on the row, in the order
 	// the condition names them. Nil without a when check.
 	whenReads []string
@@ -198,6 +203,9 @@ type accessRule struct {
 // declares it: the entity of the row the rule's row must sit within, and the
 // checks that row must pass.
 type withinEntry struct {
+	// at is the index of the entry in the rule's within list as declared,
+	// for errors.
+	at     int
 	entity string
 	// callerIs is the name of the field that must hold one of the caller's
 	// subjects, "" without a caller_is check.
@@ -437,6 +445,24 @@ func (r readers) loose() readers {
 	return out
 }
 
+// everyRow returns who may read every row of the entity where a row sits: r
+// without the rules of checked that check the row, and loose after that. A
+// rule with a caller_is or a when check admits a caller on some rows only, so
+// it does not count. A rule that needs more than one permission, or that sets
+// within entries, stays.
+func (r readers) everyRow() readers {
+	if r.all {
+		return r.loose()
+	}
+	out := readers{perms: r.perms}
+	for _, o := range r.checked {
+		if !o.checksRow() {
+			out.checked = append(out.checked, o)
+		}
+	}
+	return out.loose()
+}
+
 // sources renders each way r admits a caller, for an error: each of perms,
 // then the permissions of each rule in checked joined by "+".
 func (r readers) sources() []string {
@@ -651,7 +677,7 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 	a := &entityAccess{parents: parents, parentUnits: units}
 	seen := map[string]int{}
 	for i, r := range opt.GetAllow() {
-		rule, err := accessRuleOf(i, r, desc, info.keyFields)
+		rule, err := accessRuleOf(fmt.Sprintf("access allow[%d]", i), r, desc, info.keyFields)
 		if err != nil {
 			return nil, err
 		}
@@ -768,9 +794,9 @@ func (a *entityAccess) guardsOf(desc protoreflect.MessageDescriptor, keyFields [
 		seen := map[string]int{}
 		for j, r := range g.GetAllow() {
 			rw := fmt.Sprintf("%s allow[%d]", where, j)
-			rule, err := accessRuleOf(j, r, desc, keyFields)
+			rule, err := accessRuleOf(rw, r, desc, keyFields)
 			if err != nil {
-				return fmt.Errorf("%s: %w", where, err)
+				return err
 			}
 			switch {
 			case rule.ops&opDelete != 0:
@@ -873,15 +899,15 @@ func unitOf(fd protoreflect.FieldDescriptor) string {
 	return string(fd.Name())
 }
 
-// accessRuleOf checks the rule at index i of an access option's allow list.
-// desc is the entity's message and keyFields its key fields, which a rule's
-// checks may not name.
-func accessRuleOf(i int, r *syncplanev1.AccessRule, desc protoreflect.MessageDescriptor, keyFields []protoreflect.FieldDescriptor) (accessRule, error) {
-	where := fmt.Sprintf("access allow[%d]", i)
+// accessRuleOf checks one rule of an access option. where is the path of the
+// rule in the option, which its errors and the rule itself keep. desc is the
+// entity's message and keyFields its key fields, which a rule's checks may not
+// name.
+func accessRuleOf(where string, r *syncplanev1.AccessRule, desc protoreflect.MessageDescriptor, keyFields []protoreflect.FieldDescriptor) (accessRule, error) {
 	if err := refuseUnknownOptionFields(where, r); err != nil {
 		return accessRule{}, err
 	}
-	var rule accessRule
+	rule := accessRule{where: where}
 	for _, flag := range []struct {
 		set bool
 		op  accessOp
@@ -935,7 +961,7 @@ func accessRuleOf(i int, r *syncplanev1.AccessRule, desc protoreflect.MessageDes
 		if err != nil {
 			return accessRule{}, fmt.Errorf("%s when: %w", where, err)
 		}
-		rule.when, rule.whenSpec = when, spec
+		rule.when, rule.whenSpec, rule.whenCond = when, spec, r.GetWhen()
 		for _, name := range conditionHeads(r.GetWhen()) {
 			unit := name
 			if fd := desc.Fields().ByName(protoreflect.Name(name)); fd != nil {
@@ -951,6 +977,7 @@ func accessRuleOf(i int, r *syncplanev1.AccessRule, desc protoreflect.MessageDes
 		if err != nil {
 			return accessRule{}, err
 		}
+		entry.at = j
 		if slices.ContainsFunc(rule.within, func(x withinEntry) bool { return x.spec() == entry.spec() }) {
 			return accessRule{}, fmt.Errorf("%s within[%d] repeats an earlier entry", where, j)
 		}
@@ -982,11 +1009,7 @@ func withinEntryOf(where string, w *syncplanev1.AccessWithin) (withinEntry, erro
 		if err := refuseNonRowConds(cond); err != nil {
 			return withinEntry{}, fmt.Errorf("%s when: %w", where, err)
 		}
-		raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(cond)
-		if err != nil {
-			return withinEntry{}, err
-		}
-		entry.when, entry.whenSpec = cond, hex.EncodeToString(raw)
+		entry.when, entry.whenSpec = cond, whenSpecOf(cond)
 	}
 	return entry, nil
 }
@@ -1007,11 +1030,14 @@ func ruleWhenOf(desc protoreflect.MessageDescriptor, cond *syncplanev1.Condition
 	if err != nil {
 		return nil, "", err
 	}
-	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(cond)
-	if err != nil {
-		return nil, "", err
-	}
-	return compiled, hex.EncodeToString(raw), nil
+	return compiled, whenSpecOf(cond), nil
+}
+
+// whenSpecOf renders cond in the canonical form of a when spec: the hex of
+// its canonical encoding, which the move log stores (see
+// AccessMove.from_within).
+func whenSpecOf(cond *syncplanev1.Condition) string {
+	return hex.EncodeToString(appendCanonical(nil, cond.ProtoReflect()))
 }
 
 // refuseUnknownCondFields refuses a condition in which any message carries
@@ -1101,7 +1127,10 @@ func ruleFieldsOf(desc protoreflect.MessageDescriptor, keyFields []protoreflect.
 	}
 	out := make([]string, 0, len(names))
 	for _, name := range names {
-		if desc.Oneofs().ByName(protoreflect.Name(name)) != nil {
+		// A synthetic oneof is not a unit: changedUnits and unitOf name its
+		// optional field instead, so a rule or guard naming it would match
+		// no change.
+		if od := desc.Oneofs().ByName(protoreflect.Name(name)); od != nil && !od.IsSynthetic() {
 			out = append(out, name)
 			continue
 		}
@@ -1568,6 +1597,20 @@ func grantField(desc protoreflect.MessageDescriptor, part, name string) (protore
 	return fd, nil
 }
 
+// missingEntityError is an access model error that a later registration of
+// an entity can repair: the schema names an entity, or a role, that no
+// registered entity declares yet. RegisterEntity keeps a catalog with such an
+// error, since it adds one entity at a time, and refuses every other error.
+type missingEntityError struct{ msg string }
+
+func (e *missingEntityError) Error() string { return e.msg }
+
+// entityMissing returns a missingEntityError with the message that format
+// and args give.
+func entityMissing(format string, args ...any) error {
+	return &missingEntityError{msg: fmt.Sprintf(format, args...)}
+}
+
 // refuseUnknownOptionFields refuses an option message that carries fields
 // this build does not know.
 func refuseUnknownOptionFields(what string, m interface {
@@ -1640,6 +1683,9 @@ type accessModel struct {
 	// it: a cursor records that as the anchors a caller holds.
 	readRules   []*syncplanecursorv1.EntityReadRule
 	fingerprint uint64
+	// maxAccessDepth is Limits.MaxAccessDepth, which fingerprint covers too:
+	// a read walks no longer chain.
+	maxAccessDepth uint32
 	// warnings are findings that do not make the model invalid but are likely
 	// mistakes. Registration logs them.
 	warnings []string
@@ -1798,7 +1844,7 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 		for _, p := range a.parents {
 			target, ok := c.byType[p.ref.ref.Target.FullName()]
 			if !ok {
-				return nil, fmt.Errorf("server: entity %q access parent %q points at %s, which is not a registered entity",
+				return nil, entityMissing("server: entity %q access parent %q points at %s, which is not a registered entity",
 					name, refCasePath(p.ref.ref), p.ref.ref.Target.FullName())
 			}
 			if target.access == nil {
@@ -1832,7 +1878,7 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 			}
 			target, ok := c.byType[sc.team.ref.Target.FullName()]
 			if !ok {
-				return nil, fmt.Errorf("server: entity %q grant subject field %q points at %s, which is not a registered entity",
+				return nil, entityMissing("server: entity %q grant subject field %q points at %s, which is not a registered entity",
 					name, refCasePath(sc.team.ref), sc.team.ref.Target.FullName())
 			}
 			if target.members == "" {
@@ -1867,23 +1913,35 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 			m.moving = true
 		}
 	}
-	if err := m.resolveWithins(names); err != nil {
+	if err := m.resolveWithins(c, names); err != nil {
 		return nil, err
 	}
 
 	mutatorNames := make([]string, 0, len(mutators))
+	var trustedOnly []string
 	for name, mi := range mutators {
 		if mi.access != nil {
 			mutatorNames = append(mutatorNames, name)
+		} else {
+			trustedOnly = append(trustedOnly, name)
 		}
 	}
 	sort.Strings(mutatorNames)
+	// A mutator written before the schema used the model declares no access,
+	// and the first sign of it would otherwise be a refused client call.
+	sort.Strings(trustedOnly)
+	for _, name := range trustedOnly {
+		m.warnings = append(m.warnings, fmt.Sprintf(
+			"mutator %q declares no MutatorAccess, so in a schema that uses the access model only a trusted caller "+
+				"invokes it, and every client invocation is refused with access_denied; "+
+				"declare a MutatorAccess on it, or MutatorAccess{TrustedOnly: true} when only trusted callers invoke it", name))
+	}
 	for _, name := range mutatorNames {
 		ma := mutators[name].access
 		if err := checkMutatorAccess(c, mutators[name], ma); err != nil {
 			return nil, err
 		}
-		if !ma.Admitted && !slices.Contains(used[ma.Permission], "mutator "+name) {
+		if !ma.Admitted && !ma.TrustedOnly && !slices.Contains(used[ma.Permission], "mutator "+name) {
 			used[ma.Permission] = append(used[ma.Permission], "mutator "+name)
 		}
 	}
@@ -1906,7 +1964,9 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	sort.Strings(perms)
 	for _, p := range perms {
 		if m.granted[p] == nil {
-			return nil, fmt.Errorf("server: permission %q of %s is granted by no role; declare a role that grants it",
+			// The grant entity that declares the role can be one that a later
+			// registration adds.
+			return nil, entityMissing("server: permission %q of %s is granted by no role; declare a role that grants it",
 				p, usedBy(used[p][0]))
 		}
 	}
@@ -1986,9 +2046,10 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	// resets when an entity it holds rows of joins or leaves the model, and
 	// not when an entity is added outside it.
 	for _, name := range all {
-		m.readRules = append(m.readRules, &syncplanecursorv1.EntityReadRule{Entity: name, Rule: readRuleOf(c.entities[name])})
+		m.readRules = append(m.readRules, readRuleOf(c.entities[name]))
 	}
-	m.fingerprint = readPolicyOf(m.readRules)
+	m.maxAccessDepth = uint32(maxDepth)
+	m.fingerprint = readPolicyOf(m.readRules, m.maxAccessDepth)
 	return m, nil
 }
 
@@ -2009,15 +2070,18 @@ type withinCheck struct {
 // entities into m.withins and m.withinOn. An entry must name an entity in the
 // model whose rows the rule's entity can sit below, and its checks must fit
 // that entity's fields. It runs once m.below is complete.
-func (m *accessModel) resolveWithins(names []string) error {
+func (m *accessModel) resolveWithins(c *catalog, names []string) error {
 	m.withins = map[string]*withinCheck{}
 	m.withinOn = map[string][]*withinCheck{}
 	for _, name := range names {
 		for _, r := range m.entities[name].access.allRules() {
-			for j, w := range r.rule.within {
-				where := fmt.Sprintf("server: entity %q %s within[%d]", name, r.where, j)
+			for _, w := range r.rule.within {
+				where := fmt.Sprintf("server: entity %q %s within[%d]", name, r.where, w.at)
 				target, ok := m.entities[w.entity]
+				_, registered := c.entities[w.entity]
 				switch {
+				case !ok && !registered:
+					return entityMissing("%s names entity %q, which is not a registered entity in the access model", where, w.entity)
 				case !ok:
 					return fmt.Errorf("%s names entity %q, which is not a registered entity in the access model", where, w.entity)
 				case !slices.Contains(m.below[w.entity], name) && w.entity == name:
@@ -2080,7 +2144,7 @@ func checkMembers(c *catalog, info *entityInfo) error {
 	member, ok := c.entities[info.members]
 	switch {
 	case !ok:
-		return fmt.Errorf("server: entity %q members names entity %q, which is not registered", info.name, info.members)
+		return entityMissing("server: entity %q members names entity %q, which is not registered", info.name, info.members)
 	case member.grant == nil:
 		return fmt.Errorf("server: entity %q members names entity %q, which is not a grant entity; "+
 			"its rows must grant a role at the team they make their subject a member of", info.name, member.name)
@@ -2290,40 +2354,83 @@ func (m *accessModel) readersBelow(name string) []readers {
 	return out
 }
 
-// readRuleOf renders what decides which rows of an entity a caller reads, and
-// which of their fields, in a canonical form: two entities with equal rules
-// read the same rows and fields from the same anchors. An entity outside the
-// model reads every row.
-func readRuleOf(info *entityInfo) string {
-	a := info.access
-	if a == nil {
-		return "open"
-	}
-	rule := "read=" + a.read.key()
-	if a.hasParent() {
-		rule += " parent=" + a.parentRule()
-	}
-	var guards []string
-	for _, g := range a.guards {
-		if g.hides() {
-			guards = append(guards, strings.Join(g.units, ",")+"{"+g.read.key()+"}")
+// moveReadersBelow returns who may read every row of each entity whose rows
+// can sit below rows of the named entity, and every unit of each guard of such
+// an entity that can hide them (see readers.everyRow), sorted by key and
+// without repeats. A write that changes what the rows below a row show needs
+// one of each where the row is.
+func (m *accessModel) moveReadersBelow(name string) []readers {
+	var out []readers
+	seen := map[string]bool{}
+	for _, below := range m.below[name] {
+		for _, set := range m.entities[below].access.readerSets() {
+			r := set.everyRow()
+			if k := r.key(); !seen[k] {
+				seen[k] = true
+				out = append(out, r)
+			}
 		}
 	}
-	if len(guards) > 0 {
-		sort.Strings(guards)
-		rule += " hide=" + strings.Join(guards, ";")
-	}
-	return rule
+	sort.Slice(out, func(i, j int) bool { return out[i].key() < out[j].key() })
+	return out
 }
 
-// readPolicyOf fingerprints read rules sorted by entity. Never 0, which a
-// cursor reserves for a schema without the access model.
-func readPolicyOf(rules []*syncplanecursorv1.EntityReadRule) uint64 {
-	h := sha256.New()
-	for _, r := range rules {
-		h.Write([]byte(r.GetEntity() + " " + r.GetRule() + "\n"))
+// readRuleOf returns what decides which rows of an entity a caller reads, and
+// which of their fields: two entities with equal rules read the same rows and
+// fields from the same anchors. An entity outside the model reads every row.
+func readRuleOf(info *entityInfo) *syncplanecursorv1.EntityReadRule {
+	out := &syncplanecursorv1.EntityReadRule{Entity: info.name}
+	a := info.access
+	if a == nil {
+		out.Open = true
+		return out
 	}
-	if p := binary.BigEndian.Uint64(h.Sum(nil)[:8]); p != 0 {
+	out.Read = readersRuleOf(a.read)
+	for _, p := range a.parents {
+		out.Parents = append(out.Parents, &syncplanecursorv1.ParentCase{Path: refCasePath(p.ref.ref), Entity: p.entity})
+	}
+	slices.SortFunc(out.Parents, func(x, y *syncplanecursorv1.ParentCase) int {
+		return cmp.Or(strings.Compare(x.GetPath(), y.GetPath()), strings.Compare(x.GetEntity(), y.GetEntity()))
+	})
+	for _, g := range a.guards {
+		if g.hides() {
+			units := slices.Clone(g.units)
+			slices.Sort(units)
+			out.Hides = append(out.Hides, &syncplanecursorv1.HidingGuard{Units: units, Read: readersRuleOf(g.read)})
+		}
+	}
+	slices.SortFunc(out.Hides, func(x, y *syncplanecursorv1.HidingGuard) int {
+		return slices.Compare(x.GetUnits(), y.GetUnits())
+	})
+	return out
+}
+
+// readersRuleOf renders r for a read rule.
+func readersRuleOf(r readers) *syncplanecursorv1.ReadersRule {
+	out := &syncplanecursorv1.ReadersRule{All: r.all, Permissions: r.perms}
+	for _, o := range r.checked {
+		rule := &syncplanecursorv1.CheckedRule{Requires: o.requires, When: o.whenCond}
+		for _, op := range accessOpNames {
+			if o.ops&op.op != 0 {
+				rule.Ops = append(rule.Ops, op.name)
+			}
+		}
+		if o.callerIs != nil {
+			rule.CallerIs = string(o.callerIs.Name())
+		}
+		for _, w := range o.within {
+			rule.Within = append(rule.Within, &syncplanecursorv1.WithinRule{Entity: w.entity, CallerIs: w.callerIs, When: w.when})
+		}
+		out.Checked = append(out.Checked, rule)
+	}
+	return out
+}
+
+// readPolicyOf fingerprints read rules sorted by entity, and the longest
+// chain a read walks. Never 0, which a cursor reserves for a schema without
+// the access model.
+func readPolicyOf(rules []*syncplanecursorv1.EntityReadRule, maxDepth uint32) uint64 {
+	if p := canonicalHash("read-policy", (&syncplanecursorv1.ReadAccess{Rules: rules, MaxAccessDepth: maxDepth}).ProtoReflect()); p != 0 {
 		return p
 	}
 	return 1
@@ -2341,7 +2448,7 @@ func sameSharedReadRules(a, b []*syncplanecursorv1.EntityReadRule) bool {
 			a = a[1:]
 		case x.GetEntity() > y.GetEntity():
 			b = b[1:]
-		case x.GetRule() != y.GetRule():
+		case !proto.Equal(x, y):
 			return false
 		default:
 			a, b = a[1:], b[1:]
@@ -2374,6 +2481,13 @@ func entitiesOnly(users []string) []string {
 // it sets Admitted alone, or a permission whose row entity is in the model and
 // whose key field is a singular string field of the args.
 func checkMutatorAccess(c *catalog, mi *mutatorInfo, ma *MutatorAccess) error {
+	if ma.TrustedOnly {
+		if ma.Admitted || ma.Permission != "" || ma.Entity != "" || ma.KeyField != "" {
+			return fmt.Errorf("server: mutator %q MutatorAccess sets TrustedOnly together with Admitted, a Permission, Entity or KeyField; "+
+				"set TrustedOnly alone", mi.name)
+		}
+		return nil
+	}
 	if ma.Admitted {
 		if ma.Permission != "" || ma.Entity != "" || ma.KeyField != "" {
 			return fmt.Errorf("server: mutator %q MutatorAccess sets Admitted together with a Permission, Entity or KeyField; "+
@@ -2392,7 +2506,7 @@ func checkMutatorAccess(c *catalog, mi *mutatorInfo, ma *MutatorAccess) error {
 	}
 	info, ok := c.entities[ma.Entity]
 	if !ok {
-		return fmt.Errorf("server: mutator %q MutatorAccess names entity %q, which is not registered", mi.name, ma.Entity)
+		return entityMissing("server: mutator %q MutatorAccess names entity %q, which is not registered", mi.name, ma.Entity)
 	}
 	if info.access == nil {
 		return fmt.Errorf("server: mutator %q MutatorAccess names entity %q, which is not in the access model", mi.name, ma.Entity)
@@ -2435,6 +2549,18 @@ func accessSpecOf(info *entityInfo) string {
 		if a.hasParent() {
 			b.WriteString(" parent=" + a.parentRule())
 		}
+	}
+	// The gate stamps a creator field on a create and no other write that is
+	// not trusted changes it. A rule's caller_is, or a within entry of an
+	// entity below, can check it, so a dropped mark lets a caller name any
+	// author.
+	if len(info.creatorFields) > 0 {
+		creators := make([]string, len(info.creatorFields))
+		for i, fd := range info.creatorFields {
+			creators[i] = string(fd.Name())
+		}
+		sort.Strings(creators)
+		b.WriteString(" creator=" + strings.Join(creators, ","))
 	}
 	if info.members != "" {
 		b.WriteString(" members=" + info.members)

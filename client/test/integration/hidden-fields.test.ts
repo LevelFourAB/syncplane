@@ -11,7 +11,7 @@
 import { createConnectTransport } from '@connectrpc/connect-node';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
-import { SyncClient } from '../../src/client.js';
+import { subscription, SyncClient } from '../../src/client.js';
 import {
 	ExpenseSchema,
 	OrgMemberSchema,
@@ -42,7 +42,11 @@ afterEach(async () => {
 	await Promise.all(open.splice(0).map((c) => c.close()));
 });
 
-function clientAs(user: string, workspaceId: string): SyncClient {
+function clientAs(
+	user: string,
+	workspaceId: string,
+	extra: Partial<ConstructorParameters<typeof SyncClient>[0]> = {},
+): SyncClient {
 	const client = new SyncClient({
 		transport: createConnectTransport({
 			baseUrl: server.url,
@@ -57,6 +61,7 @@ function clientAs(user: string, workspaceId: string): SyncClient {
 		entities,
 		pollIntervalMs: 0,
 		streamEnabled: false,
+		...extra,
 	});
 	open.push(client);
 	return client;
@@ -186,6 +191,32 @@ describe('field read rules on the wire', () => {
 			(await admin.queryServer(StaffSchema, { where: (s) => s.salary.gt(0n) })).map((r) => r.key),
 		)
 			.toEqual([ 's1' ]);
+	});
+
+	it('does not leave a field on the client after a grant change hides it from a subscription that names it', async () => {
+		// Given admin, who reads salary on every row, holds s1 (salary 5000)
+		// through a subscription to the staff earning more than 0
+		const ws = freshWorkspace();
+		await seed(ws);
+		const admin = await synced(clientAs('admin', ws, {
+			subscriptions: [ subscription(StaffSchema, (s) => s.salary.gt(0n)) ],
+		}));
+		expect((await admin.getRow(StaffSchema, 's1'))?.value.salary).toBe(5000n);
+
+		// When admin loses the role that lets it read salary, keeping one that
+		// reads staff, and syncs again
+		await trusted(ws, [
+			{ entity: 'org_member', value: { id: 'om-admin', userId: 'admin', role: 'org_member' } },
+		]);
+		const failure = await admin.syncNow().then(() => 'none', (err: unknown) => String(err));
+
+		// Then the client no longer shows the salary it may not read
+		const row = await admin.getRow(StaffSchema, 's1');
+		expect(
+			row === undefined || row.value.salary === 0n,
+			`salary ${row?.value.salary}, sync failure: ${failure}`,
+		)
+			.toBe(true);
 	});
 });
 

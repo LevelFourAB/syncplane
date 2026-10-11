@@ -35,6 +35,10 @@ const (
 	// A failure scoped to this topic that may not persist (a storage error,
 	// a permission hook that could not decide). Reopen with backoff.
 	TopicDropped_REASON_ERROR TopicDropped_Reason = 2
+	// The caller holds no permission in the workspace's access model. A
+	// grant written later lifts it, so the room can be reopened with
+	// backoff. It is the room's form of WorkspaceDropped.REASON_NO_ACCESS.
+	TopicDropped_REASON_NO_ACCESS TopicDropped_Reason = 3
 )
 
 // Enum value maps for TopicDropped_Reason.
@@ -43,11 +47,13 @@ var (
 		0: "REASON_UNSPECIFIED",
 		1: "REASON_ACCESS_REVOKED",
 		2: "REASON_ERROR",
+		3: "REASON_NO_ACCESS",
 	}
 	TopicDropped_Reason_value = map[string]int32{
 		"REASON_UNSPECIFIED":    0,
 		"REASON_ACCESS_REVOKED": 1,
 		"REASON_ERROR":          2,
+		"REASON_NO_ACCESS":      3,
 	}
 )
 
@@ -1018,14 +1024,15 @@ const file_syncplane_v1_presence_proto_rawDesc = "" +
 	"\vRoomMessage\x12*\n" +
 	"\x11sender_session_id\x18\x01 \x01(\tR\x0fsenderSessionId\x12%\n" +
 	"\x0esender_subject\x18\x02 \x01(\tR\rsenderSubject\x12\x18\n" +
-	"\apayload\x18\x03 \x01(\fR\apayload\"\xb2\x01\n" +
+	"\apayload\x18\x03 \x01(\fR\apayload\"\xc8\x01\n" +
 	"\fTopicDropped\x129\n" +
 	"\x06reason\x18\x01 \x01(\x0e2!.syncplane.v1.TopicDropped.ReasonR\x06reason\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"M\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"c\n" +
 	"\x06Reason\x12\x16\n" +
 	"\x12REASON_UNSPECIFIED\x10\x00\x12\x19\n" +
 	"\x15REASON_ACCESS_REVOKED\x10\x01\x12\x10\n" +
-	"\fREASON_ERROR\x10\x02\"\xa0\x01\n" +
+	"\fREASON_ERROR\x10\x02\x12\x14\n" +
+	"\x10REASON_NO_ACCESS\x10\x03\"\xa0\x01\n" +
 	"\fWatchRequest\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\tR\tsessionId\x12+\n" +

@@ -15,6 +15,7 @@ syntax = "proto3";
 package syncplane.cursor.v1;
 
 import "syncplane/v1/patch.proto";
+import "syncplane/v1/query.proto";
 
 option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1;syncplanecursorv1";
 
@@ -188,8 +189,11 @@ message AnchorRef {
 }
 
 // ReadAccess is what a caller could read when a cursor was issued, stored in
-// the cursor-state store under Cursor.access_ref. Encoded deterministically,
-// with every list sorted, so equal access produces equal bytes.
+// the cursor-state store under Cursor.access_ref. Every list is sorted, so
+// equal access holds equal values. Cursor.access_hash and
+// Cursor.access_policy hash the engine's canonical encoding of it, which reads
+// the field values by field number and not the encoded bytes, so a field that
+// is not set leaves both hashes as they were.
 message ReadAccess {
 	// The caller's subjects. A cursor presented by a caller with other subjects
 	// cannot resync from this entry.
@@ -197,17 +201,81 @@ message ReadAccess {
 	// One entry per permission that some entity reads by, sorted by permission.
 	repeated PermissionAnchors permissions = 2;
 	// The read rule of every entity in the access model the entry was recorded
-	// under, sorted by entity. They hash to Cursor.access_policy, and
-	// Cursor.access_hash leaves them out.
+	// under, sorted by entity. They and max_access_depth hash to
+	// Cursor.access_policy, and Cursor.access_hash leaves them out.
 	repeated EntityReadRule rules = 3;
+	// The longest parent chain a read walks (Limits.MaxAccessDepth). A cursor
+	// recorded under another limit cannot resync from this entry.
+	uint32 max_access_depth = 4;
 }
 
-// EntityReadRule is what decides which rows of one entity a caller reads: its
-// read permission and its access parent, in a canonical text form. Two equal
-// rules read the same rows from the same anchors.
+// EntityReadRule is what decides which rows of one entity a caller reads, and
+// which of their fields: who reads them, through which access parents, and
+// what each guard that can hide fields admits. Two equal rules read the same
+// rows and fields from the same anchors. A rule feature added later is a new
+// field, which a rule that does not use it leaves unset.
 message EntityReadRule {
 	string entity = 1;
-	string rule = 2;
+	// A text form of the rule, which the first records held.
+	reserved 2;
+	reserved "rule";
+	// Set for an entity outside the access model, whose rows every admitted
+	// caller reads.
+	bool open = 3;
+	// Who reads the rows.
+	ReadersRule read = 4;
+	// The access parents, one per reference case, sorted by path and entity.
+	repeated ParentCase parents = 5;
+	// The guards that can hide fields, sorted by their units.
+	repeated HidingGuard hides = 6;
+}
+
+// ReadersRule is who reads the rows of an entity, or the fields of a guard.
+message ReadersRule {
+	// Every admitted caller reads every row.
+	bool all = 1;
+	// The permissions of the rules that check nothing on the row, sorted.
+	repeated string permissions = 2;
+	// The rules with a check on the row or above it, or that need more than
+	// one permission, in the engine's order.
+	repeated CheckedRule checked = 3;
+}
+
+// CheckedRule is one access rule of a ReadersRule.checked list.
+message CheckedRule {
+	// The operations the rule admits, by name, in the engine's order.
+	repeated string ops = 1;
+	// The permissions the rule needs, sorted; empty for a rule that admits
+	// every admitted caller.
+	repeated string requires = 2;
+	// The field that must hold one of the caller's subjects.
+	string caller_is = 3;
+	// The condition a row must match.
+	syncplane.v1.Condition when = 4;
+	// The rule's within entries, in the engine's order.
+	repeated WithinRule within = 5;
+}
+
+// WithinRule is one within entry of an access rule.
+message WithinRule {
+	string entity = 1;
+	string caller_is = 2;
+	syncplane.v1.Condition when = 3;
+}
+
+// ParentCase is one case of an entity's access parent: the reference that
+// names the parent row, and the parent's entity.
+message ParentCase {
+	string path = 1;
+	string entity = 2;
+}
+
+// HidingGuard is a guard that can hide fields from a caller.
+message HidingGuard {
+	// The units the guard restricts, sorted.
+	repeated string units = 1;
+	// Who reads them.
+	ReadersRule read = 2;
 }
 
 // PermissionAnchors is where a caller held one permission.

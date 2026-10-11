@@ -37,9 +37,10 @@ export interface UseDetailOptions extends UseWorkspaceOptions, DetailOptions {}
  * authorize.
  *
  * Re-evaluates when an access input in the row changes: whether the row is
- * held locally, the row its access parent names, or the value of a subject
- * field the entity's access rules name. A change of any other field does not
- * re-evaluate. Also re-evaluates when `SyncClient.onAccessChange` reports the
+ * held locally, the row its access parent names, or the value of a field that
+ * a check of the entity's access rules or field guards reads: a `callerIs`
+ * field, a field a `when` condition reads, and the same for a `within` entry
+ * on the entity itself. A change of any other field does not re-evaluate. Also re-evaluates when `SyncClient.onAccessChange` reports the
  * workspace: a new summary of the caller's access arrives, a local write that
  * can change the caller's grants is queued, acked or rolled back, or a row
  * that other rows sit below changes, in this tab or another sharing the
@@ -97,7 +98,7 @@ export function useCan<D extends DescMessage>(
 	const detail = useAnswer(
 		opts?.workspaceId,
 		schema,
-		{ key, subjects: true },
+		{ key, checks: true },
 		[ 'can', schema.typeName, key, operation, fieldsKey ],
 		(scope) => scope.can(schema, key, operation, { ...canOpts, detail: true }),
 		(client, ws) => client.peekCanIn(ws, schema, key, operation, canOpts),
@@ -155,8 +156,8 @@ export function useCanCreate<D extends DescMessage>(
  * Predicts whether the caller holds `permission` at the row of `schema` with
  * `key`, for the resolved workspace. See `SyncClient.hasPermission` for what
  * the answer means. Re-evaluates, starts from an answer it can give at once,
- * and takes `opts.detail`, as {@link useCan} does, except that a subject
- * field is not an input.
+ * and takes `opts.detail`, as {@link useCan} does, except that the fields
+ * the checks of rules and guards read are not inputs.
  *
  * @example
  * ```tsx
@@ -187,7 +188,7 @@ export function useHasPermission<D extends DescMessage>(
 	const detail = useAnswer(
 		opts?.workspaceId,
 		schema,
-		{ key, subjects: false },
+		{ key, checks: false },
 		[ 'permission', schema.typeName, key, permission ],
 		(scope) => scope.hasPermission(schema, key, permission, { detail: true }),
 		(client, ws) => client.peekHasPermissionIn(ws, schema, key, permission),
@@ -228,8 +229,8 @@ function seedOf(client: SyncClient, id: string, peek: () => Verdict | undefined)
 /** The row an answer is for, and which of its fields are inputs of the answer. */
 interface AnswerRow {
 	key: string;
-	/** Whether the subject fields of the entity's access rules are inputs. */
-	subjects: boolean;
+	/** Whether the fields the checks of the entity's access rules and guards read are inputs. */
+	checks: boolean;
 }
 
 /**
@@ -260,7 +261,7 @@ function useAnswer<D extends DescMessage>(
 		id,
 	]);
 	const key = row?.key;
-	const subjects = row?.subjects ?? false;
+	const checks = row?.checks ?? false;
 	useEffect(() => {
 		// Resolved first: an unregistered schema throws here, before anything
 		// below subscribes.
@@ -307,7 +308,7 @@ function useAnswer<D extends DescMessage>(
 				(cell) => {
 					// A watch that fails delivers its error once, with the row it
 					// last had or none, so the first ask still runs.
-					const inputs = accessInputsOf(def, cell.row?.value as Message | undefined, subjects);
+					const inputs = accessInputsOf(def, cell.row?.value as Message | undefined, checks);
 					if (inputs === seen) return;
 					seen = inputs;
 					evaluate();
@@ -320,6 +321,6 @@ function useAnswer<D extends DescMessage>(
 			offRow?.();
 		};
 		// `ask` is a new closure on every render; deps lists what it reads.
-	}, [ client, scope, key, subjects, id, ...deps ]);
+	}, [ client, scope, key, checks, id, ...deps ]);
 	return held?.id === id ? held.detail : seed;
 }

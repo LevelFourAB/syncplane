@@ -138,6 +138,13 @@ type pendingVerdict struct {
 	// then. err is the gate's error from the last attempt that failed.
 	set *accessSet
 	err error
+	// holdNoAccess makes a verdict that the caller holds no permission admit
+	// it with an empty set, and keep the gate's error in noAccess. A pull from
+	// a cursor sets it: it sends the revocation resync of a caller that held
+	// a permission when its cursor was issued before it refuses the caller
+	// (see Server.lastGrantRefusal).
+	holdNoAccess bool
+	noAccess     error
 }
 
 // reach reaches the verdict in tx unless it is reached already, and returns
@@ -164,6 +171,11 @@ func (v *pendingVerdict) reachApart(ctx context.Context) error {
 }
 
 func (v *pendingVerdict) record(set *accessSet, err error) (*accessSet, error) {
+	if err != nil && v.holdNoAccess && errors.Is(err, ErrNoAccess) {
+		v.noAccess = v.wrap(err)
+		v.set, v.err = noPermissions(), nil
+		return v.set, nil
+	}
 	if err != nil {
 		v.err = v.wrap(err)
 		return nil, &gateError{v.err}
@@ -238,4 +250,18 @@ func workspaceAccessError(err error) error {
 	}
 	return connect.NewError(connect.CodeInternal,
 		fmt.Errorf("resolving workspace access: %w", err))
+}
+
+// heldNoAccess returns the gate's error that holdNoAccess kept, nil when the
+// verdict admitted the caller, is not reached, or v is nil.
+func (v *pendingVerdict) heldNoAccess() error {
+	if v == nil {
+		return nil
+	}
+	return v.noAccess
+}
+
+// noPermissions returns a set that holds no permission.
+func noPermissions() *accessSet {
+	return &accessSet{perms: map[string]*permAnchors{}}
 }

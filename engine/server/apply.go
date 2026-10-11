@@ -149,14 +149,14 @@ func (s *Server) apply(
 	if key != "" {
 		key = ledgerKey(p, enforced, key)
 	}
-	visible, project, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
+	visible, project, refuse, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
 	if err != nil {
 		return WriteOutcome{}, adm.verdict.settle(ctx, err)
 	}
 
 	// Phase 1: run fn over a read snapshot, recording its writes. No write lock
 	// is held and fn runs at most once (WithReadTx never retries).
-	atx := &ApplyTx{srv: s, ctx: ctx, ws: workspaceID, visible: visible, project: project}
+	atx := &ApplyTx{srv: s, ctx: ctx, ws: workspaceID, visible: visible, project: project, refuse: refuse}
 	var (
 		result []byte
 		replay *storage.IdempotencyRecord
@@ -345,6 +345,9 @@ type ApplyTx struct {
 	// project clears the fields a guard hides from the caller in each row a
 	// read returns, or is nil for a Trusted call.
 	project rowProjector
+	// refuse refuses a query that names a field a guard hides from the
+	// caller, or is nil for a Trusted call.
+	refuse specRefuser
 }
 
 // rowRef identifies a row within the workspace for read-after-write detection.
@@ -426,10 +429,14 @@ func (a *ApplyTx) ScanPage(prototype proto.Message, afterKey string, limit int, 
 // it does NOT run under the workspace write lock, so a broad query here blocks
 // no other writer.
 //
-// Recorded writes are not visible to it (see Apply).
+// A spec that names a field the caller does not read on every row fails as on
+// ViewTx.Query. Recorded writes are not visible to it (see Apply).
 func (a *ApplyTx) Query(prototype proto.Message, spec query.Spec, fn func(msg proto.Message, version uint64) error) error {
 	info, err := a.info(prototype)
 	if err != nil {
+		return err
+	}
+	if err := a.refuse.check(info, spec); err != nil {
 		return err
 	}
 	rows, err := runQuerySpec(a.srv, a.tx, a.ws, info, spec, a.visible, a.project)

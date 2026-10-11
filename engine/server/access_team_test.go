@@ -350,7 +350,7 @@ var _ = Describe("Access model teams", func() {
 
 		It("refuses deleting a squad that a live grant names", func() {
 			msg := rejected(del("staff", "squad", "lonely"), server.CodeConflict)
-			Expect(msg).To(ContainSubstring(`row "lonely" is the subject of a live repo_member row`))
+			Expect(msg).To(ContainSubstring(`row "lonely" is the subject of a live grant row`))
 
 			applied(del("admin", "repo_member", "rm-lonely"))
 			applied(del("staff", "squad", "lonely"))

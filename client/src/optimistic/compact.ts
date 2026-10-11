@@ -1,4 +1,4 @@
-import { clone, create, fromBinary, type Message, toBinary } from '@bufbuild/protobuf';
+import { clone, create, fromBinary, isFieldSet, type Message, toBinary } from '@bufbuild/protobuf';
 
 import {
 	type CrudMutation,
@@ -204,6 +204,9 @@ function foldCrud(
 			// deleted document, and protected fields do not keep their stored
 			// values. Folded, the PUT would reach the live row.
 			if (base.op === CrudOp.DELETE) return 'barrier';
+			// A PUT that leaves a guarded unit unset keeps its stored value when
+			// the caller may not read it, so only the PATCH can clear it.
+			if (base.op === CrudOp.PATCH && clearsGuarded(def, base, incoming.value)) return 'barrier';
 			// Otherwise a PUT overwrites whatever came before: the row ends at the
 			// PUT value either way.
 			return clone(CrudMutationSchema, incoming);
@@ -336,6 +339,28 @@ function sameWrite(base: CrudMutation, incoming: CrudMutation): boolean {
 function patchTouchesKey(def: EntityDef, crud: CrudMutation): boolean {
 	const keyNames = new Set(def.keyFields.map((f) => f.name));
 	return (crud.fieldMask?.paths ?? []).some((p) => keyNames.has(p.split('.')[0]!));
+}
+
+/**
+ * Whether `patch` masks a unit that a field guard restricts and `put`, the
+ * value of a PUT, leaves unset. The server keeps the stored value of such a
+ * unit on a PUT from a caller who may not read it, so the PUT does not carry
+ * the patch's clear.
+ */
+function clearsGuarded(def: EntityDef, patch: CrudMutation, put: Uint8Array): boolean {
+	if (def.guards.length === 0) return false;
+	const guarded = new Set(def.guards.flatMap((g) => g.units));
+	let value: Message | undefined;
+	for (const path of patch.fieldMask?.paths ?? []) {
+		const head = path.split('.', 1)[0]!;
+		const field = def.schema.fields.find((f) => f.name === head);
+		const oneof = field?.oneof ?? def.schema.oneofs.find((o) => o.name === head);
+		if (!guarded.has(oneof?.name ?? head)) continue;
+		value ??= fromBinary(def.schema, put);
+		const members = oneof === undefined ? (field === undefined ? [] : [ field ]) : oneof.fields;
+		if (!members.some((f) => isFieldSet(value!, f))) return true;
+	}
+	return false;
 }
 
 function unionPaths(a: string[], b: string[]): string[] {

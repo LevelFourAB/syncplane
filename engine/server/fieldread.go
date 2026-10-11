@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strings"
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
@@ -295,39 +296,162 @@ func condHeads(cond *syncplanev1.Condition) (heads []string, match bool) {
 // guard hides from the bound caller on some row: in its predicate, its
 // window's order or a reference its follow spec walks. Which rows the client
 // holds would tell it something about values it does not read. It runs once
-// access is bound, since what a guard hides depends on it.
+// access is bound, since what a guard hides depends on it. A subscription the
+// client holds already is not refused: it selects nothing while it names such
+// a field (see blindSubs).
 func (e *rowEmitter) refuseHiddenSubs() error {
 	c := e.srv.catalogPtr()
 	for _, sub := range e.subs {
+		if e.subsAdmitted || slices.ContainsFunc(e.heldSubs, func(h *syncplanev1.Subscription) bool { return proto.Equal(h, sub) }) {
+			continue
+		}
 		info, ok := c.entities[sub.GetEntity()]
 		if !ok {
 			continue
 		}
 		what := fmt.Sprintf("the subscription to %q", info.name)
-		if err := e.refuseHiddenCond(info, what, sub.GetPredicate()); err != nil {
+		if err := e.refuseHiddenBase(info, sub, what); err != nil {
 			return err
-		}
-		var heads []string
-		relevance := false
-		for _, k := range sub.GetWindow().GetOrderBy() {
-			relevance = relevance || k.GetRelevance()
-			if len(k.GetPath()) > 0 {
-				heads = append(heads, k.GetPath()[0])
-			}
-		}
-		if err := e.refuseHiddenPaths(info, what, heads); err != nil {
-			return err
-		}
-		if relevance {
-			if err := e.refuseHiddenMatch(info, what); err != nil {
-				return err
-			}
 		}
 		if err := e.refuseHiddenFollow(sub, what); err != nil {
 			return err
 		}
 	}
+	e.subsAdmitted = true
 	return nil
+}
+
+// refuseHiddenBase refuses sub, a subscription to rows of info, when its
+// predicate, its window's order or its relevance reads a field a guard hides
+// from the bound caller on some row.
+func (e *rowEmitter) refuseHiddenBase(info *entityInfo, sub *syncplanev1.Subscription, what string) error {
+	if err := e.refuseHiddenCond(info, what, sub.GetPredicate()); err != nil {
+		return err
+	}
+	var heads []string
+	relevance := false
+	for _, k := range sub.GetWindow().GetOrderBy() {
+		relevance = relevance || k.GetRelevance()
+		if len(k.GetPath()) > 0 {
+			heads = append(heads, k.GetPath()[0])
+		}
+	}
+	if err := e.refuseHiddenPaths(info, what, heads); err != nil {
+		return err
+	}
+	if relevance {
+		return e.refuseHiddenMatch(info, what)
+	}
+	return nil
+}
+
+// subBlind is what the bound caller's access hides of what one subscription
+// names (see blindSubs).
+type subBlind struct {
+	// base is set when its predicate, its window's order or its relevance
+	// reads a field hidden from the caller on some row: the subscription
+	// selects no row, its window holds none, and it seeds no follow closure.
+	base bool
+	// follow is set when its follow spec walks a reference hidden from the
+	// caller on some row: the subscription seeds no follow closure.
+	follow bool
+}
+
+// blindSubs returns, by index into the emitter's subscriptions, what the
+// bound access hides of what each one names, or nil when it hides nothing of
+// any. A subscription the client held when it could read every field it
+// names keeps syncing when that changes, and refuseHiddenSubs does not refuse
+// it. It selects nothing the hidden values decide instead, so that which rows
+// the client holds tells it nothing about them; a resync removes the rows it
+// selected, and sends them again once the caller reads the field again. It is
+// memoized per binding.
+func (e *rowEmitter) blindSubs() ([]subBlind, error) {
+	if e.caller == nil || len(e.subs) == 0 {
+		return nil, nil
+	}
+	if e.blindKnown {
+		return e.blind, nil
+	}
+	c := e.srv.catalogPtr()
+	var out []subBlind
+	for i, sub := range e.subs {
+		info, ok := c.entities[sub.GetEntity()]
+		if !ok {
+			continue
+		}
+		base, err := isHiddenRefusal(e.refuseHiddenBase(info, sub, ""))
+		if err != nil {
+			return nil, err
+		}
+		follow, err := isHiddenRefusal(e.refuseHiddenFollow(sub, ""))
+		if err != nil {
+			return nil, err
+		}
+		if !base && !follow {
+			continue
+		}
+		if out == nil {
+			out = make([]subBlind, len(e.subs))
+		}
+		out[i] = subBlind{base: base, follow: follow}
+	}
+	e.blind, e.blindKnown = out, true
+	return out, nil
+}
+
+// blindBase reports whether the bound access hides a field that subscription
+// i of the emitter selects its rows by (see subBlind.base).
+func (e *rowEmitter) blindBase(i int) (bool, error) {
+	blind, err := e.blindSubs()
+	if err != nil || blind == nil {
+		return false, err
+	}
+	return blind[i].base, nil
+}
+
+// blindSeeds reports whether subscription sub of the emitter seeds no follow
+// closure under the bound access (see subBlind).
+func (e *rowEmitter) blindSeeds(sub *syncplanev1.Subscription) (bool, error) {
+	blind, err := e.blindSubs()
+	if err != nil || blind == nil {
+		return false, err
+	}
+	for i, s := range e.subs {
+		if s == sub {
+			return blind[i].base || blind[i].follow, nil
+		}
+	}
+	return false, nil
+}
+
+// blindEntity returns, for the subscriptions of the emitter to rows of
+// entity, which ones the bound access makes select nothing, as a bit per
+// subscription index. Two sides of a resync whose results differ select
+// different rows of entity under the same anchors.
+func (e *rowEmitter) blindEntity(entity string) (string, error) {
+	blind, err := e.blindSubs()
+	if err != nil || blind == nil {
+		return "", err
+	}
+	var b strings.Builder
+	for i, sub := range e.subs {
+		if sub.GetEntity() == entity && (blind[i].base || blind[i].follow) {
+			fmt.Fprintf(&b, "%d,", i)
+		}
+	}
+	return b.String(), nil
+}
+
+// isHiddenRefusal reports whether err is a refusal of refuseHidden* for a
+// field the caller does not read, and returns any other error.
+func isHiddenRefusal(err error) (bool, error) {
+	if err == nil {
+		return false, nil
+	}
+	if connect.CodeOf(err) == connect.CodePermissionDenied {
+		return true, nil
+	}
+	return false, err
 }
 
 // refuseHiddenFollow refuses a follow spec that walks a reference field a

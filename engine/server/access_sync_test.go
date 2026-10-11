@@ -373,6 +373,7 @@ var _ = Describe("Access model sync", func() {
 				Version:         got.GetVersion(),
 				Subjects:        []string{"mia"},
 				RootPermissions: []string{"view_labels", "view_projects", "view_tasks"},
+				MaxAccessDepth:  32,
 				AnchorGroups: []*syncplanev1.AnchorGroup{
 					{
 						Permissions: []string{"edit_tasks", "manage_members", "view_members"},

@@ -2,13 +2,12 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -30,7 +29,11 @@ import (
 // with the caller's subjects and the model's read rules, as a cursor records
 // it.
 func readAccessOf(model *accessModel, caller *accessCaller, set *accessSet) *syncplanecursorv1.ReadAccess {
-	ra := &syncplanecursorv1.ReadAccess{Subjects: slices.Clone(caller.subjects), Rules: model.readRules}
+	ra := &syncplanecursorv1.ReadAccess{
+		Subjects:       slices.Clone(caller.subjects),
+		Rules:          model.readRules,
+		MaxAccessDepth: model.maxAccessDepth,
+	}
 	for _, perm := range model.readPerms {
 		a := set.perms[perm]
 		if a == nil || (!a.root && len(a.rows) == 0) {
@@ -65,19 +68,16 @@ func anchorRowsByEntity(rows map[anchorRow]struct{}) ([]string, map[string][]str
 }
 
 // readAccessHash fingerprints what a ReadAccess holds: its subjects and
-// anchors. The rules are left out, so a change of rules that leaves them
+// anchors, in their canonical encoding (see appendCanonical). The rules and
+// the depth limit are left out, so a change of them that leaves the anchors
 // valid keeps the hash. Never 0, which a cursor reserves for a schema without
 // the access model.
 func readAccessHash(ra *syncplanecursorv1.ReadAccess) uint64 {
-	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(&syncplanecursorv1.ReadAccess{
+	h := canonicalHash("read-access", (&syncplanecursorv1.ReadAccess{
 		Subjects:    ra.GetSubjects(),
 		Permissions: ra.GetPermissions(),
-	})
-	if err != nil {
-		panic(err) // cannot fail for a message of valid in-memory protos
-	}
-	sum := sha256.Sum256(raw)
-	if h := binary.BigEndian.Uint64(sum[:8]); h != 0 {
+	}).ProtoReflect())
+	if h != 0 {
 		return h
 	}
 	return 1
@@ -129,11 +129,36 @@ func (e *rowEmitter) stampAccess(st *cursorState, cur cursorState) {
 	st.accessHash = hash
 	st.accessID = cur.accessID
 	// The stored entry also holds the rules, so new rules need a new entry.
-	if cur.accessHash == hash && cur.accessPolicy == st.accessPolicy && cur.accessGen != 0 {
+	// An entry the store no longer holds records the access bound now, so it
+	// is written again: a later change of access resyncs from it.
+	if cur.accessHash == hash && cur.accessPolicy == st.accessPolicy && cur.accessGen != 0 && e.accessEntryHeld(cur) {
 		st.accessGen = cur.accessGen
 		return
 	}
 	st.accessPending = ra
+}
+
+// accessEntryUseEvery is how often an emitter that issues many cursors, such
+// as a stream's, reads the access entry it reissues.
+const accessEntryUseEvery = time.Hour
+
+// accessEntryHeld reads the access entry cur names, which a cursor about to be
+// issued names again, and reports false when the store no longer holds it.
+// The read tells the store the entry is in use (see cursorstate.Store.Get),
+// so a client that keeps syncing under the same access keeps its entry. An
+// emitter reads it at most once per accessEntryUseEvery, and a store that
+// fails counts as one that holds the entry.
+func (e *rowEmitter) accessEntryHeld(cur cursorState) bool {
+	s := e.srv
+	if s.cursorState == nil || (!e.accessUsedAt.IsZero() && time.Since(e.accessUsedAt) < accessEntryUseEvery) {
+		return true
+	}
+	_, err := s.cursorState.Get(e.ctx, e.ws, cursorstate.Ref{ID: cur.accessID, Gen: cur.accessGen})
+	if errors.Is(err, cursorstate.ErrNotFound) {
+		return false
+	}
+	e.accessUsedAt = time.Now()
+	return true
 }
 
 // stampCallerAccess records the emitter's bound CallerAccess on st, and the
@@ -171,6 +196,7 @@ func (s *Server) storeAccess(ctx context.Context, ws string, st *cursorState, c 
 			RootPermissions: ca.GetRootPermissions(),
 			AnchorGroups:    ca.GetAnchorGroups(),
 			Version:         st.callerAccessHash,
+			MaxAccessDepth:  ca.GetMaxAccessDepth(),
 		}
 		st.callerAccessID, st.callerAccessGen = s.putAccessEntry(ctx, ws, st.callerAccessID, entry)
 		st.callerAccessPending = nil
@@ -245,7 +271,26 @@ const (
 // read. haveCursor is false for a request without a cursor, which has nothing
 // to compare. Runs inside the request's read transaction tx, after
 // bindAccess.
+//
+// It sets e.movesThrough to the position tx reads at: the rows the page
+// classifies reflect every move through it, and the access bound on e is the
+// one at that position. A pull from the cursor the page issues reads at or
+// past it (see cursorState.readFloor), so that a replica that lags behind it
+// cannot show older grants or older parents than the client's rows reflect.
 func (s *Server) compareAccess(ctx context.Context, ws string, tx storage.ReadTx, cur cursorState, haveCursor bool, e *rowEmitter) (accessComparison, error) {
+	cmp, err := s.compareAccessIn(ctx, ws, tx, cur, haveCursor, e)
+	if err != nil || e.caller == nil {
+		return cmp, err
+	}
+	pos, err := tx.CurrentSeq()
+	if err != nil {
+		return cmp, err
+	}
+	e.movesThrough = max(e.movesThrough, pos)
+	return cmp, nil
+}
+
+func (s *Server) compareAccessIn(ctx context.Context, ws string, tx storage.ReadTx, cur cursorState, haveCursor bool, e *rowEmitter) (accessComparison, error) {
 	var cmp accessComparison
 	policy := uint64(0)
 	if e.caller != nil {
@@ -286,7 +331,10 @@ func (s *Server) compareAccess(ctx context.Context, ws string, tx storage.ReadTx
 			cmp.reset = resetAccessPolicy
 		case old == nil:
 			cmp.reset = resetAccessUnavailable
-		case cur.accessPolicy != policy && !sameSharedReadRules(old.GetRules(), e.caller.model.readRules):
+		case cur.accessPolicy != policy && (old.GetMaxAccessDepth() != e.caller.model.maxAccessDepth ||
+			!sameSharedReadRules(old.GetRules(), e.caller.model.readRules)):
+			// A lower depth limit hides rows below the chains it cuts short,
+			// which no anchor or move names.
 			cmp.reset = resetAccessPolicy
 		case cur.accessHash != cmp.hash:
 			cmp.old = accessSetOf(old)
@@ -334,6 +382,7 @@ func (s *Server) compareMoves(ctx context.Context, ws string, tx storage.ReadTx,
 		oldSet = e.access
 	}
 	cmp.oldChains = newAccessChains(model, tx, s.limits.maxAccessDepth(), report)
+	cmp.oldChains.createdAfter = floor
 	cmp.oldChains.overrides, _ = firstMoves(moves)
 	cmp.oldChains.withinOverrides = firstWithins(model, moves)
 	cmp.moved, err = movedForCaller(model, e.caller.subjects, cmp.oldChains, oldSet, e.chains, e.access, moves)
@@ -554,7 +603,7 @@ func (e *rowEmitter) loadReadAccess(cur cursorState) (*syncplanecursorv1.ReadAcc
 		return nil, err
 	}
 	if !slices.Equal(ra.GetSubjects(), e.caller.subjects) || readAccessHash(ra) != cur.accessHash ||
-		readPolicyOf(ra.GetRules()) != cur.accessPolicy {
+		readPolicyOf(ra.GetRules(), ra.GetMaxAccessDepth()) != cur.accessPolicy {
 		return nil, nil
 	}
 	return ra, nil
@@ -678,6 +727,16 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 			return nil, false, err
 		}
 		return withWindowMembers(keys, info.name, maxCandidates, newEm.windowMembers)
+	}
+	// A subscription that selects nothing on one side (see blindSubs) selects
+	// rows on the other wherever they sit.
+	oldBlind, err := oldEm.blindEntity(info.name)
+	if err != nil {
+		return nil, false, err
+	}
+	newBlind, err := newEm.blindEntity(info.name)
+	if err != nil || oldBlind != newBlind {
+		return nil, false, err
 	}
 	changed := map[anchorRow]struct{}{}
 	var named []string
@@ -957,7 +1016,7 @@ func appendMissing(list, names []string) []string {
 // for the client: the permissions held at the root, and each anchored row once,
 // in the group of the permissions held there and not at the root.
 func callerAccessOf(caller *accessCaller, set *accessSet) *syncplanev1.CallerAccess {
-	ca := &syncplanev1.CallerAccess{Subjects: callerSubjects(caller)}
+	ca := &syncplanev1.CallerAccess{Subjects: callerSubjects(caller), MaxAccessDepth: caller.model.maxAccessDepth}
 	var anchored []string
 	for perm, a := range set.perms {
 		switch {
@@ -1036,16 +1095,12 @@ func (e *rowEmitter) boundCallerAccess() (*syncplanev1.CallerAccess, uint64) {
 	return e.callerAccess, e.callerAccessHash
 }
 
-// callerAccessHash fingerprints ca, which carries no seq and no version, and
-// returns its encoded size. The hash is never 0, which a cursor reserves for
-// a schema without the access model.
+// callerAccessHash fingerprints ca, which carries no seq and no version, in
+// its canonical encoding (see appendCanonical), and returns its encoded size.
+// The hash is never 0, which a cursor reserves for a schema without the access
+// model.
 func callerAccessHash(ca *syncplanev1.CallerAccess) (uint64, int) {
-	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(ca)
-	if err != nil {
-		panic(err) // cannot fail for a message of valid in-memory protos
-	}
-	sum := sha256.Sum256(raw)
-	return binary.BigEndian.Uint64(sum[:8]) | 1, len(raw)
+	return canonicalHash("caller-access", ca.ProtoReflect()) | 1, proto.Size(ca)
 }
 
 // callerAccessUpdate returns what a response sends of the bound
@@ -1079,6 +1134,7 @@ func (e *rowEmitter) callerAccessUpdate(cur cursorState, haveCursor bool, seq ui
 		RootPermissions: ca.GetRootPermissions(),
 		AnchorGroups:    ca.GetAnchorGroups(),
 		Version:         hash,
+		MaxAccessDepth:  ca.GetMaxAccessDepth(),
 	}
 	if !e.callerAccessDeltas || held == 0 {
 		return whole, nil
@@ -1121,11 +1177,12 @@ func (e *rowEmitter) storedCallerAccess(cur cursorState, version uint64) *syncpl
 }
 
 // callerAccessDeltaOf returns the change from held to now, without seq and
-// versions, or nil when no delta can carry it: the subjects or the root
-// permissions differ.
+// versions, or nil when no delta can carry it: the subjects, the root
+// permissions or the max access depth differ.
 func callerAccessDeltaOf(held, now *syncplanev1.CallerAccess) *syncplanev1.CallerAccessDelta {
 	if !slices.Equal(held.GetSubjects(), now.GetSubjects()) ||
-		!slices.Equal(held.GetRootPermissions(), now.GetRootPermissions()) {
+		!slices.Equal(held.GetRootPermissions(), now.GetRootPermissions()) ||
+		held.GetMaxAccessDepth() != now.GetMaxAccessDepth() {
 		return nil
 	}
 	before := map[anchorRow][]string{}

@@ -256,6 +256,9 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	// snapshots never need tombstones, so it drops every other row.
 	visibleOf := func(tx storage.ReadTx, page []storage.Row) ([]*syncplanev1.RowChange, error) {
 		emitter.readChainsFrom(tx)
+		if err := s.pinChains(tx, emitter, begin.GetSeq()); err != nil {
+			return nil, err
+		}
 		var out []*syncplanev1.RowChange
 		for _, row := range page {
 			class, err := emitter.classify(row)
@@ -493,4 +496,25 @@ func bootstrapNarrowable(e *rowEmitter, entity string) (*entityScope, bool) {
 		return nil, false
 	}
 	return scope, true
+}
+
+// pinChains makes the parent-chain walker bound on e read each row that moved
+// after seq with the parents, and what within entries read of it, that it had
+// at seq, and read a row created after seq as one that does not exist. A
+// snapshot that reads its pages in transactions of their own classifies every
+// page as of its Begin position this way, which is the position the pull from
+// its cursor compares the moves after it with (see compareMoves). With more
+// moves than Limits.MaxResyncScan after seq it pins nothing: that pull resets.
+func (s *Server) pinChains(tx storage.ReadTx, e *rowEmitter, seq uint64) error {
+	if e.caller == nil || !e.caller.model.moving || e.chains == nil {
+		return nil
+	}
+	moves, _, overflow, err := readAccessMoves(tx, seq, s.limits.MaxResyncScan)
+	if err != nil || overflow {
+		return err
+	}
+	e.chains.overrides, _ = firstMoves(moves)
+	e.chains.withinOverrides = firstWithins(e.caller.model, moves)
+	e.chains.createdAfter = seq
+	return nil
 }

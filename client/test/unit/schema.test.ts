@@ -23,6 +23,7 @@ import {
 	type AccessRuleDecl,
 	bool,
 	bytes,
+	type CheckedWithinDecl,
 	defineSchema,
 	double,
 	entitiesFromDescriptorSet,
@@ -151,6 +152,17 @@ describe('schema builder', () => {
 
 	it('rejects an entity with no key field', () => {
 		expect(() => entity('bad', { title: text() })).toThrow(/no key field/);
+	});
+
+	it('rejects an entity name the engine reserves for its own entities', () => {
+		// The access move log and the field history are stored under such names.
+		for (const name of [ 'syncplane_access_moves', 'syncplane_field_history', 'syncplane_x' ]) {
+			expect(() => entity(name, { id: text().key() })).toThrow(
+				`entity name "${name}" starts with "syncplane_", which is reserved for the engine's own entities`,
+			);
+		}
+		// The match is case-sensitive, as on the server.
+		expect(entity('Syncplane_x', { id: text().key() }).name).toBe('Syncplane_x');
 	});
 
 	it('rejects opaque on non-bytes fields', () => {
@@ -1231,7 +1243,7 @@ describe('schema builder — within entries', () => {
 					admitted: true,
 					within: [
 						within(project, { when: (p) => p.isPrivate.eq(false) }),
-						{ entity: 'project', callerIs: 'ownerId' },
+						within(project, { callerIs: 'ownerId' }),
 					],
 				},
 			],
@@ -1258,11 +1270,16 @@ describe('schema builder — within entries', () => {
 
 	describe('validation', () => {
 		const fields = { id: text().key(), project: ref(() => project) };
-		const allowing = (...within: WithinDecl[]) => () =>
+		// Plain entries, which only within() builds in typed code: the
+		// validation also guards what untyped callers pass.
+		const allowing = (...entries: WithinDecl[]) => () =>
 			defineSchema(
 				project,
 				entity('e', fields, {
-					access: { parents: [ 'project' ], allow: [ { read: true, requires: 'p', within } ] },
+					access: {
+						parents: [ 'project' ],
+						allow: [ { read: true, requires: 'p', within: entries as CheckedWithinDecl[] } ],
+					},
 				}),
 			);
 

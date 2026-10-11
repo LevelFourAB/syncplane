@@ -19,20 +19,26 @@ import {
 	accessRowId,
 	AccessSummary,
 	anchorEntities,
+	and,
 	answerOf,
 	type CanAnswer,
 	canAt,
 	type CanDetail,
+	childEntitiesOf,
 	decideRead,
 	decideRules,
 	decideUpdate,
+	decideUpdateChecks,
 	decodeAccess,
 	type DecodedAccess,
 	detailOf,
 	entitiesAboveOf,
-	MAX_ACCESS_CHAIN,
+	grantSubsetAt,
+	hasGrantEntities,
+	inRecursiveChain,
 	type ParentRefs,
 	parentRefsOf,
+	parentsRead,
 	pendingChangesAccess,
 	type RuleRow,
 	ruleRowOf,
@@ -45,6 +51,7 @@ import {
 	whenReads,
 	withinEntities,
 	withinReads,
+	writeChangesAccess,
 } from './access.js';
 import { CodeFormatUpgraded, CodeWatchFailed, CodeWorkspacePurged } from './codes.js';
 import {
@@ -96,6 +103,7 @@ import {
 	metaPendingAccess,
 	metaPushedThrough,
 	metaWsPrefix,
+	overlayGeneration,
 	overlayGenerationFor,
 	overlayKey,
 	type OverlayRecord,
@@ -222,6 +230,7 @@ import {
 import {
 	decodeWholeRow,
 	type EntityRowRef,
+	forEachMergedRow,
 	mergedRowFrom,
 	type NamedWorkspaces,
 	readMergedRow,
@@ -1836,7 +1845,15 @@ interface QueryPage<T> {
  * client does not hold it, and the rows above it.
  */
 type AccessPlan =
-	& { def: EntityDef; decide(row: Message | undefined, chain: AccessChain): Verdict }
+	& {
+		def: EntityDef;
+		decide(row: Message | undefined, chain: AccessChain): Verdict;
+		/**
+		 * Reads the rows directly above the row even where no access parent
+		 * or within entry leads further, so that `chain.row` knows them.
+		 */
+		readsParents?: boolean;
+	}
 	& ({ key: string } | { row: Message });
 
 /** The answer outright, or the row a prediction starts from. */
@@ -1847,6 +1864,34 @@ type AccessPlanner = (summary: AccessSummary) => Verdict | AccessPlan;
  * summary, or the planner that decides it from one.
  */
 type AccessQuestion = Verdict | AccessPlanner;
+
+/**
+ * Whether `tx` holds a live row of `below` in `workspaceId` whose access
+ * parents name the row of `schema` at `key`. The server refuses a delete of
+ * a row with a live row below it.
+ */
+async function holdsRowBelow(
+	tx: KVRead,
+	registry: EntityRegistry,
+	workspaceId: string,
+	below: readonly EntityDef[],
+	schema: DescMessage,
+	key: string,
+): Promise<boolean> {
+	const entity = registry.bySchema(schema).name;
+	for (const def of below) {
+		let found = false;
+		// A scan of the entity: the client keeps no index of the rows that
+		// name a row as their access parent.
+		await forEachMergedRow(tx, registry, def.name, workspaceId, (row) => {
+			if (found) return;
+			const refs = parentRefsOf(def, fromBinary(def.schema, row.v));
+			found = refs?.some((ref) => ref.entity === entity && ref.key === key) ?? false;
+		});
+		if (found) return true;
+	}
+	return false;
+}
 
 /** One prediction waiting in an access batch; see SyncClient.askAccess. */
 interface AccessAsk {
@@ -1880,9 +1925,11 @@ interface AccessWalk {
 	/**
 	 * The rows the access parents of each row reached above the row name, by
 	 * accessRowId: undefined for a row the client does not hold, or one past
-	 * MAX_ACCESS_CHAIN hops.
+	 * maxHops hops.
 	 */
 	above: Map<string, readonly AccessRow[] | undefined>;
+	/** The summary's maxAccessDepth: how many hops above the row the walk reads. */
+	maxHops: number;
 	/** The entities whose rows the walk reads for a `within` entry. */
 	withinEntities: ReadonlySet<string>;
 	/** The rows of the level the walk reads next. */
@@ -1978,7 +2025,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 */
 	private accessSummaries = new Map<
 		string,
-		{ generation: unknown; summary: Promise<AccessSummary | UnknownDetail> }
+		{
+			generation: unknown;
+			summary: Promise<AccessSummary | UnknownDetail>;
+			/**
+			 * The overlay generations the summary was decided under, when it
+			 * read the overlay: a mirror's writes, which decide a queued custom
+			 * mutation, can change with no change to the queue.
+			 */
+			overlay?: { keys: string[]; values: unknown[] };
+		}
 	>();
 	/**
 	 * Per workspace, the summary the last access batch decided from, or why it
@@ -2391,8 +2447,17 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		return tracked;
 	}
 
+	/**
+	 * Asks again for the rooms of a workspace that wait for a grant: a change
+	 * of what the caller holds there can be the grant.
+	 */
+	private readonly retryRoomsOnAccess = (workspaceId: string): void => {
+		this.presence?.retryNoAccess(workspaceId);
+	};
+
 	/** The ephemeral plane's coordinator, started with the first room. */
 	private presenceCoordinator(): PresenceCoordinator {
+		this.accessListeners.add(this.retryRoomsOnAccess);
 		this.presence ??= new PresenceCoordinator({
 			transport: () => this.resolveTransport(),
 			sessionId: this.sessionId,
@@ -3365,12 +3430,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * `cb` runs with the workspace id once for each commit, by this tab or
 	 * another tab sharing the store, that stores or removes the workspace's
 	 * CallerAccess; queues, acks or rolls back a local write to a grant row or
-	 * a delete of a row that other rows sit below; or writes a row of an
+	 * a delete of a row that other rows sit below; replays the mirror of a
+	 * queued custom mutation that writes such a row; or writes a row of an
 	 * entity that other rows sit below, locally or from the server. It can run
 	 * when no prediction changed.
 	 *
 	 * A change of the row a prediction is for is not reported unless the row
 	 * is of such an entity. Watch that row as well to follow the prediction.
+	 * Nor is a change of the rows below the row, which a prediction of a
+	 * delete reads: watch them to follow it.
 	 */
 	onAccessChange(cb: (workspaceId: string) => void): () => void {
 		this.accessListeners.add(cb);
@@ -3392,6 +3460,26 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * answers `'unknown'` at best, since the new value decides. Without
 	 * `opts.fields`, the answer is for some update; see {@link CanOptions}.
 	 *
+	 * The answer also covers the checks the server makes beside the rules,
+	 * where the client holds their inputs. An update that changes the access
+	 * parent needs the right to read the row, each field of it a guard can
+	 * hide, and every row of each entity whose rows can sit below it, where
+	 * the row is now; a read rule with a `callerIs` or `when` check does not
+	 * give the right to read every row. An update of a field that a `within`
+	 * entry reads needs the same right for the rows below. An update of a
+	 * field that a read rule of a hiding guard checks needs the right to read
+	 * the guarded fields, and answers `'unknown'` at best. On a grant entity, a
+	 * delete, or an update of the subject, the role or the access parent,
+	 * needs every permission of the row's role where the row applies; an
+	 * update of the role or the access parent answers `'unknown'` at best.
+	 * Where a chain of access parents can lead back to an entity it passes, an
+	 * update that changes the access parent answers `'unknown'` at best, as
+	 * the caller must read the new parent. A delete answers `'no'` while the
+	 * client holds a live row whose access parent names the row, as the server refuses that delete. To find one,
+	 * it scans the rows held locally of each entity whose rows can sit below
+	 * the row. An update or a delete of a row the client does not hold
+	 * answers `'unknown'` at best.
+	 *
 	 * Resolves to `'yes'` for an entity outside the access model, which is
 	 * open to every caller in the workspace.
 	 *
@@ -3410,8 +3498,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 *   chain that is not held locally, the row itself included, and the
 	 *   caller holds that permission at a row of an entity that can sit above
 	 *   it;
-	 * - `'pending_grant'`: while a local write to a grant row, or a delete of a
-	 *   row other rows sit below, waits for its ack;
+	 * - `'pending_grant'`: while a local write to a grant row or a delete of a
+	 *   row other rows sit below waits for its ack. That includes such a write
+	 *   by the mirror of a custom mutation, and, in a schema with grant
+	 *   entities, a custom mutation with no mirror;
 	 * - `'new_value'`: when the update changes a field whose new value decides;
 	 * - `'chain_too_deep'`: when the chain of access parents is longer than
 	 *   the client walks.
@@ -3452,7 +3542,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * default workspace: the row as the server would store it, with each
 	 * creator field holding the caller's primary subject. See {@link can} for
 	 * what the answer means and when it is `'unknown'`; the row's access
-	 * parent takes the place of the row itself.
+	 * parent takes the place of the row itself. A grant row needs every
+	 * permission of its role where it applies.
+	 *
+	 * Each permission a rule requires and each of its `within` entries must
+	 * hold through each access parent of the row on its own: at the row, or at
+	 * that parent or a row above it. Where a chain of access parents can lead
+	 * back to an entity it passes, as a folder in a folder does, the caller must
+	 * also read each access parent the row names: the answer is `'no'` when it
+	 * does not, and `'unknown'` (`row_not_held`) when the client does not hold
+	 * the parent, which can then be missing or hidden.
 	 *
 	 * @example
 	 * ```ts
@@ -3520,7 +3619,18 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		opts?: CanOptions<D>,
 	): Promise<Verdict> {
 		this.assertOpen();
-		return this.askQuestion(workspaceId, this.canQuestion(schema, key, operation, opts));
+		const verdict = await this.askQuestion(
+			workspaceId,
+			this.canQuestion(schema, key, operation, opts),
+		);
+		if (operation !== 'delete' || verdict === 'no') return verdict;
+		const below = childEntitiesOf(this.entityRegistry, this.entityRegistry.bySchema(schema).name);
+		if (below.length === 0) return verdict;
+		return (await this.withAccessRead((tx) =>
+				holdsRowBelow(tx, this.entityRegistry, workspaceId, below, schema, key)
+			))
+			? 'no'
+			: verdict;
 	}
 
 	/** @internal backs WorkspaceClient.canCreate. */
@@ -3597,10 +3707,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		const rules = def.accessRules;
 		// An entity outside the model is open to every caller in the workspace.
 		if (rules === undefined) return 'yes';
-		return (summary) => ({
-			def,
-			key,
-			decide: (row, chain) => {
+		return (summary) => {
+			const decide = (row: Message | undefined, chain: AccessChain): Verdict => {
 				const stored = ruleRowOf(summary, def, key, row, chain);
 				if (operation === 'read' && opts?.fields !== undefined) {
 					return decideRead(
@@ -3611,7 +3719,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						updateUnitsOf(def.schema, opts.fields),
 					);
 				}
-				if (operation !== 'update') return decideRules(rules, operation, summary.subjects, stored);
+				if (operation === 'read') return decideRules(rules, operation, summary.subjects, stored);
+				if (operation === 'delete') {
+					// A delete takes away what a grant row grants.
+					const admits = decideRules(rules, operation, summary.subjects, stored);
+					return admits === 'no' ? 'no' : and(admits, grantSubsetAt(summary, def, row, chain));
+				}
 				// Without named fields the answer is for some update, and the best
 				// answer of the candidates wins: null, for an update that only a rule
 				// without a fields list admits, and each field a list names, alone.
@@ -3622,6 +3735,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						u === null ? null : [ u ]
 					);
 				const newValue = unknownBecause('new_value');
+				const recursive = inRecursiveChain(def);
 				let answer: Verdict = 'no';
 				for (const changed of candidates) {
 					// The new value of a changed subject field, access parent or field a
@@ -3642,13 +3756,44 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 								? newValue
 								: stored.within(rule),
 					};
-					const one = decideUpdate(rules, def.guards, summary.subjects, stored, final, changed);
+					let one = decideUpdate(rules, def.guards, summary.subjects, stored, final, changed);
+					if (one !== 'no' && changed !== null) {
+						one = and(
+							one,
+							decideUpdateChecks(
+								this.entityRegistry,
+								summary,
+								def,
+								key,
+								row,
+								stored,
+								chain,
+								changed,
+								moves,
+							),
+						);
+					}
+					// In a recursive chain the server refuses a new parent the caller
+					// does not read, and the new parent is not known here.
+					if (moves && recursive) one = and(one, newValue);
 					if (one === 'yes') return 'yes';
 					if (one !== 'no' && answer === 'no') answer = one;
 				}
 				return answer;
-			},
-		});
+			};
+			return {
+				def,
+				key,
+				decide: (row, chain) => {
+					const answer = decide(row, chain);
+					// The server refuses an update or a delete of a row it does not
+					// hold live, and a row this client does not hold can be one.
+					return answer === 'yes' && row === undefined && operation !== 'read'
+						? unknownBecause('row_not_held')
+						: answer;
+				},
+			};
+		};
 	}
 
 	private canCreateQuestion<D extends DescMessage>(
@@ -3660,16 +3805,26 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		if (rules === undefined) return 'yes';
 		return (summary) => {
 			const row = stampCreatorFields(def, create(schema, init), summary.subjects[0] ?? '');
+			const recursive = inRecursiveChain(def);
 			return {
 				def,
 				row,
-				decide: (_, chain) =>
-					decideRules(
+				readsParents: recursive,
+				decide: (_, chain) => {
+					const admits = decideRules(
 						rules,
 						'create',
 						summary.subjects,
 						ruleRowOf(summary, def, keyOf(def, row), row, chain, true),
-					),
+					);
+					if (admits === 'no') return 'no';
+					const answer = and(admits, grantSubsetAt(summary, def, row, chain));
+					// In a recursive chain the server refuses a parent the caller
+					// does not read.
+					return recursive && answer !== 'no'
+						? and(answer, parentsRead(summary, parentRefsOf(def, row), chain))
+						: answer;
+				},
 			};
 		};
 	}
@@ -3799,7 +3954,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * per level for every distinct row the level reaches. The rows are read
 	 * through the merged view, so a queued move counts where the row will be
 	 * once the server accepts it. A path stops at a row the client does not
-	 * hold, and after MAX_ACCESS_CHAIN hops.
+	 * hold, and after as many hops as the summary's maxAccessDepth allows.
 	 *
 	 * An error deciding one prediction is the outcome of that prediction alone.
 	 * An error reading the store rejects.
@@ -3838,6 +3993,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						parents: undefined,
 						above: new Map(),
 						withinEntities: withinEntities(plan.def),
+						maxHops: summary.maxAccessDepth,
 						level: [],
 					});
 				}
@@ -3883,6 +4039,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			step(walk, () => {
 				const chain: AccessChain = {
 					parents: walk.parents,
+					maxHops: walk.maxHops,
 					above: (row) => walk.above.get(accessRowId(row)),
 					row: (at) => {
 						const def = this.entityRegistry.get(at.entity);
@@ -3896,7 +4053,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			});
 		};
 		// Moves the rows of `refs`, `hops` above the row, that `walk` has not
-		// reached into its next level. A row past MAX_ACCESS_CHAIN hops is not
+		// reached into its next level. A row past walk.maxHops hops is not
 		// read, so the rows above it are not known. A row without an access
 		// parent ends its path, and is read only when a within entry reads it.
 		const enter = (walk: AccessWalk, refs: NonNullable<ParentRefs>, hops: number) => {
@@ -3905,8 +4062,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				if (walk.above.has(id)) continue;
 				if (
 					accessParentFields(ref.def.schema).length === 0 && !walk.withinEntities.has(ref.def.name)
+					&& !(hops === 1 && walk.plan.readsParents === true)
 				) walk.above.set(id, []);
-				else if (hops > MAX_ACCESS_CHAIN) walk.above.set(id, undefined);
+				else if (hops > walk.maxHops) walk.above.set(id, undefined);
 				else {
 					walk.above.set(id, undefined);
 					walk.level.push(ref);
@@ -3982,25 +4140,33 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			metaLastMutationId(workspaceId),
 		]);
 		const cached = this.accessSummaries.get(workspaceId);
-		if (generation !== undefined && cached?.generation === generation) return cached.summary;
+		if (generation !== undefined && cached?.generation === generation) {
+			const overlay = cached.overlay;
+			if (overlay === undefined) return cached.summary;
+			const now = await tx.getMany(overlay.keys);
+			if (now.every((v, i) => v !== undefined && v === overlay.values[i])) return cached.summary;
+		}
+		let entry: NonNullable<typeof cached> | undefined;
 		const summary = (async () => {
 			const decoded = await this.storedAccessUnder(tx, workspaceId, storedGeneration);
 			if (decoded === undefined) return unknownBecause('no_summary');
 			// Only a count of zero is trusted. A build that predates the record
 			// drops queued writes without counting them down, so a count above
 			// zero can be too high, and the walk keeps the answer exact for it.
-			if (
-				pendingAccessOf(pendingRecord, lastMutationId) !== 0
-				&& pendingChangesAccess(this.entityRegistry, await readPending(tx, workspaceId))
-			) {
-				return unknownBecause('pending_grant');
+			if (pendingAccessOf(pendingRecord, lastMutationId) === 0) return decoded.summary;
+			const pending = await this.pendingAccessIn(tx, workspaceId);
+			if (pending.overlay !== undefined && entry !== undefined) {
+				if (pending.overlay.values.some((v) => v === undefined)) {
+					// A store written by a build that does not stamp the overlay.
+					if (this.accessSummaries.get(workspaceId) === entry) this.accessSummaries.delete(workspaceId);
+				} else entry.overlay = pending.overlay;
 			}
-			return decoded.summary;
+			return pending.changes ? unknownBecause('pending_grant') : decoded.summary;
 		})();
 		if (generation !== undefined) {
 			// Entered before the first await, so a caller that reads the same
 			// generation while this read is in flight waits for it.
-			const entry = { generation, summary };
+			entry = { generation, summary };
 			this.accessSummaries.set(workspaceId, entry);
 			// A failed read is not an answer to reuse.
 			summary.catch(() => {
@@ -4008,6 +4174,44 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			});
 		}
 		return summary;
+	}
+
+	/**
+	 * Whether the pending queue of `workspaceId` holds a write that can change
+	 * what the caller holds. A custom mutation with a mirror can when the
+	 * overlay holds a grant row or a deleted row that other rows sit below,
+	 * which only a queued write puts there; `overlay` then names the overlay
+	 * generations read. One without a mirror can when the schema has grant
+	 * entities, as the client cannot see what the server's mutator writes.
+	 */
+	private async pendingAccessIn(
+		tx: KVRead,
+		workspaceId: string,
+	): Promise<{ changes: boolean; overlay?: { keys: string[]; values: unknown[] } }> {
+		const registry = this.entityRegistry;
+		const unmirrored = hasGrantEntities(registry);
+		let mirrored = false;
+		const queued = pendingChangesAccess(registry, await readPending(tx, workspaceId), (custom) => {
+			if (this.mirrors[custom.name] === undefined) return unmirrored;
+			mirrored = true;
+			return false;
+		});
+		if (queued || !mirrored) return { changes: queued };
+		const anchors = anchorEntities(registry);
+		const entities = registry.names().filter((name) =>
+			registry.get(name)!.grant || anchors.has(name)
+		);
+		if (entities.length === 0) return { changes: false };
+		const keys = entities.map((name) => overlayGeneration(name, workspaceId));
+		const values = await tx.getMany(keys);
+		for (const name of entities) {
+			for await (const [ , v ] of tx.scan(overlayWsPrefix(name, workspaceId))) {
+				if (writeChangesAccess(registry, name, (v as OverlayRecord).del === true)) {
+					return { changes: true, overlay: { keys, values } };
+				}
+			}
+		}
+		return { changes: false, overlay: { keys, values } };
 	}
 
 	/** storedAccessUnder, with the CallerAccess generation read from `tx`. */

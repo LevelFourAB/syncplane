@@ -92,10 +92,13 @@ export interface SchemaSkewInfo {
  *
  * "none" means the caller holds no permission in the workspace's access model,
  * such as a new user before the first grant is written, or a caller whose last
- * grant was removed. It is not permanent: the client keeps the local copy and
- * the queue, leaves the workspace out of the stream and of each cycle, and asks
- * again with backoff, 1 to 30 seconds apart, and at once on
- * `SyncClient.syncNow()`. The first answer that admits the caller sets
+ * grant was removed. A caller that loses its last grant first receives a
+ * tombstone for each row of an entity in the access model, as for any row the
+ * caller can no longer read; rows of entities outside the model stay. A caller
+ * that waits for its first grant keeps its local copy. It is not permanent:
+ * the client keeps the queue, leaves the workspace out of the stream and of
+ * each cycle, and asks again with backoff, 1 to 30 seconds apart, and at once
+ * on `SyncClient.syncNow()`. The first answer that admits the caller sets
  * "granted" and syncs the workspace again, queued writes included.
  *
  * "granted" is set only after "none"; a workspace that was never refused leaves

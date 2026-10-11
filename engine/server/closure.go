@@ -586,6 +586,9 @@ func (e *rowEmitter) closureSeeds(tx storage.ReadTx, sub *syncplanev1.Subscripti
 		return nil, connect.NewError(connect.CodeInvalidArgument,
 			fmt.Errorf("subscription names unknown entity %q", sub.GetEntity()))
 	}
+	if blind, err := e.blindSeeds(sub); err != nil || blind {
+		return nil, err
+	}
 	// A windowed subscription seeds from its WINDOW, not from every predicate
 	// match: the predicate selects candidates for the window, so following from
 	// all of them would expand the closure right back past the working set the
@@ -1318,6 +1321,12 @@ var errMaintenanceDeclined = errors.New("closure maintenance declined")
 // stays bounded by MaxClosureSize either way, which is the bound that protects
 // the cursor and the client.
 func (e *rowEmitter) maintainClosure(tx storage.ReadTx, prev *syncplanecursorv1.ClosureSet, subs []*syncplanev1.Subscription, changes []storage.Row, seedsMoved []closureKey) (closureRows, bool, error) {
+	// A subscription that seeds nothing under the bound access (see
+	// blindSubs) left members in prev that no change names, so the closure is
+	// walked again.
+	if blind, err := e.blindSubs(); err != nil || blind != nil {
+		return nil, false, err
+	}
 	hops, ok, err := e.resolveHops(subs)
 	if err != nil || !ok {
 		return nil, false, err

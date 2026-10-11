@@ -150,6 +150,13 @@ export function validateEntityName(name: string, where?: string): void {
 }
 
 /**
+ * The prefix of the name of each entity the engine keeps for itself, such as
+ * the field history and the access move log. The server refuses to register
+ * a schema entity whose name starts with it; the match is case-sensitive.
+ */
+export const RESERVED_ENTITY_PREFIX = 'syncplane_';
+
+/**
  * Throws unless `name` satisfies the rule for the name a schema gives a
  * reverse relation — (syncplane.v1.field_behavior).reverse_relation. The rule
  * is the entity-name rule: the name is a follow segment on the wire, an

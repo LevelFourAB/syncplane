@@ -271,11 +271,16 @@ message CallerAccess {
 	// Identifies what the summary holds: equal summaries have equal versions,
 	// whatever their seq. Never 0 in a summary from the server.
 	fixed64 version = 6;
+	// The most access parent hops the server follows up from a row: its
+	// MaxAccessDepth. A permission held at a row further up does not apply to
+	// the row. 0 from a server that does not send it, and a client then
+	// assumes 32, the default.
+	uint32 max_access_depth = 7;
 }
 
 // A change to a CallerAccess: applied to the summary whose version is
-// base_version, it gives the summary whose version is version. Subjects and
-// root_permissions do not change.
+// base_version, it gives the summary whose version is version. Subjects,
+// root_permissions and max_access_depth do not change.
 //
 // To apply it, put each row that anchor_groups lists in the group with the
 // permissions listed there, and take it out of the group it was in. Then

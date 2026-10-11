@@ -33,6 +33,7 @@ import {
 	PresenceService,
 	type PublishItem,
 	type Topic,
+	TopicDropped_Reason,
 	type WatchResponse,
 } from '../gen/syncplane/v1/presence_pb.js';
 import { reportError } from '../report.js';
@@ -130,14 +131,15 @@ const PEER_TTL_MS = 3 * PEER_ANNOUNCE_MS;
 /**
  * A stream frame in the form followers receive it. Deliberately not the wire
  * message: a protobuf message is not structured-clone safe, and followers only
- * ever need these five shapes.
+ * ever need these six shapes.
  */
 type SharedFrame =
 	| { k: 'snapshot'; participants: RawParticipant[]; truncated: boolean }
 	| { k: 'updated'; participant: RawParticipant }
 	| { k: 'left'; sessionId: string }
 	| { k: 'message'; senderSessionId: string; senderSubject: string; payload: Uint8Array }
-	| { k: 'dropped'; message: string };
+	| { k: 'dropped'; message: string }
+	| { k: 'waiting'; message: string };
 
 /**
  * Owns the account's room membership, its Watch stream and its cross-tab
@@ -153,6 +155,15 @@ export class PresenceCoordinator {
 	private readonly attached = new Map<string, Set<Attachment>>();
 	/** What other tabs last announced about themselves, by tab id. */
 	private readonly peerRooms = new Map<string, PeerTab>();
+	/**
+	 * The topics the server dropped because the caller holds no grant in the
+	 * workspace yet, by topic key. Each sits out the stream until its retry
+	 * time, as a workspace that waits for a grant sits out sync.
+	 */
+	private readonly waiting = new Map<
+		string,
+		{ workspaceId: string; backoff: Backoff; retryAt: number; timer?: ReturnType<typeof setTimeout> }
+	>();
 	private readonly tabId = randomId();
 	/** Re-announces this tab's set, and ages out peers that stopped. */
 	private peerTimer?: ReturnType<typeof setInterval>;
@@ -265,6 +276,8 @@ export class PresenceCoordinator {
 		this.announce();
 		this.clearReopenTimer();
 		this.stopPeerTimer();
+		for (const wait of this.waiting.values()) clearTimeout(wait.timer);
+		this.waiting.clear();
 		this.running = false;
 		this.streamAbort?.abort();
 		this.leadership?.stop();
@@ -338,14 +351,59 @@ export class PresenceCoordinator {
 		return out;
 	}
 
-	/** The union this tab would open a stream over: its own rooms plus its peers'. */
+	/**
+	 * The union this tab would open a stream over: its own rooms plus its
+	 * peers', without the topics that wait for a grant.
+	 */
 	private unionTopics(): PresenceTopic[] {
 		const byKey = new Map<string, PresenceTopic>();
 		for (const t of this.localTopics()) byKey.set(topicKey(t), t);
 		for (const peer of this.peerRooms.values()) {
 			for (const t of peer.topics) byKey.set(topicKey(t), t);
 		}
+		const now = Date.now();
+		for (const [ key, wait ] of this.waiting) {
+			if (!byKey.has(key)) {
+				// No tab holds the room any more.
+				clearTimeout(wait.timer);
+				this.waiting.delete(key);
+			} else if (now < wait.retryAt) byKey.delete(key);
+		}
 		return [ ...byKey.values() ];
+	}
+
+	/**
+	 * Records that the server dropped the room of `key` because the caller
+	 * holds no grant in `workspaceId` yet: the room leaves the stream, and a
+	 * timer brings it back after a backoff of 1 to 30 seconds, longer after
+	 * each answer of no access.
+	 */
+	private noteNoAccess(key: string, workspaceId: string): void {
+		const wait = this.waiting.get(key) ?? { workspaceId, backoff: new Backoff(), retryAt: 0 };
+		clearTimeout(wait.timer);
+		const delay = wait.backoff.next();
+		wait.retryAt = Date.now() + delay;
+		wait.timer = setTimeout(() => {
+			wait.timer = undefined;
+			if (!this.stopped && this.receiving) this.scheduleReopen();
+		}, delay);
+		this.waiting.set(key, wait);
+	}
+
+	/**
+	 * Asks the server again, at once, for each room of `workspaceId` that
+	 * waits for a grant: what the caller holds there changed.
+	 */
+	retryNoAccess(workspaceId: string): void {
+		let any = false;
+		for (const wait of this.waiting.values()) {
+			if (wait.workspaceId !== workspaceId || wait.retryAt === 0) continue;
+			clearTimeout(wait.timer);
+			wait.timer = undefined;
+			wait.retryAt = 0;
+			any = true;
+		}
+		if (any && !this.stopped && this.receiving) this.scheduleReopen();
 	}
 
 	/**
@@ -614,6 +672,8 @@ export class PresenceCoordinator {
 		});
 		const shareable = toSharedFrame(frame);
 		if (shareable === undefined) return;
+		if (shareable.k === 'waiting') this.noteNoAccess(key, frame.topic.workspaceId);
+		else if (shareable.k === 'snapshot') this.waiting.delete(key);
 		this.deliver(key, shareable);
 		if (shared) this.post({ t: 'frame', key, frame: shareable });
 	}
@@ -638,6 +698,9 @@ export class PresenceCoordinator {
 					break;
 				case 'dropped':
 					sink.onDropped(frame.message);
+					break;
+				case 'waiting':
+					sink.onWaiting();
 					break;
 			}
 		}
@@ -682,7 +745,10 @@ function toSharedFrame(frame: WatchResponse): SharedFrame | undefined {
 				payload: frame.body.value.payload,
 			};
 		case 'dropped':
-			return { k: 'dropped', message: frame.body.value.message };
+			// The caller holds no grant yet, which a later grant lifts.
+			return frame.body.value.reason === TopicDropped_Reason.NO_ACCESS
+				? { k: 'waiting', message: frame.body.value.message }
+				: { k: 'dropped', message: frame.body.value.message };
 		default:
 			return undefined;
 	}

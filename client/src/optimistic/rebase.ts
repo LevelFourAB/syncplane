@@ -14,6 +14,7 @@ import {
 	type DecodedAccess,
 	encodeAccess,
 	touchPendingAccess,
+	writeChangesAccess,
 } from '../access.js';
 import { syncableEntities } from '../entities.js';
 import {
@@ -141,6 +142,7 @@ class KVMirrorTx implements MirrorTx {
 		const key = keyOf(def, value);
 		await this.tx.put(overlayKey(def.name, this.workspaceId, key), record);
 		this.touched.row(this.workspaceId, def.name, key);
+		this.touchAccess(def.name, false);
 	}
 
 	async del(schema: DescMessage, key: string): Promise<void> {
@@ -148,6 +150,16 @@ class KVMirrorTx implements MirrorTx {
 		const record: OverlayRecord = { del: true };
 		await this.tx.put(overlayKey(def.name, this.workspaceId, key), record);
 		this.touched.row(this.workspaceId, def.name, key);
+		this.touchAccess(def.name, true);
+	}
+
+	// What a queued custom mutation can do to the caller's grants is decided
+	// from what its mirror wrote, and a replay during rebase can write other
+	// rows than the first apply did, with no change to the queue.
+	private touchAccess(entity: string, del: boolean): void {
+		if (writeChangesAccess(this.registry, entity, del)) {
+			this.touched.entity(this.workspaceId, ACCESS_TOUCH_ENTITY);
+		}
 	}
 }
 

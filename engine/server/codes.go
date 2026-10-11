@@ -50,7 +50,9 @@ const (
 	// permanent: a grant row written later admits the caller. It arrives where
 	// CodeWorkspaceAccessRevoked does, and as a WorkspaceDropped frame with
 	// reason NO_ACCESS on Subscribe. A client seeing it keeps its local copy and
-	// its queue, and retries with backoff.
+	// its queue, and retries with backoff. A Pull from a cursor issued while
+	// the caller held a permission gets it only after a page that tombstones
+	// the rows the caller read and sets has_more.
 	CodeWorkspaceNoAccess = "workspace_no_access"
 )
 

@@ -27,16 +27,19 @@ import (
 // access rule's within entry reads of the row, such as a project's private
 // flag or a doc's owner, so the log records that as a move too.
 //
-// A move is recorded only for a row other rows can sit below, and only when
-// one does at the time of the write: a change of its access parents or of
-// what within entries read of it, its creation (a row created with a key that
-// rows below already name) and its deletion (a Trusted write may delete a row
-// with rows below it). A record holds the row's parents before and after the
-// change, so a row that gains or loses one of several parents is one record,
-// and what within entries read of the row before it. A row without rows below
-// it moves nothing that the change scan does not already see. When one
-// sequence writes a row more than once, the log keeps one record whose state
-// before the change is the one the row had at the start of the sequence.
+// A move is recorded only for a row of an entity other rows can sit below: a
+// change of its access parents or of what within entries read of it, and its
+// deletion. Its creation is recorded only when rows below already name its
+// key. A change is recorded whether or not rows sit below the row at the
+// time of the write: rows that sat below it when a cursor was issued can have
+// moved away since, and the pull walks their chain through the row as it was
+// then (see compareMoves), which only the record holds. A row created after a
+// cursor without rows below is on no such chain. A record holds the row's
+// parents before and after the change, so a row that gains or loses one of
+// several parents is one record, and what within entries read of the row
+// before it. When one sequence writes a row more than once, the log keeps one
+// record whose state before the change is the one the row had at the start of
+// the sequence.
 //
 // The records are rows of accessMovesEntity, which no schema declares, so the
 // sync paths skip them as they skip any entity the catalog does not hold. Each
@@ -93,8 +96,8 @@ func edgeOfRefs(first *syncplanecursorv1.AnchorRef, more []*syncplanecursorv1.An
 
 // recordAccessMove writes the log record of a write that changes the access
 // parents of a row other rows can sit below, or what within entries read of
-// it, when rows sit below it. Every
-// write path calls it, Trusted ones included, after every check that can
+// it. A write that creates the row is recorded only when rows sit below it.
+// Every write path calls it, Trusted ones included, after every check that can
 // refuse the write and before the row is written. final is the row as it will
 // be stored, nil for a delete; load returns the row before the write.
 func (s *Server) recordAccessMove(
@@ -108,9 +111,12 @@ func (s *Server) recordAccessMove(
 	seq uint64,
 	actor storage.Actor,
 ) error {
-	model := s.catalogPtr().access
-	if model == nil || info.access == nil || !model.anchors[info.name] {
-		return nil
+	// While a registration leaves the model incomplete, the last model that
+	// compiled decides, so that a Trusted write in that window still logs the
+	// moves the next pull must see.
+	model, info, finalRow, err := s.trackedAccess(info, final)
+	if err != nil || model == nil || info.access == nil || !model.anchors[info.name] {
+		return err
 	}
 	checked := len(model.withinOn[info.name]) > 0
 	if !info.access.hasParent() && !checked {
@@ -132,16 +138,18 @@ func (s *Server) recordAccessMove(
 			fromWithin = withinStateOf(model, info, stored.ProtoReflect())
 		}
 	}
-	if final != nil {
-		to = edgeOf(model, info, final.ProtoReflect())
-		toWithin = withinStateOf(model, info, final.ProtoReflect())
+	if finalRow != nil {
+		to = edgeOf(model, info, finalRow)
+		toWithin = withinStateOf(model, info, finalRow)
 	}
 	if from.equal(to) && fromWithin.equal(toWithin) {
 		return nil
 	}
-	below, err := liveRowBelow(tx, model, info, key, s.limits)
-	if err != nil || below == "" {
-		return err
+	if !live {
+		below, err := liveRowBelow(tx, model, info, key, s.limits)
+		if err != nil || below == "" {
+			return err
+		}
 	}
 	logKey := accessMoveKey(seq, info.name, key)
 	// An earlier write of the same sequence moved the row already: its record

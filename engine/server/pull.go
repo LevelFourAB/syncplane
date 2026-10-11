@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
@@ -108,6 +109,14 @@ type cursorState struct {
 	// turns the cursor into a reset — the same recovery as falling below the
 	// tombstone horizon.
 	stateEvicted bool
+}
+
+// readFloor is the position a read from the cursor must read at or past: its
+// seq, minSeq, and the position its access and the parents of the client's
+// rows were read at (see compareAccess), and the one a resync in flight
+// converges on.
+func (c cursorState) readFloor(minSeq uint64) uint64 {
+	return max(c.seq, minSeq, c.movesThrough, c.resync.GetToMovesThrough())
 }
 
 // windowSet is the window membership the cursor carries, in whichever form it
@@ -367,12 +376,28 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	adm, err := s.enterWorkspaceServed(ctx, msg.GetWorkspaceId(), false)
+	// A caller that held a permission when its cursor was issued and holds
+	// none now gets its revocation resync before the refusal (see
+	// lastGrantRefusal), so the refusal waits for the read transaction.
+	var noAccess error
+	if adm.caller != nil && claimsGrants(msg.GetCursor(), adm.caller) {
+		if err != nil && errors.Is(err, ErrNoAccess) {
+			noAccess, err = err, nil
+		}
+		if adm.verdict != nil {
+			adm.verdict.holdNoAccess = true
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		if gerr := adm.verdict.refusal(ctx, err); gerr != nil {
 			res, err = nil, gerr
+		}
+		// A caller the gate refuses learns nothing else of its request.
+		if held := cmp.Or(noAccess, adm.verdict.heldNoAccess()); err != nil && held != nil {
+			res, err = nil, held
 		}
 	}()
 	principal := adm.principal
@@ -392,6 +417,8 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	emitter.callerAccessDeltas = msg.CallerAccessVersion != nil
 	emitter.heldCallerAccess = msg.GetCallerAccessVersion()
 	emitter.admit(adm)
+	emitter.noAccess = noAccess
+	emitter.heldSubs = cur.subs
 
 	// Resolve every Permissions hook OUTSIDE the read snapshot, mirroring
 	// bootstrap.go: FilterEpoch up front, then warm the emitter's per-entity
@@ -430,7 +457,7 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	// and the client would drop its optimism for a mutation the page lacks.
 	// min_seq is untrusted wire input whose worst effect is forcing the read
 	// onto the primary — the behavior every pull had before replicas.
-	err = s.readTx(ctx, msg.GetWorkspaceId(), max(cur.seq, msg.GetMinSeq()), func(tx storage.ReadTx) error {
+	err = s.readTx(ctx, msg.GetWorkspaceId(), cur.readFloor(msg.GetMinSeq()), func(tx storage.ReadTx) error {
 		var e error
 		resp, _, resetSeen, e = s.servePullPage(ctx, tx, route, cur, emitter, wantHash, epoch, msg.GetSubscriptions(), watermarkKey(principal, msg.GetClientId()), msg.GetCursor(), limit)
 		return e
@@ -538,6 +565,9 @@ func (s *Server) servePullPage(ctx context.Context, tx storage.ReadTx, route pul
 	if err != nil {
 		return nil, cursorState{}, resetNone, err
 	}
+	if err := lastGrantRefusal(emitter, cur, route, acc); err != nil {
+		return nil, cursorState{}, resetNone, err
+	}
 	old, resync, ok := route.oldEm, route.resync, route.resync && route.reset == resetNone
 	if acc.reset == resetNone && route.reset != resetStaleResync {
 		old, resync, ok, err = s.bindResyncAccess(ctx, emitter.ws, cur, acc, old, resync, ok, emitter)
@@ -563,6 +593,9 @@ func (s *Server) servePullPage(ctx context.Context, tx storage.ReadTx, route pul
 		reset = resetResyncUnavailable
 	}
 	if reset != resetNone {
+		if emitter.noAccess != nil {
+			return nil, cursorState{}, resetNone, emitter.noAccess
+		}
 		resp.Reset_ = true
 		resp.NextCursor = rawCursor
 		return resp, cur, reset, nil
@@ -577,7 +610,51 @@ func (s *Server) servePullPage(ctx context.Context, tx storage.ReadTx, route pul
 	if err != nil {
 		return nil, cursorState{}, resetNone, err
 	}
+	if emitter.noAccess != nil {
+		// The client pulls again at once and receives the refusal, which the
+		// page after the resync's last one answers with.
+		resp.HasMore = true
+	}
 	return resp, next, resetNone, nil
+}
+
+// claimsGrants reports whether raw, the cursor of a pull by caller, names an
+// access record in which caller holds a permission. It reads only the
+// cursor, so a cursor it accepts can still fail to resync (see
+// lastGrantRefusal).
+func claimsGrants(raw []byte, caller *accessCaller) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var c syncplanecursorv1.Cursor
+	if proto.Unmarshal(raw, &c) != nil {
+		return false
+	}
+	return c.GetAccessPolicy() != 0 && c.GetAccessRef().GetGen() != 0 &&
+		c.GetAccessHash() != readAccessHash(&syncplanecursorv1.ReadAccess{Subjects: caller.subjects})
+}
+
+// lastGrantRefusal returns the refusal a pull answers with when the caller
+// holds no permission, or nil when the pull serves the page. A pull serves it
+// when its cursor was issued while the caller held a permission and the page
+// can resync from it, or when the cursor is inside such a resync: the resync
+// tombstones every row the caller no longer reads and sends a CallerAccess that
+// holds nothing, as an open stream does before the gate drops its scope. Each
+// page of it has has_more set, and the pull after its last page gets the
+// refusal. A pull whose cursor recorded no permission, or that would reset, gets
+// the refusal at once, so a caller that waits for its first grant keeps its
+// local copy.
+func lastGrantRefusal(e *rowEmitter, cur cursorState, route pullRoute, acc accessComparison) error {
+	if e.noAccess == nil {
+		return nil
+	}
+	if route.reset != resetNone || acc.reset != resetNone {
+		return e.noAccess
+	}
+	if cur.resync != nil || (acc.old != nil && acc.old.any()) {
+		return nil
+	}
+	return e.noAccess
 }
 
 // belowHorizon reports whether a change-feed position may have missed a

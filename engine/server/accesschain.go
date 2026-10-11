@@ -41,6 +41,10 @@ type accessChains struct {
 	// resync reads with what moved rows held when its cursor was issued.
 	overrides       map[anchorRow]chainEdge
 	withinOverrides map[anchorRow]rowWithin
+	// createdAfter, when not 0, makes a row created after that sequence read
+	// as one that does not exist, as it did at that sequence. The old side of
+	// a resync sets it to its cursor's position.
+	createdAfter uint64
 }
 
 // rowWithin is what the within checks that name a row's entity read of the
@@ -240,6 +244,11 @@ func (c *accessChains) load(at anchorRow) error {
 		case err != nil:
 			return err
 		case row.Deleted:
+		case c.createdAfter != 0 && row.CreatedVersion > c.createdAfter:
+			// The old side reads the rows that moved after its cursor from the
+			// move log. A row created after it with no row below is not
+			// logged, but a row that moved away from its key since can still
+			// name it on the old side.
 		default:
 			decoded, err := info.decode(row.Value)
 			if err != nil {

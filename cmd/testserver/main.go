@@ -16,8 +16,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
@@ -44,6 +46,8 @@ func main() {
 			"items a text field must give up before compaction rewrites its row (0 disables)")
 		access = flag.Bool("access", false,
 			"serve the access-model test schema instead of the default one; see access.go")
+		maxAccessDepth = flag.Int("max-access-depth", 0,
+			"Limits.MaxAccessDepth: the most access parent hops a permission reaches down (0 is the default)")
 	)
 	buildLogger := clilog.Flags(flag.CommandLine)
 	flag.Parse()
@@ -55,6 +59,16 @@ func main() {
 			clilog.Fatal(logger, "create temp dir", err)
 		}
 		defer os.RemoveAll(dir)
+		// The suites stop the server with a signal, and the serve loop never
+		// returns, so the defer above does not run. Without this every run
+		// leaves its database behind in the temp directory.
+		stop := make(chan os.Signal, 1)
+		signal.Notify(stop, syscall.SIGTERM, os.Interrupt)
+		go func() {
+			<-stop
+			os.RemoveAll(dir)
+			os.Exit(0)
+		}()
 		*dbPath = filepath.Join(dir, "sync.db")
 	}
 
@@ -70,6 +84,7 @@ func main() {
 		server.WithNotifyCoalescing(*notifyWindow),
 		server.WithChunkSize(*chunkSize),
 		server.WithLogger(logger),
+		server.WithLimits(server.Limits{MaxAccessDepth: *maxAccessDepth}),
 	}
 	if *access {
 		opts = append(opts, accessOptions()...)

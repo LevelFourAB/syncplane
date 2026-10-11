@@ -48,7 +48,11 @@ type Store interface {
 	// store; callers must not modify them.
 	//
 	// A Get is a signal the entry is live: implementations that evict by
-	// recency should count it as use.
+	// recency should count it as use, and implementations that expire
+	// entries by age should renew one that a Get still reads. A pull reads
+	// the membership entry and the access entry of the cursor it serves, the
+	// ones it reissues unchanged included, and a stream does so at least once
+	// an hour.
 	Get(ctx context.Context, workspaceID string, ref Ref) ([]byte, error)
 
 	// Put stores an entry under (workspaceID, ref). Refs are never reused for

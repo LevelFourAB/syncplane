@@ -19,10 +19,13 @@ import (
 // the ceiling on how long a client can stay away and still resume without a
 // re-bootstrap — sized to the same weeks-not-minutes order of magnitude
 // WithGC's retention guidance uses, since past either bound the client is
-// reset all the same.
+// reset all the same. A Get of an entry older than cursorStateRenewAfter
+// renews it, so an entry that a client keeps presenting does not age out
+// while the client is active.
 const (
 	cursorStateKeepPerLineage = 4
 	cursorStateRetention      = 30 * 24 * time.Hour
+	cursorStateRenewAfter     = cursorStateRetention / 4
 )
 
 // CursorStateStore returns a cursorstate.Store backed by this database, making
@@ -40,16 +43,29 @@ type cursorStateStore struct {
 }
 
 func (c *cursorStateStore) Get(ctx context.Context, workspaceID string, ref cursorstate.Ref) ([]byte, error) {
-	var state []byte
+	var (
+		state     []byte
+		writtenAt int64
+	)
 	err := c.s.read.QueryRowContext(ctx, `
-		SELECT state FROM cursor_state
+		SELECT state, written_at FROM cursor_state
 		WHERE workspace_id = ? AND id = ? AND gen = ?`,
-		workspaceID, int64(ref.ID), int64(ref.Gen)).Scan(&state)
+		workspaceID, int64(ref.ID), int64(ref.Gen)).Scan(&state, &writtenAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, cursorstate.ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("sqlitestore: cursor state: %w", err)
+	}
+	// Renewed on a read only once it has aged, so a client that pulls often
+	// costs one write per renewal period, not one per pull. A failed renewal
+	// costs nothing now: the next Get tries again.
+	now := time.Now().Unix()
+	if writtenAt < now-int64(cursorStateRenewAfter/time.Second) {
+		_, _ = c.s.write.ExecContext(ctx, `
+			UPDATE cursor_state SET written_at = ?
+			WHERE workspace_id = ? AND id = ? AND gen = ? AND written_at < ?`,
+			now, workspaceID, int64(ref.ID), int64(ref.Gen), now)
 	}
 	return state, nil
 }

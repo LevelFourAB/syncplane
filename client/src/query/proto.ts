@@ -192,20 +192,36 @@ export function condToProto(cond: Cond): Condition {
 	}
 }
 
-/** Proto → AST (wire paths). Throws on malformed messages. */
+/**
+ * The error for a condition of `kind` without an op, or with an op value this
+ * build does not declare: a newer query.proto can add one, and reading it as
+ * any known op could widen what the condition, or a not around it, admits.
+ */
+function opError(kind: string, op: number): Error {
+	return new Error(
+		op === 0
+			? `${kind} condition needs an op`
+			: `${kind} condition op ${op} is unknown to this client; upgrade the client before using it`,
+	);
+}
+
+/**
+ * Proto → AST (wire paths). Throws on malformed messages, and on an op value
+ * this build does not declare.
+ */
 export function condFromProto(cond: Condition): Cond {
 	const kind = cond.kind;
 	switch (kind.case) {
 		case 'cmp': {
 			const op = CMP_FROM_PROTO.get(kind.value.op);
-			if (!op) throw new Error('cmp condition needs an op');
+			if (!op) throw opError('cmp', kind.value.op);
 			return { kind: 'cmp', path: kind.value.path, op, value: scalarFromProto(kind.value.value) };
 		}
 		case 'in':
 			return { kind: 'in', path: kind.value.path, values: kind.value.values.map(scalarFromProto) };
 		case 'str': {
 			const op = STR_FROM_PROTO.get(kind.value.op);
-			if (!op) throw new Error('str condition needs an op');
+			if (!op) throw opError('str', kind.value.op);
 			return { kind: 'str', path: kind.value.path, op, value: kind.value.value };
 		}
 		case 'rep': {
@@ -222,7 +238,7 @@ export function condFromProto(cond: Condition): Cond {
 				case RepOp.IS_EMPTY:
 					return { kind: 'rep', path, op: 'isEmpty' };
 				default:
-					throw new Error('rep condition needs an op');
+					throw opError('rep', kind.value.op);
 			}
 		}
 		case 'exists': {
@@ -240,7 +256,7 @@ export function condFromProto(cond: Condition): Cond {
 				case PresentOp.IS_NOT_SET:
 					return { kind: 'present', path: kind.value.path, op: 'isNotSet' };
 				default:
-					throw new Error('present condition needs an op');
+					throw opError('present', kind.value.op);
 			}
 		}
 		case 'match':

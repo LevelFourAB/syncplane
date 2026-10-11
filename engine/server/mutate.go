@@ -32,9 +32,16 @@ import (
 // before the transaction opens. A ctx with no principal authorizes as
 // anonymous, which a deny-by-default policy refuses.
 //
+// Reads through the tx read as the caller's client would, as through
+// EntityTx.AsCaller: a row the caller may not read reads as absent, each field
+// a field guard hides from the caller reads as its zero value, and a Query
+// whose predicate or order names such a field fails with code
+// permission_denied. The first read, and the first after a write, calls
+// ReadFilter once for each registered entity inside the transaction.
+//
 // System work that has no caller to authorize — connectors, migrations, cron —
-// marks its ctx with Trusted, which skips both hooks. See Trusted for why the
-// bypass is opt-in.
+// marks its ctx with Trusted, which skips both hooks and reads every row
+// unfiltered. See Trusted for why the bypass is opt-in.
 //
 // This is the ONE place the engine consults a permission hook while holding a
 // lock, and it is confined here because nothing else can know fn's writes in

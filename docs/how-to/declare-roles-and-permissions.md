@@ -132,7 +132,7 @@ message TeamMember {
 }
 ```
 
-Then let `ProjectMember` name a user or a team. Make its subject a oneof, and keep the roles you have:
+Then let `ProjectMember` name a user or a team. Make its subject a oneof, and keep the roles you have. `user_id` and `role` keep their field numbers, and `team` gets a new one, so the rows you stored before still decode:
 
 ```proto
 message ProjectMember {
@@ -159,9 +159,9 @@ message ProjectMember {
 	Project project = 2;
 	oneof member {
 		string user_id = 3;
-		Team team = 4;
+		Team team = 5;
 	}
-	string role = 5;
+	string role = 4;
 }
 ```
 
@@ -256,7 +256,7 @@ message Folder {
 }
 ```
 
-A chain is at most `Limits.MaxAccessDepth` rows long (32 by default). The server refuses a folder moved below itself or below a chain that is already that long.
+A chain is at most `Limits.MaxAccessDepth` rows long (32 by default). The server refuses a folder moved below itself, or moved where it or a folder below it would sit deeper than that. A client that creates or moves a folder below another folder must read that folder.
 
 A row can sit below one of several entities, such as a comment on a task or on a doc. Name a oneof of references in `parents`. The case a row holds decides where it sits:
 
@@ -284,7 +284,7 @@ message Comment {
 
 The comment's rules apply in both cases. Add `view_comments` and `edit_comments` to the project roles and to the folder roles, so that a role in either tree reaches the comments below it. A reference message whose target is a oneof of entities works the same way: name the field that holds it. See [Polymorphic access parents](../reference/proto-options.md#polymorphic-access-parents).
 
-Registration refuses a schema with a permission no role grants, or a role that grants a permission nothing uses. Read the error: it names the permission and the entity.
+Registration refuses a schema with a permission that no role grants, and logs a warning for a permission that a role grants but nothing uses. The error and the warning name the permission and the entity.
 
 The TypeScript schema builder declares the same options with `access`, its `parents` included, and `grant`; see the [TypeScript client reference](../reference/typescript-client.md#access-model). The builder has no `oneof` and no enum fields, so a subject that is a user or a team, a polymorphic access parent and an enum role field need a proto schema.
 
@@ -541,11 +541,11 @@ Add `within` to a rule to admit only rows that sit within a row that passes a ch
 - A write that changes `private` or `owner_id` changes what other callers read below the project, so it needs, where the project is, a read rule of each entity below it. A caller that edits projects but cannot read their tasks cannot make a project public.
 - In a tree of one entity, such as folders inside folders, one row that passes is enough. A private inner folder below a folder that is not private does not hide its documents through such a rule.
 
-In the TypeScript schema builder, an entry with `callerIs` is a plain object. Build an entry with `when` through `schema.within`, which types the condition against the parent's fields. Pass a thunk, `() => project`, when `project` is declared after the entity:
+In the TypeScript schema builder, build each entry through `schema.within`, which types `callerIs` and `when` against the parent's fields. Pass a thunk, `() => project`, when `project` is declared after the entity:
 
 ```ts
 { read: true, requires: 'view_open_tasks', within: schema.within(() => project, { when: (p) => p.private.eq(false) }) },
-{ read: true, write: true, admitted: true, within: { entity: 'project', callerIs: 'ownerId' } },
+{ read: true, write: true, admitted: true, within: schema.within(() => project, { callerIs: 'ownerId' }) },
 ```
 
 In a tree of one entity, write `{ self: true, when }` for an entry on the entity's own rows. TypeScript types `when` against the entity's fields:
@@ -692,6 +692,7 @@ message Staff {
 - **A grant change resends the rows.** Give a caller `hr` and the next pull sends the rows again with the salary in them.
 - **A `PUT` keeps what the caller did not read.** An editor who writes back a whole row changes the name and keeps the stored salary, review and bonus.
 - **A field that decides access stays readable.** Registration refuses to hide a field that a rule checks with `caller_is` or `when`, so `person_id` stays visible here.
+- **Only a reader of the review changes who reads it.** A client write that changes `person_id` needs the right to read `review` before and after the write, so an editor cannot point a record at itself to read the review. To reassign a record, use a trusted write, such as a mutator body.
 
 On the client, `can(schema, key, 'read', { fields: [ 'salary' ] })` predicts whether the caller reads the field. See [Who reads a guarded field](../reference/proto-options.md#who-reads-a-guarded-field).
 
@@ -734,9 +735,13 @@ In the TypeScript schema builder, name each `ref()` or `refList()` field in `acc
 
 ### Moving and deleting rows that other rows sit below
 
-Rows below a row move with it. To move a task to another project, the caller needs one update rule that admits it at both projects, here the `write` rule with `edit_tasks`, and, at the old project, the read permission of every entity that can sit below a task, here `view_tasks` for the comments. Without the read permission a caller could carry rows it cannot read to a project where other people can read them.
+Rows below a row move with it. To move a task to another project, the caller needs one update rule that admits it at both projects, here the `write` rule with `edit_tasks`, and, at the old project, the right to read the task itself, each field of it a guard can hide, and every row of each entity that can sit below a task, here `view_tasks` for the task and the comments. A read rule with `caller_is` or `when`, such as "authors read their own comments", reads some rows only and does not count. Without these read rights a caller could carry rows and fields it cannot read to a project where it or other people can read them.
 
 A client cannot delete a row while a live row names it as its access parent. Delete or move the comments first; one batch can delete the comments and the task together. Trusted code can delete the task anyway, and its comments then sit below nothing, so only a caller who holds `view_tasks` at the workspace root reads them.
+
+A client cannot create a task with that key while those comments are live: the create is refused with `conflict`, so a new task does not take over the comments of the old one. The same applies to a row whose key a live grant row names. Delete or move the comments first, or create the row with trusted code, which puts the comments below it.
+
+A client `PATCH` or `DELETE` of a row that does not exist is refused with `access_denied`, the same answer as for a row the caller may not change. A client that deletes a row that another client deleted first therefore sees the delete in `onMutationRejected`.
 
 ## 4. Tell the server who the caller is
 
@@ -789,6 +794,25 @@ func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) 
 	return tx.AsCaller().Patch(&taskv1.Task{Id: id, Done: true}, []string{"done"}, nil)
 }
 ```
+
+Read through `tx.AsCaller()` too when the body passes on what it reads, for example in a rejection message. Such a read returns what the caller's client would receive: a row the caller cannot read is not found, and a field that a guard hides from the caller has its zero value. A query whose predicate or order names such a field fails with `permission_denied`:
+
+```go
+func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
+	id := args.(*taskv1.CompleteTaskArgs).GetTaskId()
+	var task taskv1.Task
+	found, err := tx.AsCaller().Get(&task, id)
+	if err != nil {
+		return err
+	}
+	if !found || task.GetDone() {
+		return server.Reject(server.CodeConflict, "the task is gone or already done")
+	}
+	return tx.AsCaller().Patch(&taskv1.Task{Id: id, Done: true}, []string{"done"}, nil)
+}
+```
+
+Reads through `tx` itself see every row and every field.
 
 Write through `tx` itself where the body must do what the caller cannot, such as giving the creator of a project its first admin grant. To ask about a permission that no rule checks, use `tx.Can("approve_tasks", &taskv1.Task{}, key)`. Add the permission to the `grants` of each role that gives it. Registration logs a warning for a permission that no rule uses. If no role grants the permission, `tx.Can` returns `server.ErrUnknownPermission`.
 

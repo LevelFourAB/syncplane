@@ -121,6 +121,28 @@ repeated Item items = 5 [(syncplane.v1.field_behavior) = { key_field: [ "id" ] o
 | `workspace`        | `bool`     | Inside a reference message, marks the string field that names the workspace the referenced row lives in. Empty means the holder's own workspace. Valid on one singular `string` field of a message carrying `(syncplane.v1.reference)`. See [References](#references).                                                                                                                                                                                                                                                                                                              |
 | `reverse_relation` | `string`   | Names the reverse relation this reference adds to its target entity. Empty means `<plural(holder entity)>By<Field>`, such as `issuesByAssignee`. Valid on a reference field declared on an entity, including a member of a oneof. See [Reverse relations](#reverse-relations).                                                                                                                                                                                                                                                                                                      |
 
+### Option fields the server does not know
+
+Registration refuses an entity whose `(syncplane.v1.entity)` options, or the
+`(syncplane.v1.field_behavior)` of a field in its shape, carry a field that
+the server does not know, at any depth. A descriptor set built against a newer
+`options.proto` can carry one. The error names the entity, the field and the
+field number. Upgrade the server before the schema uses the new option.
+
+Registration also refuses the write policies that the [access model](#access-model)
+replaced. A descriptor set built against an older `options.proto` can still
+carry them:
+
+| Option                        | Field number | Replace it with                                                      |
+| ----------------------------- | ------------ | -------------------------------------------------------------------- |
+| `EntityOptions.delete_policy` | 4            | `access` on the entity, with rules for the operations callers may do |
+| `EntityOptions.create_policy` | 7            | `access` on the entity, with rules for the operations callers may do |
+| `EntityOptions.update_policy` | 8            | `access` on the entity, with rules for the operations callers may do |
+| `FieldBehavior.write_policy`  | 8            | a [field guard](#field-guards) that names the field                  |
+
+An operation that no rule names, and a field operation that no rule of its
+guard admits, are open only to trusted writes.
+
 ## References
 
 A message-typed field whose (element) message is an entity is a **reference**. The stored row keeps only the target's key fields; the live target row resolves on read. A reference resolves inside the workspace of the row that holds it: a stub carries key fields alone, which identify a row within one partition only.
@@ -681,10 +703,11 @@ A guard decides per row and per caller. The server clears each field the caller 
 A request may not name a field that the caller does not read on every row it reads: a read rule of the guard that needs no permission and sets no check, or whose permissions the caller holds at the workspace root. Otherwise the server refuses it with `PermissionDenied`:
 
 - a `Query` predicate, `order_by`, `group_by` or facet, including the inner condition of a `rel` on the target entity;
+- the `Where` or `OrderBy` of a `query.Spec` that `ViewTx.Query` or `ApplyTx.Query` runs for a caller, including the inner condition of a `rel` on the target entity;
 - a subscription predicate, a window's `order_by`, or a reference that a `follow` path walks;
 - a `match` condition or a relevance order, when the guard restricts a search field.
 
-A subscription that a grant change makes refused fails on the next pull.
+A subscription that the client's cursor already holds is not refused when a grant change hides a field it names. While the field stays hidden, it selects no row, its window holds no row, and its `follow` paths reach no row: the next pull removes the rows it selected, and sync goes on. Once the caller reads the field again, the next pull sends them again. A subscription that the cursor does not hold is refused.
 
 Reading and writing are separate, so a caller can write a field it may not read. A `PATCH` whose mask names the field sets it. A `PUT` that updates a row keeps the stored value of each such field that it leaves unset, so a client that writes back a row it received does not clear what it never saw. A `PUT` that sets such a field writes it, when a guard rule admits the caller. To clear a field the caller may not read, use a `PATCH`.
 
@@ -886,9 +909,9 @@ message ProjectMember {
 	Project project = 2;
 	oneof member {
 		string user_id = 3;
-		Team team = 4;
+		Team team = 5;
 	}
-	string role = 5;
+	string role = 4;
 }
 ```
 
@@ -910,7 +933,7 @@ Registration refuses a schema that uses the model when:
 
 - An entity declares no `access` and the server is built with `WithStrictAccess`.
 - An `access` declares no rule, or two rules with the same operation flags, source and checks.
-- A rule's `when` condition does not compile against the entity, or uses a `rel` or `match` condition.
+- A rule's `when` condition does not compile against the entity, uses a `rel` or `match` condition, or uses an operator value that the server does not know.
 - A rule's `within` entry names no entity, sets neither `caller_is` nor `when`, repeats another entry of the rule, names an entity that is not in the model or whose rows the rule's rows cannot sit below (the rule's own entity counts only when its rows sit below rows of their own), names a `caller_is` that is not a top-level, singular `string` field of that entity, or has a `when` condition that does not compile against that entity or uses a `rel` or `match` condition.
 - A rule sets no operation flag, sets neither `requires` nor `admitted`, sets both, or names one permission twice in `requires`.
 - An entry of `parents` names a field or oneof that does not exist, a member of a oneof, a map, a field that is not a reference, or a workspace-qualified reference, or names a field or oneof that another entry names.
@@ -932,7 +955,9 @@ Registration refuses a schema that uses the model when:
 - A permission or role name breaks the [naming rules](naming.md#permission-and-role-names).
 - The `access`, rule, `admitted`, `within`, `guard`, `grant`, role or `members` options carry fields the server does not know, which a newer `options.proto` can write.
 
-`RegisterDescriptorSet` and `New` refuse a schema that breaks a rule. `RegisterEntity` adds one entity at a time, so a schema it builds can break a rule until its last entity is registered. While it does, every request to the server fails with `failed_precondition`.
+`RegisterDescriptorSet` and `New` refuse a schema that breaks a rule. `RegisterEntity` adds one entity at a time, so it accepts an entity that leaves the schema incomplete: the schema names an entity that is not registered yet, or a permission that no registered role grants yet. While the schema is incomplete, every request to the server fails with `failed_precondition`. Trusted writes still run, and the engine records their moves and refuses a cycle or a too deep chain under the last schema that compiled. `RegisterEntity` refuses an entity that breaks any other rule, and the server keeps serving the schema it served before.
+
+Registration logs a warning for each mutator that declares no `MutatorAccess`. In a schema that uses the model, only a trusted caller can invoke such a mutator, and every client invocation is refused with `access_denied`. Declare `server.MutatorAccess{TrustedOnly: true}` on a mutator that only trusted callers invoke: it is refused the same way, and registration logs nothing for it.
 
 Registration logs a warning when a rule never decides an operation, because another rule of the entity names it and admits every caller and row the first one admits. A rule that needs `edit_tasks` and `use_billing` never decides beside one that needs `edit_tasks` alone. It also logs a warning when a rule needs two permissions and every role that grants one grants the other: the rule then admits the same callers as a rule that needs the first alone.
 
@@ -942,7 +967,7 @@ Registration logs a warning when a role grants a permission that no rule and no 
 
 ### Changing the access model
 
-A registration that changes the access model of an entity that is already registered is refused unless the caller allows it. A change is any change to the entity's `access` (its guards and parents included), `grant` or `members` options, or to the numbers of the enum values its role field matches, which includes adding `access` to an entity that had none or removing it. A change to the order of the rules or of the parents is not a change, and neither is a change to `includes` that leaves each role with the same permissions. Allow it with `server.AllowAccessChange()` on `RegisterDescriptorSet`, `RegisterEntity`, `RegisterDynamicEntity` and `Manager.Register`, `allow_access_change` on `AdminService.Register`, or `allowAccessChange` on the TypeScript `registerSchema`.
+A registration that changes the access model of an entity that is already registered is refused unless the caller allows it. A change is any change to the entity's `access` (its guards and parents included), `grant` or `members` options, to which of its fields carry the `creator` mark, or to the numbers of the enum values its role field matches, which includes adding `access` to an entity that had none or removing it. A change to the order of the rules or of the parents is not a change, and neither is a change to `includes` that leaves each role with the same permissions. Allow it with `server.AllowAccessChange()` on `RegisterDescriptorSet`, `RegisterEntity`, `RegisterDynamicEntity` and `Manager.Register`, `allow_access_change` on `AdminService.Register`, or `allowAccessChange` on the TypeScript `registerSchema`.
 
 A registration that declares the first role of a schema that served callers without one, or removes its last role, is refused the same way, even when no entity that was registered before changes. This includes a schema that did not use the access model before. A schema without a role admits every caller that `CanAccessWorkspace` lets in, and a schema with one admits only a caller that holds a permission, so the change decides who enters every workspace. The first registration of a server that holds no entity yet needs no flag. A run of `RegisterEntity` calls that leaves the model incomplete for a time is compared with the last schema that served callers.
 

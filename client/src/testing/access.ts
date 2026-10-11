@@ -1,7 +1,22 @@
-import { create, type DescMessage } from '@bufbuild/protobuf';
+import { create, type DescMessage, toBinary } from '@bufbuild/protobuf';
 
-import { accessParentFields, type AnchoredRow, anchorGroupsOf, compareUtf8 } from '../access.js';
-import { type CallerAccess, CallerAccessSchema } from '../gen/syncplane/v1/service_pb.js';
+import {
+	accessParentFields,
+	type AnchoredRow,
+	anchorGroupsOf,
+	compareUtf8,
+	MAX_ACCESS_CHAIN,
+} from '../access.js';
+import {
+	type AnchorGroup,
+	AnchorGroupSchema,
+	type AnchorRows,
+	AnchorRowsSchema,
+	type CallerAccess,
+	type CallerAccessDelta,
+	CallerAccessDeltaSchema,
+	CallerAccessSchema,
+} from '../gen/syncplane/v1/service_pb.js';
 import { entityOptionsOf, refShapes } from '../mutations.js';
 
 /**
@@ -153,9 +168,13 @@ export class RoleTable {
 /**
  * The CallerAccess a server sends for `access`, with seq 0: each anchored row
  * once, in the group of the permissions held there and not at the root, and
- * every list sorted.
+ * every list sorted. It carries `maxAccessDepth` as the server's
+ * MaxAccessDepth. Its version is {@link accessVersionOf} of it.
  */
-export function callerAccessOf(access: Omit<TestCallerAccess, 'roles'>): CallerAccess {
+export function callerAccessOf(
+	access: Omit<TestCallerAccess, 'roles'>,
+	maxAccessDepth = MAX_ACCESS_CHAIN,
+): CallerAccess {
 	const root = new Set<string>();
 	for (const p of access.permissions ?? []) {
 		if (p.root === true) root.add(p.permission);
@@ -180,9 +199,82 @@ export function callerAccessOf(access: Omit<TestCallerAccess, 'roles'>): CallerA
 			anchored.push({ entity, key, permissions: [ ...held ].sort(compareUtf8) });
 		}
 	}
-	return create(CallerAccessSchema, {
+	const out = create(CallerAccessSchema, {
 		subjects: [ ...(access.subjects ?? []) ],
 		rootPermissions: [ ...root ].sort(compareUtf8),
 		anchorGroups: anchorGroupsOf(anchored),
+		maxAccessDepth,
+	});
+	out.version = accessVersionOf(out);
+	return out;
+}
+
+/**
+ * A CallerAccess.version for `access`: equal summaries, apart from seq and
+ * version, give equal versions, and the result is never 0. A 64-bit FNV-1a
+ * hash of the encoded summary; the real server uses another hash, which a
+ * client cannot tell apart, as a version is opaque to it.
+ */
+export function accessVersionOf(access: CallerAccess): bigint {
+	const raw = toBinary(CallerAccessSchema, { ...access, seq: 0n, version: 0n });
+	let hash = 0xcbf29ce484222325n;
+	for (const byte of raw) hash = BigInt.asUintN(64, (hash ^ BigInt(byte)) * 0x100000001b3n);
+	return hash | 1n;
+}
+
+/**
+ * The change from `held` to `now` as a CallerAccessDelta, with seq 0 and the
+ * versions of the two, or `undefined` when no delta can carry it: the
+ * subjects, the root permissions or the max access depth differ. Built as the real server builds
+ * it, so its groups and rows are in the order CallerAccess documents.
+ */
+export function accessDeltaOf(
+	held: CallerAccess,
+	now: CallerAccess,
+): CallerAccessDelta | undefined {
+	const same = (a: readonly string[], b: readonly string[]) =>
+		a.length === b.length && a.every((x, i) => x === b[i]);
+	if (
+		!same(held.subjects, now.subjects) || !same(held.rootPermissions, now.rootPermissions)
+		|| held.maxAccessDepth !== now.maxAccessDepth
+	) {
+		return undefined;
+	}
+	const before = new Map<string, readonly string[]>();
+	for (const group of held.anchorGroups) {
+		for (const rows of group.anchors) {
+			for (const key of rows.keys) before.set(`${rows.entity}\u0000${key}`, group.permissions);
+		}
+	}
+	const changed: AnchorGroup[] = [];
+	for (const group of now.anchorGroups) {
+		const anchors: AnchorRows[] = [];
+		for (const rows of group.anchors) {
+			const keys = rows.keys.filter((key) => {
+				const id = `${rows.entity}\u0000${key}`;
+				const perms = before.get(id);
+				before.delete(id);
+				return perms === undefined || !same(perms, group.permissions);
+			});
+			if (keys.length > 0) anchors.push(create(AnchorRowsSchema, { entity: rows.entity, keys }));
+		}
+		if (anchors.length > 0) {
+			changed.push(create(AnchorGroupSchema, { permissions: [ ...group.permissions ], anchors }));
+		}
+	}
+	const removed = new Map<string, string[]>();
+	for (const id of before.keys()) {
+		const [ entity, key ] = id.split('\u0000') as [string, string];
+		let keys = removed.get(entity);
+		if (keys === undefined) removed.set(entity, keys = []);
+		keys.push(key);
+	}
+	return create(CallerAccessDeltaSchema, {
+		baseVersion: held.version,
+		version: now.version,
+		anchorGroups: changed,
+		removed: [ ...removed ]
+			.sort(([ a ], [ b ]) => compareUtf8(a, b))
+			.map(([ entity, keys ]) => create(AnchorRowsSchema, { entity, keys: keys.sort(compareUtf8) })),
 	});
 }

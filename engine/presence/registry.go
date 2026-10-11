@@ -146,10 +146,12 @@ type record struct {
 // Close runs or the Registry shuts down, which is how a stream learns to end.
 type Watch struct {
 	reg       *Registry
+	issuer    string
 	subject   string
 	sessionID string
 	// fronted is every session this stream keeps alive, sessionID included. It
-	// is fixed for the stream's life and read without a lock, as is subject.
+	// is fixed for the stream's life and read without a lock, as are issuer
+	// and subject.
 	fronted map[string]struct{}
 	out     *outbox
 
@@ -158,15 +160,17 @@ type Watch struct {
 	closed bool
 }
 
-// Open registers a stream that subject opened for sessionID, plus any further
-// sessions it is responsible for. Those ids are what records are keyed on, and
-// holding them here is what makes this node re-announce them.
+// Open registers a stream that the principal of issuer and subject opened for
+// sessionID, plus any further sessions it is responsible for. Those ids are
+// what records are keyed on, and holding them here is what makes this node
+// re-announce them.
 //
-// The stream keeps alive only the records written under subject. A session id
-// is shown to every watcher of a room, so naming one is no proof of owning it:
-// a stream that names a session whose record another subject wrote does not
-// re-announce that record, and the record expires when its owner's streams are
-// gone.
+// The stream keeps alive only the records written under the same issuer and
+// subject. A session id is shown to every watcher of a room, so naming one is
+// no proof of owning it: a stream that names a session whose record another
+// owner wrote does not re-announce that record, and the record expires when
+// its owner's streams are gone. Two issuers' principals with one subject are
+// two owners.
 //
 // A browser shares one stream across an account's tabs and the tabs that are
 // not holding it still publish, so fronting several sessions is the normal
@@ -175,7 +179,7 @@ type Watch struct {
 //
 // The returned Watch must be closed when the stream ends; leaving it open
 // leaves this node re-announcing records for sessions that are gone.
-func (r *Registry) Open(subject, sessionID string, fronted ...string) *Watch {
+func (r *Registry) Open(issuer, subject, sessionID string, fronted ...string) *Watch {
 	all := make(map[string]struct{}, len(fronted)+1)
 	all[sessionID] = struct{}{}
 	for _, id := range fronted {
@@ -183,6 +187,7 @@ func (r *Registry) Open(subject, sessionID string, fronted ...string) *Watch {
 	}
 	return &Watch{
 		reg:       r,
+		issuer:    issuer,
 		subject:   subject,
 		sessionID: sessionID,
 		fronted:   all,
@@ -306,9 +311,10 @@ func (r *Registry) Publish(ctx context.Context, ev Event) error {
 // Announce interval, and does two things in one pass:
 //
 //   - Re-announces every record whose session has a Watch stream on this node
-//     opened by the record's subject, so the other nodes keep it alive. The record's own revision is carried
-//     unchanged, so an announcement that overtakes a newer state is discarded
-//     by revision rather than winning.
+//     opened by the record's owner, its issuer and subject, so the other nodes
+//     keep it alive. The record's own revision is carried unchanged, so an
+//     announcement that overtakes a newer state is discarded by revision
+//     rather than winning.
 //   - Drops every record that has gone an expiry window without being written
 //     or re-announced, reporting it to local watchers as a departure.
 //
@@ -329,7 +335,7 @@ func (r *Registry) Sweep(ctx context.Context) {
 	var announce []Event
 	for _, rm := range r.rooms {
 		for sid, rec := range rm.participants {
-			if rm.ownsLocked(sid, rec.p.Subject) {
+			if rm.ownsLocked(sid, rec.p) {
 				rec.seenAt = now
 				announce = append(announce, Event{
 					Topic:       rm.topic,
@@ -469,12 +475,12 @@ func (r *Registry) apply(ev Event) {
 		if !ok {
 			return
 		}
-		// A record belongs to its subject. On a multi-node bus a session id is
-		// known to every watcher, so a withdrawal stamped with a different
-		// subject is a foreign node writing into a slot it does not own, not the
-		// owner leaving. Ignore it; the owner's node keeps re-announcing the
-		// record and the roster stays honest.
-		if held.p.Subject != ev.Participant.Subject {
+		// A record belongs to its issuer and subject. On a multi-node bus a
+		// session id is known to every watcher, so a withdrawal stamped with a
+		// different owner is a foreign node writing into a slot it does not
+		// own, not the owner leaving. Ignore it; the owner's node keeps
+		// re-announcing the record and the roster stays honest.
+		if !sameOwner(held.p, ev.Participant) {
 			return
 		}
 		rm.removeLocked(ev.Participant.SessionID)
@@ -489,12 +495,13 @@ func (rm *room) upsertLocked(ev Event, maxParticipants int, now time.Time) {
 	sid := ev.Participant.SessionID
 	held, exists := rm.participants[sid]
 	if exists {
-		// A record belongs to the subject that created it, and only that subject
-		// may overwrite it — checked before the revision, so a spoof at a high
-		// revision cannot raise the ceiling the owner then has to climb past.
-		// First-writer sets the owner, so an unheld session is still admitted
-		// below; that is what lets a record arriving from another node land.
-		if held.p.Subject != ev.Participant.Subject {
+		// A record belongs to the issuer and subject that created it, and only
+		// that owner may overwrite it — checked before the revision, so a spoof
+		// at a high revision cannot raise the ceiling the owner then has to
+		// climb past. First-writer sets the owner, so an unheld session is
+		// still admitted below; that is what lets a record arriving from
+		// another node land.
+		if !sameOwner(held.p, ev.Participant) {
 			return
 		}
 		if ev.Participant.Revision < held.p.Revision {
@@ -552,6 +559,7 @@ func (rm *room) removeLocked(sid string) {
 		Kind:  KindLeave,
 		Participant: Participant{
 			SessionID: sid,
+			Issuer:    rec.p.Issuer,
 			Subject:   rec.p.Subject,
 		},
 	})
@@ -566,18 +574,19 @@ func (rm *room) fanOutLocked(ev Event) {
 	}
 }
 
-// ownsLocked reports whether a local stream of subject for this session is
-// watching this topic, which is what makes this node responsible for
-// re-announcing the session's record here. Membership in watchers IS the
-// answer: a stream is added on Join and removed on Leave and Close.
+// ownsLocked reports whether a local stream of p's owner, its issuer and
+// subject, for this session is watching this topic, which is what makes this
+// node responsible for re-announcing the session's record here. Membership in
+// watchers IS the answer: a stream is added on Join and removed on Leave and
+// Close.
 //
-// The subject is part of the match because every watcher learns every session
+// The owner is part of the match because every watcher learns every session
 // id in its rooms. Matched on the id alone, a stranger's stream that names an
 // id would keep the record of a departed session alive for as long as the
 // stranger stays connected.
-func (rm *room) ownsLocked(sid, subject string) bool {
+func (rm *room) ownsLocked(sid string, p Participant) bool {
 	for w := range rm.watchers {
-		if w.subject != subject {
+		if w.issuer != p.Issuer || w.subject != p.Subject {
 			continue
 		}
 		if _, fronted := w.fronted[sid]; fronted {
@@ -585,6 +594,12 @@ func (rm *room) ownsLocked(sid, subject string) bool {
 		}
 	}
 	return false
+}
+
+// sameOwner reports whether a and b were written by one principal: the same
+// issuer and the same subject.
+func sameOwner(a, b Participant) bool {
+	return a.Issuer == b.Issuer && a.Subject == b.Subject
 }
 
 // snapshotLocked renders the roster, ordered by session id so every watcher of

@@ -84,6 +84,7 @@ import {
 	file_syncplane_v1_query,
 } from '../gen/syncplane/v1/query_pb.js';
 import {
+	RESERVED_ENTITY_PREFIX,
 	validateEntityName,
 	validatePermissionName,
 	validateRelationName,
@@ -909,8 +910,8 @@ export type GuardRuleDecl<F extends Fields = Fields> =
  * {@link SelfWithinDecl}. `callerIs` names a singular `text()` field of that
  * entity, by accessor name, that must hold one of the caller's subjects;
  * `when` is a condition that row must match, and reads only that row. At
- * least one of the two is set. Build an entry with `when` through
- * {@link within}, which types the condition against the entity's fields. A
+ * least one of the two is set. A rule takes the entry as {@link within}
+ * builds it, which types `callerIs` and `when` against the entity's fields. A
  * permission held at the root does not skip the check.
  *
  * A write to a row that changes whether it passes changes what the rows below
@@ -928,7 +929,12 @@ export type GuardRuleDecl<F extends Fields = Fields> =
  *   access: {
  *     parents: [ 'doc' ],
  *     allow: [
- *       { read: true, write: true, admitted: true, within: { entity: 'doc', callerIs: 'ownerId' } },
+ *       {
+ *         read: true,
+ *         write: true,
+ *         admitted: true,
+ *         within: schema.within(() => doc, { callerIs: 'ownerId' }),
+ *       },
  *     ],
  *   },
  * });
@@ -937,9 +943,17 @@ export type GuardRuleDecl<F extends Fields = Fields> =
 export interface WithinDecl<F extends Fields = Fields> {
 	entity: string | (() => EntitySchema);
 	self?: never;
-	callerIs?: Extract<keyof F, string>;
+	callerIs?: TextKeys<F>;
 	when?(row: QueryRef<RowOf<F>>): Cond;
 }
+
+declare const checkedWithin: unique symbol;
+
+/**
+ * A {@link WithinDecl} that {@link within} built, with its checks typed
+ * against the fields of the entity it names: the form an access rule takes.
+ */
+export type CheckedWithinDecl = WithinDecl & { readonly [checkedWithin]: true };
 
 /**
  * A within entry on rows of the rule's own entity, for an entity whose rows
@@ -973,8 +987,11 @@ export interface SelfWithinDecl<F extends Fields = Fields> {
 	when?(row: QueryRef<RowOf<F>>): Cond;
 }
 
-/** One entry of an access rule's `within`: {@link WithinDecl} or {@link SelfWithinDecl}. */
-export type WithinEntry<F extends Fields = Fields> = WithinDecl | SelfWithinDecl<F>;
+/**
+ * One entry of an access rule's `within`: a {@link CheckedWithinDecl} from
+ * {@link within}, or a {@link SelfWithinDecl}.
+ */
+export type WithinEntry<F extends Fields = Fields> = CheckedWithinDecl | SelfWithinDecl<F>;
 
 /**
  * Builds a within entry on rows of `target`, with `when` typed against its
@@ -1018,8 +1035,11 @@ export type WithinEntry<F extends Fields = Fields> = WithinDecl | SelfWithinDecl
 export function within<F extends Fields>(
 	target: EntitySchema<F> | (() => EntitySchema<F>),
 	checks: Omit<WithinDecl<F>, 'entity' | 'self'>,
-): WithinDecl {
-	return { ...checks, entity: typeof target === 'function' ? target : target.name } as WithinDecl;
+): CheckedWithinDecl {
+	return {
+		...checks,
+		entity: typeof target === 'function' ? target : target.name,
+	} as WithinDecl as CheckedWithinDecl;
 }
 
 /**
@@ -1152,6 +1172,12 @@ export function entity<F extends Fields>(
 	// The name reaches the wire, storage and the KV key layout, and is lowered to
 	// a proto message name below — the shared rule (naming.ts) covers all of it.
 	validateEntityName(name, 'entity()');
+	if (name.startsWith(RESERVED_ENTITY_PREFIX)) {
+		throw new Error(
+			`entity(): entity name "${name}" starts with "${RESERVED_ENTITY_PREFIX}", `
+				+ "which is reserved for the engine's own entities",
+		);
+	}
 	assertFields(`entity "${name}"`, fields);
 
 	let keyCount = 0;
@@ -1835,7 +1861,20 @@ function validateWithinTargets(entities: readonly EntitySchema[]): void {
 						throw new Error(`${where}: callerIs field "${w.callerIs}" must be a singular text() field`);
 					}
 				}
-				whenOf(where, w.when, target.fields);
+				const when = whenOf(where, w.when, target.fields);
+				// A client decides the entry from the rows it holds, so a field
+				// the entry checks must reach every reader of the target's rows.
+				const reads = when === undefined ? [] : conditionHeads(when);
+				if (w.callerIs !== undefined) reads.push(snakeCase(w.callerIs));
+				const hideable = new Set(hideableFields(target.access?.guard ?? []).map(snakeCase));
+				for (const field of reads) {
+					if (hideable.has(field)) {
+						throw new Error(
+							`${where}: reads "${field}" of entity "${target.name}", which a guard can hide; `
+								+ 'a field that a within entry checks is one every reader of the row reads',
+						);
+					}
+				}
 			});
 		});
 		if (lazy) assertAccessRules(`entity "${e.name}"`, e.name, e.access!, e.fields, true);

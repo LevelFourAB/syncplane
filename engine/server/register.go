@@ -8,12 +8,14 @@ import (
 	"log/slog"
 	"sort"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 
+	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/internal/protoopts"
 )
 
@@ -43,6 +45,9 @@ type RegisterResult struct {
 // google/protobuf/descriptor.proto and syncplane/v1/options.proto ahead of the
 // synthesized entity files, so the whole schema resolves from these bytes
 // with no codegen.
+//
+// Each entity is checked as RegisterEntity checks it, so a reserved name or an
+// option field this server does not know refuses the whole set.
 //
 // Re-registration is idempotent and additive (see registerDescriptorSet):
 // an identical set is a no-op, appended fields/new entities upsert, and a
@@ -283,4 +288,159 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// removedEntityOptions names, by field number, the EntityOptions fields that
+// the access model replaced. options.proto reserves the numbers, so this
+// server reads them as unknown fields.
+var removedEntityOptions = map[protowire.Number]string{
+	4: "delete_policy",
+	7: "create_policy",
+	8: "update_policy",
+}
+
+// removedFieldWritePolicy is the FieldBehavior field number of write_policy,
+// which the field guards of the access model replaced.
+const removedFieldWritePolicy protowire.Number = 8
+
+// refuseStaleOptions refuses an entity whose (syncplane.v1.entity) options,
+// or the (syncplane.v1.field_behavior) of any field in its shape, carry a
+// field this server does not know. A removed write policy gets an error that
+// says what replaces it. Dropping such a field would silently give every
+// admitted caller a write that the policy kept to trusted writes, and a field
+// from a newer options.proto can narrow access or change merge semantics.
+//
+// It checks only the fields directly on the two option messages. The option
+// messages inside them are checked where they are read, and then once more by
+// refuseUnknownNestedOptions.
+func refuseStaleOptions(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions) error {
+	for _, n := range unknownNumbers(eo.ProtoReflect().GetUnknown()) {
+		if name, ok := removedEntityOptions[n]; ok {
+			return fmt.Errorf("server: entity %q sets %s (field %d of EntityOptions), which this server no longer reads: "+
+				"declare an access option on the entity instead, with rules for the operations callers may do; "+
+				"an operation that no rule names is open only to trusted writes", eo.GetName(), name, n)
+		}
+		return fmt.Errorf("server: entity %q options carry field %d, which this server does not know; "+
+			"upgrade the server before using it", eo.GetName(), n)
+	}
+	return walkFieldBehaviors(desc, func(fd protoreflect.FieldDescriptor, b *syncplanev1.FieldBehavior) error {
+		for _, n := range unknownNumbers(b.ProtoReflect().GetUnknown()) {
+			if n == removedFieldWritePolicy {
+				return fmt.Errorf("server: entity %q field %q sets write_policy (field %d of FieldBehavior), which this server no longer reads: "+
+					"name the field in a guard of the entity's access option instead; "+
+					"a field operation that no rule of the guard admits is open only to trusted writes",
+					eo.GetName(), fd.FullName(), n)
+			}
+			return fmt.Errorf("server: entity %q field %q behavior carries field %d, which this server does not know; "+
+				"upgrade the server before using it", eo.GetName(), fd.FullName(), n)
+		}
+		return nil
+	})
+}
+
+// refuseUnknownNestedOptions refuses an entity whose (syncplane.v1.entity)
+// options, or the (syncplane.v1.field_behavior) of any field in its shape,
+// hold an option message at any depth that carries fields this server does
+// not know.
+func refuseUnknownNestedOptions(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions) error {
+	if path := unknownOptionPath(eo.ProtoReflect(), "options"); path != "" {
+		return fmt.Errorf("server: entity %q %s carries option fields this server does not know; "+
+			"upgrade the server before using them", eo.GetName(), path)
+	}
+	return walkFieldBehaviors(desc, func(fd protoreflect.FieldDescriptor, b *syncplanev1.FieldBehavior) error {
+		if path := unknownOptionPath(b.ProtoReflect(), "behavior"); path != "" {
+			return fmt.Errorf("server: entity %q field %q %s carries option fields this server does not know; "+
+				"upgrade the server before using them", eo.GetName(), fd.FullName(), path)
+		}
+		return nil
+	})
+}
+
+// walkFieldBehaviors calls fn with the field behavior of each field of desc
+// that carries one, and of each field of the messages nested in desc. It does
+// not enter entity-typed fields: those are other entities, checked when they
+// register.
+func walkFieldBehaviors(desc protoreflect.MessageDescriptor, fn func(protoreflect.FieldDescriptor, *syncplanev1.FieldBehavior) error) error {
+	seen := map[protoreflect.FullName]bool{}
+	var walk func(md protoreflect.MessageDescriptor) error
+	walk = func(md protoreflect.MessageDescriptor) error {
+		seen[md.FullName()] = true
+		fields := md.Fields()
+		for i := 0; i < fields.Len(); i++ {
+			fd := fields.Get(i)
+			if b := fieldBehaviorOf(fd); b != nil {
+				if err := fn(fd, b); err != nil {
+					return err
+				}
+			}
+			var sub protoreflect.MessageDescriptor
+			switch {
+			case fd.IsMap():
+				if fd.MapValue().Kind() == protoreflect.MessageKind {
+					sub = fd.MapValue().Message()
+				}
+			case fd.Kind() == protoreflect.MessageKind:
+				sub = fd.Message()
+			}
+			if sub == nil || seen[sub.FullName()] || protoopts.Entity(sub) != nil {
+				continue
+			}
+			if err := walk(sub); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(desc)
+}
+
+// unknownOptionPath returns the path, below root, of the first message in m
+// that carries unknown fields, or "" when no message does.
+func unknownOptionPath(m protoreflect.Message, root string) string {
+	if len(m.GetUnknown()) > 0 {
+		return root
+	}
+	var found string
+	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		at := root + "." + string(fd.Name())
+		switch {
+		case fd.IsMap():
+			if fd.MapValue().Kind() == protoreflect.MessageKind {
+				v.Map().Range(func(k protoreflect.MapKey, mv protoreflect.Value) bool {
+					found = unknownOptionPath(mv.Message(), fmt.Sprintf("%s[%v]", at, k.Interface()))
+					return found == ""
+				})
+			}
+		case fd.IsList():
+			if fd.Kind() == protoreflect.MessageKind {
+				for i := 0; i < v.List().Len() && found == ""; i++ {
+					found = unknownOptionPath(v.List().Get(i).Message(), fmt.Sprintf("%s[%d]", at, i))
+				}
+			}
+		case fd.Kind() == protoreflect.MessageKind:
+			found = unknownOptionPath(v.Message(), at)
+		}
+		return found == ""
+	})
+	return found
+}
+
+// unknownNumbers returns the field numbers in raw, the unknown fields of a
+// message, in order. It stops at the first field it cannot parse, which a
+// message decoded from valid bytes never carries.
+func unknownNumbers(raw []byte) []protowire.Number {
+	var out []protowire.Number
+	for len(raw) > 0 {
+		n, typ, tagLen := protowire.ConsumeTag(raw)
+		if tagLen < 0 {
+			break
+		}
+		valLen := protowire.ConsumeFieldValue(n, typ, raw[tagLen:])
+		if valLen < 0 {
+			break
+		}
+		out = append(out, n)
+		raw = raw[tagLen+valLen:]
+	}
+	return out
 }

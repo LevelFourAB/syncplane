@@ -17,6 +17,7 @@ import {
 	accessRowId,
 	AccessSummary,
 	decideRules,
+	MAX_ACCESS_CHAIN,
 	parentRefsOf,
 	type RuleRow,
 	ruleRowOf,
@@ -36,6 +37,9 @@ import {
 	type BootstrapRequest,
 	BootstrapResponseSchema,
 	type CallerAccess,
+	type CallerAccessDelta,
+	CallerAccessDeltaSchema,
+	CallerAccessSchema,
 	MutationStatus,
 	type PullRequest,
 	type PushRequest,
@@ -53,7 +57,7 @@ import {
 	mergeTextFieldsInto,
 	textSchemaPathOf,
 } from '../mutations.js';
-import { callerAccessOf, RoleTable, type TestCallerAccess } from './access.js';
+import { accessDeltaOf, callerAccessOf, RoleTable, type TestCallerAccess } from './access.js';
 
 /** The workspace the kit reads and writes when none is named. */
 export const DEFAULT_WORKSPACE = 'main';
@@ -143,6 +147,13 @@ export interface TestServerOptions<E extends readonly DescMessage[] = readonly D
 	 * @defaultValue 'all'
 	 */
 	serve?: 'all' | 'readable';
+	/**
+	 * The server's `Limits.MaxAccessDepth`, which every CallerAccess the
+	 * server sends carries. The client's access predictions follow as many
+	 * access parent hops as it allows.
+	 * @defaultValue 32
+	 */
+	maxAccessDepth?: number;
 }
 
 /** How a push held back by {@link TestServer.holdPushes} is let through. */
@@ -280,17 +291,34 @@ class MutatorTx implements TestMutatorTx {
 
 const cursorPrefix = 'tk:';
 
-function encodeCursor(seq: bigint): Uint8Array {
-	return new TextEncoder().encode(cursorPrefix + seq);
+/** Where a Subscribe scope is: its seq and the CallerAccess it holds, as `page` takes them. */
+interface StreamPosition {
+	seq: bigint;
+	held: bigint;
+	deltas: boolean;
 }
 
-/** undefined means the cursor was not minted by this server — answered as reset. */
-function decodeCursor(cursor: Uint8Array): bigint | undefined {
-	if (cursor.length === 0) return 0n;
+/**
+ * A cursor at `seq`, issued to a client that holds the CallerAccess whose
+ * version is `access`, 0 for none, as the real server's cursor records it.
+ */
+function encodeCursor(seq: bigint, access: bigint): Uint8Array {
+	return new TextEncoder().encode(`${cursorPrefix}${seq}:${access}`);
+}
+
+/**
+ * The position of `cursor` and the version of the CallerAccess it was issued
+ * under. An empty cursor is the start, issued under none. undefined means the
+ * cursor was not minted by this server — answered as reset.
+ */
+function decodeCursor(cursor: Uint8Array): { seq: bigint; access: bigint } | undefined {
+	if (cursor.length === 0) return { seq: 0n, access: 0n };
 	const text = new TextDecoder().decode(cursor);
 	if (!text.startsWith(cursorPrefix)) return undefined;
+	const [ seq, access, ...rest ] = text.slice(cursorPrefix.length).split(':');
+	if (seq === undefined || access === undefined || rest.length > 0) return undefined;
 	try {
-		return BigInt(text.slice(cursorPrefix.length));
+		return { seq: BigInt(seq), access: BigInt(access) };
 	} catch {
 		return undefined;
 	}
@@ -396,9 +424,12 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	/** Workspaces denied to the caller, by how: permanently, or until a grant. */
 	private denied = new Map<string, 'revoked' | 'none'>();
 	private callerAccess = new Map<string, CallerAccess>();
+	/** Every CallerAccess set so far, by version: the bases a delta can apply to. */
+	private accessVersions = new Map<bigint, CallerAccess>();
 	private summaries = new WeakMap<CallerAccess, AccessSummary>();
 	private roleTable: RoleTable;
 	private serve: 'all' | 'readable';
+	private maxAccessDepth: number;
 	private holds = 0;
 	private holdWaiters: (() => void)[] = [];
 	private schemaRevision: string;
@@ -416,6 +447,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		this.chunkSize = opts.chunkSize ?? 100;
 		this.roleTable = new RoleTable(opts.entities);
 		this.serve = opts.serve ?? 'all';
+		this.maxAccessDepth = opts.maxAccessDepth ?? MAX_ACCESS_CHAIN;
 	}
 
 	/**
@@ -566,9 +598,12 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	 * access model, which `SyncClient.can`, `SyncClient.hasPermission` and the
 	 * React access hooks answer from. `subjects` are what the rules' subject
 	 * checks compare with, and the first is what a client stores in a creator
-	 * field of a row it creates. Every bootstrap, pull and stream page after
-	 * this call carries it, and `undefined` stops sending one; a client keeps
-	 * the last one it received. Writes are not checked against it: the server
+	 * field of a row it creates. Each bootstrap after this call carries it,
+	 * and a pull or stream page carries it only when the client does not hold
+	 * it yet, as the real server sends it: whole, or as a CallerAccessDelta
+	 * from the summary the client holds when that is smaller. `undefined`
+	 * stops sending one; a client keeps the last one it received. Writes are
+	 * not checked against it: the server
 	 * still applies every write and stores a creator field as the client wrote
 	 * it. Rows are filtered by it only under {@link TestServerOptions.serve}
 	 * `'readable'`.
@@ -593,13 +628,12 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			return;
 		}
 		const fromRoles = this.roleTable.permissionsOf(access.roles ?? []);
-		this.callerAccess.set(
-			workspace,
-			callerAccessOf({
-				...(access.subjects === undefined ? {} : { subjects: access.subjects }),
-				permissions: [ ...fromRoles, ...(access.permissions ?? []) ],
-			}),
-		);
+		const summary = callerAccessOf({
+			...(access.subjects === undefined ? {} : { subjects: access.subjects }),
+			permissions: [ ...fromRoles, ...(access.permissions ?? []) ],
+		}, this.maxAccessDepth);
+		this.callerAccess.set(workspace, summary);
+		this.accessVersions.set(summary.version, summary);
 		this.ws(workspace).wake();
 	}
 
@@ -953,6 +987,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			// would read it as not known.
 			const chain: AccessChain = {
 				parents: parentRefsOf(def, row),
+				maxHops: summary!.maxAccessDepth,
 				above: (at) => {
 					const atDef = this.registry.get(at.entity);
 					const atRow = atDef === undefined ? undefined : rowOf(atDef, at.key);
@@ -1018,13 +1053,21 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		throw err;
 	}
 
-	/** One forward page from `from`, in commit order. */
+	/**
+	 * One forward page from `from`, in commit order, for a client that holds
+	 * the CallerAccess whose version is `held`, 0 for none. The page carries
+	 * the current CallerAccess only when its version is not `held`, and with
+	 * `deltas` as a CallerAccessDelta where one is smaller, as the real server
+	 * sends it.
+	 */
 	private page(
 		workspaceId: string,
 		state: WorkspaceState,
 		clientId: string,
 		from: bigint,
 		limit: number,
+		held: bigint,
+		deltas: boolean,
 	) {
 		const readable = this.readableIn(workspaceId, state);
 		const changed: { entity: string; key: string; row: StoredRow }[] = [];
@@ -1076,7 +1119,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			markServed(served, resync, readable);
 			markServed(served, included, readable);
 		}
-		const access = this.callerAccess.get(workspaceId);
+		const access = this.accessUpdate(workspaceId, held, deltas, through);
 		return {
 			patch: {
 				changes: [ ...resync, ...included ].map((c) =>
@@ -1084,21 +1127,49 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 				),
 				dropEntities: [],
 			},
-			nextCursor: encodeCursor(through),
+			nextCursor: encodeCursor(through, access.holds),
 			lastAckedMutationId: state.watermarks.get(clientId) ?? 0n,
 			reset: false,
 			hasMore,
 			seq: through,
 			schemaRevision: this.schemaRevision,
-			...(access === undefined ? {} : { callerAccess: { ...access, seq: through } }),
+			...(access.whole === undefined ? {} : { callerAccess: access.whole }),
+			...(access.delta === undefined ? {} : { callerAccessDelta: access.delta }),
 		};
+	}
+
+	/**
+	 * What a page current through `seq` sends of the CallerAccess of
+	 * `workspaceId` to a client that holds the one whose version is `held`:
+	 * nothing when the versions are equal or none is set, else the whole
+	 * summary, or with `deltas` the change from `held` when the server knows
+	 * that summary and the change is smaller. `holds` is the version the
+	 * client holds after the page.
+	 */
+	private accessUpdate(
+		workspaceId: string,
+		held: bigint,
+		deltas: boolean,
+		seq: bigint,
+	): { whole?: CallerAccess; delta?: CallerAccessDelta; holds: bigint } {
+		const now = this.callerAccess.get(workspaceId);
+		if (now === undefined || now.version === held) return { holds: held };
+		const whole = { ...now, seq };
+		const base = deltas && held !== 0n ? this.accessVersions.get(held) : undefined;
+		const delta = base === undefined ? undefined : accessDeltaOf(base, now);
+		if (
+			delta === undefined
+			|| toBinary(CallerAccessDeltaSchema, delta).length
+				>= toBinary(CallerAccessSchema, { ...now, seq: 0n, version: 0n }).length
+		) return { whole, holds: now.version };
+		return { delta: { ...delta, seq }, holds: now.version };
 	}
 
 	private handlePull(req: PullRequest) {
 		this.assertAccess(req.workspaceId);
 		const state = this.ws(req.workspaceId);
-		const from = decodeCursor(req.cursor);
-		if (from === undefined || from < state.horizon) {
+		const cursor = decodeCursor(req.cursor);
+		if (cursor === undefined || cursor.seq < state.horizon) {
 			return {
 				nextCursor: new Uint8Array(),
 				lastAckedMutationId: state.watermarks.get(req.clientId) ?? 0n,
@@ -1108,7 +1179,9 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 				schemaRevision: this.schemaRevision,
 			};
 		}
-		return this.page(req.workspaceId, state, req.clientId, from, req.limit);
+		const deltas = req.callerAccessVersion !== undefined;
+		const held = req.callerAccessVersion ?? (req.cursor.length === 0 ? 0n : cursor.access);
+		return this.page(req.workspaceId, state, req.clientId, cursor.seq, req.limit, held, deltas);
 	}
 
 	private async *handleBootstrap(req: BootstrapRequest) {
@@ -1121,7 +1194,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			body: {
 				case: 'begin',
 				value: {
-					cursor: encodeCursor(state.seq),
+					cursor: encodeCursor(state.seq, this.callerAccess.get(req.workspaceId)?.version ?? 0n),
 					lastAckedMutationId: state.watermarks.get(req.clientId) ?? 0n,
 					seq: state.seq,
 					schemaRevision: this.schemaRevision,
@@ -1162,7 +1235,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	private async *handleSubscribe(req: SubscribeRequest, signal: AbortSignal) {
-		const cursors = new Map<string, bigint>();
+		const cursors = new Map<string, StreamPosition>();
 		const pending = [ ...req.scopes ];
 		const drop = (workspaceId: string, reason: WorkspaceDropped_Reason, message: string) => {
 			cursors.delete(workspaceId);
@@ -1180,12 +1253,16 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 				yield drop(scope.workspaceId, denial.reason, denial.message);
 				continue;
 			}
-			const from = decodeCursor(scope.cursor);
-			if (from === undefined || from < state.horizon) {
+			const cursor = decodeCursor(scope.cursor);
+			if (cursor === undefined || cursor.seq < state.horizon) {
 				yield drop(scope.workspaceId, WorkspaceDropped_Reason.RESET, 'cursor predates the horizon');
 				continue;
 			}
-			cursors.set(scope.workspaceId, from);
+			cursors.set(scope.workspaceId, {
+				seq: cursor.seq,
+				held: scope.callerAccessVersion ?? (scope.cursor.length === 0 ? 0n : cursor.access),
+				deltas: scope.callerAccessVersion !== undefined,
+			});
 			yield* this.pageFrames(scope.workspaceId, cursors, req);
 			yield create(SubscribeResponseSchema, {
 				workspaceId: scope.workspaceId,
@@ -1221,17 +1298,22 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 
 	private *pageFrames(
 		workspaceId: string,
-		cursors: Map<string, bigint>,
+		cursors: Map<string, StreamPosition>,
 		req: SubscribeRequest,
 	) {
 		const state = this.ws(workspaceId);
 		for (;;) {
-			const from = cursors.get(workspaceId)!;
-			const page = this.page(workspaceId, state, req.clientId, from, req.limit);
-			// A page can carry rows the caller started or stopped reading with
-			// no new commit.
-			if (page.seq === from && page.patch.changes.length === 0) return;
-			cursors.set(workspaceId, page.seq);
+			const at = cursors.get(workspaceId)!;
+			const page = this.page(workspaceId, state, req.clientId, at.seq, req.limit, at.held, at.deltas);
+			// A page can carry rows the caller started or stopped reading, or a
+			// new CallerAccess, with no new commit.
+			const access = page.callerAccess ?? page.callerAccessDelta;
+			if (page.seq === at.seq && page.patch.changes.length === 0 && access === undefined) return;
+			cursors.set(workspaceId, {
+				seq: page.seq,
+				held: access?.version ?? at.held,
+				deltas: at.deltas,
+			});
 			yield create(SubscribeResponseSchema, {
 				workspaceId,
 				schemaRevision: this.schemaRevision,
