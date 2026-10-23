@@ -265,6 +265,11 @@ function foldCrud(
 			if (mergers && ![ ...mergers.values() ].every((fn) => fn === mergeText)) {
 				return 'barrier';
 			}
+			// The server refuses a PATCH whose mask reaches a guarded unit the
+			// caller may not write, and refuses the whole mask, so a patch it
+			// accepts alone would go down with one it refuses. Two patches that
+			// reach the same guards get the same verdict from the guards.
+			if (!sameGuards(def, base, incoming)) return 'barrier';
 			const merged = fromBinary(def.schema, base.value);
 			const src = fromBinary(def.schema, incoming.value);
 			if (!tryMergeMask(def, merged, src, incoming, mergers)) return 'barrier';
@@ -334,6 +339,26 @@ function foldMergers(mergers: EntityMergers | undefined): EntityMergers | undefi
 		if (fn === mergeText) out.set(path, mergeQueuedText);
 	}
 	return out;
+}
+
+/**
+ * Whether the masks of the PATCHes `base` and `incoming` reach the same field
+ * guards of `def`.
+ */
+function sameGuards(def: EntityDef, base: CrudMutation, incoming: CrudMutation): boolean {
+	if (def.guards.length === 0) return true;
+	const reached = (patch: CrudMutation): boolean[] => {
+		const units = new Set(
+			(patch.fieldMask?.paths ?? []).map((path) => {
+				const head = path.split('.', 1)[0]!;
+				return unitMembers(def, head)?.unit ?? head;
+			}),
+		);
+		return def.guards.map((g) => g.units.some((u) => units.has(u)));
+	};
+	const a = reached(base);
+	const b = reached(incoming);
+	return a.every((hit, i) => hit === b[i]);
 }
 
 /**

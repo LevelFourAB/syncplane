@@ -37,6 +37,10 @@ const entities = [
 	ExpenseSchema,
 ];
 
+/** Keeps a burst of writes in the queue until the spec syncs, so the whole
+ * burst is in one compaction pass. */
+const HOLD = { pushDebounceMs: 60_000, pushMaxDelayMs: 60_000 };
+
 const open: SyncClient[] = [];
 afterEach(async () => {
 	await Promise.all(open.splice(0).map((c) => c.close()));
@@ -251,5 +255,40 @@ describe('field write rules on the wire', () => {
 		await expect(padmin.mutate.patch(ExpenseSchema, 'e1', { total: 2n })).rejects.toThrow(
 			'field "total" may not be written by a client',
 		);
+	});
+
+	it('stores a queued patch the writer may make when a patch of a field it may not write follows under one expected version', async () => {
+		// Given expense e1, and a project admin who writes its title and may not
+		// write its status
+		const ws = freshWorkspace();
+		await seed(ws);
+		await trusted(ws, [
+			{
+				entity: 'project_member',
+				value: { id: 'pm-padmin', project: { id: 'p1' }, userId: 'padmin', role: 'project_admin' },
+			},
+			{
+				entity: 'expense',
+				value: { id: 'e1', project: { id: 'p1' }, title: 'lunch', status: 'open' },
+			},
+		]);
+		const padmin = await synced(clientAs('padmin', ws, HOLD));
+		const version = (await padmin.getRow(ExpenseSchema, 'e1'))!.version;
+		expect(await padmin.can(ExpenseSchema, 'e1', 'update', { fields: [ 'status' ] })).toBe('no');
+
+		// When both patches are queued under the version the form read, and
+		// pushed in one compaction pass
+		await padmin.mutate.patch(ExpenseSchema, 'e1', { title: 'dinner' }, { expectedVersion: version });
+		await padmin.mutate.patch(ExpenseSchema, 'e1', { status: 'paid' }, { expectedVersion: version });
+		await padmin.syncNow();
+		await padmin.syncNow();
+
+		// Then the title is stored, as when the two patches go one by one. The
+		// server refuses a mask that reaches the status, so folded into one
+		// patch, the title goes with it.
+		const owner = await synced(clientAs('owner', ws));
+		const stored = await owner.getRow(ExpenseSchema, 'e1');
+		expect(stored?.value.title).toBe('dinner');
+		expect(stored?.value.status).toBe('open');
 	});
 });
