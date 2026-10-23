@@ -315,6 +315,34 @@ var _ = Describe("Access model field read rules", func() {
 			Expect(decoded(rc).GetSalary()).To(BeZero())
 		})
 
+		// A row has one version for every caller, and expected_version compares
+		// a write with it, so a write of a hidden field alone still reaches the
+		// caller: without the new version, each later compare-and-swap write of
+		// the row would be refused as stale.
+		It("sends a row again at its new version when a write changes only a field hidden from the caller", func() {
+			first, err := pullFrom("padmin", nil)
+			Expect(err).NotTo(HaveOccurred())
+			before := staffIn(first.GetPatch().GetChanges())["s1"]
+			Expect(before.GetHidden()).To(ContainElement("salary"))
+
+			applied(patch("admin", "s1", &accessv1.Staff{Salary: 9000}, "salary"))
+
+			next, err := pullFrom("padmin", first.GetNextCursor())
+			Expect(err).NotTo(HaveOccurred())
+			rc := staffIn(next.GetPatch().GetChanges())["s1"]
+			Expect(rc).NotTo(BeNil())
+			Expect(rc.GetVersion()).To(BeNumerically(">", before.GetVersion()))
+			Expect(rc.GetHidden()).To(ContainElement("salary"))
+			Expect(decoded(rc).GetSalary()).To(BeZero())
+			Expect(proto.Equal(decoded(rc), decoded(before))).To(BeTrue(), "nothing padmin reads changed")
+
+			applied(push("padmin", func(c string) *syncplanev1.Mutation {
+				m := patchMutation(c, 1, "staff", "s1", &accessv1.Staff{Name: "anna"}, "name")
+				m.GetCrud().ExpectedVersion = proto.Uint64(rc.GetVersion())
+				return m
+			}))
+		})
+
 		It("sends a row again when a write changes what a guard decides on the row", func() {
 			first, err := pullFrom("guest", nil)
 			Expect(err).NotTo(HaveOccurred())
