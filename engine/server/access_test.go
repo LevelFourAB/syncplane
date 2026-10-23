@@ -649,6 +649,17 @@ var _ = Describe("Access model registration", func() {
 				`grant role "TEAM_ROLE_OWNER" is not a value of enum syncplane.testdata.access.v1.TeamRole`)))
 		})
 
+		It("refuses an enum role on enum number 0", func() {
+			set := accessFileSet(func(file *descriptorpb.FileDescriptorProto) {
+				member := messageNamed(file, "TeamMember")
+				eo := proto.GetExtension(member.GetOptions(), syncplanev1.E_Entity).(*syncplanev1.EntityOptions)
+				eo.GetGrant().Roles = append(eo.GetGrant().Roles, &syncplanev1.Role{Name: "TEAM_ROLE_UNSPECIFIED", Grants: []string{"view_team"}})
+			})
+			_, err := srv.RegisterDescriptorSet(set)
+			Expect(err).To(MatchError(ContainSubstring(
+				`grant role "TEAM_ROLE_UNSPECIFIED" is enum number 0 of syncplane.testdata.access.v1.TeamRole`)))
+		})
+
 		// RegisterEntity adds one entity at a time, so a schema can only be
 		// judged once it is complete. Until it is, nothing is served.
 		It("fails closed while RegisterEntity leaves the model incomplete", func() {

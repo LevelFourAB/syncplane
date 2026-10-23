@@ -1396,6 +1396,12 @@ func grantOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions,
 				return nil, fmt.Errorf("grant role %q is not a value of enum %s, which role field %q holds",
 					r.GetName(), role.Enum().FullName(), role.Name())
 			}
+			// Proto3 does not tell an unset enum from 0, so a role on 0
+			// would go to every grant row that never set its role.
+			if ev.Number() == 0 {
+				return nil, fmt.Errorf("grant role %q is enum number 0 of %s, which every row that leaves role field %q unset holds",
+					r.GetName(), role.Enum().FullName(), role.Name())
+			}
 			if prev, dup := g.roleOfNumber[ev.Number()]; dup {
 				return nil, fmt.Errorf("grant roles %q and %q are names of one enum number (%d) of %s, "+
 					"so a row that stores it would hold both", prev, r.GetName(), ev.Number(), role.Enum().FullName())
