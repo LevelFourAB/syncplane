@@ -17,6 +17,7 @@ import {
 	MemoSchema,
 	ProjectMemberSchema,
 	ProjectSchema,
+	StaffSchema,
 	TaskSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
@@ -38,6 +39,7 @@ const entities = [
 	MemoSchema,
 	FolderSchema,
 	FolderMemberSchema,
+	StaffSchema,
 ];
 
 const open: SyncClient[] = [];
@@ -210,6 +212,82 @@ describe('a prediction about a row that rows sit below', () => {
 		// ed holds view_matters and view_open_matters nowhere, which the
 		// summary shows, so the client can tell.
 		expect(hide).not.toBe('yes');
+	});
+});
+
+describe('a prediction about a move of a row with guarded fields', () => {
+	// s1 sits in p1. No client reads its bonus or pin, and only guest, whom it
+	// is about, reads its review, wherever it sits. A caller with
+	// edit_projects reads its salary and bio where it sits. olaf owns p1 and
+	// p2. ada is project_admin at p1, without edit_projects, and owns p2.
+	async function seed(ws: string): Promise<void> {
+		await trusted(ws, [
+			{ entity: 'project', value: { id: 'p1', name: 'one' } },
+			{ entity: 'project', value: { id: 'p2', name: 'two' } },
+			{
+				entity: 'staff',
+				value: {
+					id: 's1',
+					project: { id: 'p1' },
+					name: 'ann',
+					personId: 'guest',
+					bonus: '7',
+					pin: '1234',
+					review: 'good',
+				},
+			},
+			...[ [ 'pm-olaf1', 'p1', 'olaf', 'project_owner' ], [
+				'pm-olaf2',
+				'p2',
+				'olaf',
+				'project_owner',
+			], [
+				'pm-ada1',
+				'p1',
+				'ada',
+				'project_admin',
+			], [ 'pm-ada2', 'p2', 'ada', 'project_owner' ] ].map(([ id, project, userId, role ]) => ({
+				entity: 'project_member',
+				value: { id, project: { id: project }, userId, role },
+			})),
+		]);
+	}
+
+	it('does not answer no for a caller who reads every field another caller reads where the row sits, as the server admits', async () => {
+		// Given
+		const ws = freshWorkspace();
+		await seed(ws);
+		const rejections: RejectionInfo[] = [];
+		const olaf = await clientAs('olaf', ws, rejections);
+		expect(await olaf.get(StaffSchema, 's1')).toBeDefined();
+
+		// When
+		const move = await olaf.can(StaffSchema, 's1', 'update', { fields: [ 'project' ] });
+		await olaf.mutate.patch(StaffSchema, 's1', { project: { id: 'p2' } });
+		await olaf.syncNow();
+
+		// Then the server applies the move. The client cannot answer yes, as
+		// olaf's grants sit at projects and the new parent decides.
+		expect(rejections).toEqual([]);
+		expect(move).toBe('unknown');
+	});
+
+	it('does not answer yes for a caller who does not read the salary where the row sits, as the server refuses', async () => {
+		// Given
+		const ws = freshWorkspace();
+		await seed(ws);
+		const rejections: RejectionInfo[] = [];
+		const ada = await clientAs('ada', ws, rejections);
+		expect(await ada.get(StaffSchema, 's1')).toBeDefined();
+
+		// When
+		const move = await ada.can(StaffSchema, 's1', 'update', { fields: [ 'project' ] });
+		await ada.mutate.patch(StaffSchema, 's1', { project: { id: 'p2' } });
+		await ada.syncNow();
+
+		// Then
+		expect(rejectedRows(rejections)).toEqual([ 'staff/s1' ]);
+		expect(move).not.toBe('yes');
 	});
 });
 

@@ -1192,9 +1192,10 @@ func (w *accessWrite) checkNothingNames(tx storage.ReadTx) error {
 }
 
 // checkReadsStored refuses the write unless the caller reads the stored row
-// and each unit of it that a guard can hide, as of tx. A move shows the row
-// to whoever reads at its new parents, the caller included, so it must not
-// carry what the caller could not read where the row was.
+// and each unit of it that a guard can hide where the row sits, as of tx. A
+// move shows the row to whoever reads at its new parents, the caller
+// included, so it must not carry what the caller could not read where the
+// row was.
 func (w *accessWrite) checkReadsStored(tx storage.ReadTx) error {
 	reading, err := w.access.admitting(tx, opRead, w.info, w.key, w.stored)
 	if err != nil {
@@ -1202,7 +1203,11 @@ func (w *accessWrite) checkReadsStored(tx storage.ReadTx) error {
 	}
 	ok := len(reading) > 0
 	for i := range w.info.access.guards {
-		if g := &w.info.access.guards[i]; ok && g.hides() {
+		// A guard whose readers do not depend on where the row sits shows its
+		// units to the same callers after the move. A rule of it that checks
+		// a unit the move changes, such as the access parent, is
+		// checkGuardInputs' to refuse.
+		if g := &w.info.access.guards[i]; ok && g.hides() && g.read.dependsOnChain() {
 			if ok, err = w.guardReads(tx, g); err != nil {
 				return err
 			}

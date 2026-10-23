@@ -463,6 +463,21 @@ func (r readers) everyRow() readers {
 	return out.loose()
 }
 
+// dependsOnChain reports whether r can admit other callers when the row sits
+// elsewhere: a rule of r needs a permission, which a caller holds at the root
+// or at a row up the row's chain, or sets within entries, which read the rows
+// above the row. Any other rule reads only the row and the caller, so it
+// admits the same callers wherever the row sits, and a move shows what it
+// guards to nobody new.
+func (r readers) dependsOnChain() bool {
+	if r.all {
+		return false
+	}
+	return len(r.perms) > 0 || slices.ContainsFunc(r.checked, func(o accessRule) bool {
+		return len(o.requires) > 0 || o.checksAbove()
+	})
+}
+
 // sources renders each way r admits a caller, for an error: each of perms,
 // then the permissions of each rule in checked joined by "+".
 func (r readers) sources() []string {
@@ -2357,13 +2372,19 @@ func (m *accessModel) readersBelow(name string) []readers {
 // moveReadersBelow returns who may read every row of each entity whose rows
 // can sit below rows of the named entity, and every unit of each guard of such
 // an entity that can hide them (see readers.everyRow), sorted by key and
-// without repeats. A write that changes what the rows below a row show needs
-// one of each where the row is.
+// without repeats. It leaves out each set whose readers do not depend on where
+// a row sits (see readers.dependsOnChain). A write that changes what the rows
+// below a row show needs one of each where the row is.
 func (m *accessModel) moveReadersBelow(name string) []readers {
 	var out []readers
 	seen := map[string]bool{}
 	for _, below := range m.below[name] {
 		for _, set := range m.entities[below].access.readerSets() {
+			// The rows below keep their values in a move, so a set whose
+			// readers do not depend on where a row sits reads them as before.
+			if !set.dependsOnChain() {
+				continue
+			}
 			r := set.everyRow()
 			if k := r.key(); !seen[k] {
 				seen[k] = true

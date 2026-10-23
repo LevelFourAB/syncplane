@@ -1433,6 +1433,18 @@ function everyRowReaders(r: Readers): Readers {
 }
 
 /**
+ * Whether `r` can admit other callers when the row sits elsewhere: a rule of
+ * it needs a permission, which a caller holds at the root or at a row up the
+ * row's chain, or sets a `within` entry, which reads the rows above the row.
+ * Any other rule reads only the row and the caller, so a move shows what `r`
+ * reads to nobody new.
+ */
+function dependsOnChain(r: Readers): boolean {
+	return !r.all
+		&& (r.perms.length > 0 || r.checked.some((o) => o.requires.length > 0 || o.within.length > 0));
+}
+
+/**
  * The guards of `def` that can hide their fields from a caller that reads the
  * row: each guard whose read rules do not admit every admitted caller.
  */
@@ -1445,7 +1457,9 @@ const belowReaders = new WeakMap<EntityRegistry, Map<string, readonly Readers[]>
 /**
  * Who reads every row of each registered entity whose rows can sit below rows
  * of `entity`, any number of hops down, and every field of each guard of such
- * an entity that can hide its fields (see {@link everyRowReaders}).
+ * an entity that can hide its fields (see {@link everyRowReaders}), without
+ * the sets whose readers do not depend on where a row sits (see
+ * {@link dependsOnChain}).
  */
 function moveReadersBelow(registry: EntityRegistry, entity: string): readonly Readers[] {
 	let byEntity = belowReaders.get(registry);
@@ -1477,8 +1491,10 @@ function moveReadersBelow(registry: EntityRegistry, entity: string): readonly Re
 		for (const name of below) {
 			const def = registry.get(name)!;
 			// An entity with an access parent declares access.
-			readers.push(everyRowReaders(readersOf(def.accessRules ?? [])));
-			for (const g of hidingGuards(def)) readers.push(everyRowReaders(readersOf(g.rules)));
+			for (const set of [ def.accessRules ?? [], ...hidingGuards(def).map((g) => g.rules) ]) {
+				const r = readersOf(set);
+				if (dependsOnChain(r)) readers.push(everyRowReaders(r));
+			}
 		}
 		out = readers.filter((r) => !r.all);
 		byEntity.set(entity, out);
@@ -1629,8 +1645,8 @@ export function grantSubsetAt(
  * reads it, and `moves` tells whether the update changes the access parent.
  * The new value of a changed unit is not known.
  *
- * - A move needs the right to read the row, and each field a guard can hide,
- *   where the row is.
+ * - A move needs the right to read the row where it is, and each field a
+ *   guard can hide whose readers depend on where the row sits.
  * - A move, or a change of a unit that a `within` entry naming the entity
  *   reads, needs the right to read every row of each entity whose rows can
  *   sit below the row, where the row is.
@@ -1655,7 +1671,10 @@ export function decideUpdateChecks(
 	const newValue = unknownBecause('new_value');
 	let answer: Verdict = 'yes';
 	if (moves) {
-		const hidden = hidingGuards(def).flatMap((g) => g.units);
+		// A guard whose readers do not depend on where the row sits shows its
+		// fields to the same callers after the move.
+		const moving = hidingGuards(def).filter((g) => dependsOnChain(readersOf(g.rules)));
+		const hidden = moving.flatMap((g) => g.units);
 		answer = decideRead(def.accessRules ?? [], def.guards, subjects, stored, hidden);
 	}
 	if (

@@ -396,3 +396,38 @@ var _ = Describe("readers.everyRow", func() {
 		Expect(readers{all: true}.everyRow()).To(Equal(readers{all: true}))
 	})
 })
+
+// A move shows the row, and the rows below it, to whoever reads where it goes.
+// Only a read rule that needs a permission or sets a within entry can admit
+// other callers there.
+var _ = Describe("readers.dependsOnChain", func() {
+	subject := (&accessv1.Page{}).ProtoReflect().Descriptor().Fields().ByName("owner_id")
+	own := func(requires ...string) accessRule {
+		return accessRule{ops: opRead, requires: requires, callerIs: subject}
+	}
+
+	It("reports a set that a permission admits", func() {
+		Expect(readers{perms: []string{"view_all"}}.dependsOnChain()).To(BeTrue())
+	})
+
+	It("reports a set with a rule that checks the row and needs a permission", func() {
+		Expect(readers{checked: []accessRule{own(), own("view_own")}}.dependsOnChain()).To(BeTrue())
+	})
+
+	It("reports a set with a rule that sets a within entry", func() {
+		within := accessRule{ops: opRead, within: []withinEntry{{entity: "project"}}}
+		Expect(readers{checked: []accessRule{within}}.dependsOnChain()).To(BeTrue())
+	})
+
+	It("does not report a set whose one rule admits the caller that a field of the row names", func() {
+		Expect(readers{checked: []accessRule{own()}}.dependsOnChain()).To(BeFalse())
+	})
+
+	It("does not report a set that no rule reads", func() {
+		Expect(readers{}.dependsOnChain()).To(BeFalse())
+	})
+
+	It("does not report a set that every admitted caller reads", func() {
+		Expect(readers{all: true}.dependsOnChain()).To(BeFalse())
+	})
+})

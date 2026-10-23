@@ -23,10 +23,42 @@ const atRoot = (subject: string, ...permissions: string[]) => ({
 	permissions: permissions.map((permission) => ({ permission, root: true })),
 });
 
+/**
+ * A project, and a personnel record below it whose review the person it is
+ * about reads, and every caller that one of `alsoRead` admits.
+ */
+function personnel(alsoRead: { read: true; requires: string }[]) {
+	const project = entity('project', { id: text().key() }, {
+		access: { allow: [ { read: true, write: true, requires: 'view_projects' } ] },
+	});
+	const record = entity('personnel', {
+		id: text().key(),
+		project: ref(() => project),
+		personId: text(),
+		review: text(),
+	}, {
+		access: {
+			parents: [ 'project' ],
+			allow: [ { read: true, requires: 'view_tasks' }, { write: true, requires: 'edit_tasks' } ],
+			guard: [ {
+				fields: [ 'review' ],
+				allow: [
+					{ read: true, admitted: true, callerIs: 'personId' },
+					...alsoRead,
+					{ write: true, requires: 'edit_projects' },
+				],
+			} ],
+		},
+	});
+	const bundle = defineSchema(project, record);
+	return [ bundle.descMessage('project')!, bundle.descMessage('personnel')! ] as const;
+}
+
 describe('can() for a move of a row', () => {
-	it('answers no when a guard hides a field of the row from every client', async () => {
-		// Given staff s1 in p1, whose bonus and pin no client reads, and a caller
-		// who reads and edits staff everywhere
+	it('answers no when a caller with a permission reads a field of the row that the caller does not read', async () => {
+		// Given staff s1 in p1, whose salary a caller with edit_projects reads
+		// where the record sits, and a caller who reads and edits staff
+		// everywhere without edit_projects
 		const t = await createTestClient({ entities: [ ProjectSchema, StaffSchema ] });
 		t.server.put(ProjectSchema, { id: 'p1' });
 		t.server.put(ProjectSchema, { id: 'p2' });
@@ -38,10 +70,69 @@ describe('can() for a move of a row', () => {
 		const rename = await t.client.can(StaffSchema, 's1', 'update', { fields: [ 'name' ] });
 		const move = await t.client.can(StaffSchema, 's1', 'update', { fields: [ 'project' ] });
 
-		// Then the move would carry fields the caller does not read to the new
-		// project, which the server refuses
+		// Then the move would carry the salary to a project where other callers
+		// read it, which the server refuses
 		expect(rename).toBe('yes');
 		expect(move).toBe('no');
+		await t.close();
+	});
+
+	it('answers yes when the fields the caller does not read are read by no client, or only by the caller the row names', async () => {
+		// Given staff s1 in p1, whose bonus and pin no client reads and whose
+		// review only the person it is about reads, and a caller who also
+		// reads salary and bio everywhere
+		const t = await createTestClient({ entities: [ ProjectSchema, StaffSchema ] });
+		t.server.put(ProjectSchema, { id: 'p1' });
+		t.server.put(ProjectSchema, { id: 'p2' });
+		t.server.put(StaffSchema, { id: 's1', project: { id: 'p1' }, name: 'ann', personId: 'guest' });
+		t.server.setCallerAccess(
+			atRoot('ed', 'view_projects', 'view_tasks', 'edit_tasks', 'edit_projects'),
+		);
+		await t.sync();
+
+		// When
+		const move = await t.client.can(StaffSchema, 's1', 'update', { fields: [ 'project' ] });
+
+		// Then the move shows those fields to nobody new, as the server decides
+		expect(move).toBe('yes');
+		await t.close();
+	});
+
+	it('answers no when a caller with a permission also reads a field that the caller the row names reads', async () => {
+		// Given a record whose review the person it is about reads, and a
+		// caller with edit_projects reads too where the record sits
+		const [ P, S ] = personnel([ { read: true, requires: 'edit_projects' } ]);
+		const t = await createTestClient({ entities: [ P, S ] });
+		t.server.put(P, { id: 'p1' });
+		t.server.put(P, { id: 'p2' });
+		t.server.put(S, { id: 's1', project: { id: 'p1' }, personId: 'guest' });
+		t.server.setCallerAccess(atRoot('ed', 'view_projects', 'view_tasks', 'edit_tasks'));
+		await t.sync();
+
+		// When
+		const move = await t.client.can(S, 's1', 'update', { fields: [ 'project' ] });
+
+		// Then the move would show the review to other callers, which the
+		// server refuses
+		expect(move).toBe('no');
+		await t.close();
+	});
+
+	it('answers yes when only the caller the row names reads a field the caller does not read', async () => {
+		// Given the same record, whose review only the person it is about reads
+		const [ P, S ] = personnel([]);
+		const t = await createTestClient({ entities: [ P, S ] });
+		t.server.put(P, { id: 'p1' });
+		t.server.put(P, { id: 'p2' });
+		t.server.put(S, { id: 's1', project: { id: 'p1' }, personId: 'guest' });
+		t.server.setCallerAccess(atRoot('ed', 'view_projects', 'view_tasks', 'edit_tasks'));
+		await t.sync();
+
+		// When
+		const move = await t.client.can(S, 's1', 'update', { fields: [ 'project' ] });
+
+		// Then
+		expect(move).toBe('yes');
 		await t.close();
 	});
 
@@ -78,6 +169,46 @@ describe('can() for a move of a row', () => {
 
 		// Then
 		expect(move).toBe('no');
+		await t.close();
+	});
+});
+
+describe('can() for a move of a row with rows below it', () => {
+	it('answers yes when each row below is read only by the caller it names', async () => {
+		// Given notes below tasks, which only their owner reads, wherever they
+		// sit: moving the task shows them to nobody new
+		const project = entity('project', { id: text().key() }, {
+			access: { allow: [ { read: true, write: true, requires: 'view_projects' } ] },
+		});
+		const task = entity('task', { id: text().key(), project: ref(() => project) }, {
+			access: {
+				parents: [ 'project' ],
+				allow: [ { read: true, requires: 'view_tasks' }, { write: true, requires: 'edit_tasks' } ],
+			},
+		});
+		const note = entity('note', { id: text().key(), task: ref(() => task), ownerId: text() }, {
+			access: {
+				parents: [ 'task' ],
+				allow: [ { read: true, admitted: true, callerIs: 'ownerId' }, {
+					write: true,
+					requires: 'edit_tasks',
+				} ],
+			},
+		});
+		const bundle = defineSchema(project, task, note);
+		const [ P, T, N ] = [ 'project', 'task', 'note' ].map((name) => bundle.descMessage(name));
+		const t = await createTestClient({ entities: [ P!, T!, N! ] });
+		t.server.put(P!, { id: 'p1' });
+		t.server.put(P!, { id: 'p2' });
+		t.server.put(T!, { id: 't1', project: { id: 'p1' } });
+		t.server.setCallerAccess(atRoot('ed', 'view_projects', 'view_tasks', 'edit_tasks'));
+		await t.sync();
+
+		// When
+		const move = await t.client.can(T!, 't1', 'update', { fields: [ 'project' ] });
+
+		// Then
+		expect(move).toBe('yes');
 		await t.close();
 	});
 });
