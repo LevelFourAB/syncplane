@@ -142,9 +142,12 @@ func (info *entityInfo) checkTextCounterSteps(prev map[string][]byte, next proto
 				return fmt.Errorf("server: entity %q text field %q: stored document: %w", info.name, ti.path, err)
 			}
 			if hi > lo && hi-lo > maxTextCounterStep {
+				// The step is left out: with the write's own counter it gives the
+				// stored document's, which a caller that writes the field may not
+				// read.
 				return Reject(CodeInvalidArgument, fmt.Sprintf(
-					"entity %q text field %q: the write moves the document's counters up by %d, and one write may move them by at most %d",
-					info.name, ti.path, hi-lo, uint64(maxTextCounterStep)))
+					"entity %q text field %q: the write moves the document's counters up by more than %d, the most one write may move them",
+					info.name, ti.path, uint64(maxTextCounterStep)))
 			}
 		}
 	}

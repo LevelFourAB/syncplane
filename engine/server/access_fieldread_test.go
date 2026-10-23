@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"encoding/binary"
 	"fmt"
 	"slices"
 
@@ -92,6 +93,25 @@ var _ = Describe("Access model registration of field read rules", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 })
+
+// textDocAt encodes a version-1 text document of peer that holds one character
+// at counter at, the smallest document whose highest counter is at.
+func textDocAt(peer string, at uint64) []byte {
+	b := []byte{1}
+	b = binary.AppendUvarint(b, 1)
+	b = binary.AppendUvarint(b, uint64(len(peer)))
+	b = append(b, peer...)
+	b = binary.AppendUvarint(b, at) // version vector
+	b = binary.AppendUvarint(b, 1)  // one run
+	b = binary.AppendUvarint(b, 0)  // peer index
+	b = binary.AppendUvarint(b, at) // start counter
+	b = binary.AppendUvarint(b, 1)  // one item
+	b = append(b, 0b010)            // parent is the root
+	b = binary.AppendUvarint(b, 1)
+	b = append(b, 'x')
+	b = binary.AppendUvarint(b, 0) // no marks
+	return b
+}
 
 var _ = Describe("Access model field read rules", func() {
 	var (
@@ -523,6 +543,22 @@ var _ = Describe("Access model field read rules", func() {
 			got := stored("s1")
 			Expect(got.GetSalary()).To(Equal(int64(5100)))
 			Expect(got.GetReview()).To(Equal("good"), "owner writes review but did not read it")
+		})
+
+		// The counter step check compares the write with the stored document,
+		// which padmin writes and may not read.
+		It("refuses a text write that moves the counters too far without naming the stored document's counter", func() {
+			lo, err := text.MaxCounter(stored("s1").GetBio())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(lo).To(BeNumerically(">", 0))
+			at := uint64(1) << 33
+
+			r := patch("padmin", "s1", &accessv1.Staff{Bio: textDocAt("padmin", at)}, "bio")
+
+			Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(r.GetErrorCode()).To(Equal("invalid_argument"))
+			Expect(r.GetErrorMessage()).NotTo(ContainSubstring(fmt.Sprint(at-lo)),
+				"padmin could compute the hidden document's highest counter from the step")
 		})
 	})
 
