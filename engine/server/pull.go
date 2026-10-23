@@ -93,6 +93,11 @@ type cursorState struct {
 	accessID      uint64
 	accessGen     uint64
 	accessPending *syncplanecursorv1.ReadAccess
+	// accessTag is Cursor.access_tag. accessKey is the seq key of the entry
+	// accessGen names, nil when the cursor was decoded from a client: the
+	// tag is then carried as it came.
+	accessTag uint64
+	accessKey []byte
 	// callerAccessHash is the hash of the CallerAccess the client last
 	// received (Cursor.caller_access_hash), and callerAccessID/Gen reference
 	// the stored copy of it (Cursor.caller_access_ref). callerAccessPending
@@ -197,6 +202,7 @@ func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte, verdic
 		accessHash:       c.GetAccessHash(),
 		accessID:         c.GetAccessRef().GetId(),
 		accessGen:        c.GetAccessRef().GetGen(),
+		accessTag:        c.GetAccessTag(),
 		callerAccessHash: c.GetCallerAccessHash(),
 		callerAccessID:   c.GetCallerAccessRef().GetId(),
 		callerAccessGen:  c.GetCallerAccessRef().GetGen(),

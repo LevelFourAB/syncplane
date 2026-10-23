@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/levelfourab/syncplane/engine/cursorstate"
 	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/internal/naming"
@@ -155,9 +156,12 @@ type rowEmitter struct {
 	// the old side of a resync reads nothing of (see hideOnOldSide).
 	readAccess     *syncplanecursorv1.ReadAccess
 	readAccessHash uint64
-	// accessUsedAt is when accessEntryHeld last read the access entry the
-	// emitter's cursors reissue, zero before the first read.
+	// accessUsedAt is when heldAccessKey last read the access entry the
+	// emitter's cursors reissue, zero before the first read. accessKeyRef
+	// names that entry and accessKey is its seq key.
 	accessUsedAt time.Time
+	accessKeyRef cursorstate.Ref
+	accessKey    []byte
 	// callerAccess, callerAccessHash and callerAccessSize render access for
 	// the client, once per binding (see boundCallerAccess).
 	callerAccess     *syncplanev1.CallerAccess

@@ -2,6 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"slices"
 	"sort"
@@ -23,7 +27,9 @@ import (
 // gained, an anchor deleted — and resync the rows under the anchors that
 // moved. The record itself lives in the cursor-state store and the cursor
 // carries a hash and a reference: a resync tombstones the rows the record
-// names, so a client must not be able to write it.
+// names, so a client must not be able to write it. The resync also reads only
+// rows at or below the cursor's seq, which the client can write, so the
+// cursor carries a tag of its seq under a key that only the record holds.
 
 // readAccessOf renders what set holds for the permissions entities read by,
 // with the caller's subjects and the model's read rules, as a cursor records
@@ -117,6 +123,7 @@ func (e *rowEmitter) boundReadAccess() (*syncplanecursorv1.ReadAccess, uint64) {
 // the stored entry it names is reused rather than written again.
 func (e *rowEmitter) stampAccess(st *cursorState, cur cursorState) {
 	st.accessPolicy, st.accessHash, st.accessID, st.accessGen, st.accessPending = 0, 0, 0, 0, nil
+	st.accessTag, st.accessKey = 0, nil
 	st.callerAccessHash, st.callerAccessID, st.callerAccessGen, st.callerAccessPending = 0, 0, 0, nil
 	st.movesThrough = 0
 	if e.caller == nil {
@@ -130,10 +137,14 @@ func (e *rowEmitter) stampAccess(st *cursorState, cur cursorState) {
 	st.accessID = cur.accessID
 	// The stored entry also holds the rules, so new rules need a new entry.
 	// An entry the store no longer holds records the access bound now, so it
-	// is written again: a later change of access resyncs from it.
-	if cur.accessHash == hash && cur.accessPolicy == st.accessPolicy && cur.accessGen != 0 && e.accessEntryHeld(cur) {
-		st.accessGen = cur.accessGen
-		return
+	// is written again: a later change of access resyncs from it. So is an
+	// entry whose key cannot be read, because without the key the cursor
+	// cannot carry a tag, and a later change of access would reset it.
+	if cur.accessHash == hash && cur.accessPolicy == st.accessPolicy && cur.accessGen != 0 {
+		if key := e.heldAccessKey(cur); key != nil {
+			st.accessGen, st.accessKey = cur.accessGen, key
+			return
+		}
 	}
 	st.accessPending = ra
 }
@@ -142,23 +153,43 @@ func (e *rowEmitter) stampAccess(st *cursorState, cur cursorState) {
 // as a stream's, reads the access entry it reissues.
 const accessEntryUseEvery = time.Hour
 
-// accessEntryHeld reads the access entry cur names, which a cursor about to be
-// issued names again, and reports false when the store no longer holds it.
-// The read tells the store the entry is in use (see cursorstate.Store.Get),
-// so a client that keeps syncing under the same access keeps its entry. An
-// emitter reads it at most once per accessEntryUseEvery, and a store that
-// fails counts as one that holds the entry.
-func (e *rowEmitter) accessEntryHeld(cur cursorState) bool {
-	s := e.srv
-	if s.cursorState == nil || (!e.accessUsedAt.IsZero() && time.Since(e.accessUsedAt) < accessEntryUseEvery) {
-		return true
+// heldAccessKey reads the access entry cur names, which a cursor about to be
+// issued names again, and returns its seq key. It returns nil when there is
+// no store, the store no longer holds the entry, the read fails, or the entry
+// has no key. The read tells the store the entry is in use (see
+// cursorstate.Store.Get), so a client that keeps syncing under the same
+// access keeps its entry. An emitter reads one entry at most once per
+// accessEntryUseEvery and keeps its key in between.
+func (e *rowEmitter) heldAccessKey(cur cursorState) []byte {
+	ref := cursorstate.Ref{ID: cur.accessID, Gen: cur.accessGen}
+	if e.accessKey != nil && e.accessKeyRef == ref && time.Since(e.accessUsedAt) < accessEntryUseEvery {
+		return e.accessKey
 	}
-	_, err := s.cursorState.Get(e.ctx, e.ws, cursorstate.Ref{ID: cur.accessID, Gen: cur.accessGen})
-	if errors.Is(err, cursorstate.ErrNotFound) {
-		return false
+	ra := &syncplanecursorv1.ReadAccess{}
+	ok, err := e.loadAccessEntry(ref.ID, ref.Gen, ra)
+	if !ok || err != nil || len(ra.GetSeqKey()) == 0 {
+		return nil
 	}
-	e.accessUsedAt = time.Now()
-	return true
+	e.accessKeyRef, e.accessKey, e.accessUsedAt = ref, ra.GetSeqKey(), time.Now()
+	return e.accessKey
+}
+
+// accessSeqKeySize is the size in bytes of a ReadAccess.seq_key.
+const accessSeqKeySize = 32
+
+// accessTag is the Cursor.access_tag of a cursor at seq and movesThrough that
+// names the ReadAccess holding key. Never 0, which a cursor without a tag
+// carries.
+func accessTag(key []byte, seq, movesThrough uint64) uint64 {
+	mac := hmac.New(sha256.New, key)
+	var b [16]byte
+	binary.BigEndian.PutUint64(b[:8], seq)
+	binary.BigEndian.PutUint64(b[8:], movesThrough)
+	mac.Write(b[:])
+	if t := binary.BigEndian.Uint64(mac.Sum(nil)[:8]); t != 0 {
+		return t
+	}
+	return 1
 }
 
 // stampCallerAccess records the emitter's bound CallerAccess on st, and the
@@ -184,7 +215,22 @@ func (e *rowEmitter) stampCallerAccess(st *cursorState, cur cursorState) {
 // client instead of resyncing it.
 func (s *Server) storeAccess(ctx context.Context, ws string, st *cursorState, c *syncplanecursorv1.Cursor) {
 	if st.accessPending != nil {
-		st.accessID, st.accessGen = s.putAccessEntry(ctx, ws, st.accessID, st.accessPending)
+		// A new key for each entry, so a tag computed for one entry is not
+		// valid for another one.
+		ra := st.accessPending
+		key := make([]byte, accessSeqKeySize)
+		if _, err := rand.Read(key); err != nil {
+			panic(err) // the platform CSPRNG does not fail
+		}
+		entry := &syncplanecursorv1.ReadAccess{
+			Subjects:       ra.GetSubjects(),
+			Permissions:    ra.GetPermissions(),
+			Rules:          ra.GetRules(),
+			MaxAccessDepth: ra.GetMaxAccessDepth(),
+			SeqKey:         key,
+		}
+		st.accessID, st.accessGen = s.putAccessEntry(ctx, ws, st.accessID, entry)
+		st.accessKey = key
 		st.accessPending = nil
 	}
 	if st.callerAccessPending != nil {
@@ -207,6 +253,12 @@ func (s *Server) storeAccess(ctx context.Context, ws string, st *cursorState, c 
 	c.AccessMovesThrough = st.movesThrough
 	if st.accessGen != 0 {
 		c.AccessRef = &syncplanecursorv1.StateRef{Id: st.accessID, Gen: st.accessGen}
+		// Without the key, st carries the tag of the cursor it was copied
+		// from, which is valid while seq and movesThrough are as they were.
+		if st.accessKey != nil {
+			st.accessTag = accessTag(st.accessKey, c.GetSeq(), st.movesThrough)
+		}
+		c.AccessTag = st.accessTag
 	}
 	if st.callerAccessGen != 0 {
 		c.CallerAccessRef = &syncplanecursorv1.StateRef{Id: st.callerAccessID, Gen: st.callerAccessGen}
@@ -586,9 +638,9 @@ func (e *rowEmitter) accessUnchanged(cur cursorState) bool {
 }
 
 // loadReadAccess reads the ReadAccess a cursor names. It returns nil, nil when
-// the entry is missing, damaged, does not match the cursor's hashes, or was
-// recorded for other subjects than the caller's: the cursor cannot resync
-// from it.
+// the entry is missing, damaged, does not match the cursor's hashes or its
+// tag, or was recorded for other subjects than the caller's: the cursor cannot
+// resync from it.
 func (e *rowEmitter) loadReadAccess(cur cursorState) (*syncplanecursorv1.ReadAccess, error) {
 	ra := &syncplanecursorv1.ReadAccess{}
 	ok, err := e.loadAccessEntry(cur.accessID, cur.accessGen, ra)
@@ -604,6 +656,12 @@ func (e *rowEmitter) loadReadAccess(cur cursorState) (*syncplanecursorv1.ReadAcc
 	}
 	if !slices.Equal(ra.GetSubjects(), e.caller.subjects) || readAccessHash(ra) != cur.accessHash ||
 		readPolicyOf(ra.GetRules(), ra.GetMaxAccessDepth()) != cur.accessPolicy {
+		return nil, nil
+	}
+	// A resync from the entry reads the rows at or below cur.seq on the side
+	// the entry describes. A client that raised seq would see tombstones of
+	// rows written under anchors it lost after the cursor was issued.
+	if len(ra.GetSeqKey()) == 0 || cur.accessTag != accessTag(ra.GetSeqKey(), cur.seq, cur.movesThrough) {
 		return nil, nil
 	}
 	return ra, nil

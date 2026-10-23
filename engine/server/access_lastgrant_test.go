@@ -153,4 +153,27 @@ var _ = Describe("Access model sync when the last grant goes", func() {
 		Expect(err).To(HaveOccurred())
 		Expect(err.(*connect.Error).Meta().Get(server.ErrorCodeMetadataKey)).To(Equal(server.CodeWorkspaceNoAccess))
 	})
+
+	It("refuses a pull from a cursor whose seq the client raised past its last grant, and sends nothing", func() {
+		// Given guest synced while it held pm-guest, then lost it
+		f := newAccessFixture()
+		f.seedOrg()
+		guest := newAccessReplica(f, "guest")
+		guest.sync()
+		revokeGuest(f)
+		// And a task written below p1 after that
+		f.seed(&accessv1.Task{Id: "t-secret", Project: project("p1"), Title: "after the revoke"})
+		admin := newAccessReplica(f, "admin")
+		current := admin.pullOnce(0).GetSeq()
+
+		// When guest pulls from its cursor with seq raised past t-secret
+		req := connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: ws, ClientId: "c-guest", Cursor: withCursorSeq(guest.cursor, current)})
+		as("guest", req.Header())
+		resp, err := f.sync.Pull(f.ctx, req)
+
+		// Then the pull is refused, and no resync names t-secret
+		Expect(resp).To(BeNil())
+		Expect(err).To(HaveOccurred())
+		Expect(err.(*connect.Error).Meta().Get(server.ErrorCodeMetadataKey)).To(Equal(server.CodeWorkspaceNoAccess))
+	})
 })

@@ -158,8 +158,14 @@ type Cursor struct {
 	// writes only one entry. Absent when the store could not take the entry,
 	// and on cursors of clients that apply no CallerAccessDelta.
 	CallerAccessRef *StateRef `protobuf:"bytes,20,opt,name=caller_access_ref,json=callerAccessRef,proto3" json:"caller_access_ref,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Keyed hash of seq and access_moves_through under the seq_key of the
+	// ReadAccess that access_ref names. A resync from that entry reads only
+	// rows at or below seq, and a client can edit seq, so the resync trusts
+	// the two values only when the tag matches; otherwise the client resets.
+	// 0 when access_ref is absent, and on cursors older than the field.
+	AccessTag     uint64 `protobuf:"fixed64,21,opt,name=access_tag,json=accessTag,proto3" json:"access_tag,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Cursor) Reset() {
@@ -330,6 +336,13 @@ func (x *Cursor) GetCallerAccessRef() *StateRef {
 		return x.CallerAccessRef
 	}
 	return nil
+}
+
+func (x *Cursor) GetAccessTag() uint64 {
+	if x != nil {
+		return x.AccessTag
+	}
+	return 0
 }
 
 // AccessMove is one change of the access parent of a row that other rows sit
@@ -573,8 +586,12 @@ type ReadAccess struct {
 	// The longest parent chain a read walks (Limits.MaxAccessDepth). A cursor
 	// recorded under another limit cannot resync from this entry.
 	MaxAccessDepth uint32 `protobuf:"varint,4,opt,name=max_access_depth,json=maxAccessDepth,proto3" json:"max_access_depth,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Random key that Cursor.access_tag is computed with. It never leaves the
+	// server, so a client cannot compute the tag of another position. Neither
+	// hash reads it.
+	SeqKey        []byte `protobuf:"bytes,5,opt,name=seq_key,json=seqKey,proto3" json:"seq_key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ReadAccess) Reset() {
@@ -633,6 +650,13 @@ func (x *ReadAccess) GetMaxAccessDepth() uint32 {
 		return x.MaxAccessDepth
 	}
 	return 0
+}
+
+func (x *ReadAccess) GetSeqKey() []byte {
+	if x != nil {
+		return x.SeqKey
+	}
+	return nil
 }
 
 // EntityReadRule is what decides which rows of one entity a caller reads, and
@@ -1592,7 +1616,7 @@ var File_syncplane_cursor_v1_cursor_proto protoreflect.FileDescriptor
 
 const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\n" +
-	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\x1a\x18syncplane/v1/query.proto\"\x9b\a\n" +
+	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\x1a\x18syncplane/v1/query.proto\"\xba\a\n" +
 	"\x06Cursor\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\bsub_hash\x18\x02 \x01(\x06R\asubHash\x12!\n" +
@@ -1618,7 +1642,9 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"access_ref\x18\x11 \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\taccessRef\x12,\n" +
 	"\x12caller_access_hash\x18\x12 \x01(\x06R\x10callerAccessHash\x120\n" +
 	"\x14access_moves_through\x18\x13 \x01(\x04R\x12accessMovesThrough\x12I\n" +
-	"\x11caller_access_ref\x18\x14 \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\x0fcallerAccessRef\"\xd3\x02\n" +
+	"\x11caller_access_ref\x18\x14 \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\x0fcallerAccessRef\x12\x1d\n" +
+	"\n" +
+	"access_tag\x18\x15 \x01(\x06R\taccessTag\"\xd3\x02\n" +
 	"\n" +
 	"AccessMove\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x10\n" +
@@ -1637,13 +1663,14 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"5\n" +
 	"\tAnchorRef\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x10\n" +
-	"\x03key\x18\x02 \x01(\tR\x03key\"\xd7\x01\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\"\xf0\x01\n" +
 	"\n" +
 	"ReadAccess\x12\x1a\n" +
 	"\bsubjects\x18\x01 \x03(\tR\bsubjects\x12H\n" +
 	"\vpermissions\x18\x02 \x03(\v2&.syncplane.cursor.v1.PermissionAnchorsR\vpermissions\x129\n" +
 	"\x05rules\x18\x03 \x03(\v2#.syncplane.cursor.v1.EntityReadRuleR\x05rules\x12(\n" +
-	"\x10max_access_depth\x18\x04 \x01(\rR\x0emaxAccessDepth\"\xf1\x01\n" +
+	"\x10max_access_depth\x18\x04 \x01(\rR\x0emaxAccessDepth\x12\x17\n" +
+	"\aseq_key\x18\x05 \x01(\fR\x06seqKey\"\xf1\x01\n" +
 	"\x0eEntityReadRule\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x12\n" +
 	"\x04open\x18\x03 \x01(\bR\x04open\x124\n" +

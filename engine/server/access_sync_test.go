@@ -15,6 +15,7 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/levelfourab/syncplane/engine/cursorstate"
+	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/server"
@@ -183,6 +184,18 @@ func (r *accessReplica) syncDelta() *syncplanev1.CallerAccessDelta {
 	}
 	Fail("the pulls did not settle")
 	return nil
+}
+
+// withCursorSeq returns raw with its seq set to seq, as a client that decodes
+// the cursor without the schema can.
+func withCursorSeq(raw []byte, seq uint64) []byte {
+	GinkgoHelper()
+	var c syncplanecursorv1.Cursor
+	Expect(proto.Unmarshal(raw, &c)).To(Succeed())
+	c.Seq = seq
+	out, err := proto.Marshal(&c)
+	Expect(err).NotTo(HaveOccurred())
+	return out
 }
 
 func (r *accessReplica) view() []string {
@@ -354,6 +367,38 @@ var _ = Describe("Access model sync", func() {
 		Expect(writer.view()).To(ContainElements("project/p3", "task/t9"))
 		Expect(counting.count("task")).To(BeZero())
 		converged(writer)
+	})
+
+	It("resets a client that raised the seq of a cursor issued before a revoke, and names no row written after it", func() {
+		// Given guest synced while it held p1 and p2, and lost p2 later
+		f.seed(&accessv1.ProjectMember{Id: "pm-guest2", Project: project("p2"), UserId: "guest", Role: "project_reader"})
+		guest := newAccessReplica(f, "guest")
+		guest.sync()
+		old := guest.cursor
+		revoke("project_member", "pm-guest2")
+		// And a task written below p2 after that, which guest never could read
+		f.seed(&accessv1.Task{Id: "t-secret", Project: project("p2")})
+		guest.sync()
+		current := guest.pullOnce(0).GetSeq()
+
+		// When guest pulls from its old cursor as it was issued
+		issued := newAccessReplica(f, "guest")
+		issued.cursor = old
+		issued.rows["task/t2"] = true
+		issued.sync()
+
+		// Then the pull resyncs it and tombstones t2
+		Expect(issued.view()).NotTo(ContainElement("task/t2"))
+		Expect(issued.view()).NotTo(ContainElement("task/t-secret"))
+
+		// When guest pulls from its old cursor with seq raised past t-secret
+		edited := newAccessReplica(f, "guest")
+		edited.cursor = withCursorSeq(old, current)
+		resp := edited.pullOnce(0)
+
+		// Then the pull resets it and names no row, not even as a tombstone
+		Expect(resp.GetReset_()).To(BeTrue())
+		Expect(resp.GetPatch().GetChanges()).To(BeEmpty())
 	})
 
 	Context("the CallerAccess summary", func() {
