@@ -234,6 +234,9 @@ conditions:
 - The subscription set changes.
 - The cursor falls behind the garbage collection horizon.
 - The target store does not match the store that issued the cursor.
+- More access moves come after the cursor than `Limits.MaxResyncScan`, so the
+  pull after the snapshot would reset (see
+  [the access model](access-model.md)).
 
 When a fresh bootstrap is required, the client discards the partial snapshot.
 

@@ -186,8 +186,13 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 				return err
 			}
 			// A snapshot is filtered by one access throughout, so one begun
-			// under other grants cannot be continued.
-			if emitter.accessUnchanged(resume.cur) && resume.servable(horizon, current, storeEpoch) {
+			// under other grants cannot be continued. One behind more moves
+			// than a pull reads would reset on the pull that follows it.
+			movesFit, err := s.movesFit(tx, emitter, resume.cur)
+			if err != nil {
+				return err
+			}
+			if emitter.accessUnchanged(resume.cur) && resume.servable(horizon, current, storeEpoch) && movesFit {
 				begin.Cursor = resume.rawCursor
 				begin.Seq = resume.cur.seq
 				begin.Resumed = true
@@ -250,13 +255,14 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		return err
 	}
 
+	pins := chainPins{through: begin.GetSeq()}
 	// visibleOf renders the rows of a page the client may see, without the
 	// fields it may not read. It runs inside the page's read transaction,
 	// which is where the parent chains of the access model are read;
 	// snapshots never need tombstones, so it drops every other row.
 	visibleOf := func(tx storage.ReadTx, page []storage.Row) ([]*syncplanev1.RowChange, error) {
 		emitter.readChainsFrom(tx)
-		if err := s.pinChains(tx, emitter, begin.GetSeq()); err != nil {
+		if err := s.pinChains(tx, emitter, begin.GetSeq(), &pins); err != nil {
 			return nil, err
 		}
 		var out []*syncplanev1.RowChange
@@ -504,17 +510,64 @@ func bootstrapNarrowable(e *rowEmitter, entity string) (*entityScope, bool) {
 // snapshot that reads its pages in transactions of their own classifies every
 // page as of its Begin position this way, which is the position the pull from
 // its cursor compares the moves after it with (see compareMoves). With more
-// moves than Limits.MaxResyncScan after seq it pins nothing: that pull resets.
-func (s *Server) pinChains(tx storage.ReadTx, e *rowEmitter, seq uint64) error {
-	if e.caller == nil || !e.caller.model.moving || e.chains == nil {
+// moves than Limits.MaxResyncScan after seq it pins no more moves: that pull
+// resets.
+//
+// pins carries what the pages before this one read of the log, so that each
+// page reads only the moves after the newest one an earlier page read. Writes
+// to a workspace commit in sequence order, so no move can appear later below
+// that one.
+func (s *Server) pinChains(tx storage.ReadTx, e *rowEmitter, seq uint64, pins *chainPins) error {
+	if e.caller == nil || !e.caller.model.moving || e.chains == nil || pins.overflow {
 		return nil
 	}
-	moves, _, overflow, err := readAccessMoves(tx, seq, s.limits.MaxResyncScan)
-	if err != nil || overflow {
+	moves, newest, overflow, err := readAccessMoves(tx, pins.through, s.limits.MaxResyncScan-pins.read)
+	if err != nil {
 		return err
 	}
-	e.chains.overrides, _ = firstMoves(moves)
-	e.chains.withinOverrides = firstWithins(e.caller.model, moves)
+	if overflow {
+		pins.overflow = true
+		return nil
+	}
+	pins.through = max(pins.through, newest)
+	pins.read += len(moves)
+	// A row keeps the state from before its first move after seq, which an
+	// earlier page has already pinned when the row moved again since.
+	if e.chains.overrides == nil {
+		e.chains.overrides = map[anchorRow]chainEdge{}
+		e.chains.withinOverrides = map[anchorRow]rowWithin{}
+	}
+	for _, m := range moves {
+		if _, seen := e.chains.overrides[m.row]; !seen {
+			e.chains.overrides[m.row] = m.from
+		}
+	}
+	for row, st := range firstWithins(e.caller.model, moves) {
+		if _, seen := e.chains.withinOverrides[row]; !seen {
+			e.chains.withinOverrides[row] = st
+		}
+	}
 	e.chains.createdAfter = seq
 	return nil
+}
+
+// chainPins is what pinChains has read of the access move log for one
+// snapshot.
+type chainPins struct {
+	// through is the newest move read, or the Begin position before any.
+	through uint64
+	// read counts the moves read after the Begin position.
+	read     int
+	overflow bool
+}
+
+// movesFit reports whether a pull from cur reads every access move after it,
+// rather than reset on more than Limits.MaxResyncScan of them (see
+// compareMoves).
+func (s *Server) movesFit(tx storage.ReadTx, e *rowEmitter, cur cursorState) (bool, error) {
+	if e.caller == nil || !e.caller.model.moving {
+		return true, nil
+	}
+	_, _, overflow, err := readAccessMoves(tx, max(cur.seq, cur.movesThrough), s.limits.MaxResyncScan)
+	return !overflow, err
 }

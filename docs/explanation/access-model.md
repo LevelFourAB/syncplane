@@ -197,7 +197,7 @@ On the next pull, the engine reads the moves after the cursor. For each moved ro
 
 A Bootstrap reads its pages in transactions of their own, while rows keep moving. Each page classifies rows with the parents they had when the Bootstrap began, read back from the log, because the pull from the Begin cursor compares the moves after that position with the chains of that position. A page that read a newer chain could ship a row that a move made visible for a moment and that no later pull removes. For the same reason a pull reads at or past the position its cursor's record and moves were read at: a read replica that lags behind that position would show older grants or older parents than the client's rows reflect, so the pull goes to the primary.
 
-A move during a resync resets the client when it changes what the caller reads, as a grant change during a resync does. A cursor that has more moves after it than `Limits.MaxResyncScan` also resets. Garbage collection removes moves at or below the tombstone horizon, where every cursor resets anyway.
+A move during a resync resets the client when it changes what the caller reads, as a grant change during a resync does. A cursor that has more moves after it than `Limits.MaxResyncScan` also resets, and a Bootstrap that resumes from such a cursor begins a new snapshot instead. Garbage collection removes moves at or below the tombstone horizon, where every cursor resets anyway.
 
 ## What the client knows
 
