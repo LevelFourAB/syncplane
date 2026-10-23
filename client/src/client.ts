@@ -254,7 +254,7 @@ import {
 	type RefClient,
 	resolveReverse,
 } from './refs.js';
-import { reportError, reportMisuse, safeInvoke } from './report.js';
+import { reportError, reportMisuse, safeInvoke, safeRun } from './report.js';
 import { createRoom, type Room, type RoomOptions } from './room.js';
 import {
 	DEFAULT_STORAGE_PREFIX,
@@ -2028,6 +2028,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	private changeShare?: ChangeShare;
 	/** onAccessChange listeners; see fireAccessChange. */
 	private accessListeners = new Set<(workspaceId: string) => void>();
+	/** onEntitiesChange listeners; see fireAccessChange. */
+	private entitiesListeners = new Set<
+		{ workspaceId: string; entities: ReadonlySet<string>; cb: () => void }
+	>();
 	/**
 	 * Per workspace, the summary accessSummaryIn last decided, against the
 	 * access generation it was read under (see keys.accessGeneration). Held
@@ -2890,9 +2894,17 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	/**
 	 * Calls the onAccessChange listeners once per workspace in which the
 	 * touched set reports ACCESS_TOUCH_ENTITY, or a row of an entity that rows
-	 * sit below.
+	 * sit below, and each onEntitiesChange listener once when it reports a row
+	 * of one of the listener's entities in its workspace.
 	 */
 	private fireAccessChange(touched: TouchSet): void {
+		for (const listener of [ ...this.entitiesListeners ]) {
+			for (const { workspaceId, entity } of touched.pairs()) {
+				if (workspaceId !== listener.workspaceId || !listener.entities.has(entity)) continue;
+				safeRun(listener.cb, 'onEntitiesChange');
+				break;
+			}
+		}
 		if (this.accessListeners.size === 0) return;
 		// A prediction reads the summary, whether the pending queue holds a
 		// write that can change grants, the row asked about and the rows up its
@@ -3448,13 +3460,30 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 *
 	 * A change of the row a prediction is for is not reported unless the row
 	 * is of such an entity. Watch that row as well to follow the prediction.
-	 * Nor is a change of the rows below the row, which a prediction of a
-	 * delete reads: watch them to follow it.
+	 * Nor is a change of the rows below the row, or of the grant rows that
+	 * name it as their subject, which a prediction of a delete reads: watch
+	 * them to follow it.
 	 */
 	onAccessChange(cb: (workspaceId: string) => void): () => void {
 		this.accessListeners.add(cb);
 		return () => {
 			this.accessListeners.delete(cb);
+		};
+	}
+
+	/**
+	 * Subscribes to commits, by this tab or another tab sharing the store,
+	 * that write a row of one of `entities` in `workspaceId`, locally or from
+	 * the server. `cb` runs once for each such commit. Returns an unsubscribe
+	 * function.
+	 * @internal useCan follows the rows that a prediction of a delete reads
+	 * with it, which onAccessChange does not report.
+	 */
+	onEntitiesChange(workspaceId: string, entities: readonly string[], cb: () => void): () => void {
+		const listener = { workspaceId, entities: new Set(entities), cb };
+		this.entitiesListeners.add(listener);
+		return () => {
+			this.entitiesListeners.delete(listener);
 		};
 	}
 

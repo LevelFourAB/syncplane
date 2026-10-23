@@ -16,8 +16,12 @@ import {
 	PostSchema,
 	ProjectMemberSchema,
 	ProjectSchema,
+	RepoSchema,
+	RepoSquadSchema,
 	RoomMemberSchema,
 	RoomSchema,
+	SquadMemberSchema,
+	SquadSchema,
 	TaskSchema,
 	ThreadSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
@@ -241,6 +245,118 @@ describe('useCan', () => {
 		await settle();
 		expect(asks.count).toBe(before);
 		expect(result.current).toBe('yes');
+		await t.client.close();
+	});
+});
+
+// The server refuses the delete of a row while a live row names it as its
+// access parent, or a live grant row names it as its subject, and can() reads
+// those rows. The summary stops after the first sync, so only the write under
+// test can make a hook ask again.
+describe('useCan for a delete', () => {
+	async function projects() {
+		const t = await createTestClient({ entities });
+		t.server.put(ProjectSchema, { id: 'p1' });
+		t.server.setCallerAccess({
+			subjects: [ 'ann' ],
+			permissions: [ 'view_projects', 'edit_projects', 'view_tasks', 'edit_tasks' ].map((
+				permission,
+			) => ({
+				permission,
+				root: true,
+			})),
+		});
+		await t.sync();
+		t.server.setCallerAccess(undefined);
+		return t;
+	}
+
+	it('answers again when a row below the row is written locally', async () => {
+		const t = await projects();
+		const { result } = renderHook(() => useCan(ProjectSchema, 'p1', 'delete'), {
+			wrapper: wrapper(t.client),
+		});
+		await waitFor(() => expect(result.current).toBe('yes'));
+
+		await act(() => t.client.mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } }));
+		await waitFor(() => expect(result.current).toBe('no'));
+
+		await act(() => t.client.mutate.del(TaskSchema, 't1'));
+		await waitFor(() => expect(result.current).toBe('yes'));
+		await t.client.close();
+	});
+
+	it('answers again when a row below the row arrives from the server', async () => {
+		const t = await projects();
+		const { result } = renderHook(() => useCan(ProjectSchema, 'p1', 'delete'), {
+			wrapper: wrapper(t.client),
+		});
+		await waitFor(() => expect(result.current).toBe('yes'));
+
+		t.server.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		await act(() => t.sync());
+		await waitFor(() => expect(result.current).toBe('no'));
+		await t.client.close();
+	});
+
+	it('answers again when a grant row that names the row as its subject arrives', async () => {
+		const squads = [ SquadSchema, SquadMemberSchema, RepoSchema, RepoSquadSchema ] as const;
+		const t = await createTestClient({ entities: squads });
+		t.server.put(SquadSchema, { id: 'sq1' });
+		t.server.put(RepoSchema, { id: 'r1' });
+		t.server.setCallerAccess({
+			subjects: [ 'ann' ],
+			permissions: [ 'view_squads', 'manage_squads', 'view_repos', 'view_repo_members' ].map((
+				permission,
+			) => ({ permission, root: true })),
+		});
+		await t.sync();
+		t.server.setCallerAccess(undefined);
+		const { result } = renderHook(() => useCan(SquadSchema, 'sq1', 'delete'), {
+			wrapper: wrapper(t.client),
+		});
+		await waitFor(() => expect(result.current).toBe('yes'));
+
+		t.server.put(RepoSquadSchema, {
+			id: 'rs1',
+			repo: { id: 'r1' },
+			squad: { id: 'sq1' },
+			role: 'repo_squad_reader',
+		});
+		await act(() => t.sync());
+		await waitFor(() => expect(result.current).toBe('no'));
+		await t.client.close();
+	});
+
+	it('does not ask again for a write to an entity whose rows cannot name the row', async () => {
+		const t = await projects();
+		const asks = countAsks(t.client);
+		const { result } = renderHook(() => useCan(ProjectSchema, 'p1', 'delete'), {
+			wrapper: wrapper(t.client),
+		});
+		await waitFor(() => expect(result.current).toBe('yes'));
+		await settle();
+		const before = asks.count;
+
+		await act(() => t.client.mutate.put(NoteSchema, { id: 'n1', body: 'hi' }));
+		await settle();
+		expect(asks.count).toBe(before);
+		await t.client.close();
+	});
+
+	it('does not ask an update again for a write to a row below the row', async () => {
+		const t = await projects();
+		const asks = countAsks(t.client);
+		const { result } = renderHook(() => useCan(ProjectSchema, 'p1', 'update'), {
+			wrapper: wrapper(t.client),
+		});
+		await waitFor(() => expect(result.current).toBe('yes'));
+		await settle();
+		const before = asks.count;
+
+		await act(() => t.client.mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } }));
+		await settle();
+		expect(asks.count).toBe(before);
 		await t.client.close();
 	});
 });

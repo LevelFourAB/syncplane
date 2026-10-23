@@ -13,7 +13,9 @@ import {
 	type AccessOperation,
 	type CanAnswer,
 	type CanDetail,
+	childEntitiesOf,
 	detailOf,
+	subjectEntitiesOf,
 	unknownBecause,
 	type Verdict,
 } from '../../access.js';
@@ -40,11 +42,13 @@ export interface UseDetailOptions extends UseWorkspaceOptions, DetailOptions {}
  * held locally, the row its access parent names, or the value of a field that
  * a check of the entity's access rules or field guards reads: a `callerIs`
  * field, a field a `when` condition reads, and the same for a `within` entry
- * on the entity itself. A change of any other field does not re-evaluate. Also re-evaluates when `SyncClient.onAccessChange` reports the
- * workspace: a new summary of the caller's access arrives, a local write that
- * can change the caller's grants is queued, acked or rolled back, or a row
- * that other rows sit below changes, in this tab or another sharing the
- * store.
+ * on the entity itself. A change of any other field does not re-evaluate.
+ * Also re-evaluates when `SyncClient.onAccessChange` reports the workspace:
+ * a new summary of the caller's access arrives, a local write that can
+ * change the caller's grants is queued, acked or rolled back, or a row that
+ * other rows sit below changes, in this tab or another sharing the store.
+ * For a `'delete'`, also re-evaluates when a row is written of an entity
+ * whose rows can name the row as their access parent or their subject.
  *
  * The first render gives an answer at once, before the hook reads the store:
  * `'yes'` or `'no'` when the summary the client read last decides it without
@@ -98,7 +102,7 @@ export function useCan<D extends DescMessage>(
 	const detail = useAnswer(
 		opts?.workspaceId,
 		schema,
-		{ key, checks: true },
+		{ key, checks: true, naming: operation === 'delete' },
 		[ 'can', schema.typeName, key, operation, fieldsKey ],
 		(scope) => scope.can(schema, key, operation, { ...canOpts, detail: true }),
 		(client, ws) => client.peekCanIn(ws, schema, key, operation, canOpts),
@@ -188,7 +192,7 @@ export function useHasPermission<D extends DescMessage>(
 	const detail = useAnswer(
 		opts?.workspaceId,
 		schema,
-		{ key, checks: false },
+		{ key, checks: false, naming: false },
 		[ 'permission', schema.typeName, key, permission ],
 		(scope) => scope.hasPermission(schema, key, permission, { detail: true }),
 		(client, ws) => client.peekHasPermissionIn(ws, schema, key, permission),
@@ -231,6 +235,11 @@ interface AnswerRow {
 	key: string;
 	/** Whether the fields the checks of the entity's access rules and guards read are inputs. */
 	checks: boolean;
+	/**
+	 * Whether the rows that can name the row as their access parent or their
+	 * subject are inputs, as they are for a delete.
+	 */
+	naming: boolean;
 }
 
 /**
@@ -262,6 +271,7 @@ function useAnswer<D extends DescMessage>(
 	]);
 	const key = row?.key;
 	const checks = row?.checks ?? false;
+	const naming = row?.naming ?? false;
 	useEffect(() => {
 		// Resolved first: an unregistered schema throws here, before anything
 		// below subscribes.
@@ -284,13 +294,23 @@ function useAnswer<D extends DescMessage>(
 				},
 			);
 		};
-		// The access change and the row's own inputs cover every input of the
-		// answer. The sync status is not an input, and it changes on every local
-		// write: asking again on it makes each write cost one prediction per
-		// mounted hook.
+		// The access change, the row's own inputs and, for a delete, the rows
+		// that can name the row cover every input of the answer. The sync status
+		// is not an input, and it changes on every local write: asking again on
+		// it makes each write cost one prediction per mounted hook.
 		const offAccess = client.onAccessChange((ws) => {
 			if (ws === scope.workspaceId) evaluate();
 		});
+		let offNaming: (() => void) | undefined;
+		if (def !== undefined && naming) {
+			const entities = [
+				...childEntitiesOf(client.entityRegistry, def.name),
+				...subjectEntitiesOf(client.entityRegistry, def.name),
+			].map((d) => d.name);
+			if (entities.length > 0) {
+				offNaming = client.onEntitiesChange(scope.workspaceId, entities, evaluate);
+			}
+		}
 		let offRow: (() => void) | undefined;
 		if (def === undefined || key === undefined) evaluate();
 		else {
@@ -318,9 +338,10 @@ function useAnswer<D extends DescMessage>(
 		return () => {
 			live = false;
 			offAccess();
+			offNaming?.();
 			offRow?.();
 		};
 		// `ask` is a new closure on every render; deps lists what it reads.
-	}, [ client, scope, key, checks, id, ...deps ]);
+	}, [ client, scope, key, checks, naming, id, ...deps ]);
 	return held?.id === id ? held.detail : seed;
 }

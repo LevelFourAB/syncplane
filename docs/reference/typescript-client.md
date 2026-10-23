@@ -1570,7 +1570,7 @@ const { answer, reason } = await client.can(TaskSchema, id, 'delete', {
 
 ##### Following changes
 
-`onAccessChange` calls back with the workspace id once for each commit that stores or removes the summary, queues, acks or rolls back a local write to a grant row (or a delete of an anchor row), replays the mirror of a queued custom mutation that writes such a row, or writes a row of an entity that other rows sit below, locally or from the server. It runs for commits by this tab and by other tabs sharing the store, and can run when no answer changed. It does not report a change of the row an answer is for unless that row is of such an entity, so to follow the answer for one row, watch that row too. The React hooks `useCan`, `useCanCreate` and `useHasPermission` do both. It does not report a change of the rows below a row either, which the answer for a `'delete'` reads; watch them to follow that answer.
+`onAccessChange` calls back with the workspace id once for each commit that stores or removes the summary, queues, acks or rolls back a local write to a grant row (or a delete of an anchor row), replays the mirror of a queued custom mutation that writes such a row, or writes a row of an entity that other rows sit below, locally or from the server. It runs for commits by this tab and by other tabs sharing the store, and can run when no answer changed. It does not report a change of the row an answer is for unless that row is of such an entity, so to follow the answer for one row, watch that row too. The React hooks `useCan`, `useCanCreate` and `useHasPermission` do both. It does not report a change of the rows below a row, or of the grant rows that name it as their subject, either, which the answer for a `'delete'` reads; watch them to follow that answer. `useCan` does this for a `'delete'`.
 
 ### Schema compilation: defineSchema
 
@@ -1929,7 +1929,9 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   the row changes (whether the row is held, its access parent, or a field that
   a check of the access rules or field guards reads: a `callerIs` field, a field
   a `when` condition reads, and the same for a `within` entry on the entity
-  itself) and when `onAccessChange` reports the workspace. A change
+  itself) and when `onAccessChange` reports the workspace. For a `'delete'`,
+  it also asks again when a row is written of an entity whose rows can name
+  the row as their access parent or their subject. A change
   of any other field of the row does not ask again. The first render gives an
   answer at once: `'yes'` or `'no'` when the summary the client read last
   decides it without a row, else the answer the same question got last in this
