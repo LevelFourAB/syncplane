@@ -496,6 +496,9 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	if err != nil {
 		return err
 	}
+	if msg, err = info.adopt(msg); err != nil {
+		return err
+	}
 	key := info.keyOf(msg.ProtoReflect())
 	if err := info.checkKey(key); err != nil {
 		return err
@@ -713,6 +716,9 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	}
 	info, err := e.info(msg)
 	if err != nil {
+		return err
+	}
+	if msg, err = info.adopt(msg); err != nil {
 		return err
 	}
 	for path := range o.texts {

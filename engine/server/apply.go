@@ -466,6 +466,9 @@ func (a *ApplyTx) Put(msg proto.Message, opts ...WriteOption) error {
 	if err != nil {
 		return err
 	}
+	if msg, err = info.adopt(msg); err != nil {
+		return err
+	}
 	o, err := collectWriteOpts(opts)
 	if err != nil {
 		return err
@@ -502,6 +505,9 @@ func (a *ApplyTx) Put(msg proto.Message, opts ...WriteOption) error {
 func (a *ApplyTx) Patch(msg proto.Message, mask []string, expected *uint64, opts ...WriteOption) error {
 	info, err := a.info(msg)
 	if err != nil {
+		return err
+	}
+	if msg, err = info.adopt(msg); err != nil {
 		return err
 	}
 	o, err := collectWriteOpts(opts)
