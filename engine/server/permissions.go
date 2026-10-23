@@ -275,6 +275,10 @@ var ErrEpochUnavailable = errors.New("server: filter epoch unavailable")
 // ReadFilterAt carries the same purity contract as ReadFilter, evaluated as
 // of the given epoch. Return ErrEpochUnavailable for epochs too old to
 // reconstruct (e.g. beyond retained history); those clients reset as before.
+//
+// The delta resync needs a cursor-state store (see WithCursorStateStore).
+// Without one, and for a cursor whose sequence and epoch the store does not
+// confirm, the client resets.
 type EpochReadFilters interface {
 	ReadFilterAt(ctx context.Context, p Principal, workspaceID, entity string, epoch uint64) (RowFilter, error)
 }

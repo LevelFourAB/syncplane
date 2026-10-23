@@ -715,6 +715,8 @@ Available backends:
 - **Adapter-provided** (default): Uses the underlying storage adapter (`cursorstate.Provider`). Entries are shared across nodes on `pgstore` and persist across restarts. `sqlitestore` and `pgstore` remove an entry 30 days after it was written, and a `Get` of an entry older than 7.5 days renews it.
 - **`cursorstate.NewMemory(maxBytes)`**: In-memory storage. Restarts clear state and cause connected clients to re-bootstrap. When full, it evicts the entries read least recently.
 
+A delta resync after a change of `FilterEpoch` needs a store. With a Permissions that implements `EpochReadFilters`, every cursor names a membership entry, even when its sets are small enough to inline. Without a store, or when the store lost the entry, a change of epoch resets the client.
+
 A pull reads the access record and the membership entry of the cursor it serves, the ones it issues again unchanged included, and a stream reads its access record at least once an hour. An entry that an active client keeps presenting therefore stays in a store that expires entries by age or evicts by recency.
 
 - **Custom `cursorstate.Store`**: Custom implementation for external caches (such as Redis or Memcached). Entries store row keys.

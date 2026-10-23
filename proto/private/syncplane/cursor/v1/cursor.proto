@@ -147,6 +147,13 @@ message Cursor {
 	// the two values only when the tag matches; otherwise the client resets.
 	// 0 when access_ref is absent, and on cursors older than the field.
 	fixed64 access_tag = 21;
+	// Keyed hash of seq and filter_epoch under the seq_key of the StoredSets
+	// entry that sets_ref names. A resync after a change of filter epoch
+	// classifies the old side with the read filters at filter_epoch and reads
+	// only rows at or below seq, and a client can edit both, so the resync
+	// trusts the two values only when the tag matches; otherwise the client
+	// resets. 0 when sets_ref is absent, and on cursors older than the field.
+	fixed64 epoch_tag = 22;
 }
 
 // AccessMove is one change of the access parent of a row that other rows sit
@@ -324,6 +331,10 @@ message StoredSets {
 	// Cursor.window — carried only when adopting a cursor from a server that
 	// predates `windows`, so nothing is lost in the exchange.
 	ClosureSet window = 4;
+	// Random key that Cursor.epoch_tag is computed with. It never leaves the
+	// server, so a client cannot compute the tag of another position. Empty on
+	// entries written before the field.
+	bytes seq_key = 5;
 }
 
 // WindowState is one Subscription.window's membership plus the position of its

@@ -84,6 +84,11 @@ type cursorState struct {
 	stateID   uint64
 	stateGen  uint64
 	stateBlob []byte
+	// setsKey is the seq key of the entry stateGen names (StoredSets.seq_key),
+	// nil when the cursor inlined its sets or the entry has no key. epochTag
+	// is Cursor.epoch_tag, which encodeCursor computes again with setsKey.
+	setsKey  []byte
+	epochTag uint64
 	// accessPolicy, accessHash and accessID/accessGen are the cursor's record
 	// of what its caller could read (Cursor.access_policy, access_hash and
 	// access_ref). accessPending is a ReadAccess encodeCursor must store
@@ -203,6 +208,7 @@ func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte, verdic
 		accessID:         c.GetAccessRef().GetId(),
 		accessGen:        c.GetAccessRef().GetGen(),
 		accessTag:        c.GetAccessTag(),
+		epochTag:         c.GetEpochTag(),
 		callerAccessHash: c.GetCallerAccessHash(),
 		callerAccessID:   c.GetCallerAccessRef().GetId(),
 		callerAccessGen:  c.GetCallerAccessRef().GetGen(),
@@ -246,6 +252,7 @@ func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte, verdic
 	st.window = sets.GetWindow()
 	st.windows = sets.GetWindows()
 	st.stateBlob = blob
+	st.setsKey = sets.GetSeqKey()
 	return st, nil
 }
 
@@ -279,6 +286,11 @@ func (s *Server) encodeCursor(ctx context.Context, ws string, st *cursorState) [
 		c.Window = st.window
 		c.Windows = st.windows
 	}
+	st.epochTag = 0
+	if c.GetSetsRef() != nil && len(st.setsKey) > 0 {
+		st.epochTag = epochTag(st.setsKey, st.seq, st.epoch)
+		c.EpochTag = st.epochTag
+	}
 	s.storeAccess(ctx, ws, st, c)
 	raw, err := proto.Marshal(c)
 	if err != nil {
@@ -293,26 +305,42 @@ func (s *Server) storeSets(ctx context.Context, ws string, st *cursorState, c *s
 	if s.cursorState == nil {
 		return false
 	}
-	blob, err := proto.Marshal(&syncplanecursorv1.StoredSets{
+	sets := &syncplanecursorv1.StoredSets{
 		Subscriptions: st.subs,
 		Closure:       st.closure,
 		Windows:       st.windows,
 		Window:        st.window,
-	})
+		SeqKey:        st.setsKey,
+	}
+	blob, err := proto.Marshal(sets)
 	if err != nil {
 		panic(err) // cannot fail for a message of valid in-memory protos
 	}
+	// A resync after a change of filter epoch trusts the cursor's seq and
+	// epoch only by the tag, and the tag needs the key of a stored entry.
+	keyed := s.resyncsEpochs()
 	// The sets encode deterministically (each key list sorted — see keySet and
 	// windowStates), so equal bytes mean equal membership and the entry the
 	// cursor came from still describes it: reissue the ref, write nothing.
 	// This is what keeps an idle poll, and every page that only advances seq,
-	// free of store writes.
-	if st.stateID != 0 && st.stateBlob != nil && bytes.Equal(blob, st.stateBlob) {
+	// free of store writes. An entry without a key is written again when the
+	// tag needs one.
+	if st.stateID != 0 && st.stateBlob != nil && bytes.Equal(blob, st.stateBlob) && (!keyed || len(st.setsKey) > 0) {
 		c.SetsRef = &syncplanecursorv1.StateRef{Id: st.stateID, Gen: st.stateGen}
 		return true
 	}
-	if len(blob) <= cursorStateInlineLimit {
+	if !keyed && len(blob) <= cursorStateInlineLimit {
 		return false
+	}
+	// A new key for each entry, so a tag computed for one entry is not valid
+	// for another one.
+	key := make([]byte, setsSeqKeySize)
+	if _, err := rand.Read(key); err != nil {
+		panic(err) // the platform CSPRNG does not fail
+	}
+	sets.SeqKey = key
+	if blob, err = proto.Marshal(sets); err != nil {
+		panic(err) // cannot fail for a message of valid in-memory protos
 	}
 	ref := cursorstate.Ref{ID: st.stateID, Gen: randNonZero()}
 	if ref.ID == 0 {
@@ -324,9 +352,26 @@ func (s *Server) storeSets(ctx context.Context, ws string, st *cursorState, c *s
 			slog.String("workspace", ws), slog.String("error", err.Error()))
 		return false
 	}
-	st.stateID, st.stateGen, st.stateBlob = ref.ID, ref.Gen, blob
+	st.stateID, st.stateGen, st.stateBlob, st.setsKey = ref.ID, ref.Gen, blob, key
 	c.SetsRef = &syncplanecursorv1.StateRef{Id: ref.ID, Gen: ref.Gen}
 	return true
+}
+
+// resyncsEpochs reports whether a change of filter epoch can resync a client
+// rather than reset it, which needs Permissions to implement EpochReadFilters.
+func (s *Server) resyncsEpochs() bool {
+	_, ok := s.perms.(EpochReadFilters)
+	return ok
+}
+
+// setsSeqKeySize is the size in bytes of a StoredSets.seq_key.
+const setsSeqKeySize = 32
+
+// epochTag is the Cursor.epoch_tag of a cursor at seq and filter epoch that
+// names the StoredSets entry holding key. Never 0, which a cursor without a
+// tag carries.
+func epochTag(key []byte, seq, epoch uint64) uint64 {
+	return positionTag(key, seq, epoch)
 }
 
 // randNonZero returns a uniformly random nonzero uint64 for cursor-state
@@ -1052,7 +1097,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	// Continue the cursor's state lineage: pages that carry the sets forward
 	// unchanged reuse the entry they were decoded from, and a page that moved
 	// them writes its entry under the same id (see storeSets).
-	next.stateID, next.stateGen, next.stateBlob = cur.stateID, cur.stateGen, cur.stateBlob
+	next.stateID, next.stateGen, next.stateBlob, next.setsKey = cur.stateID, cur.stateGen, cur.stateBlob, cur.setsKey
 	emitter.stampAccess(&next, cur)
 	if resp.HasMore {
 		// Resume just past the last delivered row. The (entity, key)

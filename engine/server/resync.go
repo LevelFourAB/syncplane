@@ -69,6 +69,14 @@ func (s *Server) oldVisibility(ctx context.Context, ws string, cur cursorState, 
 		if !implemented {
 			return nil, false, nil
 		}
+		// The client can edit the cursor's epoch and seq. A lower epoch would
+		// show rows the client never held as visible on the old side, and a
+		// higher seq would let the diff reach rows written after the cursor,
+		// so either would tombstone rows the client cannot read and tell it
+		// their keys.
+		if len(cur.setsKey) == 0 || cur.epochTag != epochTag(cur.setsKey, cur.seq, cur.epoch) {
+			return nil, false, nil
+		}
 		oldEm.filterSource = func(entity string) (RowFilter, error) {
 			return erf.ReadFilterAt(ctx, principalOf(ctx), ws, entity, cur.epoch)
 		}
@@ -193,7 +201,7 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 		}
 		// Same state lineage, new entry: the sets moved with the scope, but
 		// they are still this client's succession of cursors.
-		st.stateID, st.stateGen, st.stateBlob = cur.stateID, cur.stateGen, cur.stateBlob
+		st.stateID, st.stateGen, st.stateBlob, st.setsKey = cur.stateID, cur.stateGen, cur.stateBlob, cur.setsKey
 		// The client now holds what the new access shows.
 		newEm.stampAccess(&st, cur)
 		current, err := tx.CurrentSeq()

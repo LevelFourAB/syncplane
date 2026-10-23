@@ -181,11 +181,17 @@ const accessSeqKeySize = 32
 // names the ReadAccess holding key. Never 0, which a cursor without a tag
 // carries.
 func accessTag(key []byte, seq, movesThrough uint64) uint64 {
+	return positionTag(key, seq, movesThrough)
+}
+
+// positionTag is the first 8 bytes of the HMAC-SHA256 of a and b under key,
+// or 1 where those are 0.
+func positionTag(key []byte, a, b uint64) uint64 {
 	mac := hmac.New(sha256.New, key)
-	var b [16]byte
-	binary.BigEndian.PutUint64(b[:8], seq)
-	binary.BigEndian.PutUint64(b[8:], movesThrough)
-	mac.Write(b[:])
+	var buf [16]byte
+	binary.BigEndian.PutUint64(buf[:8], a)
+	binary.BigEndian.PutUint64(buf[8:], b)
+	mac.Write(buf[:])
 	if t := binary.BigEndian.Uint64(mac.Sum(nil)[:8]); t != 0 {
 		return t
 	}

@@ -163,7 +163,14 @@ type Cursor struct {
 	// rows at or below seq, and a client can edit seq, so the resync trusts
 	// the two values only when the tag matches; otherwise the client resets.
 	// 0 when access_ref is absent, and on cursors older than the field.
-	AccessTag     uint64 `protobuf:"fixed64,21,opt,name=access_tag,json=accessTag,proto3" json:"access_tag,omitempty"`
+	AccessTag uint64 `protobuf:"fixed64,21,opt,name=access_tag,json=accessTag,proto3" json:"access_tag,omitempty"`
+	// Keyed hash of seq and filter_epoch under the seq_key of the StoredSets
+	// entry that sets_ref names. A resync after a change of filter epoch
+	// classifies the old side with the read filters at filter_epoch and reads
+	// only rows at or below seq, and a client can edit both, so the resync
+	// trusts the two values only when the tag matches; otherwise the client
+	// resets. 0 when sets_ref is absent, and on cursors older than the field.
+	EpochTag      uint64 `protobuf:"fixed64,22,opt,name=epoch_tag,json=epochTag,proto3" json:"epoch_tag,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -341,6 +348,13 @@ func (x *Cursor) GetCallerAccessRef() *StateRef {
 func (x *Cursor) GetAccessTag() uint64 {
 	if x != nil {
 		return x.AccessTag
+	}
+	return 0
+}
+
+func (x *Cursor) GetEpochTag() uint64 {
+	if x != nil {
+		return x.EpochTag
 	}
 	return 0
 }
@@ -1200,7 +1214,11 @@ type StoredSets struct {
 	Windows []*WindowState `protobuf:"bytes,3,rep,name=windows,proto3" json:"windows,omitempty"`
 	// Cursor.window — carried only when adopting a cursor from a server that
 	// predates `windows`, so nothing is lost in the exchange.
-	Window        *ClosureSet `protobuf:"bytes,4,opt,name=window,proto3" json:"window,omitempty"`
+	Window *ClosureSet `protobuf:"bytes,4,opt,name=window,proto3" json:"window,omitempty"`
+	// Random key that Cursor.epoch_tag is computed with. It never leaves the
+	// server, so a client cannot compute the tag of another position. Empty on
+	// entries written before the field.
+	SeqKey        []byte `protobuf:"bytes,5,opt,name=seq_key,json=seqKey,proto3" json:"seq_key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1259,6 +1277,13 @@ func (x *StoredSets) GetWindows() []*WindowState {
 func (x *StoredSets) GetWindow() *ClosureSet {
 	if x != nil {
 		return x.Window
+	}
+	return nil
+}
+
+func (x *StoredSets) GetSeqKey() []byte {
+	if x != nil {
+		return x.SeqKey
 	}
 	return nil
 }
@@ -1616,7 +1641,7 @@ var File_syncplane_cursor_v1_cursor_proto protoreflect.FileDescriptor
 
 const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\n" +
-	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\x1a\x18syncplane/v1/query.proto\"\xba\a\n" +
+	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\x1a\x18syncplane/v1/query.proto\"\xd7\a\n" +
 	"\x06Cursor\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\bsub_hash\x18\x02 \x01(\x06R\asubHash\x12!\n" +
@@ -1644,7 +1669,8 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\x14access_moves_through\x18\x13 \x01(\x04R\x12accessMovesThrough\x12I\n" +
 	"\x11caller_access_ref\x18\x14 \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\x0fcallerAccessRef\x12\x1d\n" +
 	"\n" +
-	"access_tag\x18\x15 \x01(\x06R\taccessTag\"\xd3\x02\n" +
+	"access_tag\x18\x15 \x01(\x06R\taccessTag\x12\x1b\n" +
+	"\tepoch_tag\x18\x16 \x01(\x06R\bepochTag\"\xd3\x02\n" +
 	"\n" +
 	"AccessMove\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x10\n" +
@@ -1707,13 +1733,14 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\x04rows\x18\x03 \x03(\v2%.syncplane.cursor.v1.ClosureSet.EntryR\x04rows\",\n" +
 	"\bStateRef\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x06R\x02id\x12\x10\n" +
-	"\x03gen\x18\x02 \x01(\x06R\x03gen\"\xfe\x01\n" +
+	"\x03gen\x18\x02 \x01(\x06R\x03gen\"\x97\x02\n" +
 	"\n" +
 	"StoredSets\x12@\n" +
 	"\rsubscriptions\x18\x01 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\x129\n" +
 	"\aclosure\x18\x02 \x01(\v2\x1f.syncplane.cursor.v1.ClosureSetR\aclosure\x12:\n" +
 	"\awindows\x18\x03 \x03(\v2 .syncplane.cursor.v1.WindowStateR\awindows\x127\n" +
-	"\x06window\x18\x04 \x01(\v2\x1f.syncplane.cursor.v1.ClosureSetR\x06window\"a\n" +
+	"\x06window\x18\x04 \x01(\v2\x1f.syncplane.cursor.v1.ClosureSetR\x06window\x12\x17\n" +
+	"\aseq_key\x18\x05 \x01(\fR\x06seqKey\"a\n" +
 	"\vWindowState\x12\"\n" +
 	"\fsubscription\x18\x01 \x01(\rR\fsubscription\x12\x12\n" +
 	"\x04keys\x18\x02 \x03(\tR\x04keys\x12\x1a\n" +
