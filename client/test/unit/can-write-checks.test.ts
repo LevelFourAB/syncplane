@@ -19,6 +19,11 @@ import {
 	file_syncplane_testdata_access_v1_access,
 	FolderSchema,
 	ProjectSchema,
+	RepoMemberSchema,
+	RepoSchema,
+	RepoSquadSchema,
+	SquadMemberSchema,
+	SquadSchema,
 	StaffSchema,
 	TaskSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
@@ -306,6 +311,65 @@ describe('can() for a delete of a row other rows sit below', () => {
 		// Then the answers follow the rows the client holds
 		expect(await t.client.can(ProjectSchema, 'p1', 'delete')).toBe('yes');
 		expect(await t.client.can(ProjectSchema, 'p2', 'delete')).toBe('no');
+		await t.close();
+	});
+});
+
+// The server also refuses the delete of a team row while a live grant row
+// names it as its subject: a team created later with the same key would take
+// over the grant.
+describe('can() for a delete of a team row that a grant row names', () => {
+	const squads = [ SquadSchema, SquadMemberSchema, RepoSchema, RepoMemberSchema, RepoSquadSchema ];
+	const manager = atRoot('ann', 'view_squads', 'manage_squads', 'view_repos', 'view_repo_members');
+
+	it('answers no while the client holds a live grant row whose subject field names it', async () => {
+		// Given a caller who manages squads everywhere, squads sq1 and sq2, and
+		// repo_squad rs1, which grants to sq1
+		const t = await createTestClient({ entities: squads });
+		t.server.put(SquadSchema, { id: 'sq1' });
+		t.server.put(SquadSchema, { id: 'sq2' });
+		t.server.put(RepoSchema, { id: 'r1' });
+		t.server.put(RepoSquadSchema, {
+			id: 'rs1',
+			repo: { id: 'r1' },
+			squad: { id: 'sq1' },
+			role: 'repo_squad_reader',
+		});
+		t.server.setCallerAccess(manager);
+		await t.sync();
+
+		// When, Then: rs1 names sq1, and no grant row names sq2
+		expect(await t.client.can(SquadSchema, 'sq1', 'delete')).toBe('no');
+		expect(await t.client.can(SquadSchema, 'sq2', 'delete')).toBe('yes');
+
+		// And when rs1 is deleted on the server
+		t.server.del(RepoSquadSchema, 'rs1');
+		await t.sync();
+
+		// Then sq1 can be deleted
+		expect(await t.client.can(SquadSchema, 'sq1', 'delete')).toBe('yes');
+		await t.close();
+	});
+
+	it('answers no while the client holds a live grant row whose subject oneof names it', async () => {
+		// Given the same caller, and repo_member rm1, whose member oneof holds sq1
+		const t = await createTestClient({ entities: squads });
+		t.server.put(SquadSchema, { id: 'sq1' });
+		t.server.put(RepoSchema, { id: 'r1' });
+		t.server.put(RepoMemberSchema, {
+			id: 'rm1',
+			repo: { id: 'r1' },
+			member: { case: 'squad', value: { id: 'sq1' } },
+			role: 'repo_reader',
+		});
+		t.server.setCallerAccess(manager);
+		await t.sync();
+
+		// When
+		const answer = await t.client.can(SquadSchema, 'sq1', 'delete');
+
+		// Then
+		expect(answer).toBe('no');
 		await t.close();
 	});
 });

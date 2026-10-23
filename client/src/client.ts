@@ -42,6 +42,8 @@ import {
 	pendingChangesAccess,
 	type RuleRow,
 	ruleRowOf,
+	subjectEntitiesOf,
+	subjectRefsOf,
 	touchPendingAccess,
 	UNKNOWN_CHAIN,
 	unknownBecause,
@@ -1873,26 +1875,28 @@ type AccessQuestion = Verdict | AccessPlanner;
 const outsideModelPlanner: AccessPlanner = () => 'yes';
 
 /**
- * Whether `tx` holds a live row of `below` in `workspaceId` whose access
- * parents name the row of `schema` at `key`. The server refuses a delete of
- * a row with a live row below it.
+ * Whether `tx` holds a live row of `defs` in `workspaceId` whose references,
+ * as `refsOf` reads them, name the row of `schema` at `key`. The server
+ * refuses a delete of a row that a live row names as its access parent, or
+ * that a live grant row names as its subject.
  */
-async function holdsRowBelow(
+async function holdsRowNaming(
 	tx: KVRead,
 	registry: EntityRegistry,
 	workspaceId: string,
-	below: readonly EntityDef[],
+	defs: readonly EntityDef[],
+	refsOf: (def: EntityDef, row: Message) => readonly AccessRow[] | undefined,
 	schema: DescMessage,
 	key: string,
 ): Promise<boolean> {
 	const entity = registry.bySchema(schema).name;
-	for (const def of below) {
+	for (const def of defs) {
 		let found = false;
 		// A scan of the entity: the client keeps no index of the rows that
-		// name a row as their access parent.
+		// name a row as their access parent or their subject.
 		await forEachMergedRow(tx, registry, def.name, workspaceId, (row) => {
 			if (found) return;
-			const refs = parentRefsOf(def, fromBinary(def.schema, row.v));
+			const refs = refsOf(def, fromBinary(def.schema, row.v));
 			found = refs?.some((ref) => ref.entity === entity && ref.key === key) ?? false;
 		});
 		if (found) return true;
@@ -3482,10 +3486,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * Where a chain of access parents can lead back to an entity it passes, an
 	 * update that changes the access parent answers `'unknown'` at best, as
 	 * the caller must read the new parent. A delete answers `'no'` while the
-	 * client holds a live row whose access parent names the row, as the server refuses that delete. To find one,
-	 * it scans the rows held locally of each entity whose rows can sit below
-	 * the row. An update or a delete of a row the client does not hold
-	 * answers `'unknown'` at best.
+	 * client holds a live row whose access parent names the row, or a live
+	 * grant row whose subject names it, as the server refuses that delete. To
+	 * find one, it scans the rows held locally of each entity whose rows can
+	 * sit below the row or grant to its members. An update or a delete of a
+	 * row the client does not hold answers `'unknown'` at best.
 	 *
 	 * Resolves to `'yes'` for an entity outside the access model, which is
 	 * open to every caller in the workspace.
@@ -3635,13 +3640,23 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			this.canQuestion(schema, key, operation, opts),
 		);
 		if (operation !== 'delete' || verdict === 'no') return verdict;
-		const below = childEntitiesOf(this.entityRegistry, this.entityRegistry.bySchema(schema).name);
-		if (below.length === 0) return verdict;
-		return (await this.withAccessRead((tx) =>
-				holdsRowBelow(tx, this.entityRegistry, workspaceId, below, schema, key)
-			))
-			? 'no'
-			: verdict;
+		const entity = this.entityRegistry.bySchema(schema).name;
+		const below = childEntitiesOf(this.entityRegistry, entity);
+		const granting = subjectEntitiesOf(this.entityRegistry, entity);
+		if (below.length === 0 && granting.length === 0) return verdict;
+		const named = await this.withAccessRead(async (tx) =>
+			await holdsRowNaming(tx, this.entityRegistry, workspaceId, below, parentRefsOf, schema, key)
+			|| await holdsRowNaming(
+				tx,
+				this.entityRegistry,
+				workspaceId,
+				granting,
+				subjectRefsOf,
+				schema,
+				key,
+			)
+		);
+		return named ? 'no' : verdict;
 	}
 
 	/** @internal backs WorkspaceClient.canCreate. */

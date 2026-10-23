@@ -1165,6 +1165,39 @@ export function parentRefsOf(def: EntityDef, row: Message | undefined): ParentRe
 	const fields = accessParentFields(def.schema);
 	if (fields.length === 0) return [];
 	if (row === undefined) return undefined;
+	return refsIn(fields, row);
+}
+
+const subjectFields = new WeakMap<DescMessage, readonly DescField[]>();
+
+/**
+ * The fields of a grant entity's subject that can name a team row: the
+ * subject field when it is a reference, or each reference member of the
+ * subject oneof. Empty for an entity that is not a grant entity.
+ */
+function teamSubjectFields(def: EntityDef): readonly DescField[] {
+	let fields = subjectFields.get(def.schema);
+	if (fields === undefined) {
+		const unit = def.grantSpec?.subjectUnit;
+		fields = unit === undefined
+			? []
+			: def.schema.fields.filter((f) => (f.oneof?.name ?? f.name) === unit && refShapes(f).length > 0);
+		subjectFields.set(def.schema, fields);
+	}
+	return fields;
+}
+
+/**
+ * The team row that the subject of grant row `row` of `def` names: one row,
+ * or none when the subject is empty, names a user, or is not a reference.
+ */
+export function subjectRefsOf(def: EntityDef, row: Message): readonly AccessRow[] {
+	const fields = teamSubjectFields(def);
+	return fields.length === 0 ? [] : refsIn(fields, row);
+}
+
+/** The rows that the references of `fields` in `row` name, sorted. */
+function refsIn(fields: readonly DescField[], row: Message): (AccessRow & { def: EntityDef })[] {
 	const out: (AccessRow & { def: EntityDef })[] = [];
 	const seen = new Set<string>();
 	const add = (field: DescField, value: unknown) => {
@@ -1371,6 +1404,29 @@ export function anchorEntities(registry: EntityRegistry): ReadonlySet<string> {
 }
 
 const childSets = new WeakMap<EntityRegistry, Map<string, readonly EntityDef[]>>();
+const subjectSets = new WeakMap<EntityRegistry, Map<string, readonly EntityDef[]>>();
+
+/**
+ * The registered grant entities whose subject can name a row of `entity`:
+ * the entities whose rows can grant to the members of its rows.
+ */
+export function subjectEntitiesOf(registry: EntityRegistry, entity: string): readonly EntityDef[] {
+	let byEntity = subjectSets.get(registry);
+	if (byEntity === undefined) {
+		byEntity = new Map();
+		subjectSets.set(registry, byEntity);
+	}
+	let out = byEntity.get(entity);
+	if (out === undefined) {
+		out = registry.names().map((name) => registry.get(name)!).filter((def) =>
+			teamSubjectFields(def).some((field) =>
+				refShapes(field).some((shape) => targetDefOf(shape.targetSchema).name === entity)
+			)
+		);
+		byEntity.set(entity, out);
+	}
+	return out;
+}
 
 /**
  * The registered entities whose access parents can point at `entity`: the
