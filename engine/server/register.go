@@ -78,6 +78,11 @@ type RegisterOption func(*registerConfig)
 
 type registerConfig struct {
 	allowAccessChange bool
+	// persist, when set, runs once the set is validated and before the server
+	// serves it, with the revision of the set. An error from it refuses the
+	// set. The Manager stores the set here, so that a store that fails or
+	// refuses the write leaves the server on the schema the store holds.
+	persist func(revision string) error
 }
 
 func registerConfigOf(opts []RegisterOption) registerConfig {
@@ -99,6 +104,11 @@ func registerConfigOf(opts []RegisterOption) registerConfig {
 // a grant row lose or gain access to every workspace.
 func AllowAccessChange() RegisterOption {
 	return func(c *registerConfig) { c.allowAccessChange = true }
+}
+
+// withPersist sets registerConfig.persist.
+func withPersist(fn func(revision string) error) RegisterOption {
+	return func(c *registerConfig) { c.persist = fn }
 }
 
 // registerDescriptorSet is the richer internal form RegisterDescriptorSet and
@@ -190,7 +200,13 @@ func (s *Server) registerDescriptorSet(set []byte, opts ...RegisterOption) (Regi
 		if c.accessErr != nil {
 			return c.accessErr
 		}
-		return c.settleGate(cfg.allowAccessChange)
+		if err := c.settleGate(cfg.allowAccessChange); err != nil {
+			return err
+		}
+		if cfg.persist != nil {
+			return cfg.persist(revision)
+		}
+		return nil
 	})
 	if err != nil {
 		return RegisterResult{}, err

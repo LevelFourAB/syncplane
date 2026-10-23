@@ -1013,6 +1013,39 @@ func (s *Store) PutCatalogEntry(ctx context.Context, id string, payload []byte, 
 	return err
 }
 
+// SwapCatalogEntry stores an entry of the server-global catalog when its stored
+// revision is prev. It runs on the writer connection.
+func (s *Store) SwapCatalogEntry(ctx context.Context, id string, payload []byte, revision, prev string) error {
+	now := time.Now().UnixMilli()
+	var (
+		res sql.Result
+		err error
+	)
+	if prev == "" {
+		res, err = s.write.ExecContext(ctx,
+			`INSERT INTO catalog (id, payload, revision, updated_at)
+			 VALUES (?, ?, ?, ?)
+			 ON CONFLICT (id) DO NOTHING`,
+			id, payload, revision, now)
+	} else {
+		res, err = s.write.ExecContext(ctx,
+			`UPDATE catalog SET payload = ?, revision = ?, updated_at = ?
+			 WHERE id = ? AND revision = ?`,
+			payload, revision, now, id, prev)
+	}
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return storage.ErrCatalogConflict
+	}
+	return nil
+}
+
 func (s *Store) ListCatalogEntries(ctx context.Context) ([]storage.CatalogEntry, error) {
 	rows, err := s.read.QueryContext(ctx,
 		`SELECT id, payload, revision, updated_at FROM catalog ORDER BY id`)

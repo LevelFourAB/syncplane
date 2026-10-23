@@ -773,6 +773,11 @@ type Server struct {
 	perms    Permissions
 	authn    Authenticator
 	notifier pubsub.Notifier
+	// sharedNotifier is the notifier as WithNotifier gave it, without the
+	// prefix and the wrappers New puts on notifier. A Manager pokes the other
+	// nodes through it when it stores a schema, under an id outside every
+	// app's share of the space.
+	sharedNotifier pubsub.Notifier
 	// wsPrefix is this server's share of the workspace-id space, empty unless
 	// a Manager hosts it. New applies it to the notifier and the room
 	// registry; storage arrives already prefixed (see prefixstore).
@@ -1177,6 +1182,7 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 		byType:    make(map[protoreflect.FullName]*entityInfo),
 		schemaRev: s.baseSchemaRev,
 	})
+	s.sharedNotifier = s.notifier
 	// The prefix goes on first, below every other wrapper, so that everything
 	// in this server deals in the bare workspace ids its callers use.
 	s.notifier = pubsub.Prefixed(s.notifier, s.wsPrefix)
