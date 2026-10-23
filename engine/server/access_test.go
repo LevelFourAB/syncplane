@@ -791,6 +791,68 @@ var _ = Describe("Access model registration", func() {
 		})
 	})
 
+	// WithCallerAccess can give a caller a root role that no entity declares,
+	// which grants nothing. A registration that declares the role gives those
+	// callers its permissions at the root of every workspace, although no
+	// entity that was registered before changes.
+	Context("evolution of the roles a root role can name", func() {
+		staff := func() server.DynamicEntity {
+			str := protoreflect.StringKind
+			return server.DynamicEntity{
+				Name: "staff", KeyFields: []string{"id"},
+				Fields: []server.DynamicField{
+					{Name: "id", Number: 1, Kind: str},
+					{Name: "user_id", Number: 2, Kind: str},
+					{Name: "role", Number: 3, Kind: str},
+				},
+				Grant: &syncplanev1.GrantOptions{Subject: "user_id", Role: "role", Roles: []*syncplanev1.Role{{
+					Name: "staff_admin", Grants: []string{"view_members", "manage_members", "view_tasks", "edit_tasks"},
+				}}},
+				Access: readWrite("view_members", "manage_members"),
+			}
+		}
+
+		It("refuses a new grant entity that declares a role the caller access hook can give, without the flag", func() {
+			srv = newBareServer(headerAuthenticator(), rootRolesBy(func(p server.Principal) []string {
+				if p.Subject == "s" {
+					return []string{"staff_admin"}
+				}
+				return nil
+			}))
+			ts := httptest.NewServer(srv.HTTPHandler())
+			DeferCleanup(ts.Close)
+			sync := syncplanev1connect.NewSyncServiceClient(ts.Client(), ts.URL)
+			pull := func() error {
+				req := connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: ws, ClientId: "c-s"})
+				as("s", req.Header())
+				_, err := sync.Pull(GinkgoT().Context(), req)
+				return err
+			}
+			Expect(register(orgSpecs())).To(Succeed())
+			Expect(connect.CodeOf(pull())).To(Equal(connect.CodePermissionDenied))
+
+			Expect(register(append(orgSpecs(), staff()))).To(MatchError(ContainSubstring(
+				`the schema declares role "staff_admin"`)))
+			Expect(connect.CodeOf(pull())).To(Equal(connect.CodePermissionDenied))
+
+			Expect(register(append(orgSpecs(), staff()), server.AllowAccessChange())).To(Succeed())
+			Expect(pull()).To(Succeed())
+		})
+
+		It("refuses RegisterEntity that declares a role the caller access hook can give, without the flag", func() {
+			srv = newBareServer(rootRolesBy(func(server.Principal) []string { return nil }))
+			Expect(register(orgSpecs())).To(Succeed())
+			Expect(srv.RegisterDynamicEntity(staff())).To(MatchError(ContainSubstring(
+				`the schema declares role "staff_admin"`)))
+			Expect(srv.RegisterDynamicEntity(staff(), server.AllowAccessChange())).To(Succeed())
+		})
+
+		It("accepts a new grant entity without the flag on a server without a caller access hook", func() {
+			Expect(register(orgSpecs())).To(Succeed())
+			Expect(register(append(orgSpecs(), staff()))).To(Succeed())
+		})
+	})
+
 	Context("evolution of an enum role field", func() {
 		BeforeEach(func() {
 			_, err := srv.RegisterDescriptorSet(accessFileSet(nil))

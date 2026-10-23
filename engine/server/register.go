@@ -200,7 +200,7 @@ func (s *Server) registerDescriptorSet(set []byte, opts ...RegisterOption) (Regi
 		if c.accessErr != nil {
 			return c.accessErr
 		}
-		if err := c.settleGate(cfg.allowAccessChange); err != nil {
+		if err := c.settleGate(cfg.allowAccessChange, s.callerAccess != nil); err != nil {
 			return err
 		}
 		if cfg.persist != nil {

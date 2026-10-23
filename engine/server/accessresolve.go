@@ -51,6 +51,10 @@ type CallerAccessFunc func(ctx context.Context, p Principal, workspaceID string)
 // anonymous caller, and the caller holds no role at the root. With it, fn is
 // the only source: Principal.Subject is a subject only when fn returns it.
 //
+// A root role that no entity declares grants nothing. With fn set, a
+// registration that declares a role name the served schema does not declare
+// needs AllowAccessChange, since fn may already return that name.
+//
 // A deployment that accepts more than one issuer should return subjects that
 // name the issuer, so that two issuers' callers with the same Subject do not
 // share grants.

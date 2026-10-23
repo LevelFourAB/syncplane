@@ -2654,15 +2654,18 @@ const (
 	gateGrants
 )
 
-// settleGate records how the workspace gate of c admits callers, once c holds
-// an entity of the application's under a valid access model. Unless allow is
-// set, it refuses a state that differs from the one c recorded before.
+// settleGate records how the workspace gate of c admits callers, and the
+// roles c declares, once c holds an entity of the application's under a valid
+// access model. Unless allow is set, it refuses a state that differs from the
+// one c recorded before. With rootRoles set, it also refuses a role name that
+// c did not declare before: the server's CallerAccessFunc can already give it
+// as a root role, which grants nothing until a schema declares it.
 //
 // A catalog whose model is invalid keeps the state recorded before it, so a
 // run of RegisterEntity calls that passes through an incomplete model is
 // judged against the last schema that served callers, not against the
 // incomplete one, which served nobody.
-func (c *catalog) settleGate(allow bool) error {
+func (c *catalog) settleGate(allow, rootRoles bool) error {
 	if c.accessErr != nil || !hasAppEntity(c) {
 		return nil
 	}
@@ -2678,7 +2681,26 @@ func (c *catalog) settleGate(allow bool) error {
 		return fmt.Errorf("server: the schema declares no role any more, so the workspace gate admits every caller "+
 			"the application's workspace hook admits; %s", allowAccessChangeHint)
 	}
+	// A gate that was gateHook declared no role, and the check above already
+	// refused the first one.
+	if !allow && rootRoles && c.gate == gateGrants {
+		var added []string
+		for name := range c.access.roles {
+			if c.gateRoles[name] == nil {
+				added = append(added, name)
+			}
+		}
+		if len(added) > 0 {
+			sort.Strings(added)
+			return fmt.Errorf("server: the schema declares role %q, which callers that WithCallerAccess gives it "+
+				"as a root role would hold at the root of every workspace; %s", added[0], allowAccessChangeHint)
+		}
+	}
 	c.gate = next
+	c.gateRoles = nil
+	if c.access != nil {
+		c.gateRoles = c.access.roles
+	}
 	return nil
 }
 

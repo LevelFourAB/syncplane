@@ -675,6 +675,9 @@ type catalog struct {
 	// recorded it. Registration refuses to change it without
 	// AllowAccessChange.
 	gate gateState
+	// gateRoles are the roles the model declared when settleGate last
+	// recorded gate. The map is the model's and is never written.
+	gateRoles map[string]*modelRole
 }
 
 // accessModelOrErr returns the catalog's access model, nil when the schema
@@ -739,6 +742,7 @@ func (c *catalog) clone() *catalog {
 		accessErr:  c.accessErr,
 		lastAccess: c.lastAccess,
 		gate:       c.gate,
+		gateRoles:  c.gateRoles,
 	}
 	for k, v := range c.entities {
 		nc.entities[k] = v
@@ -1210,7 +1214,7 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 		if c.accessErr != nil {
 			return c.accessErr
 		}
-		return c.settleGate(true)
+		return c.settleGate(true, s.callerAccess != nil)
 	}); err != nil {
 		return nil, err
 	}
@@ -1390,7 +1394,7 @@ func (s *Server) RegisterEntity(msg proto.Message, opts ...RegisterOption) error
 		if c.accessErr != nil && !errors.As(c.accessErr, &missing) {
 			return c.accessErr
 		}
-		return c.settleGate(cfg.allowAccessChange)
+		return c.settleGate(cfg.allowAccessChange, s.callerAccess != nil)
 	}); err != nil {
 		return err
 	}
