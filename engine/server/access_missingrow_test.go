@@ -6,6 +6,7 @@ import (
 
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/server"
 )
 
 // A write to a row the caller cannot read must not tell the caller that the
@@ -14,12 +15,17 @@ import (
 var _ = Describe("Access model writes to a row that does not exist", func() {
 	var (
 		f       *accessFixture
+		opts    []server.Option
 		clients int
 	)
 
 	BeforeEach(func() {
 		clients = 0
-		f = newAccessFixture()
+		opts = nil
+	})
+
+	JustBeforeEach(func() {
+		f = newAccessFixture(opts...)
 		f.seedOrg()
 	})
 
@@ -72,5 +78,38 @@ var _ = Describe("Access model writes to a row that does not exist", func() {
 
 		// Then: it is refused.
 		Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED), verdict(r))
+	})
+
+	// The application's ReadFilter narrows the model, and a write to a row it
+	// hides is also a write to a row the caller may not change.
+	Context("when the application's ReadFilter hides a row the model also refuses", func() {
+		// Given: the ReadFilter hides t1, which writer and guest may not
+		// change in the model either.
+		BeforeEach(func() {
+			opts = []server.Option{server.WithPermissions(hideTask{key: "t1"})}
+		})
+
+		It("answers a patch of a missing row exactly as a patch of the hidden row", func() {
+			Expect(verdict(patch("writer", "t-none"))).To(Equal(verdict(patch("writer", "t1"))))
+		})
+
+		It("answers a delete of a missing row exactly as a delete of the hidden row", func() {
+			Expect(verdict(del("guest", "t-none"))).To(Equal(verdict(del("guest", "t1"))))
+		})
+	})
+
+	Context("when the application's ReadFilter hides a row the model lets the caller change", func() {
+		// Given: the ReadFilter hides t2, which writer may change in the model.
+		BeforeEach(func() {
+			opts = []server.Option{server.WithPermissions(hideTask{key: "t2"})}
+		})
+
+		It("answers a patch of a missing row exactly as a patch of the hidden row", func() {
+			Expect(verdict(patch("writer", "t-none"))).To(Equal(verdict(patch("writer", "t2"))))
+		})
+
+		It("answers a delete of a missing row exactly as a delete of the hidden row", func() {
+			Expect(verdict(del("writer", "t-none"))).To(Equal(verdict(del("writer", "t2"))))
+		})
 	})
 })

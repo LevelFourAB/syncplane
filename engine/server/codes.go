@@ -12,8 +12,10 @@ const (
 	// grants a role it does not hold, a move needs a read permission the caller
 	// lacks, a mutator's MutatorAccess does not hold, or the entity has no
 	// rule for the operation. The application's own permission hooks refuse
-	// with CodePermissionDenied. The message names only what the caller sent;
-	// the server logs why at debug level, as "access refused".
+	// with CodePermissionDenied, except the default row check: on an entity of
+	// the access model, a write to a row ReadFilter hides gets CodeAccessDenied,
+	// as a write to a missing row does. The message names only what the caller
+	// sent; the server logs why at debug level, as "access refused".
 	CodeAccessDenied = "access_denied"
 	// CodeInvalidArgument rejects a mutation whose payload is semantically
 	// invalid for the application.

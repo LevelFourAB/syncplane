@@ -97,7 +97,7 @@ In a schema that uses the access model, a caller that `CanAccessWorkspace` admit
 
 `ReadFilter` returns a per-row predicate. `FilterEpoch` versions the visibility inputs behind `ReadFilter` so that a permission change triggers a delta resync instead of requiring a full re-bootstrap. For more information, see [Partial sync and coverage](../explanation/partial-sync-and-coverage.md).
 
-`ReadFilter` also gates writes. The engine refuses a `PUT`, `PATCH`, or `DELETE` of a stored row that the filter hides with `permission_denied`. A caller therefore cannot change, delete, or reveal a row that it cannot read. To decide writes with a different rule, see [Check writes against the stored row](#check-writes-against-the-stored-row).
+`ReadFilter` also gates writes. The engine refuses a `PUT`, `PATCH`, or `DELETE` of a stored row that the filter hides with `permission_denied`, or with `access_denied` on an entity in the access model. A caller therefore cannot change, delete, or reveal a row that it cannot read. To decide writes with a different rule, see [Check writes against the stored row](#check-writes-against-the-stored-row).
 
 Keep membership checks out of `ReadFilter`. Handle membership in `CanAccessWorkspace`. Combining the two can cause a `nil` return to leak entities across tenants.
 

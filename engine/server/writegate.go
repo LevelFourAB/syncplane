@@ -166,6 +166,12 @@ func (g *writeGate) guardRow(
 // names only what the caller sent, and reads the same whether the row was
 // hidden or would not decode.
 func refuseRow(info *entityInfo, key string) error {
+	if info.access != nil {
+		// The access model gives a PATCH or DELETE of a missing row this
+		// refusal (see beginAccessWrite). The same answer here keeps a row the
+		// row check hides apart from a key that does not exist.
+		return accessRefusal(info, key)
+	}
 	return Reject(CodePermissionDenied,
 		fmt.Sprintf("entity %q: row %q may not be changed by this caller", info.name, key))
 }

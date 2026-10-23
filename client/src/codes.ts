@@ -43,7 +43,9 @@ export const CodePermissionDenied = 'permission_denied';
 /**
  * The schema's access model refused this mutation: no access rule admits it
  * for the caller, or it grants a role the caller does not hold. The app's own
- * permission policy refuses with CodePermissionDenied instead. The server logs
+ * permission policy refuses with CodePermissionDenied instead, except a write
+ * to a row its read filter hides on an entity of the access model: that gets
+ * this code, as a write to a row that does not exist does. The server logs
  * why at debug level, as "access refused".
  */
 export const CodeAccessDenied = 'access_denied';

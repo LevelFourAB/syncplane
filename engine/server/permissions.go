@@ -230,7 +230,10 @@ type Permissions interface {
 	//
 	// Unless RowWritePermissions supplies a write filter for the entity, it
 	// also gates writes: a PUT, PATCH or DELETE of a stored row it hides is
-	// refused with CodePermissionDenied, on the wire and in-process alike.
+	// refused with CodePermissionDenied, on the wire and in-process alike. On
+	// an entity that declares an access option the refusal is CodeAccessDenied,
+	// which is also the answer to a PATCH or DELETE of a row that does not
+	// exist.
 	//
 	// The returned filter is applied to rows of one request and must close over
 	// p rather than consult ctx: it runs during the row scan, after this hook
@@ -345,6 +348,12 @@ type RowWriteFilter func(w Write, stored proto.Message) error
 // A stored row that does not decode cannot be checked, so a write to it is
 // refused with CodePermissionDenied whenever the entity has a check; a Trusted
 // write repairs it. A refused write does not disclose the row's version.
+//
+// On an entity that declares an access option, these two refusals use
+// CodeAccessDenied. The access model refuses a PATCH or DELETE of a row that
+// does not exist with that code, so the answer does not tell a hidden row from
+// a missing key. A WriteFilter that refuses rows the caller cannot read keeps
+// the same property only when it refuses them with CodeAccessDenied.
 //
 //	func (p *policy) WriteFilter(
 //		_ context.Context, who server.Principal, _, entity string,

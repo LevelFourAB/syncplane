@@ -487,16 +487,18 @@ Permission interfaces include `CanAccessWorkspace`, `CanMutate`, `ReadFilter`, `
 
 Every write that is not trusted and targets a live row passes a row check before it is applied. The check sees the stored row as it is inside the write transaction:
 
-| Situation                                                  | Row check                                                          |
-| ---------------------------------------------------------- | ------------------------------------------------------------------ |
-| `WriteFilter` returns a filter for the entity              | The filter decides. `ReadFilter` is not used for writes.           |
-| No `RowWritePermissions`, or `WriteFilter` returns `nil`   | Refused with `CodePermissionDenied` if `ReadFilter` hides the row. |
-| Neither filter applies to the entity                       | None. The write costs no extra read.                               |
-| No live row (create, or a key whose row is deleted)        | None. `CanMutate` alone decides.                                   |
-| The stored row does not decode                             | Refused with `CodePermissionDenied`. A trusted write repairs it.   |
-| Trusted context, or rows that a custom mutator body writes | None.                                                              |
+| Situation                                                  | Row check                                                                                                                       |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `WriteFilter` returns a filter for the entity              | The filter decides. `ReadFilter` is not used for writes.                                                                        |
+| No `RowWritePermissions`, or `WriteFilter` returns `nil`   | Refused with `CodePermissionDenied` if `ReadFilter` hides the row, or with `CodeAccessDenied` on an entity in the access model. |
+| Neither filter applies to the entity                       | None. The write costs no extra read.                                                                                            |
+| No live row (create, or a key whose row is deleted)        | None. `CanMutate` alone decides.                                                                                                |
+| The stored row does not decode                             | Refused with `CodePermissionDenied`, or with `CodeAccessDenied` on an entity in the access model. A trusted write repairs it.   |
+| Trusted context, or rows that a custom mutator body writes | None.                                                                                                                           |
 
 `WriteFilter` is resolved at most once per entity per request, before the write transaction opens. `Server.Mutate` resolves it inside the transaction. The returned `RowWriteFilter` runs inside the transaction for each write, receives the same `Write` that `CanMutate` received, and must be a pure function of its arguments. A refused write does not disclose the row's version.
+
+On an entity in the access model, the default row check refuses with `CodeAccessDenied`, the code the access model gives a `PATCH` or `DELETE` of a row that does not exist. A hidden row and a missing key therefore get the same answer. A `WriteFilter` keeps this property only when it refuses rows the caller cannot read with `CodeAccessDenied`.
 
 Error constructors and rejection codes:
 

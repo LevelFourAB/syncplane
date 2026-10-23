@@ -741,7 +741,7 @@ A client cannot delete a row while a live row names it as its access parent. Del
 
 A client cannot create a task with that key while those comments are live: the create is refused with `conflict`, so a new task does not take over the comments of the old one. The same applies to a row whose key a live grant row names. Delete or move the comments first, or create the row with trusted code, which puts the comments below it.
 
-A client `PATCH` or `DELETE` of a row that does not exist is refused with `access_denied`, the same answer as for a row the caller may not change. A client that deletes a row that another client deleted first therefore sees the delete in `onMutationRejected`.
+A client `PATCH` or `DELETE` of a row that does not exist is refused with `access_denied`, the same answer as for a row the caller may not change or a row your `ReadFilter` hides. A client that deletes a row that another client deleted first therefore sees the delete in `onMutationRejected`.
 
 ## 4. Tell the server who the caller is
 

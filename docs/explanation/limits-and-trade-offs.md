@@ -187,7 +187,7 @@ A `ReadFilter` controls which rows a client can read, but does not hide the exis
 - **Deletions:** A tombstone containing the entity name, key, and version is sent to all subscribed clients when a row is deleted. Because the value is removed, the read filter cannot be evaluated against it.
 - **Revocation:** If an update modifies a row such that it no longer passes the read filter, the server sends a tombstone to ensure clients drop their cached copy. If the server cannot determine whether a client previously held the row, it sends a tombstone conservatively. Bootstrap sync skips denied rows entirely, and permission-change resync evaluates the client's prior filter to tombstone only previously visible rows.
 
-Writes disclose existence too, whatever the subscription. A write to a row that the caller may not read is refused with `permission_denied`, while a `PATCH` of a missing row is refused with `conflict` and a `PUT` or `DELETE` of one applies. A caller that guesses a key can therefore learn that a row exists, but not its fields or its version.
+Writes disclose existence too, whatever the subscription. A write to a row that the caller may not read is refused with `permission_denied`, while a `PATCH` of a missing row is refused with `conflict` and a `PUT` or `DELETE` of one applies. A caller that guesses a key can therefore learn that a row exists, but not its fields or its version. An entity in the access model gives a `PATCH` or `DELETE` of a hidden row and of a missing row the same answer, `access_denied` (see [the access model](access-model.md#writes-are-checked-inside-the-transaction)).
 
 Because row keys are visible in tombstones, keys must not contain sensitive data such as email addresses, slugs, or invite codes. Use surrogate keys (such as UUIDs) and store sensitive data in entity fields protected by the read filter.
 
@@ -242,7 +242,7 @@ Quarantined rows are not deleted from storage:
 
 - A `PUT` request with valid data replaces the corrupt bytes and restores normal sync.
 - A `PATCH` request is rejected with a `conflict` error because a field mask cannot be applied to undecodable base bytes.
-- When the entity has a row check (a read filter or a write filter), the check cannot run on the corrupt bytes, so the engine refuses every client write to the row with `permission_denied`. A trusted write repairs the row. Admitting the write would let any caller overwrite or delete a row that nobody can show they may change.
+- When the entity has a row check (a read filter or a write filter), the check cannot run on the corrupt bytes, so the engine refuses every client write to the row with `permission_denied` (`access_denied` on an entity in the access model). A trusted write repairs the row. Admitting the write would let any caller overwrite or delete a row that nobody can show they may change.
 
 Full sync operations without read filters or predicates transmit raw bytes without decoding them, allowing corrupt rows to reach clients where decoding errors surface on read. In-process methods (`ViewTx`, `ApplyTx`, and `EntityTx`) return decode errors directly to Go callers rather than quarantining rows.
 
