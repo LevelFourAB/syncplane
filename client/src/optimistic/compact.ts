@@ -1,4 +1,12 @@
-import { clone, create, fromBinary, isFieldSet, type Message, toBinary } from '@bufbuild/protobuf';
+import {
+	clone,
+	create,
+	type DescField,
+	fromBinary,
+	isFieldSet,
+	type Message,
+	toBinary,
+} from '@bufbuild/protobuf';
 
 import {
 	type CrudMutation,
@@ -205,8 +213,9 @@ function foldCrud(
 			// values. Folded, the PUT would reach the live row.
 			if (base.op === CrudOp.DELETE) return 'barrier';
 			// A PUT that leaves a guarded unit unset keeps its stored value when
-			// the caller may not read it, so only the PATCH can clear it.
-			if (base.op === CrudOp.PATCH && clearsGuarded(def, base, incoming.value)) return 'barrier';
+			// the caller may not read it, so it does not carry an earlier write of
+			// that unit: a PATCH's clear, or a PUT's value.
+			if (keepsGuarded(def, base, incoming.value)) return 'barrier';
 			// Otherwise a PUT overwrites whatever came before: the row ends at the
 			// PUT value either way.
 			return clone(CrudMutationSchema, incoming);
@@ -234,11 +243,15 @@ function foldCrud(
 				const merged = fromBinary(def.schema, base.value);
 				const src = fromBinary(def.schema, incoming.value);
 				if (!tryMergeMask(def, merged, src, incoming, mergers)) return 'barrier';
+				const value = toBinary(def.schema, merged);
+				// A clear of a guarded unit folds into a PUT that leaves it unset,
+				// which keeps the stored value for a caller who may not read it.
+				if (keepsGuarded(def, incoming, value)) return 'barrier';
 				return create(CrudMutationSchema, {
 					entity: base.entity,
 					key: base.key,
 					op: CrudOp.PUT,
-					value: toBinary(def.schema, merged),
+					value,
 					expectedVersion: base.expectedVersion,
 				});
 			}
@@ -342,25 +355,48 @@ function patchTouchesKey(def: EntityDef, crud: CrudMutation): boolean {
 }
 
 /**
- * Whether `patch` masks a unit that a field guard restricts and `put`, the
- * value of a PUT, leaves unset. The server keeps the stored value of such a
- * unit on a PUT from a caller who may not read it, so the PUT does not carry
- * the patch's clear.
+ * Whether `earlier` writes a unit that a field guard restricts and `put`, the
+ * value of a later PUT, leaves unset. A PATCH writes each unit its mask
+ * reaches, and a PUT each unit its value sets. The server keeps the stored
+ * value of such a unit on a PUT from a caller who may not read it, so the PUT
+ * does not carry the earlier write. The client does not know which guarded
+ * units the caller reads, so every guarded unit counts.
  */
-function clearsGuarded(def: EntityDef, patch: CrudMutation, put: Uint8Array): boolean {
+function keepsGuarded(def: EntityDef, earlier: CrudMutation, put: Uint8Array): boolean {
 	if (def.guards.length === 0) return false;
 	const guarded = new Set(def.guards.flatMap((g) => g.units));
-	let value: Message | undefined;
-	for (const path of patch.fieldMask?.paths ?? []) {
-		const head = path.split('.', 1)[0]!;
-		const field = def.schema.fields.find((f) => f.name === head);
-		const oneof = field?.oneof ?? def.schema.oneofs.find((o) => o.name === head);
-		if (!guarded.has(oneof?.name ?? head)) continue;
-		value ??= fromBinary(def.schema, put);
-		const members = oneof === undefined ? (field === undefined ? [] : [ field ]) : oneof.fields;
-		if (!members.some((f) => isFieldSet(value!, f))) return true;
+	let written: DescField[][];
+	if (earlier.op === CrudOp.PATCH) {
+		written = (earlier.fieldMask?.paths ?? []).flatMap((path) => {
+			const members = unitMembers(def, path.split('.', 1)[0]!);
+			return members && guarded.has(members.unit) ? [ members.fields ] : [];
+		});
+	} else if (earlier.op === CrudOp.PUT) {
+		const value = fromBinary(def.schema, earlier.value);
+		written = [ ...guarded ].flatMap((unit) => {
+			const members = unitMembers(def, unit);
+			return members?.fields.some((f) => isFieldSet(value, f)) ? [ members.fields ] : [];
+		});
+	} else {
+		return false;
 	}
-	return false;
+	if (written.length === 0) return false;
+	const value = fromBinary(def.schema, put);
+	return written.some((fields) => !fields.some((f) => isFieldSet(value, f)));
+}
+
+/**
+ * The unit that the top-level field or oneof `name` belongs to, with the fields
+ * of that unit: the field alone, or each member of its oneof.
+ */
+function unitMembers(
+	def: EntityDef,
+	name: string,
+): { unit: string; fields: DescField[] } | undefined {
+	const field = def.schema.fields.find((f) => f.name === name);
+	const oneof = field?.oneof ?? def.schema.oneofs.find((o) => o.name === name);
+	if (oneof !== undefined) return { unit: oneof.name, fields: oneof.fields };
+	return field === undefined ? undefined : { unit: field.name, fields: [ field ] };
 }
 
 function unionPaths(a: string[], b: string[]): string[] {
