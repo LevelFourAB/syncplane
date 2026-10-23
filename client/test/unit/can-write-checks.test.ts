@@ -2,13 +2,21 @@
 // guards: a move needs the right to read the row, every field of it a guard
 // can hide, and every row below it, where the row is; a change of a field
 // that decides who reads a guarded field needs the right to read that field
-// before and after. can() decides each check that the client holds the
-// inputs of, so it does not answer yes for an update the server refuses.
+// before and after; a grant row may grant only what the writer holds where
+// it applies. can() decides each check that the client holds the inputs of,
+// so it does not answer yes for an update the server refuses.
 
+import { clone, create, createFileRegistry } from '@bufbuild/protobuf';
+import {
+	EnumOptionsSchema,
+	EnumValueDescriptorProtoSchema,
+	FileDescriptorProtoSchema,
+} from '@bufbuild/protobuf/wkt';
 import { describe, expect, it } from 'vitest';
 
 import {
 	DocSchema,
+	file_syncplane_testdata_access_v1_access,
 	FolderSchema,
 	ProjectSchema,
 	StaffSchema,
@@ -400,6 +408,54 @@ describe('canCreate() for a rule with a within entry, on a row below more than o
 			await t.client.canCreate(I!, { id: 'i1', a: { id: 'b1' }, b: { id: 'b9' } }, { detail: true }),
 		)
 			.toEqual({ answer: 'unknown', reason: 'row_not_held' });
+		await t.close();
+	});
+});
+
+/**
+ * Team and TeamMember of the access test schema, with alias `name` of
+ * TeamRole inserted before the value that holds `number`, so a stored
+ * `number` reads as `name`, which no role declares.
+ */
+function teamWithRoleAlias(name: string, number: number) {
+	const file = file_syncplane_testdata_access_v1_access;
+	const proto = clone(FileDescriptorProtoSchema, file.proto);
+	const roles = proto.enumType.find((e) => e.name === 'TeamRole')!;
+	roles.options = create(EnumOptionsSchema, { allowAlias: true });
+	const at = roles.value.findIndex((v) => v.number === number);
+	roles.value.splice(at, 0, create(EnumValueDescriptorProtoSchema, { name, number }));
+	const registry = createFileRegistry(
+		proto,
+		(dep) => file.dependencies.find((d) => d.proto.name === dep),
+	);
+	return [
+		registry.getMessage('syncplane.testdata.access.v1.Team')!,
+		registry.getMessage('syncplane.testdata.access.v1.TeamMember')!,
+	] as const;
+}
+
+describe('canCreate() for a grant row whose enum role has an alias', () => {
+	it('decides the subset rule with the role declared on the stored number', async () => {
+		// Given TEAM_ROLE_MANAGER inserted before TEAM_ROLE_EDITOR (2), and a
+		// caller who edits teams everywhere but does not view them
+		const [ team, member ] = teamWithRoleAlias('TEAM_ROLE_MANAGER', 2);
+		const t = await createTestClient({ entities: [ team, member ] });
+		t.server.put(team, { id: 't1' });
+		t.server.setCallerAccess(atRoot('ed', 'edit_team'));
+		await t.sync();
+
+		// When it asks to grant role 2, which is TEAM_ROLE_EDITOR and grants
+		// view_team
+		const answer = await t.client.canCreate(member, {
+			id: 'tm1',
+			team: { id: 't1' },
+			userId: 'u1',
+			role: 2,
+		});
+
+		// Then the row grants more than the caller holds, which the server
+		// refuses
+		expect(answer).toBe('no');
 		await t.close();
 	});
 });

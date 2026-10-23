@@ -3,6 +3,8 @@ package server_test
 import (
 	"context"
 	"log/slog"
+	"net/http/httptest"
+	"slices"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -12,10 +14,12 @@ import (
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
+	"google.golang.org/protobuf/types/dynamicpb"
 
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/server"
 )
 
@@ -203,6 +207,55 @@ func messageNamed(file *descriptorpb.FileDescriptorProto, name string) *descript
 	}
 	Fail("no message named " + name)
 	return nil
+}
+
+// teamFileSet returns a descriptor set that holds only Team, TeamMember and
+// TeamRole of the access test schema, after change has edited the file.
+func teamFileSet(change func(*descriptorpb.FileDescriptorProto)) []byte {
+	GinkgoHelper()
+	return accessFileSet(func(file *descriptorpb.FileDescriptorProto) {
+		file.MessageType = slices.DeleteFunc(file.MessageType, func(m *descriptorpb.DescriptorProto) bool {
+			return m.GetName() != "Team" && m.GetName() != "TeamMember"
+		})
+		file.EnumType = slices.DeleteFunc(file.EnumType, func(e *descriptorpb.EnumDescriptorProto) bool {
+			return e.GetName() != "TeamRole"
+		})
+		if change != nil {
+			change(file)
+		}
+	})
+}
+
+// teamRoleAliasBefore gives TeamRole allow_alias and inserts name with number
+// before the value that already has that number, so that number reads as name.
+func teamRoleAliasBefore(name string, number int32) func(*descriptorpb.FileDescriptorProto) {
+	return func(file *descriptorpb.FileDescriptorProto) {
+		GinkgoHelper()
+		at := slices.IndexFunc(file.GetEnumType(), func(e *descriptorpb.EnumDescriptorProto) bool { return e.GetName() == "TeamRole" })
+		Expect(at).To(BeNumerically(">=", 0), "no TeamRole enum")
+		e := file.GetEnumType()[at]
+		if e.Options == nil {
+			e.Options = &descriptorpb.EnumOptions{}
+		}
+		e.Options.AllowAlias = proto.Bool(true)
+		at = slices.IndexFunc(e.Value, func(v *descriptorpb.EnumValueDescriptorProto) bool { return v.GetNumber() == number })
+		Expect(at).To(BeNumerically(">=", 0))
+		e.Value = slices.Insert(e.Value, at, &descriptorpb.EnumValueDescriptorProto{
+			Name: proto.String(name), Number: proto.Int32(number),
+		})
+	}
+}
+
+// dynamicOf returns msg as a message of the type srv serves for entity, for a
+// server whose schema came from a descriptor set: a compiled message of
+// another descriptor does not fit its catalog.
+func dynamicOf(srv *server.Server, entity string, msg proto.Message) proto.Message {
+	GinkgoHelper()
+	meta, ok := srv.Entity(entity)
+	Expect(ok).To(BeTrue(), "entity %q is not registered", entity)
+	out := dynamicpb.NewMessage(meta.Descriptor)
+	Expect(proto.Unmarshal(mustMarshal(msg), out)).To(Succeed())
+	return out
 }
 
 var _ = Describe("Access model registration", func() {
@@ -779,6 +832,71 @@ var _ = Describe("Access model registration", func() {
 			})
 			_, err := srv.RegisterDescriptorSet(set, server.AllowAccessChange())
 			Expect(err).To(MatchError(ContainSubstring(`field "role" enum type changed`)))
+		})
+	})
+
+	// A stored enum role is a number, and every name of the number is the
+	// same value, so an alias changes no row's role.
+	Context("an enum role value with aliases", func() {
+		var sync syncplanev1connect.SyncServiceClient
+
+		BeforeEach(func() {
+			srv = newBareServer(headerAuthenticator())
+			ts := httptest.NewServer(srv.HTTPHandler())
+			DeferCleanup(ts.Close)
+			sync = syncplanev1connect.NewSyncServiceClient(ts.Client(), ts.URL)
+		})
+
+		// seedEditor writes team t1 and a grant of role number 2 to u1 there.
+		seedEditor := func() {
+			GinkgoHelper()
+			Expect(srv.Mutate(server.Trusted(GinkgoT().Context()), ws, func(tx *server.EntityTx) error {
+				if err := tx.Put(dynamicOf(srv, "team", &accessv1.Team{Id: "t1"})); err != nil {
+					return err
+				}
+				return tx.Put(dynamicOf(srv, "team_member", &accessv1.TeamMember{
+					Id: "tm1", Team: &accessv1.Team{Id: "t1"}, UserId: "u1", Role: accessv1.TeamRole_TEAM_ROLE_EDITOR,
+				}))
+			})).To(Succeed())
+		}
+
+		// heldBy pulls from an empty cursor as user and returns the
+		// permissions it holds by row.
+		heldBy := func(user string) map[string][]string {
+			GinkgoHelper()
+			req := connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: ws, ClientId: "c-" + user})
+			as(user, req.Header())
+			resp, err := sync.Pull(GinkgoT().Context(), req)
+			Expect(err).NotTo(HaveOccurred())
+			return heldAt(resp.Msg.GetCallerAccess())
+		}
+
+		It("keeps the role of stored rows when an alias registers before a role value, without the flag", func() {
+			_, err := srv.RegisterDescriptorSet(teamFileSet(nil))
+			Expect(err).NotTo(HaveOccurred())
+			seedEditor()
+			Expect(heldBy("u1")).To(HaveKeyWithValue("edit_team", []string{"team/t1"}))
+
+			_, err = srv.RegisterDescriptorSet(teamFileSet(teamRoleAliasBefore("TEAM_ROLE_MANAGER", 2)))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(heldBy("u1")).To(HaveKeyWithValue("edit_team", []string{"team/t1"}))
+		})
+
+		It("grants a role declared on an alias that is not the first name of its number", func() {
+			_, err := srv.RegisterDescriptorSet(teamFileSet(teamRoleAliasBefore("TEAM_ROLE_EDITOR_FIRST", 2)))
+			Expect(err).NotTo(HaveOccurred())
+			seedEditor()
+			Expect(heldBy("u1")).To(HaveKeyWithValue("edit_team", []string{"team/t1"}))
+		})
+
+		It("refuses two roles declared on names of one number", func() {
+			_, err := srv.RegisterDescriptorSet(teamFileSet(func(file *descriptorpb.FileDescriptorProto) {
+				teamRoleAliasBefore("TEAM_ROLE_MANAGER", 2)(file)
+				member := messageNamed(file, "TeamMember")
+				eo := proto.GetExtension(member.GetOptions(), syncplanev1.E_Entity).(*syncplanev1.EntityOptions)
+				eo.GetGrant().Roles = append(eo.GetGrant().Roles, &syncplanev1.Role{Name: "TEAM_ROLE_MANAGER", Grants: []string{"view_team"}})
+			}))
+			Expect(err).To(MatchError(ContainSubstring(`grant roles "TEAM_ROLE_EDITOR" and "TEAM_ROLE_MANAGER" are names of one enum number`)))
 		})
 	})
 })

@@ -566,6 +566,10 @@ type grantSpec struct {
 	// roles maps a declared role name to the permissions it grants, sorted,
 	// with the permissions of the roles it includes added.
 	roles map[string][]string
+	// roleOfNumber maps the number of each declared enum role to its name. A
+	// row stores the number, and an alias inserted before the declared name
+	// would make ByNumber answer with a name no role declares.
+	roleOfNumber map[protoreflect.EnumNumber]string
 	// roleNames are the declared role names in declaration order, for errors
 	// and for the evolution check, which sorts them.
 	roleNames []string
@@ -1386,9 +1390,20 @@ func grantOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions,
 		if _, dup := g.roles[r.GetName()]; dup {
 			return nil, fmt.Errorf("grant declares role %q twice", r.GetName())
 		}
-		if role.Kind() == protoreflect.EnumKind && role.Enum().Values().ByName(protoreflect.Name(r.GetName())) == nil {
-			return nil, fmt.Errorf("grant role %q is not a value of enum %s, which role field %q holds",
-				r.GetName(), role.Enum().FullName(), role.Name())
+		if role.Kind() == protoreflect.EnumKind {
+			ev := role.Enum().Values().ByName(protoreflect.Name(r.GetName()))
+			if ev == nil {
+				return nil, fmt.Errorf("grant role %q is not a value of enum %s, which role field %q holds",
+					r.GetName(), role.Enum().FullName(), role.Name())
+			}
+			if prev, dup := g.roleOfNumber[ev.Number()]; dup {
+				return nil, fmt.Errorf("grant roles %q and %q are names of one enum number (%d) of %s, "+
+					"so a row that stores it would hold both", prev, r.GetName(), ev.Number(), role.Enum().FullName())
+			}
+			if g.roleOfNumber == nil {
+				g.roleOfNumber = make(map[protoreflect.EnumNumber]string, len(opt.GetRoles()))
+			}
+			g.roleOfNumber[ev.Number()] = r.GetName()
 		}
 		if len(r.GetGrants()) == 0 && len(r.GetIncludes()) == 0 {
 			return nil, fmt.Errorf("grant role %q grants no permissions", r.GetName())
@@ -2592,8 +2607,9 @@ func accessSpecOf(info *entityInfo) string {
 		sort.Strings(roles)
 		for _, r := range roles {
 			b.WriteString(" " + r + "=" + strings.Join(g.roles[r], ","))
-			// A stored enum role is a number. The name it reads as is what picks
-			// the role, so renumbering a value regrants every row that holds it.
+			// A stored enum role is a number, and the role declared on that
+			// number is what the row holds, so renumbering a value regrants every
+			// row that holds it. An alias of the number changes nothing.
 			if g.role.Kind() == protoreflect.EnumKind {
 				num := g.role.Enum().Values().ByName(protoreflect.Name(r)).Number()
 				b.WriteString("#" + strconv.Itoa(int(num)))

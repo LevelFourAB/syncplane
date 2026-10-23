@@ -1588,13 +1588,19 @@ function grantUnitsOf(def: EntityDef): readonly string[] {
 	return out;
 }
 
-/** The role a grant row of `spec` holds; empty for none. */
+/**
+ * The role a grant row of `spec` holds; empty for none. An enum number holds
+ * the role declared on any of its names.
+ */
 function grantRoleOf(spec: GrantSpec, row: Message): string {
 	const field = spec.roleField;
 	if (field === undefined) return '';
 	const value = fieldValueOf(row as unknown as Record<string, unknown>, field);
 	if (field.fieldKind === 'enum') {
-		return field.enum.values.find((v) => v.number === value)?.name ?? '';
+		// An alias inserted before the declared name would otherwise read the
+		// number as a name no role declares.
+		const names = field.enum.values.filter((v) => v.number === value);
+		return (names.find((v) => spec.roles.has(v.name)) ?? names[0])?.name ?? '';
 	}
 	return typeof value === 'string' ? value : '';
 }

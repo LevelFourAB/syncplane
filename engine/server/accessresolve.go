@@ -654,12 +654,16 @@ func grantRowsOf(tx storage.ReadTx, g *entityInfo, probes []caseProbe, limits Li
 	return nil
 }
 
-// grantRoleOf returns the role name a grant row holds, or "" when its role
-// field holds an enum number the enum does not declare.
+// grantRoleOf returns the role name a grant row holds. An enum number holds
+// the role declared on any of its names; a number with no declared role reads
+// as its first name, and one the enum does not declare as "".
 func grantRoleOf(g *grantSpec, msg protoreflect.Message) string {
 	v := msg.Get(g.role)
 	if g.role.Kind() != protoreflect.EnumKind {
 		return v.String()
+	}
+	if name, ok := g.roleOfNumber[v.Enum()]; ok {
+		return name
 	}
 	if ev := g.role.Enum().Values().ByNumber(v.Enum()); ev != nil {
 		return string(ev.Name())
