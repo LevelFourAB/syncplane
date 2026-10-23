@@ -1,8 +1,9 @@
 // can() and canCreate() promise to evaluate the access rules "as the server
 // does": a 'yes' tells an app to show a control. These specs pin the
 // predictions against the real server for the write checks that sit beside
-// the rules: the subset rule on grant rows, and the read rules of the rows
-// below a row whose change moves what those rows show. Each spec asks for the
+// the rules: the subset rule on grant rows, the read rules of the rows below a
+// row whose change moves what those rows show, and the workspace gate, which
+// refuses a caller that holds no permission. Each spec asks for the
 // prediction, makes the write, and reads the server's verdict.
 
 import { createConnectTransport } from '@connectrpc/connect-node';
@@ -15,6 +16,7 @@ import {
 	FolderSchema,
 	MatterSchema,
 	MemoSchema,
+	NoteSchema,
 	ProjectMemberSchema,
 	ProjectSchema,
 	StaffSchema,
@@ -40,6 +42,7 @@ const entities = [
 	FolderSchema,
 	FolderMemberSchema,
 	StaffSchema,
+	NoteSchema,
 ];
 
 const open: SyncClient[] = [];
@@ -364,13 +367,15 @@ describe('the summary on the wire', () => {
 });
 
 describe('a caller who loses access', () => {
-	// rita reads p1 through pm-rita-1, and in the second spec p2 through
-	// pm-rita-2 as well. t1 sits in p1.
+	// rita reads p1 through pm-rita-1, and in some specs p2 through pm-rita-2
+	// as well. t1 sits in p1. Every caller the workspace gate admits writes
+	// note n1.
 	async function seed(ws: string, both: boolean): Promise<void> {
 		await trusted(ws, [
 			{ entity: 'project', value: { id: 'p1', name: 'one' } },
 			{ entity: 'project', value: { id: 'p2', name: 'two' } },
 			{ entity: 'task', value: { id: 't1', project: { id: 'p1' }, title: 'secret' } },
+			{ entity: 'note', value: { id: 'n1', body: 'hello' } },
 			{
 				entity: 'project_member',
 				value: { id: 'pm-rita-1', project: { id: 'p1' }, userId: 'rita', role: 'project_reader' },
@@ -427,5 +432,32 @@ describe('a caller who loses access', () => {
 		// ... and the task she may no longer read is not left on her device,
 		// as it is not when she keeps another grant.
 		expect(await rita.get(TaskSchema, 't1')).toBeUndefined();
+	});
+
+	it("answers no for a write that every admitted caller may make once it was the caller's last grant", async () => {
+		// Given
+		const ws = freshWorkspace();
+		await seed(ws, false);
+		const rejections: RejectionInfo[] = [];
+		const rita = await clientAs('rita', ws, rejections);
+		expect(await rita.can(NoteSchema, 'n1', 'update')).toBe('yes');
+
+		// When
+		await revokeP1(ws);
+		await rita.syncNow();
+		expect(rita.status().workspaces[ws]?.access).toBe('none');
+
+		// Then the gate refuses rita, so no rule admits her
+		expect(await rita.can(NoteSchema, 'n1', 'update')).toBe('no');
+		expect(await rita.canCreate(NoteSchema, { id: 'n2', body: 'new' })).toBe('no');
+		expect(await rita.hasPermission(ProjectSchema, 'p1', 'edit_tasks')).toBe('no');
+
+		// And when she keeps another grant, the gate admits her
+		const ws2 = freshWorkspace();
+		await seed(ws2, true);
+		const kept = await clientAs('rita', ws2, rejections);
+		await revokeP1(ws2);
+		await kept.syncNow();
+		expect(await kept.can(NoteSchema, 'n1', 'update')).toBe('yes');
 	});
 });

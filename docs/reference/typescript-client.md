@@ -1520,6 +1520,7 @@ const canComment = await client.canCreate(CommentSchema, {
   - Where a chain of access parents can lead back to an entity it passes, as a folder in a folder does, a write that adds an access parent needs the right to read that parent. `canCreate` answers `'no'` when the caller does not read a parent the row names, and `'unknown'` (`row_not_held`) when the client does not hold that parent, which can be missing or hidden. An update that changes the access parent answers `'unknown'` at best (`new_value`), because the new parent decides.
   - A `'delete'` answers `'no'` while the client holds a live row whose access parent names the row, because the server refuses that delete with `conflict`. To find one, `can` scans the rows held locally of each entity whose rows can sit below the row.
   - An `'update'` or a `'delete'` of a row the client does not hold answers `'unknown'` at best (`row_not_held`), because the server refuses both for a row it does not hold live.
+  - When the client registers a grant entity and the stored summary holds no permission, every prediction answers `'no'`, for an entity outside the model too, because the server refuses every request of such a caller in the workspace. This is the state after the caller loses its last grant, while `status().workspaces[id].access` is `'none'`.
 
 | Answer      | When                                                                      |
 | ----------- | ------------------------------------------------------------------------- |

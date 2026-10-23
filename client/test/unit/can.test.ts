@@ -6,8 +6,9 @@
 // the inputs of the access rules from local rows, that predictions asked
 // together share one read of the store and answer as they do one at a time,
 // that the stored CallerAccess is read and decoded again only when it
-// changes, and that the pending queue is read only when it can hold a write
-// that changes the grants.
+// changes, that the pending queue is read only when it can hold a write
+// that changes the grants, and that a caller that holds no permission, which
+// the server's workspace gate refuses, gets no 'yes'.
 
 import { create, type DescMessage, type MessageInitShape, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, it, vi } from 'vitest';
@@ -38,6 +39,7 @@ import {
 	LeafletSchema,
 	MatterSchema,
 	MemoSchema,
+	NoteSchema,
 	PageSchema,
 	PinSchema,
 	PostSchema,
@@ -1472,6 +1474,45 @@ describe('predictions asked together', () => {
 		expect(settled.map((s) => s.status)).toEqual([ 'fulfilled', 'rejected', 'fulfilled' ]);
 		expect(settled[0]).toEqual({ status: 'fulfilled', value: 'yes' });
 		expect(settled[2]).toEqual({ status: 'fulfilled', value: 'yes' });
+		await c.close();
+	});
+});
+
+// In a schema that declares a role, the server refuses every request of a
+// caller that holds no permission in the workspace, which is where a caller
+// that lost its last grant ends up.
+describe('a caller that holds no permission', () => {
+	it('gets no yes in a schema with a grant entity, also for an admitted rule and an entity outside the model', async () => {
+		const kv = new MemoryKVStore();
+		const c = offlineClient(kv, [ ProjectSchema, ProjectMemberSchema, NoteSchema, WidgetSchema ]);
+		// The first answer opens the store, so the summaries written next are
+		// stamped like one a pull writes.
+		expect(await c.canCreate(NoteSchema, { id: 'n1' })).toBe('unknown');
+		await storeSummary(kv, {
+			subjects: [ 'rita' ],
+			permissions: [ { permission: 'view_projects', root: true } ],
+		});
+		expect(await c.canCreate(NoteSchema, { id: 'n1' })).toBe('yes');
+		expect(await c.canCreate(WidgetSchema, { id: 'w1' })).toBe('yes');
+
+		await storeSummary(kv, { subjects: [ 'rita' ] });
+
+		expect(await c.canCreate(NoteSchema, { id: 'n1' })).toBe('no');
+		expect(await c.can(NoteSchema, 'n1', 'update')).toBe('no');
+		expect(await c.canCreate(WidgetSchema, { id: 'w1' })).toBe('no');
+		expect(await c.can(WidgetSchema, 'w1', 'delete')).toBe('no');
+		expect(c.peekCanCreateIn(WS, NoteSchema, { id: 'n1' })).toBe('no');
+		await c.close();
+	});
+
+	it('gets yes for an admitted rule in a schema without a grant entity, where the gate admits every caller', async () => {
+		const kv = new MemoryKVStore();
+		const c = offlineClient(kv, [ NoteSchema, WidgetSchema ]);
+		expect(await c.canCreate(NoteSchema, { id: 'n1' })).toBe('unknown');
+		await storeSummary(kv, { subjects: [ 'rita' ] });
+
+		expect(await c.canCreate(NoteSchema, { id: 'n1' })).toBe('yes');
+		expect(await c.canCreate(WidgetSchema, { id: 'w1' })).toBe('yes');
 		await c.close();
 	});
 });

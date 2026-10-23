@@ -1866,6 +1866,13 @@ type AccessPlanner = (summary: AccessSummary) => Verdict | AccessPlan;
 type AccessQuestion = Verdict | AccessPlanner;
 
 /**
+ * The planner of an entity outside the model in a schema with a grant entity.
+ * It answers 'yes' also where no summary decides, as the gate admits the
+ * caller unless a summary shows it holds nothing.
+ */
+const outsideModelPlanner: AccessPlanner = () => 'yes';
+
+/**
  * Whether `tx` holds a live row of `below` in `workspaceId` whose access
  * parents name the row of `schema` at `key`. The server refuses a delete of
  * a row with a live row below it.
@@ -3483,6 +3490,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * Resolves to `'yes'` for an entity outside the access model, which is
 	 * open to every caller in the workspace.
 	 *
+	 * When the client registers a grant entity and the stored summary holds no
+	 * permission, as after the caller lost its last grant, every prediction
+	 * answers `'no'`: the server then refuses every request in the workspace.
+	 *
 	 * The answer is advisory. The server decides every read and write itself,
 	 * and a write this predicts as allowed can still come back as a rejection
 	 * ack. A row the caller has lost access to keeps showing an optimistic
@@ -3705,8 +3716,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	): AccessQuestion {
 		const def = this.entityRegistry.bySchema(schema);
 		const rules = def.accessRules;
-		// An entity outside the model is open to every caller in the workspace.
-		if (rules === undefined) return 'yes';
+		if (rules === undefined) return this.outsideModel();
 		return (summary) => {
 			const decide = (row: Message | undefined, chain: AccessChain): Verdict => {
 				const stored = ruleRowOf(summary, def, key, row, chain);
@@ -3802,7 +3812,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	): AccessQuestion {
 		const def = this.entityRegistry.bySchema(schema);
 		const rules = def.accessRules;
-		if (rules === undefined) return 'yes';
+		if (rules === undefined) return this.outsideModel();
 		return (summary) => {
 			const row = stampCreatorFields(def, create(schema, init), summary.subjects[0] ?? '');
 			const recursive = inRecursiveChain(def);
@@ -3841,6 +3851,26 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				: { def, key, decide: (_, chain) => canAt(summary, permission, def.name, key, chain) };
 	}
 
+	/**
+	 * The question for an entity outside the model, which is open to every
+	 * caller the workspace gate admits. In a schema with a grant entity, the
+	 * gate admits only a caller that holds a permission, which a stored
+	 * summary tells (see {@link gateRefuses}); without one the answer stays
+	 * 'yes'.
+	 */
+	private outsideModel(): AccessQuestion {
+		return hasGrantEntities(this.entityRegistry) ? outsideModelPlanner : 'yes';
+	}
+
+	/**
+	 * Whether the server's workspace gate refuses the caller that `summary`
+	 * describes: in a schema with a grant entity, a caller that holds no
+	 * permission. Every operation is then refused, whatever the rules say.
+	 */
+	private gateRefuses(summary: AccessSummary): boolean {
+		return summary.holdsNothing && hasGrantEntities(this.entityRegistry);
+	}
+
 	/** The answer to `question`, read from the store when it needs a summary. */
 	private askQuestion(workspaceId: string, question: AccessQuestion): Promise<Verdict> {
 		return typeof question === 'function'
@@ -3855,7 +3885,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			const q = question();
 			if (typeof q !== 'function') return q;
 			const summary = this.settledAccess.get(workspaceId);
-			if (!(summary instanceof AccessSummary)) return summary;
+			if (!(summary instanceof AccessSummary)) return q === outsideModelPlanner ? 'yes' : summary;
+			if (this.gateRefuses(summary)) return 'no';
 			const plan = q(summary);
 			if (!isAccessPlan(plan)) return plan;
 			const row = 'row' in plan ? plan.row : undefined;
@@ -3978,7 +4009,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		batch.forEach((ask, at) => {
 			const summary = summaries.get(ask.workspaceId)!;
 			if (!(summary instanceof AccessSummary)) {
-				out[at] = { answer: summary };
+				out[at] = { answer: ask.plan === outsideModelPlanner ? 'yes' : summary };
+				return;
+			}
+			if (this.gateRefuses(summary)) {
+				out[at] = { answer: 'no' };
 				return;
 			}
 			try {

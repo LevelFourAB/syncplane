@@ -163,6 +163,12 @@ export class AccessSummary {
 	 * not carry it.
 	 */
 	readonly maxAccessDepth: number;
+	/**
+	 * Whether the caller holds no permission, at the root or at any row. In a
+	 * schema that declares a role, the server then refuses every request in
+	 * the workspace.
+	 */
+	readonly holdsNothing: boolean;
 
 	constructor(access: CallerAccess) {
 		this.subjects = access.subjects;
@@ -183,6 +189,7 @@ export class AccessSummary {
 				for (const permission of this.groups[i]!) held.add(permission);
 			}
 		}
+		this.holdsNothing = this.roots.size === 0 && this.entities.size === 0;
 	}
 
 	/** Whether the caller holds `permission` at the workspace root. */
