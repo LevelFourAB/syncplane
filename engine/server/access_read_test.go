@@ -143,6 +143,26 @@ var _ = Describe("Access model reads", func() {
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
 		})
 
+		// An anonymous caller has an empty subject, and so does a caller whose
+		// hook returns one. Neither may match a grant row with an empty
+		// subject, which storage can hold from before the schema had the grant.
+		DescribeTable("never matches a grant row with an empty subject to an empty subject from the caller access hook",
+			func(opt server.Option) {
+				f = newAccessFixture(opt)
+				f.plant("org_member", "om-empty", &accessv1.OrgMember{Id: "om-empty", UserId: "", Role: "org_admin"})
+				f.seed(&accessv1.Task{Id: "t1", Title: "secret"})
+
+				rows, err := f.pullErr("")
+				Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied), "an anonymous caller read %v", rows)
+			},
+			Entry("a hook that returns an empty subject",
+				subjectsBy(func(server.Principal) []string { return []string{""} })),
+			Entry("a hook that returns an empty subject twice and an undeclared root role",
+				server.WithCallerAccess(func(_ context.Context, _ server.Principal, _ string) (server.CallerAccess, error) {
+					return server.CallerAccess{Subjects: []string{"", ""}, RootRoles: []string{"", "superuser"}}, nil
+				})),
+		)
+
 		It("admits a caller as soon as a grant row names them", func() {
 			_, err := f.pullErr("late")
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))

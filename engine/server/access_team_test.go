@@ -360,6 +360,38 @@ var _ = Describe("Access model teams", func() {
 			rejected(del("dave", "repo_member", "rm-design"), server.CodeAccessDenied)
 			applied(del("rita", "repo_member", "rm-rita"))
 		})
+
+		It("refuses a write later in a push after the caller left the squad", func() {
+			rs := f.push("dana", "c-dana",
+				deleteMutation("c-dana", 1, "squad_member", "sm-dana"),
+				patchMutation("c-dana", 2, "issue", "i1", &accessv1.Issue{Id: "i1", Title: "renamed"}, "title"),
+			)
+			applied(rs[0])
+			rejected(rs[1], server.CodeAccessDenied)
+		})
+
+		It("refuses a member write later in a push after the caller demoted itself from lead", func() {
+			rs := f.push("dana", "c-dana",
+				patchMutation("c-dana", 1, "squad_member", "sm-dana",
+					&accessv1.SquadMember{Id: "sm-dana", Role: "squad_member"}, "role"),
+				putMutation("c-dana", 2, "squad_member", "sm-z", squadMember("sm-z", "design", "z", "squad_member")),
+			)
+			applied(rs[0])
+			rejected(rs[1], server.CodeAccessDenied)
+		})
+
+		It("moves what a grant to a squad gives when the grant is pointed at another squad", func() {
+			applied(push("admin", func(c string) *syncplanev1.Mutation {
+				return patchMutation(c, 1, "repo_member", "rm-design",
+					&accessv1.RepoMember{Id: "rm-design", Member: &accessv1.RepoMember_Squad{Squad: squad("ops")}}, "member")
+			}))
+
+			rename := func(c string) *syncplanev1.Mutation {
+				return patchMutation(c, 1, "issue", "i1", &accessv1.Issue{Id: "i1", Title: "renamed"}, "title")
+			}
+			rejected(push("dana", rename), server.CodeAccessDenied)
+			applied(push("olga", rename))
+		})
 	})
 
 	Describe("sync", func() {

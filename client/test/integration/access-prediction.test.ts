@@ -2,8 +2,9 @@
 // does": a 'yes' tells an app to show a control. These specs pin the
 // predictions against the real server for the write checks that sit beside
 // the rules: the subset rule on grant rows, the read rules of the rows below a
-// row whose change moves what those rows show, and the workspace gate, which
-// refuses a caller that holds no permission. Each spec asks for the
+// row whose change moves what those rows show, the workspace gate, which
+// refuses a caller that holds no permission, and rules that need two
+// permissions the caller holds at different anchors. Each spec asks for the
 // prediction, makes the write, and reads the server's verdict.
 
 import { createConnectTransport } from '@connectrpc/connect-node';
@@ -11,9 +12,14 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { type RejectionInfo, SyncClient } from '../../src/client.js';
 import {
+	AccountMemberSchema,
+	AccountSchema,
+	BillerSchema,
+	ChargeSchema,
 	DossierSchema,
 	FolderMemberSchema,
 	FolderSchema,
+	InvoiceSchema,
 	MatterSchema,
 	MemoSchema,
 	NoteSchema,
@@ -43,6 +49,11 @@ const entities = [
 	FolderMemberSchema,
 	StaffSchema,
 	NoteSchema,
+	AccountSchema,
+	AccountMemberSchema,
+	BillerSchema,
+	InvoiceSchema,
+	ChargeSchema,
 ];
 
 const open: SyncClient[] = [];
@@ -459,5 +470,88 @@ describe('a caller who loses access', () => {
 		await revokeP1(ws2);
 		await kept.syncNow();
 		expect(await kept.can(NoteSchema, 'n1', 'update')).toBe('yes');
+	});
+});
+
+describe('a prediction about a rule that needs two permissions held at different anchors', () => {
+	// a1 and a2 hold an invoice and a charge each; the invoice rules need an
+	// account permission and a billing permission. ed edits a1 and is a
+	// billing clerk at the root; vi edits a1 and bills a2 through account
+	// roles only.
+	async function seed(ws: string): Promise<void> {
+		await trusted(ws, [
+			{ entity: 'account', value: { id: 'a1' } },
+			{ entity: 'account', value: { id: 'a2' } },
+			{ entity: 'invoice', value: { id: 'i1', account: { id: 'a1' }, title: 'one' } },
+			{ entity: 'invoice', value: { id: 'i2', account: { id: 'a2' }, title: 'two' } },
+			{ entity: 'charge', value: { id: 'c1', invoice: { id: 'i1' }, memo: 'x' } },
+			{ entity: 'charge', value: { id: 'c2', invoice: { id: 'i2' }, memo: 'y' } },
+			{
+				entity: 'account_member',
+				value: { id: 'am-ed', account: { id: 'a1' }, userId: 'ed', role: 'account_editor' },
+			},
+			{ entity: 'biller', value: { id: 'b-ed', userId: 'ed', role: 'billing_clerk' } },
+			{
+				entity: 'account_member',
+				value: { id: 'am-vi1', account: { id: 'a1' }, userId: 'vi', role: 'account_editor' },
+			},
+			{
+				entity: 'account_member',
+				value: { id: 'am-vi2', account: { id: 'a2' }, userId: 'vi', role: 'account_biller' },
+			},
+		]);
+	}
+
+	it('answers yes for a caller who holds one at the row and one at the root, as the server admits', async () => {
+		// Given
+		const ws = freshWorkspace();
+		await seed(ws);
+		const rejections: RejectionInfo[] = [];
+		const ed = await clientAs('ed', ws, rejections);
+
+		// When
+		const answers = {
+			readI1: await ed.can(InvoiceSchema, 'i1', 'read'),
+			updateC1: await ed.can(ChargeSchema, 'c1', 'update'),
+			createC: await ed.canCreate(ChargeSchema, { id: 'c9', invoice: { id: 'i1' } }),
+		};
+		await ed.mutate.patch(ChargeSchema, 'c1', { memo: 'edited' });
+		await ed.mutate.put(ChargeSchema, { id: 'c9', invoice: { id: 'i1' }, memo: 'new' });
+		await ed.syncNow();
+		await ed.syncNow();
+
+		// Then
+		expect(answers).toEqual({ readI1: 'yes', updateC1: 'yes', createC: 'yes' });
+		expect(await ed.get(InvoiceSchema, 'i1')).toBeDefined();
+		expect(rejections.map((r) => r.errorMessage)).toEqual([]);
+	});
+
+	it('does not answer yes for a caller who holds each at a different account, as the server sends neither invoice', async () => {
+		// Given
+		const ws = freshWorkspace();
+		await seed(ws);
+		const vi = await clientAs('vi', ws, []);
+
+		// When
+		const answers = {
+			readI1: await vi.can(InvoiceSchema, 'i1', 'read'),
+			readI2: await vi.can(InvoiceSchema, 'i2', 'read'),
+			createC1: await vi.canCreate(ChargeSchema, { id: 'c8', invoice: { id: 'i1' } }),
+			createC2: await vi.canCreate(ChargeSchema, { id: 'c9', invoice: { id: 'i2' } }),
+		};
+
+		// Then
+		expect({
+			...answers,
+			heldI1: (await vi.get(InvoiceSchema, 'i1')) !== undefined,
+			heldI2: (await vi.get(InvoiceSchema, 'i2')) !== undefined,
+		}).toEqual({
+			readI1: expect.not.stringMatching(/^yes$/),
+			readI2: expect.not.stringMatching(/^yes$/),
+			createC1: expect.not.stringMatching(/^yes$/),
+			createC2: expect.not.stringMatching(/^yes$/),
+			heldI1: false,
+			heldI2: false,
+		});
 	});
 });

@@ -229,6 +229,122 @@ var _ = Describe("Manager", func() {
 		Expect(entityNamesOf(newManager(root).App("a"))).To(ContainElement("label"))
 	})
 
+	It("stores every entity of concurrent registrations into one app", func() {
+		root := newRootStore(filepath.Join(GinkgoT().TempDir(), "mgr.db"))
+		m := newManager(root)
+
+		var wg sync.WaitGroup
+		errs := make([]error, 8)
+		for i := range errs {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer GinkgoRecover()
+				_, errs[i] = m.Register(ctx, "a", descriptorSetBytes(plainSpec(fmt.Sprintf("e%d", i))))
+			}()
+		}
+		wg.Wait()
+
+		for _, err := range errs {
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Expect(m.Close()).To(Succeed())
+		Expect(entityNamesOf(newManager(root).App("a"))).To(ContainElements("e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7"))
+	})
+
+	// The access model keeps state of its own beside the rows — grant
+	// indexes, the move log, cursor-state records — and none of it may cross
+	// the prefix that partitions one root adapter between apps.
+	It("keeps two apps' grants, moves and cursors apart", func() {
+		m := newManager(newRootStore(filepath.Join(GinkgoT().TempDir(), "mgr.db")),
+			server.WithServerOptions(headerAuthenticator()))
+		type pulled struct {
+			rows   []string
+			reset  bool
+			cursor []byte
+		}
+		pull := func(app, user string, cursor []byte) (pulled, error) {
+			GinkgoHelper()
+			req := connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: ws, ClientId: "c-" + user, Cursor: cursor})
+			as(user, req.Header())
+			resp, err := syncClient(m, app).Pull(ctx, req)
+			if err != nil {
+				return pulled{}, err
+			}
+			var out pulled
+			for _, rc := range resp.Msg.GetPatch().GetChanges() {
+				out.rows = append(out.rows, rc.GetEntity()+"/"+rc.GetKey())
+			}
+			sort.Strings(out.rows)
+			out.reset, out.cursor = resp.Msg.GetReset_(), resp.Msg.GetNextCursor()
+			return out, nil
+		}
+
+		// Given apps a and b, where u reads the tasks of both
+		for _, app := range []string{"a", "b"} {
+			_, err := m.Register(ctx, app, descriptorSetBytes(readerSpecs(true)...))
+			Expect(err).NotTo(HaveOccurred())
+			srv := m.App(app)
+			Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+				for _, row := range []struct {
+					entity string
+					fields map[string]string
+				}{
+					{"org_member", map[string]string{"id": "om-u", "user_id": "u", "role": "org_reader"}},
+					{"project", map[string]string{"id": "p1"}},
+					{"project", map[string]string{"id": "p2"}},
+					{"task", map[string]string{"id": "t-" + app}},
+				} {
+					if err := tx.Put(dynamicRow(srv, row.entity, row.fields)); err != nil {
+						return err
+					}
+				}
+				return nil
+			})).To(Succeed())
+		}
+		fromA, err := pull("a", "u", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fromA.rows).To(ContainElement("task/t-a"))
+		fromB, err := pull("b", "u", nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(fromB.rows).To(ContainElement("task/t-b"))
+		Expect(fromB.rows).NotTo(ContainElement("task/t-a"))
+
+		// When app a moves its task, writes a new grant and revokes u
+		srvA := m.App("a")
+		Expect(srvA.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+			task := dynamicRow(srvA, "task", map[string]string{"id": "t-a"})
+			fd := task.ProtoReflect().Descriptor().Fields().ByName("project")
+			ref := task.ProtoReflect().NewField(fd)
+			ref.Message().Set(ref.Message().Descriptor().Fields().ByName("id"), protoreflect.ValueOfString("p2"))
+			task.ProtoReflect().Set(fd, ref)
+			if err := tx.Put(task); err != nil {
+				return err
+			}
+			if err := tx.Put(dynamicRow(srvA, "org_member", map[string]string{"id": "om-x", "user_id": "x", "role": "org_admin"})); err != nil {
+				return err
+			}
+			return tx.Delete(dynamicRow(srvA, "org_member", nil), "om-u")
+		})).To(Succeed())
+
+		// Then b's cursor sees no change: no reset and no row
+		next, err := pull("b", "u", fromB.cursor)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(next.reset).To(BeFalse(), "app a's writes reset a cursor of app b")
+		Expect(next.rows).To(BeEmpty())
+
+		// And a cursor of app a presented to app b shows only b's rows
+		cross, err := pull("b", "u", fromA.cursor)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cross.rows).NotTo(ContainElement("task/t-a"))
+
+		// And u, revoked in a, is refused in a while b still admits it
+		_, err = pull("a", "u", nil)
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
+		_, err = pull("b", "x", nil)
+		Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied), "x's grant in app a admitted it to app b")
+	})
+
 	// The live server never drops an entity, and the stored schema is the
 	// merge of the sets the app registered. A set that replaces the message
 	// of an entity with a message that is not that entity would leave the two

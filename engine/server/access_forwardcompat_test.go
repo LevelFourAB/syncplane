@@ -94,6 +94,65 @@ var _ = Describe("Access model forward compatibility", func() {
 		// Then registration fails and names the entry
 		Expect(err).To(MatchError(ContainSubstring("within[0]")))
 	})
+
+	// futureCmp is a cmp condition on archived with an unknown operator.
+	futureCmp := func() *syncplanev1.Condition {
+		return &syncplanev1.Condition{Kind: &syncplanev1.Condition_Cmp{Cmp: &syncplanev1.CmpCond{
+			Path: []string{"archived"}, Op: syncplanev1.CmpOp(futureOp),
+			Value: &syncplanev1.QueryValue{Kind: &syncplanev1.QueryValue_BoolValue{BoolValue: true}},
+		}}}
+	}
+
+	DescribeTable("refuses an operator this server does not know at every depth of the access options",
+		func(place func([]server.DynamicEntity)) {
+			// Given the org schema with a repeated tags field and a status
+			// field on task, and the unknown operator placed in it
+			specs := archivedTask()
+			task := specNamed(specs, "task")
+			task.Fields = append(task.Fields,
+				server.DynamicField{Name: "tags", Number: 4, Kind: protoreflect.StringKind, Repeated: true},
+				server.DynamicField{Name: "status", Number: 5, Kind: protoreflect.StringKind},
+			)
+			place(specs)
+
+			// When it registers
+			err := register(specs)
+
+			// Then registration fails for the operator
+			Expect(err).To(MatchError(ContainSubstring("99")))
+		},
+		Entry("a rep operator in a rule's when", func(s []server.DynamicEntity) {
+			r := permRule("view_tasks", "read")
+			r.When = not(&syncplanev1.Condition{Kind: &syncplanev1.Condition_Rep{Rep: &syncplanev1.RepCond{
+				Path: []string{"tags"}, Op: syncplanev1.RepOp(futureOp),
+				Values: []*syncplanev1.QueryValue{{Kind: &syncplanev1.QueryValue_StringValue{StringValue: "x"}}},
+			}}})
+			specNamed(s, "task").Access.Allow[0] = r
+		}),
+		Entry("a cmp operator inside an and list", func(s []server.DynamicEntity) {
+			r := permRule("view_tasks", "read")
+			r.When = not(&syncplanev1.Condition{Kind: &syncplanev1.Condition_And{And: &syncplanev1.ConditionList{
+				Conds: []*syncplanev1.Condition{futureCmp()},
+			}}})
+			specNamed(s, "task").Access.Allow[0] = r
+		}),
+		Entry("a cmp operator in a guard read rule's when", func(s []server.DynamicEntity) {
+			read := permRule("view_tasks", "read")
+			read.When = not(futureCmp())
+			specNamed(s, "task").Access.Guard = []*syncplanev1.FieldGuard{{
+				Fields: []string{"status"},
+				Allow:  []*syncplanev1.AccessRule{read, permRule("edit_tasks", "update")},
+			}}
+		}),
+		Entry("a cmp operator in a guard write rule's when", func(s []server.DynamicEntity) {
+			write := permRule("view_tasks", "update")
+			write.When = not(futureCmp())
+			specNamed(s, "task").Access.Guard = []*syncplanev1.FieldGuard{{
+				Fields: []string{"status"},
+				Allow:  []*syncplanev1.AccessRule{write},
+			}}
+		}),
+	)
 })
 
 // The creator mark decides who writes a field: a create that is not trusted

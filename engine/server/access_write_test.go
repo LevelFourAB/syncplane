@@ -240,6 +240,51 @@ var _ = Describe("Access model writes", func() {
 			denied(r)
 			Expect(f.pull("padmin")).To(ContainElement("project_member/pm-padmin"), "the batch rolled back")
 		})
+
+		It("refuses a write later in a push after the caller removed its own grant", func() {
+			rs := f.push("padmin", "c-padmin",
+				deleteMutation("c-padmin", 1, "project_member", "pm-padmin"),
+				patchMutation("c-padmin", 2, "task", "t1", &accessv1.Task{Id: "t1", Title: "renamed"}, "title"),
+			)
+			applied(rs[0])
+			denied(rs[1])
+		})
+
+		It("refuses a grant later in a push after the caller demoted its own grant", func() {
+			rs := f.push("padmin", "c-padmin",
+				patchMutation("c-padmin", 1, "project_member", "pm-padmin",
+					&accessv1.ProjectMember{Id: "pm-padmin", Role: "project_reader"}, "role"),
+				putMutation("c-padmin", 2, "project_member", "pm-z", member("pm-z", "p1", "z", "project_reader")),
+			)
+			applied(rs[0])
+			denied(rs[1])
+		})
+
+		// pm-ghost names p9 before p9 exists, which blocks the create until
+		// the grant is gone.
+		It("creates a project later in a push after the dormant grant that named it is deleted", func() {
+			rs := f.push("admin", "c-admin",
+				putMutation("c-admin", 1, "project", "p9", project("p9")),
+				deleteMutation("c-admin", 2, "project_member", "pm-ghost"),
+				putMutation("c-admin", 3, "project", "p9", project("p9")),
+			)
+			refused(rs[0], server.CodeConflict)
+			applied(rs[1])
+			applied(rs[2])
+			_, err := f.pullErr("ghost")
+			Expect(err).To(HaveOccurred())
+		})
+
+		It("refuses to delete a project created earlier in the push once a grant anchors at it", func() {
+			rs := f.push("admin", "c-admin",
+				putMutation("c-admin", 1, "project", "p3", project("p3")),
+				putMutation("c-admin", 2, "project_member", "pm-z3", member("pm-z3", "p3", "z", "project_admin")),
+				deleteMutation("c-admin", 3, "project", "p3"),
+			)
+			applied(rs[0])
+			applied(rs[1])
+			refused(rs[2], server.CodeConflict)
+		})
 	})
 
 	Context("mutators", func() {

@@ -971,6 +971,21 @@ var _ = Describe("Access model registration", func() {
 			}))
 			Expect(err).To(MatchError(ContainSubstring(`grant roles "TEAM_ROLE_EDITOR" and "TEAM_ROLE_MANAGER" are names of one enum number`)))
 		})
+
+		It("refuses a trusted write of a grant row whose role is a number the enum does not declare", func() {
+			_, err := srv.RegisterDescriptorSet(teamFileSet(nil))
+			Expect(err).NotTo(HaveOccurred())
+
+			err = srv.Mutate(server.Trusted(GinkgoT().Context()), ws, func(tx *server.EntityTx) error {
+				if err := tx.Put(dynamicOf(srv, "team", &accessv1.Team{Id: "t1"})); err != nil {
+					return err
+				}
+				return tx.Put(dynamicOf(srv, "team_member", &accessv1.TeamMember{
+					Id: "tm7", Team: &accessv1.Team{Id: "t1"}, UserId: "u7", Role: accessv1.TeamRole(7),
+				}))
+			})
+			Expect(err).To(HaveOccurred())
+		})
 	})
 })
 
