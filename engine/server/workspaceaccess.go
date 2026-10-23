@@ -76,8 +76,9 @@ func (s *Server) admitTo(ctx context.Context, workspaceID string, leaveGrants bo
 		return adm, workspaceAccessError(err)
 	}
 	adm.creator = adm.caller.primary
+	adm.wrap = workspaceAccessError
 	if leaveGrants && model.requiresPermission() {
-		adm.verdict = &pendingVerdict{srv: s, ws: workspaceID, caller: adm.caller, wrap: workspaceAccessError}
+		adm.verdict = &pendingVerdict{srv: s, ws: workspaceID, caller: adm.caller, wrap: adm.wrap}
 		return adm, nil
 	}
 	if adm.access, err = s.admitAccess(ctx, workspaceID, adm.caller); err != nil {
@@ -123,6 +124,9 @@ type admission struct {
 	// serves the request, nil when the gate made it (see
 	// enterWorkspaceServed). access is then nil.
 	verdict *pendingVerdict
+	// wrap maps an error of the gate onto what the entry point reports, nil
+	// for a schema that does not use the model.
+	wrap func(error) error
 }
 
 // pendingVerdict is the grant check the workspace gate leaves to the
@@ -189,15 +193,18 @@ func (v *pendingVerdict) record(set *accessSet, err error) (*accessSet, error) {
 // It is the error a gateError in the chain of err carries. Otherwise, when no
 // attempt reached the verdict, refusal reaches it with reachApart, so a
 // refused caller gets the gate's error whatever failed first; it does not when
-// ctx is done, and err then stands. A nil v returns nil.
+// ctx is done, and err then stands. A nil v, a verdict the gate reached
+// itself, still returns the error of a gateError: txAccess.begin decides the
+// verdict again in a write transaction at a later position.
 func (v *pendingVerdict) refusal(ctx context.Context, err error) error {
+	var ge *gateError
+	if errors.As(err, &ge) {
+		return ge.err
+	}
 	if v == nil {
 		return nil
 	}
-	var ge *gateError
 	switch {
-	case errors.As(err, &ge):
-		return ge.err
 	case v.set != nil:
 		return nil
 	case v.err != nil:

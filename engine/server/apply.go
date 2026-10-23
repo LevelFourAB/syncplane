@@ -258,7 +258,7 @@ func (s *Server) apply(
 		wrote = etx.wrote
 		return nil
 	})
-	if err != nil {
+	if err = adm.verdict.settle(ctx, err); err != nil {
 		return WriteOutcome{}, err
 	}
 	if wrote {

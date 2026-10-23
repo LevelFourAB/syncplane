@@ -27,8 +27,10 @@ type txAccess struct {
 	// admitted is the set the workspace gate read, which begin takes as the
 	// transaction's own where it is held (see heldAt). verdict is the grant
 	// check the gate left to the write transaction, which begin reaches.
+	// wrap maps the gate's error onto what the entry point reports.
 	admitted *accessSet
 	verdict  *pendingVerdict
+	wrap     func(error) error
 	tx       storage.ReadTx
 	set      *accessSet
 	// chains walks parent chains over chainsTx, and is dropped after a write
@@ -44,7 +46,7 @@ func newTxAccess(adm admission, limits Limits, report func(storage.Row, error)) 
 	if adm.caller == nil {
 		return nil
 	}
-	return &txAccess{caller: adm.caller, admitted: adm.access, verdict: adm.verdict, limits: limits, report: report}
+	return &txAccess{caller: adm.caller, admitted: adm.access, verdict: adm.verdict, wrap: adm.wrap, limits: limits, report: report}
 }
 
 // begin starts one attempt of a write transaction. It drops what an earlier
@@ -55,9 +57,11 @@ func newTxAccess(adm admission, limits Limits, report func(storage.Row, error)) 
 // write; after one it only costs the read of the position.
 //
 // When the workspace gate left its grant check to the write transaction, begin
-// reaches that verdict in tx and returns the gate's error, a gateError, for a
-// refused caller. A write path then calls it before it reads anything else of
-// tx, and the refused transaction writes nothing.
+// reaches that verdict in tx. When tx reads the workspace at another position
+// than the one the verdict was reached at, begin reads the caller's grants
+// from tx and decides the verdict again. Either way it returns the gate's
+// error, a gateError, for a refused caller. A write path then calls it before
+// it reads anything else of tx, and the refused transaction writes nothing.
 func (a *txAccess) begin(tx storage.ReadTx) error {
 	if a == nil {
 		return nil
@@ -82,12 +86,26 @@ func (a *txAccess) begin(tx storage.ReadTx) error {
 		// transaction ends, so the set stays what tx holds until a write of
 		// the transaction's own drops it (see noteWrite).
 		a.tx, a.set = tx, a.admitted
+		return nil
 	}
+	// The grants may have changed since the verdict: on a rerun under
+	// savepoints, an adapter retry, or after a gate that read them in a
+	// transaction of its own. A rule with permissions reads them again where
+	// it is checked, but one that admits every admitted caller reads nothing,
+	// so a caller whose last grant went in between would write through it.
+	set, err := accessIn(tx, a.caller, a.limits, nil)
+	if err != nil {
+		return err
+	}
+	if !set.any() {
+		return &gateError{a.wrap(ErrNoAccess)}
+	}
+	a.tx, a.set = tx, set
 	return nil
 }
 
-// settle is pendingVerdict.settle for the grant check a carries. A nil a, or
-// one the workspace gate decided, returns err.
+// settle is pendingVerdict.settle for the grant check a carries. A nil a
+// returns err.
 func (a *txAccess) settle(ctx context.Context, err error) error {
 	if a == nil {
 		return err
