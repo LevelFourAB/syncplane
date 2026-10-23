@@ -533,6 +533,42 @@ var _ = Describe("Access model field read rules", func() {
 			Expect(historyOf("owner", query.Has("mask.paths", "salary"))).NotTo(BeEmpty())
 			Expect(historyOf("guest", query.Has("mask.paths", "salary"))).To(BeEmpty())
 		})
+
+		It("counts in a record only the writes of fields the caller reads", func() {
+			named := patch("owner", "s1", &accessv1.Staff{Name: "anna"}, "name")
+			applied(named)
+			for _, salary := range []int64{5500, 6000, 6500} {
+				applied(patch("owner", "s1", &accessv1.Staff{Salary: salary}, "salary"))
+			}
+
+			owner := historyOf("owner", query.Eq("seq", named.GetSeq()))
+			Expect(owner).To(HaveLen(1))
+			Expect(owner[0].GetWrites()).To(BeEquivalentTo(4), "the salary writes fold into the session")
+			Expect(owner[0].GetWriteGroups()).To(BeEmpty(), "the groups never leave the server")
+
+			guest := historyOf("guest", query.Eq("seq", named.GetSeq()))
+			Expect(guest).To(HaveLen(1))
+			Expect(guest[0].GetMask().GetPaths()).To(Equal([]string{"name"}))
+			Expect(guest[0].GetWrites()).To(BeEquivalentTo(1), "guest does not read salary")
+			Expect(guest[0].GetThroughSeq()).To(Equal(named.GetSeq()), "guest does not read salary")
+		})
+
+		It("dates a record by the first write of a field the caller reads", func() {
+			salaried := patch("owner", "s1", &accessv1.Staff{Salary: 5500}, "salary")
+			applied(salaried)
+			named := patch("owner", "s1", &accessv1.Staff{Name: "anna"}, "name")
+			applied(named)
+
+			owner := historyOf("owner", query.Eq("seq", salaried.GetSeq()))
+			Expect(owner).To(HaveLen(1))
+			Expect(owner[0].GetMask().GetPaths()).To(ConsistOf("salary", "name"))
+
+			guest := historyOf("guest", query.Has("mask.paths", "name"))
+			Expect(guest).To(HaveLen(1))
+			Expect(guest[0].GetSeq()).To(Equal(named.GetSeq()), "guest does not read salary")
+			Expect(guest[0].GetThroughSeq()).To(Equal(named.GetSeq()))
+			Expect(guest[0].GetWrites()).To(BeEquivalentTo(1))
+		})
 	})
 
 	Describe("writes", func() {

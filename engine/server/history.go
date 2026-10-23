@@ -467,6 +467,12 @@ func (s *Server) captureHistory(
 		// down to empty, and foldHistory reads the flag to tell the two apart.
 		rec.RowCreated = true
 	}
+	rec.WriteGroups = []*syncplanev1.FieldHistoryWriteGroup{{
+		Fields:   historyUnits(rec.GetMask().GetPaths()),
+		Writes:   1,
+		FirstSeq: seq,
+		LastSeq:  seq,
+	}}
 
 	histKey, stored, err := s.historyTarget(tx, histInfo, info, ws, key, rec, actor, now)
 	if err != nil {
@@ -682,8 +688,9 @@ func (s *Server) historyReadable(tx storage.ReadTx, e *rowEmitter, histInfo *ent
 	if filter == nil && !hides {
 		// Every row of the source entity is readable, so its history is too.
 		// Also the fast path: no source row is fetched in the common case where
-		// an app does not filter reads at all.
-		return true, nil
+		// an app does not filter reads at all. The projection still runs, as it
+		// is what takes the write groups out.
+		return e.projectHistory(src, row.Key, rec, nil), nil
 	}
 	verdict, err := e.historySourceReadable(tx, src, rec.GetSourceKey(), filter)
 	if err != nil || !verdict.readable {
@@ -695,30 +702,40 @@ func (s *Server) historyReadable(tx storage.ReadTx, e *rowEmitter, histInfo *ent
 // projectHistory takes out of rec the fields of its source row that a guard
 // hides from the caller, and reports whether anything of rec is left to
 // show: a record of a row's creation, or one whose mask names a field the
-// caller reads. A record it changes is memoized by its key for the query's
-// matching and its result (see historyView).
+// caller reads. seq, through_seq and writes then count only the write groups
+// that changed a field the caller reads, and the groups themselves never
+// leave the server. A record it changes is memoized by its key for the
+// query's matching and its result (see historyView).
 //
 // A predicate then matches the record the caller receives, so a condition on
-// the mask cannot tell the caller that a field it does not read changed.
+// the mask or on the counts cannot tell the caller that a field it does not
+// read changed.
 func (e *rowEmitter) projectHistory(src *entityInfo, key string, rec *syncplanev1.FieldHistory, hidden []string) bool {
-	if len(hidden) == 0 {
-		return true
-	}
-	var kept []string
-	for _, p := range rec.GetMask().GetPaths() {
-		if _, found := slices.BinarySearch(hidden, protectedHead(p)); !found {
-			kept = append(kept, p)
+	paths := rec.GetMask().GetPaths()
+	kept := paths
+	if len(hidden) > 0 {
+		kept = nil
+		for _, p := range paths {
+			if !unitHidden(hidden, protectedHead(p)) {
+				kept = append(kept, p)
+			}
+		}
+		if len(kept) == 0 && !rec.GetRowCreated() {
+			return false
 		}
 	}
-	if len(kept) == len(rec.GetMask().GetPaths()) {
+	if len(kept) == len(paths) && len(rec.GetWriteGroups()) == 0 {
 		return true
 	}
-	if len(kept) == 0 && !rec.GetRowCreated() {
-		return false
-	}
 	out := proto.CloneOf(rec)
-	out.Mask = &fieldmaskpb.FieldMask{Paths: kept}
-	if len(rec.GetPrior()) > 0 {
+	out.WriteGroups = nil
+	if len(hidden) > 0 {
+		countVisibleWrites(out, rec.GetWriteGroups(), hidden)
+	}
+	if len(kept) != len(paths) {
+		out.Mask = &fieldmaskpb.FieldMask{Paths: kept}
+	}
+	if len(kept) != len(paths) && len(rec.GetPrior()) > 0 {
 		prior, err := src.decode(rec.GetPrior())
 		if err != nil {
 			return false
@@ -735,6 +752,42 @@ func (e *rowEmitter) projectHistory(src *entityInfo, key string, rec *syncplanev
 	}
 	e.historyViews[key] = out
 	return true
+}
+
+// countVisibleWrites sets seq, through_seq and writes of out from the groups
+// that changed a unit outside hidden, sorted. A group of no units is the
+// row's creation, which every caller that reads the row sees. A record without
+// groups keeps its counts: nothing says which of its writes changed what.
+//
+// A hidden write that lands before the first visible one moves seq forward,
+// and prior still holds at the new seq: the writes before it changed only
+// hidden units, which the projection takes out of mask and prior.
+func countVisibleWrites(out *syncplanev1.FieldHistory, groups []*syncplanev1.FieldHistoryWriteGroup, hidden []string) {
+	var (
+		writes      uint32
+		first, last uint64
+	)
+	for _, g := range groups {
+		units := g.GetFields()
+		if len(units) > 0 && !slices.ContainsFunc(units, func(u string) bool { return !unitHidden(hidden, u) }) {
+			continue
+		}
+		if writes == 0 || g.GetFirstSeq() < first {
+			first = g.GetFirstSeq()
+		}
+		last = max(last, g.GetLastSeq())
+		writes += g.GetWrites()
+	}
+	if writes == 0 {
+		return
+	}
+	out.Seq, out.ThroughSeq, out.Writes = first, last, writes
+}
+
+// unitHidden reports whether unit is in hidden, which is sorted.
+func unitHidden(hidden []string, unit string) bool {
+	_, found := slices.BinarySearch(hidden, unit)
+	return found
 }
 
 // historyView returns the history record with key as the caller receives it,
@@ -1034,6 +1087,7 @@ func foldHistory(info *entityInfo, stored, rec *syncplanev1.FieldHistory) (*sync
 	out := proto.Clone(stored).(*syncplanev1.FieldHistory)
 	out.ThroughSeq = rec.GetThroughSeq()
 	out.Writes = stored.GetWrites() + 1
+	out.WriteGroups = foldWriteGroups(out.GetWriteGroups(), rec.GetWriteGroups())
 	if stored.GetRowCreated() {
 		return out, nil
 	}
@@ -1100,6 +1154,42 @@ func foldHistory(info *entityInfo, stored, rec *syncplanev1.FieldHistory) (*sync
 	out.Mask = &fieldmaskpb.FieldMask{Paths: append(kept, added...)}
 	out.Prior = value
 	return out, nil
+}
+
+// foldWriteGroups adds the groups of a folding write to the groups of the
+// record it folds into. groups is the record's own clone and is changed in
+// place; a group of the same fields only grows, so the count of groups stays
+// at the number of distinct field sets the session changed.
+func foldWriteGroups(groups, add []*syncplanev1.FieldHistoryWriteGroup) []*syncplanev1.FieldHistoryWriteGroup {
+	for _, a := range add {
+		i := slices.IndexFunc(groups, func(g *syncplanev1.FieldHistoryWriteGroup) bool {
+			return slices.Equal(g.GetFields(), a.GetFields())
+		})
+		if i < 0 {
+			groups = append(groups, proto.CloneOf(a))
+			continue
+		}
+		g := groups[i]
+		g.Writes += a.GetWrites()
+		g.FirstSeq = min(g.GetFirstSeq(), a.GetFirstSeq())
+		g.LastSeq = max(g.GetLastSeq(), a.GetLastSeq())
+	}
+	return groups
+}
+
+// historyUnits returns the units a mask names: the first segment of each path,
+// sorted and without duplicates. It is the name a guard's hidden set uses (see
+// protectedHead), so a write group compares against that set directly.
+func historyUnits(paths []string) []string {
+	if len(paths) == 0 {
+		return nil
+	}
+	units := make([]string, 0, len(paths))
+	for _, p := range paths {
+		units = append(units, protectedHead(p))
+	}
+	slices.Sort(units)
+	return slices.Compact(units)
 }
 
 // maskCovers reports whether a mask already accounts for a path: it names the

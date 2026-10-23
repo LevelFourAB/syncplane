@@ -83,6 +83,7 @@ History records are stored in the `syncplane.v1.FieldHistory` entity (wire name 
 | `prior`                         | Serialized source entity containing key fields and the masked fields in their prior state. Text fields contain plain-string values rather than documents. Read using `plainTextOf` or `text.PlainText` for display. |
 | `actor_subject`, `actor_system` | The actor who performed the write (see `storage.Actor`): caller subject, trusted write label, or both. Each session belongs to one actor. Unattributed writes leave both fields empty.                              |
 | `recorded_at`                   | Server wall-clock timestamp when the record opened, used for display. Writes are ordered strictly by `seq`.                                                                                                         |
+| `write_groups`                  | The session's writes grouped by the fields each one changed. The server reads them to count `seq`, `through_seq` and `writes` for a caller with hidden fields. `Query` never returns them.                          |
 
 History recording rules:
 
@@ -692,7 +693,7 @@ message Staff {
 }
 ```
 
-A guard decides per row and per caller. The server clears each field the caller may not read before the row leaves it, and names the field in `RowChange.hidden`. A cleared field reads as its zero value; the list tells it apart from a stored zero value. This applies to every path that sends a row: pull, bootstrap, `Subscribe`, `Query`, field history and the in-process `View` and `Apply` reads. In a field history record, a hidden field leaves the mask and the prior value, and a record of hidden fields alone is not shown.
+A guard decides per row and per caller. The server clears each field the caller may not read before the row leaves it, and names the field in `RowChange.hidden`. A cleared field reads as its zero value; the list tells it apart from a stored zero value. This applies to every path that sends a row: pull, bootstrap, `Subscribe`, `Query`, field history and the in-process `View` and `Apply` reads. In a field history record, a hidden field leaves the mask and the prior value, and a record of hidden fields alone is not shown. `seq`, `through_seq` and `writes` count only the writes that changed a field the caller reads.
 
 | Change                                                                         | What the client receives                                                  |
 | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
