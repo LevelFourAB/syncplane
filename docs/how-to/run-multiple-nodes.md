@@ -103,6 +103,17 @@ mgr, err := server.NewManager(ctx, store,
 
 `server.Manager` partitions the store, the notifier and the bus itself: each application's server prefixes the workspace IDs it puts on them, so workspaces with identical names in different applications never reach each other.
 
+A schema that you register on one node reaches the other nodes over the same notifier, at once. If a notification is lost, the other nodes find the schema when they next read the catalog, every 30 seconds by default. To change the interval, pass `server.WithCatalogPollInterval`:
+
+```go
+mgr, err := server.NewManager(ctx, store,
+	server.WithServerOptions(server.WithNotifier(notifier)),
+	server.WithCatalogPollInterval(10*time.Second),
+)
+```
+
+You can send a registration to any node. Each node merges the new set over the schema that the database stores. See [Hosting many apps](../reference/server.md#hosting-many-apps).
+
 ## Running multiple nodes with syncplaned
 
 If you run the standalone `syncplaned` host binary, pass a PostgreSQL connection URI to the `-db` flag. `syncplaned` automatically selects `pgstore`, `pgnotify` and `pgpresence`:

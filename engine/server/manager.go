@@ -75,6 +75,17 @@ import (
 //
 // Nothing forces this: an app with no policy inherits AllowAll, which admits
 // every caller into every workspace of that app (see AllowAll).
+//
+// # Several nodes
+//
+// Several Managers may share one root adapter. A registration on one of them
+// stores the schema only when the stored schema is still the one it merged
+// over, so a node that had not seen a newer schema merges over that one
+// instead of writing its own over it. The other nodes serve the stored schema
+// once they learn of it: at once when their apps share a notifier with the
+// node that registered (see WithNotifier), and otherwise on the next catalog
+// poll (see WithCatalogPollInterval). A node also serves apps that another
+// node registered from the poll after their first registration.
 type Manager struct {
 	root storage.Adapter
 	// catalog is where the registered schemas persist, resolved from root at
@@ -84,12 +95,24 @@ type Manager struct {
 	opts       []Option
 	appOpts    func(appID string) []Option
 
+	// pollInterval is how often the catalog is read for schemas other nodes
+	// stored; 0 turns the poll off.
+	pollInterval time.Duration
+
 	mu   sync.RWMutex
 	apps map[string]*hostedApp
 	// closed latches in Close. It exists so a registration racing shutdown
 	// cannot start a fresh *Server — and with it a GC goroutine — that nothing
 	// will ever close.
 	closed bool
+
+	// ctx ends in Close, and stops the catalog poll and the poke watchers;
+	// wg counts them, so Close can wait for a reload in flight before it
+	// closes the servers.
+	ctx      context.Context
+	cancel   context.CancelFunc
+	wg       sync.WaitGroup
+	stopOnce sync.Once
 }
 
 // hostedApp is one app: its *Server plus the mux routed traffic is served by.
@@ -105,13 +128,31 @@ type hostedApp struct {
 	srv     *Server
 	handler http.Handler
 
-	// regMu serializes the registrations of the app, so that each one
-	// merges over the schema the one before it stored.
+	// regMu serializes the registrations of the app and the reloads of its
+	// stored schema, so that each one starts from the schema the one before
+	// it left.
 	regMu sync.Mutex
 	// schema is the descriptor set of the schema srv serves, as the catalog
-	// stores it; nil before the app's first registration. regMu guards it.
-	schema []byte
+	// stores it, and revision is its catalog revision; both are empty before
+	// the app's first registration. regMu guards them.
+	schema   []byte
+	revision string
+	// stopPokes ends the subscription to the app's catalog pokes.
+	stopPokes func()
 }
+
+// defaultCatalogPollInterval is the catalog poll interval of a Manager built
+// without WithCatalogPollInterval.
+const defaultCatalogPollInterval = 30 * time.Second
+
+// maxRegisterAttempts bounds how often Register merges again after another
+// node stored a schema between its read of the catalog and its write.
+const maxRegisterAttempts = 5
+
+// catalogPokeID is the id a Manager notifies when it stores a schema of
+// appID. It has no "/", so it is outside the share of every app (see
+// appPrefix) and reaches no app's subscribers or activity stream.
+func catalogPokeID(appID string) string { return "syncplane:catalog:" + appID }
 
 // ManagerOption configures a Manager.
 type ManagerOption func(*Manager)
@@ -153,6 +194,18 @@ func WithAppOptions(fn func(appID string) []Option) ManagerOption {
 	return func(m *Manager) { m.appOpts = fn }
 }
 
+// WithCatalogPollInterval sets how often the Manager reads the catalog for
+// schemas that other nodes over the same root adapter stored. The default is
+// 30 seconds. A value of 0 or less turns the poll off; the Manager then learns
+// of another node's registration only through a shared notifier, and serves
+// an app that another node registered first only after a restart.
+//
+// A node that registers does not wait for the poll: it merges over the stored
+// schema in either case.
+func WithCatalogPollInterval(d time.Duration) ManagerOption {
+	return func(m *Manager) { m.pollInterval = d }
+}
+
 // NewManager builds a Manager over a root adapter and reloads every persisted
 // app schema, re-registering its entities BEFORE returning, so a restart
 // leaves all previously-registered apps immediately syncable. A
@@ -172,14 +225,16 @@ func NewManager(ctx context.Context, root storage.Adapter, opts ...ManagerOption
 		return nil, fmt.Errorf("server: manager: adapter cannot persist app schemas (no storage.Catalog)")
 	}
 	m := &Manager{
-		root:       root,
-		catalog:    catalog,
-		authorizer: DenyAll{},
-		apps:       map[string]*hostedApp{},
+		root:         root,
+		catalog:      catalog,
+		authorizer:   DenyAll{},
+		apps:         map[string]*hostedApp{},
+		pollInterval: defaultCatalogPollInterval,
 	}
 	for _, opt := range opts {
 		opt(m)
 	}
+	m.ctx, m.cancel = context.WithCancel(context.Background())
 	schemas, err := m.ListAppSchemas(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("server: manager boot: list app schemas: %w", err)
@@ -196,14 +251,125 @@ func NewManager(ctx context.Context, root storage.Adapter, opts ...ManagerOption
 			_ = m.Close()
 			return nil, fmt.Errorf("server: manager boot: re-register app %q: %w", sc.AppID, err)
 		}
-		app.schema = sc.DescriptorSet
+		app.schema, app.revision = sc.DescriptorSet, sc.Revision
 		srv.log().LogAttrs(ctx, slog.LevelInfo, "app schema reloaded on boot",
 			slog.String("component", "schema"),
 			slog.String("app", sc.AppID),
 			slog.Int("entities", len(r.Entities)),
 			slog.String("revision", r.Revision))
 	}
+	if m.pollInterval > 0 {
+		m.wg.Add(1)
+		go m.pollCatalog()
+	}
 	return m, nil
+}
+
+// pollCatalog reloads, every pollInterval until Close, each schema whose
+// stored revision is not the one its app serves, and hosts each app it has
+// not hosted yet.
+func (m *Manager) pollCatalog() {
+	defer m.wg.Done()
+	t := time.NewTicker(m.pollInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-m.ctx.Done():
+			return
+		case <-t.C:
+		}
+		entries, err := m.catalog.ListCatalogEntries(m.ctx)
+		if err != nil {
+			if m.ctx.Err() == nil {
+				slog.Default().LogAttrs(m.ctx, slog.LevelWarn, "catalog poll failed",
+					slog.String("component", "schema"), slog.Any("error", err))
+			}
+			continue
+		}
+		for _, e := range entries {
+			app, err := m.host(e.ID)
+			if err != nil {
+				if m.ctx.Err() == nil {
+					slog.Default().LogAttrs(m.ctx, slog.LevelWarn, "catalog poll cannot host app",
+						slog.String("component", "schema"), slog.String("app", e.ID), slog.Any("error", err))
+				}
+				continue
+			}
+			m.reload(app, e)
+		}
+	}
+}
+
+// watchPokes reloads the stored schema of app on each catalog poke, until
+// pokes closes.
+func (m *Manager) watchPokes(appID string, app *hostedApp, pokes <-chan struct{}) {
+	defer m.wg.Done()
+	for range pokes {
+		e, ok, err := m.storedSchema(m.ctx, appID)
+		if err != nil {
+			if m.ctx.Err() == nil {
+				app.srv.log().LogAttrs(m.ctx, slog.LevelWarn, "catalog read after a poke failed",
+					slog.String("component", "schema"), slog.String("app", appID), slog.Any("error", err))
+			}
+			continue
+		}
+		if ok {
+			m.reload(app, e)
+		}
+	}
+}
+
+// reload makes app serve the stored schema e, and logs when that fails.
+func (m *Manager) reload(app *hostedApp, e storage.CatalogEntry) {
+	app.regMu.Lock()
+	defer app.regMu.Unlock()
+	if err := m.adopt(m.ctx, app, e); err != nil {
+		app.srv.log().LogAttrs(m.ctx, slog.LevelError, "stored app schema cannot be served",
+			slog.String("component", "schema"),
+			slog.String("app", e.ID),
+			slog.String("revision", e.Revision),
+			slog.Any("error", err))
+	}
+}
+
+// adopt makes app serve e, the stored schema of the app, when it serves
+// another revision. The caller holds app.regMu.
+//
+// The node that stored e checked its change of the access model against the
+// schema it merged over, which is the stored schema before e or a later one.
+// So e is served with AllowAccessChange: a node that served an older schema
+// checks the same change again otherwise, and refuses a change the operator
+// allowed.
+func (m *Manager) adopt(ctx context.Context, app *hostedApp, e storage.CatalogEntry) error {
+	if e.Revision == app.revision {
+		return nil
+	}
+	r, err := app.srv.registerDescriptorSet(e.Payload, AllowAccessChange())
+	if err != nil {
+		return fmt.Errorf("server: app %q: serve stored schema: %w", e.ID, err)
+	}
+	app.schema, app.revision = e.Payload, e.Revision
+	app.srv.log().LogAttrs(ctx, slog.LevelInfo, "app schema reloaded",
+		slog.String("component", "schema"),
+		slog.String("app", e.ID),
+		slog.Int("entities", len(r.Entities)),
+		slog.String("revision", r.Revision))
+	return nil
+}
+
+// storedSchema returns the catalog entry of appID; ok is false when there is
+// none.
+func (m *Manager) storedSchema(ctx context.Context, appID string) (e storage.CatalogEntry, ok bool, err error) {
+	entries, err := m.catalog.ListCatalogEntries(ctx)
+	if err != nil {
+		return storage.CatalogEntry{}, false, err
+	}
+	for _, e := range entries {
+		if e.ID == appID {
+			return e, true, nil
+		}
+	}
+	return storage.CatalogEntry{}, false, nil
 }
 
 // appServer returns the app's *Server, creating it (over the app's storage
@@ -248,6 +414,10 @@ func (m *Manager) host(appID string) (*hostedApp, error) {
 		mux.Handle(path, h)
 	}
 	app = &hostedApp{srv: srv, handler: mux}
+	pokes, stop := srv.sharedNotifier.Subscribe(catalogPokeID(appID))
+	app.stopPokes = stop
+	m.wg.Add(1)
+	go m.watchPokes(appID, app, pokes)
 	m.apps[appID] = app
 	return app, nil
 }
@@ -293,6 +463,16 @@ func (m *Manager) Close() error {
 		apps = append(apps, app)
 	}
 	m.mu.Unlock()
+
+	// The poll and the poke watchers go first, and Close waits for them: a
+	// reload in flight registers on a server that is about to close.
+	m.stopOnce.Do(func() {
+		m.cancel()
+		for _, app := range apps {
+			app.stopPokes()
+		}
+	})
+	m.wg.Wait()
 
 	// Outside the lock: Server.Close waits for the background loops to return,
 	// and a pass in flight may still be routing requests through lookup.
@@ -422,9 +602,16 @@ type ManagerRegisterResult struct {
 // A set adds and replaces entities and keeps the others the app registered
 // before. The app's schema, which the catalog stores, is the merge of every
 // set it registered: the definitions of set, and every definition of the
-// schema before it that set does not replace. A restart serves that schema,
-// and the revision is the revision of that schema. Entities in the result are
-// the entities set declares. Registrations of one app run one at a time.
+// stored schema that set does not replace. A restart serves that schema, and
+// the revision is the revision of that schema. Entities in the result are the
+// entities set declares. Registrations of one app run one at a time.
+//
+// The merge is over the schema the catalog stores, also when another node
+// stored it, and set is checked against that schema. The app serves the
+// merged schema only once the catalog stores it, so an error leaves the app
+// on the stored schema, and a retry of the same set stores it. When other
+// nodes store schemas of the app faster than Register can merge, it fails
+// with an error that wraps storage.ErrCatalogConflict.
 func (m *Manager) Register(ctx context.Context, appID string, set []byte, opts ...RegisterOption) (ManagerRegisterResult, error) {
 	if appID == "" {
 		return ManagerRegisterResult{}, fmt.Errorf("server: register needs an app_id")
@@ -435,13 +622,41 @@ func (m *Manager) Register(ctx context.Context, appID string, set []byte, opts .
 	}
 	app.regMu.Lock()
 	defer app.regMu.Unlock()
+	for attempt := 1; ; attempt++ {
+		stored, ok, err := m.storedSchema(ctx, appID)
+		if err != nil {
+			return ManagerRegisterResult{}, fmt.Errorf("server: read app schema: %w", err)
+		}
+		if ok {
+			if err := m.adopt(ctx, app, stored); err != nil {
+				return ManagerRegisterResult{}, err
+			}
+		}
+		res, err := m.registerOver(ctx, appID, app, stored.Revision, set, opts)
+		if errors.Is(err, storage.ErrCatalogConflict) && attempt < maxRegisterAttempts {
+			continue
+		}
+		return res, err
+	}
+}
+
+// registerOver merges set over the schema app serves, which the catalog
+// stores at revision prev, and serves the result once the catalog stores it.
+// The caller holds app.regMu.
+func (m *Manager) registerOver(ctx context.Context, appID string, app *hostedApp, prev string, set []byte, opts []RegisterOption) (ManagerRegisterResult, error) {
 	srv := app.srv
 	merged, entities, err := mergeDescriptorSets(app.schema, set)
 	if err != nil {
 		return ManagerRegisterResult{}, err
 	}
 	prevRev := srv.SchemaRevision()
-	r, err := srv.registerDescriptorSet(merged, opts...)
+	persist := withPersist(func(revision string) error {
+		if err := m.catalog.SwapCatalogEntry(ctx, appID, merged, revision, prev); err != nil {
+			return fmt.Errorf("server: persist app schema: %w", err)
+		}
+		return nil
+	})
+	r, err := srv.registerDescriptorSet(merged, append(slices.Clone(opts), persist)...)
 	if err != nil {
 		return ManagerRegisterResult{}, err
 	}
@@ -453,10 +668,8 @@ func (m *Manager) Register(ctx context.Context, appID string, set []byte, opts .
 		} else {
 			status = RegisterUpdated
 		}
-		if err := m.catalog.PutCatalogEntry(ctx, appID, merged, r.Revision); err != nil {
-			return ManagerRegisterResult{}, fmt.Errorf("server: persist app schema: %w", err)
-		}
-		app.schema = merged
+		app.schema, app.revision = merged, r.Revision
+		srv.sharedNotifier.Notify(catalogPokeID(appID))
 		srv.log().LogAttrs(ctx, slog.LevelInfo, "app schema registered",
 			slog.String("component", "schema"),
 			slog.String("app", appID),

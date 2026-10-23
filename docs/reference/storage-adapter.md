@@ -82,6 +82,7 @@ An adapter can implement `storage.Catalog` to persist state that belongs to no w
 Properties:
 
 - Entries are few and small. Every read is a full listing, ordered by ID.
+- `SwapCatalogEntry(ctx, id, payload, revision, prev)` writes only when the stored revision is `prev`, and `prev` `""` means that no entry is stored. The check and the write are atomic against every other writer. On a mismatch it writes nothing and returns `storage.ErrCatalogConflict`. Several `server.Manager` nodes over one store write the catalog with it.
 - `DeleteCatalogEntry` on a missing ID is not an error.
 - A prefixed view from `prefixstore` does not expose the catalog: it belongs to no partition.
 - Test suite: `storagetest.Catalog`.

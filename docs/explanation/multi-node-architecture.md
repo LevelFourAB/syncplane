@@ -20,6 +20,19 @@ Failure handling behaves as follows:
 - **Database failover:** In-flight transactions return errors and clients retry. `pgstore` retries serialization failures and deadlocks. Dropped `LISTEN` connections cause the listener to re-query active subscriptions upon reconnect, backed up by periodic sweeps.
 - **Rolling deployment:** Effect handlers must be idempotent to handle concurrent executions across versions. The schema-revision handshake prevents client-server version mismatches.
 
+## Schema registration across nodes
+
+A `server.Manager` keeps the schema of each app in the store's catalog. Each node also holds the schema it serves in memory. Each admin `Register` call reaches one node, so the nodes can serve different schemas for a short time.
+
+Two rules keep the nodes from undoing each other's registrations:
+
+- **The catalog is the base of every merge.** A registration reads the stored schema, serves it first if it is newer than the node's own, and merges the new set over it. The access-change check then compares against the stored schema. A node that missed a narrowed role therefore cannot widen it again without `AllowAccessChange`.
+- **The write is a compare-and-swap.** The node stores the merged schema only when the stored revision is still the one it merged over. When another node wrote in between, the node reads again and merges again. The app serves the merged schema only after the write succeeds, so the memory of a node never runs ahead of the store.
+
+The other nodes learn of a new schema from a poke on the shared notifier, and from a periodic read of the catalog for the pokes that get lost. A node serves a schema that another node stored without checking the access change again, because the node that stored it already checked the change against the stored schema.
+
+Until a node has the new schema, it serves the previous one. After a role is narrowed, a node can still send rows under the old role for up to one poll interval. The poke shortens this window to the notifier's delivery latency.
+
 ## Connection pooler restrictions
 
 Running PgBouncer or similar connection poolers in `transaction` mode breaks three core syncplane mechanisms:

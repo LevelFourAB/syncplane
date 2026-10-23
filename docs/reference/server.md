@@ -685,6 +685,7 @@ mgr, _ := server.NewManager(ctx, root,
     server.WithRegisterAuthorizer(server.TokenAuthorizer(token)),
     server.WithServerOptions(opts...),          // applied to every app
     server.WithAppOptions(func(appID string) []server.Option { ... }),
+    server.WithCatalogPollInterval(30*time.Second), // the default
 )
 mgr.SyncHandler()    // public, routed by a leading /<appID> segment
 mgr.AdminHandler()   // private control plane
@@ -692,6 +693,14 @@ mgr.Close()          // stops every hosted app's *Server (not the root adapter)
 ```
 
 The default authorizer is `server.DenyAll`. See [Host multiple apps](../how-to/host-multiple-apps.md).
+
+Several Managers can share one root adapter:
+
+- `Register` merges the new set over the schema that the catalog stores, also when another node stored it. The new set is checked against that schema, including the check for `AllowAccessChange`.
+- An app serves a merged schema only after the catalog stores it. If the store fails, the app keeps the stored schema, and a retry of the same set stores it.
+- When other nodes store schemas of the app faster than `Register` can merge, `Register` returns an error that wraps `storage.ErrCatalogConflict`.
+- The other nodes serve a stored schema at once when their apps share a notifier (`WithNotifier` in `WithServerOptions`). Otherwise they serve it at the next catalog poll.
+- `WithCatalogPollInterval` sets the poll interval. The default is 30 seconds, and 0 or less turns the poll off. The poll also hosts the apps that another node registered first. With no poll, a node serves such an app only after a restart.
 
 ## Storage
 

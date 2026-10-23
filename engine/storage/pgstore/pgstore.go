@@ -669,6 +669,35 @@ func (s *Store) PutCatalogEntry(ctx context.Context, id string, payload []byte, 
 	return err
 }
 
+// SwapCatalogEntry stores an entry of the server-global catalog when its stored
+// revision is prev.
+func (s *Store) SwapCatalogEntry(ctx context.Context, id string, payload []byte, revision, prev string) error {
+	now := time.Now().UnixMilli()
+	var (
+		tag pgconn.CommandTag
+		err error
+	)
+	if prev == "" {
+		tag, err = s.pool.Exec(ctx,
+			`INSERT INTO catalog (id, payload, revision, updated_at)
+			 VALUES ($1, $2, $3, $4)
+			 ON CONFLICT (id) DO NOTHING`,
+			id, payload, revision, now)
+	} else {
+		tag, err = s.pool.Exec(ctx,
+			`UPDATE catalog SET payload = $1, revision = $2, updated_at = $3
+			 WHERE id = $4 AND revision = $5`,
+			payload, revision, now, id, prev)
+	}
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return storage.ErrCatalogConflict
+	}
+	return nil
+}
+
 func (s *Store) ListCatalogEntries(ctx context.Context) ([]storage.CatalogEntry, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT id, payload, revision, updated_at FROM catalog ORDER BY id`)

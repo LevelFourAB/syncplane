@@ -122,6 +122,10 @@ import (
 // ErrNotFound is returned by lookups that reference a missing row.
 var ErrNotFound = errors.New("storage: not found")
 
+// ErrCatalogConflict is returned by Catalog.SwapCatalogEntry when the stored
+// revision of the entry is not the one the caller expected.
+var ErrCatalogConflict = errors.New("storage: catalog entry changed")
+
 // Row is a stored entity row or tombstone.
 type Row struct {
 	Entity string
@@ -201,9 +205,19 @@ type CatalogEntry struct {
 //
 // Entries are few and small, and every read is a full listing, so an adapter
 // needs no index beyond the id.
+//
+// Several processes may share one catalog. SwapCatalogEntry is the write that
+// stays correct when they do: it fails instead of replacing an entry that
+// another process wrote after the caller read it.
 type Catalog interface {
 	// PutCatalogEntry stores payload under id, replacing whatever was there.
 	PutCatalogEntry(ctx context.Context, id string, payload []byte, revision string) error
+	// SwapCatalogEntry stores payload under id only when the stored entry has
+	// the revision prev, and prev "" means that no entry is stored under id.
+	// The check and the write are atomic against every other writer of the
+	// catalog. When the stored revision is another one, it stores nothing and
+	// returns ErrCatalogConflict.
+	SwapCatalogEntry(ctx context.Context, id string, payload []byte, revision, prev string) error
 	// ListCatalogEntries returns every entry, ordered by id.
 	ListCatalogEntries(ctx context.Context) ([]CatalogEntry, error)
 	// DeleteCatalogEntry removes the entry under id. Removing one that is not
