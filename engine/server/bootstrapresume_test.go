@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
+	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
@@ -242,5 +243,118 @@ var _ = Describe("Bootstrap resume", func() {
 		}
 		Expect(connect.CodeOf(stream.Err())).To(Equal(connect.CodeInvalidArgument))
 		Expect(stream.Close()).To(Succeed())
+	})
+})
+
+// A resumed snapshot under the access model is filtered by the caller's
+// access now, but classifies each row below a moved row by the parents it had
+// at the Begin seq of the cursor the client hands back. The specs here hand
+// back cursors whose Begin is far behind a move, as issued and with an edited
+// seq, and check that the snapshot ships no value written where the caller
+// cannot read.
+var _ = Describe("Bootstrap resume under the access model", func() {
+	var f *accessFixture
+
+	type snapshot struct {
+		begin *syncplanev1.BootstrapResponse_Begin
+		// values holds each delivered task title and comment body, by
+		// "entity/key".
+		values map[string]string
+	}
+	// bootstrap runs a whole Bootstrap as user, resuming from resume when it
+	// is not nil.
+	bootstrap := func(user string, resume *syncplanev1.BootstrapResume) snapshot {
+		GinkgoHelper()
+		req := connect.NewRequest(&syncplanev1.BootstrapRequest{WorkspaceId: ws, ClientId: "c-" + user, Resume: resume})
+		as(user, req.Header())
+		stream, err := f.sync.Bootstrap(f.ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		out := snapshot{values: map[string]string{}}
+		for stream.Receive() {
+			switch body := stream.Msg().GetBody().(type) {
+			case *syncplanev1.BootstrapResponse_Begin_:
+				out.begin = body.Begin
+			case *syncplanev1.BootstrapResponse_Chunk_:
+				for _, rc := range body.Chunk.GetRows() {
+					key := rc.GetEntity() + "/" + rc.GetKey()
+					switch rc.GetEntity() {
+					case "task":
+						var t accessv1.Task
+						Expect(proto.Unmarshal(rc.GetValue(), &t)).To(Succeed())
+						out.values[key] = t.GetTitle()
+					case "comment":
+						var c accessv1.Comment
+						Expect(proto.Unmarshal(rc.GetValue(), &c)).To(Succeed())
+						out.values[key] = c.GetBody()
+					}
+				}
+			}
+		}
+		Expect(stream.Err()).NotTo(HaveOccurred())
+		return out
+	}
+
+	// moveOut moves t1 from p1, which guest reads, to p2, which it does not,
+	// and then writes into t1 and its comment c1 what only readers of p2 may
+	// see.
+	moveOut := func() {
+		GinkgoHelper()
+		Expect(f.srv.Mutate(server.Trusted(f.ctx), ws, func(tx *server.EntityTx) error {
+			return tx.Patch(&accessv1.Task{Id: "t1", Project: project("p2")}, []string{"project"}, nil)
+		})).To(Succeed())
+		Expect(f.srv.Mutate(server.Trusted(f.ctx), ws, func(tx *server.EntityTx) error {
+			if err := tx.Patch(&accessv1.Task{Id: "t1", Title: "secret"}, []string{"title"}, nil); err != nil {
+				return err
+			}
+			return tx.Patch(&accessv1.Comment{Id: "c1", Body: "secret"}, []string{"body"}, nil)
+		})).To(Succeed())
+	}
+
+	BeforeEach(func() {
+		f = newDeepFixtureOn(newTestStore())
+		f.seedOrg()
+		f.seedComments()
+	})
+
+	It("resumes a snapshot interrupted under the same access", func() {
+		first := bootstrap("guest", nil)
+		Expect(first.values).To(HaveKey("comment/c1"))
+
+		second := bootstrap("guest", &syncplanev1.BootstrapResume{Cursor: first.begin.GetCursor()})
+		Expect(second.begin.GetResumed()).To(BeTrue())
+		Expect(second.values).To(HaveKey("comment/c1"))
+	})
+
+	It("ships no value written after a row moved out of reach, on a resume of an old Begin cursor", func() {
+		// Given guest bootstrapped while t1 and c1 sat in p1
+		old := bootstrap("guest", nil)
+		Expect(old.values).To(HaveKey("comment/c1"))
+		// And t1 moved to p2 later, and t1 and c1 got text guest may not read
+		moveOut()
+		Expect(bootstrap("guest", nil).values).NotTo(HaveKey("comment/c1"))
+
+		// When guest resumes the old snapshot from its start
+		resumed := bootstrap("guest", &syncplanev1.BootstrapResume{Cursor: old.begin.GetCursor()})
+
+		// Then the snapshot holds no text written in p2
+		Expect(resumed.values).NotTo(ContainElement("secret"))
+	})
+
+	It("ships no value written after a row moved out of reach, on a resume cursor whose seq the client lowered", func() {
+		// Given t1 and c1 sat in p1 at seq before, then t1 moved to p2, and
+		// t1 and c1 got text guest may not read
+		before := bootstrap("guest", nil).begin.GetSeq()
+		moveOut()
+		// And guest holds only a cursor issued after the move
+		current := bootstrap("guest", nil)
+		Expect(current.values).NotTo(HaveKey("comment/c1"))
+
+		// When guest resumes from that cursor with seq lowered to before
+		resumed := bootstrap("guest", &syncplanev1.BootstrapResume{
+			Cursor: withCursorSeq(current.begin.GetCursor(), before),
+		})
+
+		// Then the snapshot holds no text written in p2
+		Expect(resumed.values).NotTo(ContainElement("secret"))
 	})
 })

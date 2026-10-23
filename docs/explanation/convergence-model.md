@@ -237,6 +237,9 @@ conditions:
 - More access moves come after the cursor than `Limits.MaxResyncScan`, so the
   pull after the snapshot would reset (see
   [the access model](access-model.md)).
+- Under the access model, the caller's access changed, or the server's record
+  of that access does not confirm the cursor's position (see
+  [the access model](access-model.md)).
 
 When a fresh bootstrap is required, the client discards the partial snapshot.
 

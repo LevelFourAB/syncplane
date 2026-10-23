@@ -627,14 +627,24 @@ func mayHoldBelow(model *accessModel, set *accessSet, perms []string, row anchor
 }
 
 // accessUnchanged reports whether cur was issued under the access model and
-// the read access bound on e. It reads nothing, which is all a caller needs
-// that restarts rather than resyncs on a difference.
-func (e *rowEmitter) accessUnchanged(cur cursorState) bool {
+// the read access bound on e, and whether the record cur names confirms its
+// seq and movesThrough (see loadReadAccess). It is for a caller that restarts
+// rather than resyncs on a difference, so a cursor without a record — no
+// cursor-state store, or an evicted entry — reports false.
+func (e *rowEmitter) accessUnchanged(cur cursorState) (bool, error) {
 	if e.caller == nil {
-		return cur.accessPolicy == 0
+		return cur.accessPolicy == 0, nil
 	}
 	_, hash := e.boundReadAccess()
-	return cur.accessPolicy == e.caller.model.fingerprint && cur.accessHash == hash
+	if cur.accessPolicy != e.caller.model.fingerprint || cur.accessHash != hash {
+		return false, nil
+	}
+	// The hashes alone are no proof: the client can copy them from any cursor
+	// it holds onto one with an older seq. A snapshot resumed from that seq
+	// classifies rows with the parents they had then, and would ship the
+	// current values of rows moved out of what the caller reads since.
+	ra, err := e.loadReadAccess(cur)
+	return ra != nil, err
 }
 
 // loadReadAccess reads the ReadAccess a cursor names. It returns nil, nil when

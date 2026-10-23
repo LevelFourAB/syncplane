@@ -705,10 +705,8 @@ func (e *rowEmitter) readersFilter(info *entityInfo, r readers) readFilter {
 	if anchors == nil && len(checked) == 0 {
 		return denyAll
 	}
-	chains := e.chains
 	subjects := e.caller.subjects
-	return func(key string, row proto.Message) (bool, error) {
-		r := row.ProtoReflect()
+	holds := func(chains *accessChains, key string, r protoreflect.Message) (bool, error) {
 		if anchors != nil {
 			if ok, err := chains.holds(anchors, info, key, r); err != nil || ok {
 				return ok, err
@@ -730,6 +728,15 @@ func (e *rowEmitter) readersFilter(info *entityInfo, r readers) readFilter {
 			}
 		}
 		return false, nil
+	}
+	chains := e.chains
+	return func(key string, row proto.Message) (bool, error) {
+		r := row.ProtoReflect()
+		ok, err := holds(chains, key, r)
+		if err != nil || !ok || e.nowChains == nil {
+			return ok, err
+		}
+		return holds(e.nowChains, key, r)
 	}
 }
 

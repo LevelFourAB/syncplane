@@ -8,6 +8,7 @@ import (
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"google.golang.org/protobuf/proto"
 
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
@@ -152,6 +153,71 @@ var _ = Describe("Access model bootstrap across a move", func() {
 		// Then guest holds what a fresh pull shows it: t2 and c2 are in
 		// p2, which guest does not read
 		Expect(guest.view()).NotTo(ContainElement("comment/c2"))
+		Expect(guest.view()).To(Equal(f.pull("guest")))
+	})
+
+	It("ships no value written after a task moved out of the projects the caller reads once the snapshot began", func() {
+		// Given guest reads p1, where t1 and its comment c1 sit
+		hooked := &hookedReadStore{Adapter: newTestStore()}
+		f := newDeepFixtureOn(hooked)
+		f.seedOrg()
+		f.seedComments()
+		// And after the snapshot begins, t1 moves to p2, and t1 and c1 get
+		// text guest may not read
+		hooked.mu.Lock()
+		hooked.sawBegin = false
+		hooked.afterBegin = func() {
+			Expect(f.srv.Mutate(server.Trusted(f.ctx), ws, func(tx *server.EntityTx) error {
+				return tx.Patch(&accessv1.Task{Id: "t1", Project: project("p2")}, []string{"project"}, nil)
+			})).To(Succeed())
+			Expect(f.srv.Mutate(server.Trusted(f.ctx), ws, func(tx *server.EntityTx) error {
+				if err := tx.Patch(&accessv1.Task{Id: "t1", Title: "secret"}, []string{"title"}, nil); err != nil {
+					return err
+				}
+				return tx.Patch(&accessv1.Comment{Id: "c1", Body: "secret"}, []string{"body"}, nil)
+			})).To(Succeed())
+		}
+		hooked.mu.Unlock()
+
+		// When guest bootstraps, and pulls from the Begin cursor
+		req := connect.NewRequest(&syncplanev1.BootstrapRequest{WorkspaceId: ws, ClientId: "c-guest"})
+		as("guest", req.Header())
+		stream, err := f.sync.Bootstrap(f.ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		guest := newAccessReplica(f, "guest")
+		values := map[string]string{}
+		for stream.Receive() {
+			switch body := stream.Msg().GetBody().(type) {
+			case *syncplanev1.BootstrapResponse_Begin_:
+				guest.cursor = body.Begin.GetCursor()
+				guest.access = body.Begin.GetCallerAccess()
+			case *syncplanev1.BootstrapResponse_Chunk_:
+				for _, rc := range body.Chunk.GetRows() {
+					key := rc.GetEntity() + "/" + rc.GetKey()
+					guest.rows[key] = true
+					switch rc.GetEntity() {
+					case "task":
+						var t accessv1.Task
+						Expect(proto.Unmarshal(rc.GetValue(), &t)).To(Succeed())
+						values[key] = t.GetTitle()
+					case "comment":
+						var c accessv1.Comment
+						Expect(proto.Unmarshal(rc.GetValue(), &c)).To(Succeed())
+						values[key] = c.GetBody()
+					}
+				}
+			}
+		}
+		Expect(stream.Err()).NotTo(HaveOccurred())
+		hooked.mu.Lock()
+		Expect(hooked.afterBegin).To(BeNil(), "t1 did not move during the snapshot")
+		hooked.mu.Unlock()
+		guest.sync()
+
+		// Then the snapshot holds no text written in p2, and guest holds
+		// what a fresh pull shows it
+		Expect(values).NotTo(ContainElement("secret"))
+		Expect(guest.view()).NotTo(ContainElement("comment/c1"))
 		Expect(guest.view()).To(Equal(f.pull("guest")))
 	})
 })
@@ -416,5 +482,65 @@ var _ = Describe("Access model move log overflow", func() {
 		guest.sync()
 		Expect(resetReasons(logs)).To(BeEmpty())
 		Expect(guest.view()).To(Equal(fresh()))
+	})
+})
+
+var _ = Describe("Access model bootstrap resume from an edited cursor", func() {
+	It("begins a new snapshot when the client lowered the seq of its resume cursor below a move out of what it reads", func() {
+		// Given guest reads p1, where t1 and its comment c1 sit
+		f := newDeepFixtureOn(newTestStore())
+		f.seedOrg()
+		f.seedComments()
+		guest := newAccessReplica(f, "guest")
+		guest.sync()
+		Expect(guest.view()).To(ContainElement("comment/c1"))
+		before := guest.pullOnce(0).GetSeq()
+
+		// And t1 moves to p2, which guest does not read, and c1 gets a body
+		// guest never could read
+		Expect(f.srv.Mutate(server.Trusted(f.ctx), ws, func(tx *server.EntityTx) error {
+			return tx.Patch(&accessv1.Task{Id: "t1", Project: project("p2")}, []string{"project"}, nil)
+		})).To(Succeed())
+		Expect(f.srv.Mutate(server.Trusted(f.ctx), ws, func(tx *server.EntityTx) error {
+			return tx.Patch(&accessv1.Comment{Id: "c1", Body: "secret"}, []string{"body"}, nil)
+		})).To(Succeed())
+		begin := bootstrapReplica(f, "guest").cursor
+
+		// When guest resumes a snapshot from its Begin cursor with seq
+		// lowered to before the move
+		req := connect.NewRequest(&syncplanev1.BootstrapRequest{
+			WorkspaceId: ws,
+			ClientId:    "c-guest",
+			Resume:      &syncplanev1.BootstrapResume{Cursor: withCursorSeq(begin, before)},
+		})
+		as("guest", req.Header())
+		stream, err := f.sync.Bootstrap(f.ctx, req)
+		Expect(err).NotTo(HaveOccurred())
+		var (
+			resumed bool
+			shipped []string
+		)
+		for stream.Receive() {
+			switch body := stream.Msg().GetBody().(type) {
+			case *syncplanev1.BootstrapResponse_Begin_:
+				resumed = body.Begin.GetResumed()
+			case *syncplanev1.BootstrapResponse_Chunk_:
+				for _, rc := range body.Chunk.GetRows() {
+					shipped = append(shipped, rc.GetEntity()+"/"+rc.GetKey())
+					if rc.GetEntity() == "comment" {
+						var c accessv1.Comment
+						Expect(proto.Unmarshal(rc.GetValue(), &c)).To(Succeed())
+						Expect(c.GetBody()).NotTo(Equal("secret"), "the snapshot shipped the body of %s", rc.GetKey())
+					}
+				}
+			}
+		}
+		Expect(stream.Err()).NotTo(HaveOccurred())
+
+		// Then the server begins a new snapshot, which ships neither t1 nor
+		// c1
+		Expect(resumed).To(BeFalse())
+		Expect(shipped).NotTo(ContainElements("task/t1"))
+		Expect(shipped).NotTo(ContainElements("comment/c1"))
 	})
 })

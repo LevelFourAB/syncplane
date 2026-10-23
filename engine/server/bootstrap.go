@@ -192,7 +192,11 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			if err != nil {
 				return err
 			}
-			if emitter.accessUnchanged(resume.cur) && resume.servable(horizon, current, storeEpoch) && movesFit {
+			sameAccess, err := emitter.accessUnchanged(resume.cur)
+			if err != nil {
+				return err
+			}
+			if sameAccess && resume.servable(horizon, current, storeEpoch) && movesFit {
 				begin.Cursor = resume.rawCursor
 				begin.Seq = resume.cur.seq
 				begin.Resumed = true
@@ -511,16 +515,43 @@ func bootstrapNarrowable(e *rowEmitter, entity string) (*entityScope, bool) {
 // page as of its Begin position this way, which is the position the pull from
 // its cursor compares the moves after it with (see compareMoves). With more
 // moves than Limits.MaxResyncScan after seq it pins no more moves: that pull
-// resets.
+// resets. When rows moved after seq, or the pins overflowed, it also binds a
+// walker over the rows as tx reads them (rowEmitter.nowChains), and the
+// emitter's filters then admit a row or a guarded unit only when both walkers
+// do.
 //
 // pins carries what the pages before this one read of the log, so that each
 // page reads only the moves after the newest one an earlier page read. Writes
 // to a workspace commit in sequence order, so no move can appear later below
 // that one.
 func (s *Server) pinChains(tx storage.ReadTx, e *rowEmitter, seq uint64, pins *chainPins) error {
-	if e.caller == nil || !e.caller.model.moving || e.chains == nil || pins.overflow {
+	if e.caller == nil || !e.caller.model.moving || e.chains == nil {
 		return nil
 	}
+	if !pins.overflow {
+		if err := s.pinMoves(tx, e, seq, pins); err != nil {
+			return err
+		}
+	}
+	// The pinned chains admit a row that has moved out of what the caller
+	// reads since seq, and the page ships what was written to it after the
+	// move. So the page also walks the chains as they are now, and a row
+	// ships only when both admit it. That is safe for the pull from the
+	// Begin cursor: it tombstones a row that moved out, which the client
+	// does not hold, and ships a row that moved in. The walker is new on
+	// each page because an earlier page memoized the chains of an earlier
+	// transaction. After an overflow the pinned chains miss moves, and their
+	// memo can be as old as the first page.
+	e.nowChains = nil
+	if len(e.chains.overrides) > 0 || len(e.chains.withinOverrides) > 0 || pins.overflow {
+		e.nowChains = newAccessChains(e.chains.model, tx, e.chains.maxDepth, e.chains.report)
+	}
+	return nil
+}
+
+// pinMoves reads the moves after pins.through and pins the rows they name on
+// the chains bound on e (see pinChains).
+func (s *Server) pinMoves(tx storage.ReadTx, e *rowEmitter, seq uint64, pins *chainPins) error {
 	moves, newest, overflow, err := readAccessMoves(tx, pins.through, s.limits.MaxResyncScan-pins.read)
 	if err != nil {
 		return err

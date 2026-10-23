@@ -133,7 +133,11 @@ type rowEmitter struct {
 	prior      *accessSet
 	verdict    *pendingVerdict
 	chains     *accessChains
-	combined   map[string]readFilter
+	// nowChains, when set, walks the parent chains of the rows as they are
+	// now, while chains walks them as of an earlier position (see pinChains).
+	// A row or a guarded unit is then readable only when it is on both.
+	nowChains *accessChains
+	combined  map[string]readFilter
 	// heldSubs are the subscriptions of the cursor the request came with,
 	// and subsAdmitted records that a binding admitted every subscription of
 	// the emitter: refuseHiddenSubs refuses neither. blind memoizes
