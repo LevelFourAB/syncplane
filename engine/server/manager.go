@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/levelfourab/syncplane/engine/internal/naming"
@@ -606,6 +607,10 @@ type ManagerRegisterResult struct {
 // the revision is the revision of that schema. Entities in the result are the
 // entities set declares. Registrations of one app run one at a time.
 //
+// An entity cannot be renamed or removed: a set that declares the message of
+// a registered entity as another entity, or with no entity option, is
+// refused.
+//
 // The merge is over the schema the catalog stores, also when another node
 // stored it, and set is checked against that schema. The app serves the
 // merged schema only once the catalog stores it, so an error leaves the app
@@ -737,7 +742,8 @@ const mergedFilePrefix = "syncplane/registered/"
 // serves now: every definition of next, and every top-level definition of
 // prev that next does not replace. A definition of prev is replaced when next
 // declares the same full name, or an entity of the same name. entities are the
-// names of the entities next declares, sorted.
+// names of the entities next declares, sorted. A merge that would drop an
+// entity of prev is an error (see refuseDroppedEntities).
 //
 // A file of prev that next holds unchanged is dropped, and a file whose path
 // next holds with other content keeps what next does not replace under a path
@@ -789,6 +795,11 @@ func mergeDescriptorSets(prev, next []byte) (merged []byte, entities []string, e
 		for _, name := range topLevelNames(f) {
 			defined[name] = true
 		}
+	}
+	// A live server keeps every entity it registered, so a merge that drops
+	// one would serve another set of entities after a restart than before it.
+	if err := refuseDroppedEntities(prevFiles, nextFiles, defined, entityNames); err != nil {
+		return nil, nil, err
 	}
 	// replaced reports whether next replaces the top-level definition name of
 	// a file of prev.
@@ -848,6 +859,37 @@ func mergeDescriptorSets(prev, next []byte) (merged []byte, entities []string, e
 		return nil, nil, err
 	}
 	return merged, entities, nil
+}
+
+// refuseDroppedEntities returns an error when next replaces the message of an
+// entity of prev with a message that is another entity or none. defined holds
+// the full names of the top-level definitions of next, and entities the names
+// of the entities it declares.
+func refuseDroppedEntities(prev, next *protoregistry.Files, defined, entities map[string]bool) error {
+	var err error
+	prev.RangeFiles(func(fd protoreflect.FileDescriptor) bool {
+		msgs := fd.Messages()
+		for i := 0; i < msgs.Len(); i++ {
+			md := msgs.Get(i)
+			name := protoopts.Entity(md).GetName()
+			if name == "" || entities[name] || !defined[string(md.FullName())] {
+				continue
+			}
+			as := "with no (syncplane.v1.entity) option"
+			if d, ferr := next.FindDescriptorByName(md.FullName()); ferr == nil {
+				if nmd, ok := d.(protoreflect.MessageDescriptor); ok {
+					if other := protoopts.Entity(nmd).GetName(); other != "" {
+						as = fmt.Sprintf("as entity %q", other)
+					}
+				}
+			}
+			err = fmt.Errorf("server: the set declares message %s, which the app registered as entity %q, %s; "+
+				"an entity cannot be renamed or removed", md.FullName(), name, as)
+			return false
+		}
+		return true
+	})
+	return err
 }
 
 // topLevelNames returns the full names of the top-level definitions of f.

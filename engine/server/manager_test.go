@@ -16,6 +16,7 @@ import (
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
@@ -342,6 +343,64 @@ var _ = Describe("Manager", func() {
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
 		_, err = pull("b", "x", nil)
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied), "x's grant in app a admitted it to app b")
+	})
+
+	// The live server never drops an entity, and the stored schema is the
+	// merge of the sets the app registered. A set that replaces the message
+	// of an entity with a message that is not that entity would leave the two
+	// apart, so the server refuses it.
+	Describe("a set that declares the message of a registered entity as another entity or as none", func() {
+		var (
+			root storage.Adapter
+			m    *server.Manager
+		)
+
+		// Given app a with entity note, whose message is sync.dynamic.Note
+		BeforeEach(func() {
+			root = newRootStore(filepath.Join(GinkgoT().TempDir(), "mgr.db"))
+			m = newManager(root)
+			note := plainSpec("note")
+			note.MessageName = "Note"
+			_, err := m.Register(ctx, "a", descriptorSetBytes(note))
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		refusedAndKept := func(err error) {
+			GinkgoHelper()
+			Expect(err).To(MatchError(ContainSubstring(`entity "note"`)))
+			Expect(entityNamesOf(m.App("a"))).To(Equal([]string{"note"}))
+			Expect(m.Close()).To(Succeed())
+			Expect(entityNamesOf(newManager(root).App("a"))).To(Equal([]string{"note"}),
+				"a restart serves what the live server served")
+		}
+
+		It("is refused when it renames the entity", func() {
+			memo := plainSpec("memo")
+			memo.MessageName = "Note"
+			_, err := m.Register(ctx, "a", descriptorSetBytes(memo))
+
+			refusedAndKept(err)
+		})
+
+		It("is refused when the message is no longer an entity", func() {
+			memo := plainSpec("memo")
+			memo.MessageName = "Memo"
+			note := plainSpec("note")
+			note.MessageName = "Note"
+			var set descriptorpb.FileDescriptorSet
+			Expect(proto.Unmarshal(descriptorSetBytes(memo, note), &set)).To(Succeed())
+			for _, msg := range set.File[len(set.File)-1].MessageType {
+				if msg.GetName() == "Note" {
+					msg.Options = nil
+				}
+			}
+			raw, err := proto.Marshal(&set)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = m.Register(ctx, "a", raw)
+
+			refusedAndKept(err)
+		})
 	})
 
 	Describe("across nodes over one root adapter", func() {
