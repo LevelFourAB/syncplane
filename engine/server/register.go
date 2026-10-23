@@ -49,6 +49,11 @@ type RegisterResult struct {
 // Each entity is checked as RegisterEntity checks it, so a reserved name or an
 // option field this server does not know refuses the whole set.
 //
+// The set replaces the descriptors the server serves, but EntityTx, ViewTx,
+// ApplyTx and EntityKey still take a compiled message of the same full name:
+// they convert it through its wire bytes, as a client's value arrives. A field
+// the set does not declare is kept as an unknown field.
+//
 // Re-registration is idempotent and additive (see registerDescriptorSet):
 // an identical set is a no-op, appended fields/new entities upsert, and a
 // conflicting change (a removed, renumbered or retyped field, or changed

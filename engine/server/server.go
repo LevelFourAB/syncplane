@@ -1954,10 +1954,12 @@ func (s *Server) WorkspaceIDs(ctx context.Context) ([]string, error) {
 // out-of-process integrations (connectors, outbox consumers) can address
 // rows without reimplementing the key-field escaping rules.
 func (s *Server) EntityKey(msg proto.Message) (entity, key string, err error) {
-	desc := msg.ProtoReflect().Descriptor()
-	info, ok := s.catalogPtr().byType[desc.FullName()]
-	if !ok {
-		return "", "", errNotRegistered(desc.FullName())
+	info, err := entityInfoFor(s, msg)
+	if err != nil {
+		return "", "", err
+	}
+	if msg, err = info.adopt(msg); err != nil {
+		return "", "", err
 	}
 	return info.name, info.keyOf(msg.ProtoReflect()), nil
 }
@@ -2451,6 +2453,24 @@ func chainSetBytes(msg protoreflect.Message, chain []protoreflect.FieldDescripto
 		}
 		cur = cur.Mutable(fd).Message()
 	}
+}
+
+// adopt returns msg as a message of the registered type. The catalog matches
+// a message by full name, but info's field descriptors work only on the
+// registered descriptor: protoreflect panics on any other. A message with
+// another descriptor — a compiled message on a schema from a descriptor set,
+// or the reverse after a re-registration — is converted through its wire
+// bytes, which is how a client's value of the same entity arrives. msg itself
+// is never changed.
+func (info *entityInfo) adopt(msg proto.Message) (proto.Message, error) {
+	if msg.ProtoReflect().Descriptor() == info.msgType.Descriptor() {
+		return msg, nil
+	}
+	raw, err := proto.Marshal(msg)
+	if err != nil {
+		return nil, fmt.Errorf("server: encode %s: %w", info.name, err)
+	}
+	return info.decode(raw)
 }
 
 func (info *entityInfo) decode(value []byte) (proto.Message, error) {

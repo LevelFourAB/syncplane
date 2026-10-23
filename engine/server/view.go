@@ -312,7 +312,12 @@ func decodeSpecCursor(order *query.Order, entity, field string, cursor []byte) (
 }
 
 // entityInfoFor resolves the registered entity for msg's descriptor type. It is
-// the shared lookup behind EntityTx.info and ViewTx.info.
+// the shared lookup behind EntityTx.info, ViewTx.info, ApplyTx.info and
+// Server.EntityKey.
+//
+// It matches by full name only, so msg may carry another descriptor than the
+// registered one (see entityInfo.adopt). A caller that reads msg's fields
+// through info adopts it first.
 func entityInfoFor(s *Server, msg proto.Message) (*entityInfo, error) {
 	name := msg.ProtoReflect().Descriptor().FullName()
 	info, ok := s.catalogPtr().byType[name]
@@ -374,6 +379,26 @@ func readRowMeta(
 		}
 	}
 	proto.Reset(dst)
+	if dst.ProtoReflect().Descriptor() != info.msgType.Descriptor() {
+		// The projection works on the registered descriptor only (see
+		// entityInfo.adopt), so a foreign dst is filled from a projected
+		// message of the registered type.
+		msg, err := info.decode(row.Value)
+		if err != nil {
+			return false, RowMeta{}, err
+		}
+		if err := project.apply(info, key, msg); err != nil {
+			return false, RowMeta{}, err
+		}
+		raw, err := proto.Marshal(msg)
+		if err != nil {
+			return false, RowMeta{}, err
+		}
+		if err := proto.Unmarshal(raw, dst); err != nil {
+			return false, RowMeta{}, err
+		}
+		return true, RowMeta{Version: row.Version, Actor: row.Actor}, nil
+	}
 	if err := proto.Unmarshal(row.Value, dst); err != nil {
 		return false, RowMeta{}, err
 	}
