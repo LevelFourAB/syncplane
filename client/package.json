@@ -5,11 +5,11 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/levelfourab/syncplane.git",
+    "url": "git+https://github.com/LevelFourAB/syncplane.git",
     "directory": "client"
   },
-  "homepage": "https://github.com/levelfourab/syncplane#readme",
-  "bugs": "https://github.com/levelfourab/syncplane/issues",
+  "homepage": "https://github.com/LevelFourAB/syncplane#readme",
+  "bugs": "https://github.com/LevelFourAB/syncplane/issues",
   "type": "module",
   "exports": {
     ".": {
