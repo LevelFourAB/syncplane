@@ -1,23 +1,21 @@
 # Share a project with the whole workspace or with chosen teams
 
-This guide makes each project either **shared** or **restricted**:
+This guide configures each project as either **shared** or **restricted**:
 
-- Every member of the workspace reads and edits a shared project and the tasks in it.
-- Only the users and teams with a grant on a restricted project read it, together with the workspace admins.
+- Every member of the workspace reads and edits a shared project and its tasks.
+- Only workspace admins, and users and teams with a grant on a restricted project, read a restricted project.
 
-A project admin changes a project from one to the other with one update. Clients receive or lose the project and its tasks on their next pull.
+A project admin changes a project between shared and restricted with one update. Clients receive or lose the project and its tasks on their next pull.
 
-This guide continues [Declare roles and permissions](declare-roles-and-permissions.md). Read that guide first, and its section [Give a role to a team](declare-roles-and-permissions.md#give-a-role-to-a-team).
+This guide continues [Declare roles and permissions](declare-roles-and-permissions.md). Read that guide first, including [Give a role to a team](declare-roles-and-permissions.md#give-a-role-to-a-team).
 
 ## How it works
 
-A role applies at the row its grant anchors at, and at every row below that row. This guide uses one **commons** row:
-
-- The role that every member of the workspace holds anchors at the commons row, not at the workspace root.
+- The role that every member holds anchors at one commons row, not at the workspace root.
 - A shared project sits below the commons row, so every member reaches it.
-- A restricted project sits at the root. Only roles at the root, and grants on the project itself, reach it.
-
-To share or restrict a project, you change one reference field. The engine sees this change as a move, so it sends the correct rows to each client. You do not need a grant row for each member on each project.
+- A restricted project sits at the root, so only roles at the root and grants on the project itself reach it.
+- To share or restrict a project, you change one reference field, and each client gets the correct rows.
+- You do not need a grant row for each member on each project.
 
 ## 1. Declare the commons and the workspace roles
 
@@ -64,7 +62,7 @@ message WorkspaceMember {
 }
 ```
 
-Workspace admins need their role at the root, so that it reaches restricted projects too. Declare a grant entity without `parents` for them, or return the role in `RootRoles` from `WithCallerAccess`:
+Workspace admins require their role at the root to reach restricted projects. Declare a grant entity without `parents` for them, or return the role in `RootRoles` from `WithCallerAccess`:
 
 ```proto
 message Admin {
@@ -102,7 +100,7 @@ Do not use one grant entity for both roles. A `WorkspaceMember` row with an empt
 
 ## 2. Give the project an access parent at the commons
 
-Add a `commons` reference to the project, and name it in `parents`. A project with `commons` set is shared. A project with `commons` empty is restricted:
+Add a `commons` reference to the project. Name it in `parents`. A project with `commons` set is shared. A project with `commons` empty is restricted:
 
 ```proto
 message Project {
@@ -127,7 +125,7 @@ Keep `Task` and `ProjectMember` as they are, with `project` in their `parents`. 
 
 ## 3. Give roles on restricted projects to users and teams
 
-Use the `ProjectMember` entity from [Give a role to a team](declare-roles-and-permissions.md#give-a-role-to-a-team): its subject is a oneof of a user and a team. Give `project_admin` the permissions of the workspace member role and `manage_roster`. A grant on a project stays when the project changes between shared and restricted.
+Use the `ProjectMember` entity from [Give a role to a team](declare-roles-and-permissions.md#give-a-role-to-a-team). Its subject is a `oneof` of a user and a team. Give `project_admin` the permissions of the workspace member role and `manage_roster`. A grant on a project stays when the project changes between shared and restricted.
 
 ## 4. Create the commons row
 
@@ -147,7 +145,7 @@ err := srv.Mutate(server.Trusted(ctx), workspaceID, func(tx *server.EntityTx) er
 
 ## 5. Share and restrict a project
 
-Set the `commons` field to share a project, and clear it to restrict the project:
+Set the `commons` field to share a project. Clear it to restrict the project:
 
 ```ts
 // Share with every member of the workspace.
@@ -157,7 +155,7 @@ await client.db.project.mutate.patch(projectId, { commons: { id: 'main' } });
 await client.db.project.mutate.patch(projectId, {}, { paths: [ 'commons' ] });
 ```
 
-The server accepts the change only from a caller that holds `edit_projects` where the project is before the change and where it is after the change. The caller must also hold `view_tasks` and `view_roster` where the project is before the change, because the tasks and grants move with it:
+The server accepts the change only from a caller that holds `edit_projects` where the project is located both before and after the change. The caller must also hold `view_tasks` and `view_roster` where the project is before the change, because the tasks and grants move with the project:
 
 | Change                      | Who can do it                             |
 | --------------------------- | ----------------------------------------- |
@@ -171,7 +169,7 @@ A member who holds `edit_projects` only through the commons row cannot restrict 
 
 To let every member create a restricted project, write a custom mutator. Its body creates the project and a `project_admin` grant for the caller in one transaction. See [Declare who may invoke each mutator](declare-roles-and-permissions.md#6-declare-who-may-invoke-each-mutator).
 
-`can(ProjectSchema, id, 'update')` answers `'yes'` on a shared project to every member, because the commons row gives them `edit_projects`, so do not use it to show the share control. Ask with `useHasPermission` for a permission that only project admins and root admins hold, such as `manage_roster`:
+Do not use `can(ProjectSchema, id, 'update')` to show the share control. It answers `'yes'` on a shared project to every member because the commons row gives them `edit_projects`. Use `useHasPermission` to check for a permission that only project admins and root admins hold, such as `manage_roster`:
 
 ```tsx
 function ShareToggle({ projectId }: { projectId: string }) {

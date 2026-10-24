@@ -1,22 +1,22 @@
 # Adding presence to an app
 
-This guide shows you how to track and display ephemeral presence state—such as
-user rosters, active selections, and cursors—across connected clients in your
-application. Use presence when you need real-time awareness that only matters
-while clients are connected and does not need to be stored or replayed. For more
+This guide shows you how to track and display ephemeral presence state across
+connected clients in your application, such as user rosters, active selections,
+and cursors. Use presence when you need real-time awareness that only matters
+while clients are connected and does not need storage or replay. For more
 details on the room model, see [Rooms](../explanation/rooms.md).
 
 ## Prerequisites
 
 Before adding presence to your application, make sure you have:
 
-- A running Syncplane server. The presence service is mounted by
-  `HTTPHandler()` and `Handlers()` alongside the sync service, with no extra
-  server configuration or bus required for single-node deployments.
+- A running Syncplane server. `HTTPHandler()` and `Handlers()` mount the
+  presence service alongside the sync service. Single-node deployments require
+  no extra server configuration or bus.
 - An established client WebSocket connection (`ws`).
 - An authenticator configured with
-  [`WithAuthenticator`](authentication-and-permissions.md) if you want to
-  display verified user identities from `Peer.subject`.
+  [`WithAuthenticator`](authentication-and-permissions.md), if you display
+  verified user identities from `Peer.subject`.
 
 ## Adding presence
 
@@ -39,16 +39,17 @@ const room = ws.room(DocumentSchema, docId, 'cursors');
 ```
 
 If the row is hidden by your `ReadFilter`, deleted, or was never created, the
-room is dropped with `room_dropped` and `Room.status()` reports `dropped`. This
-status is terminal, and reopening returns the same result.
+server drops the room with `room_dropped`, and `Room.status()` reports
+`dropped`. This status is terminal. Reopening returns the same result.
 
-In a schema that uses the access model, a caller that holds no grant in the
-workspace yet is not dropped. `Room.status()` reports `waiting` and the roster
-is empty. The client asks again with backoff, 1 to 30 seconds apart, and at
-once when the caller's access in the workspace changes. When a grant admits the
-caller, the room goes to `open` and publishes the state set while it waited.
+In a schema that uses the access model, the server does not drop a caller that
+holds no grant in the workspace yet. `Room.status()` reports `waiting` and the
+roster is empty. The client retries with backoff, 1 to 30 seconds apart. The
+client retries immediately when the caller's access changes in the workspace.
+When a grant admits the caller, the room changes to `open` and publishes the
+state set while it waited.
 
-If you send raw bytes rather than JSON (for example, with text anchors), provide
+If you send raw bytes instead of JSON (for example, with text anchors), provide
 custom codec functions in the room options:
 
 ```ts
@@ -75,8 +76,8 @@ room.setPresence({ name: 'Ada', color: '#c0f' });
 ```
 
 Calls to `setPresence` are throttled (60 ms by default, configured by
-`throttleMs`). You can call it on every mouse movement; intermediate positions
-are dropped and the latest position is sent.
+`throttleMs`). You can call `setPresence` on every mouse movement. The client
+drops intermediate positions and sends the latest position.
 
 If you publish collaborative text cursors, publish
 [text anchors](../explanation/collaborative-text.md) instead of integer
@@ -109,9 +110,9 @@ room.subscribe((peers) => {
 ```
 
 The `peers` array contains all active peer records including your own, ordered
-by session ID. The array is frozen and keeps its reference until data changes,
-making it safe to pass to `useSyncExternalStore`. `Peer.subject` is stamped by
-the server from the request principal and cannot be forged by the client.
+by session ID. The array is frozen and keeps its reference until data changes.
+This makes the array safe to pass to `useSyncExternalStore`. The server sets
+`Peer.subject` from the request principal. The client cannot forge this value.
 
 If you resolve collaborative text anchors, wrap resolution in a `try`/`catch`
 block to handle anchors that point to pending or compacted text:
@@ -130,8 +131,7 @@ room.subscribe((peers) => {
 });
 ```
 
-If you use React, you can use the `usePresence` hook to manage subscription
-and state:
+If you use React, use the `usePresence` hook to manage subscription and state:
 
 ```tsx
 function Presence() {
@@ -142,8 +142,8 @@ function Presence() {
 
 ### 4. Broadcast ephemeral messages (optional)
 
-To send transient messages to whoever is currently connected, call `send()` and
-listen with `onMessage()`:
+To send transient messages to connected peers, call `send()` and listen with
+`onMessage()`:
 
 ```ts
 room.onMessage((m) => {
@@ -152,13 +152,13 @@ room.onMessage((m) => {
 await room.send({ kind: 'wave' });
 ```
 
-Messages are delivered at most once. The `send()` call resolves when the server
-accepts the message, not when peers receive it. If the client cannot reach the
-server, `send()` rejects.
+The server delivers messages at most once. The `send()` call resolves when the
+server accepts the message, not when peers receive it. If the client cannot
+reach the server, `send()` rejects.
 
-If you implement features like agent chat where transcript data must persist
-while intermediate tokens are transient, write the durable data to a row and
-broadcast the transient hints:
+If you implement features where transcript data must persist while intermediate
+tokens are transient (such as agent chat), write durable data to a row and
+broadcast transient hints:
 
 ```ts
 // The transcript is data. It survives a reload and a new reader gets it.
@@ -171,7 +171,7 @@ for await (const token of completion) await stream.send(token);
 
 ### 5. Close the room
 
-When the view or component is unmounted, close the room to withdraw your record
+When the view or component unmounts, close the room to withdraw your record
 immediately:
 
 ```ts
@@ -183,13 +183,13 @@ automatically on unmount.
 
 ## Confirming the result
 
-To confirm that presence is functioning:
+To confirm that presence works:
 
 1. Open your application in two separate browser windows or tabs.
 2. Verify that each window displays the other user in the peer roster.
 3. Trigger a state change in one window (such as updating presence or moving a
-   cursor) and verify that the other window receives and renders the update.
-4. Close one window and verify that the corresponding peer is removed from the
+   cursor). Verify that the other window receives and renders the update.
+4. Close one window. Verify that the corresponding peer is removed from the
    active roster.
 
 ## Filtering participant visibility
@@ -213,23 +213,23 @@ func (policy) VisibleParticipants(
 }
 ```
 
-Both hooks run when a client joins, and `CanJoinRoom` runs again on the
-stream heartbeat. Access revocations take effect within one heartbeat interval.
+Both hooks run when a client joins. `CanJoinRoom` runs again on each stream
+heartbeat. Access revocations take effect within one heartbeat interval.
 
 ## Error behavior
 
 The following table describes how the client and server handle failure
 scenarios:
 
-| Situation                                       | What happens                                                                  |
-| ----------------------------------------------- | ----------------------------------------------------------------------------- |
-| Offline when `setPresence` is called            | Remembered and re-sent; the record is re-published when the stream reopens    |
-| Offline when `send` is called                   | Rejects. A broadcast is not queued — one that arrives late is worse than none |
-| Access revoked while the room is open           | `room_dropped` within one heartbeat; terminal                                 |
-| The caller holds no grant in the workspace yet  | `Room.status()` is `waiting`; the room opens when a grant admits the caller   |
-| The caller's last grant goes while it is open   | `waiting` within one heartbeat, as above                                      |
-| A peer's tab is killed                          | Disappears within three announce intervals (~15 seconds by default)           |
-| A peer publishes state your build cannot decode | That peer's `state` is `undefined`; the room carries on                       |
+| Situation                                                 | What happens                                                                      |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Offline when `setPresence` is called                      | The client keeps the latest state and publishes it again when the stream reopens. |
+| Offline when `send` is called                             | Rejects. Broadcasts are not queued.                                               |
+| Access revoked while the room is open                     | The server sends `room_dropped` within one heartbeat. The status is terminal.     |
+| The caller holds no grant in the workspace yet            | `Room.status()` reports `waiting`. The room opens when a grant admits the caller. |
+| The caller's last grant is revoked while the room is open | `Room.status()` reports `waiting` within one heartbeat.                           |
+| A peer's tab is killed                                    | The peer disappears within three announce intervals (~15 seconds by default).     |
+| A peer publishes state that cannot be decoded             | That peer's `state` is `undefined`. The room remains open.                        |
 
 ## Sizing limits
 

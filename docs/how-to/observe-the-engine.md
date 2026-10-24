@@ -1,6 +1,6 @@
 # Observing the engine
 
-This guide shows you how to connect OpenTelemetry to the engine so pushes, pulls, storage transactions, and background work appear in your traces and metrics.
+This guide shows you how to connect OpenTelemetry to the engine so that pushes, pulls, storage transactions, and background work appear in your traces and metrics.
 
 For descriptions of each instrument, see [Telemetry](../reference/telemetry.md).
 
@@ -72,7 +72,7 @@ Follow these steps to configure OpenTelemetry in your application:
 
 2. Wrap the storage adapter and initialize the server:
 
-   Wrap your storage adapter once at the root with `otelstore.Wrap` before passing it to `server.New`. A manager partitions the root adapter per application with a wrapper that forwards to it, so wrapping per application causes double-counting.
+   Wrap the storage adapter once at the root with `otelstore.Wrap` before you pass it to `server.New`. A manager partitions the root adapter per application with a wrapper that forwards to it. Wrapping per application causes double-counting.
 
    ```go
    // Storage is instrumented by wrapping the adapter — so any adapter gets it,
@@ -110,7 +110,7 @@ Follow these steps to configure OpenTelemetry in your application:
 
 4. Shut down the providers on exit:
 
-   Call the `shutdown` function before the process exits. If you omit shutdown, the final batch of telemetry is not sent.
+   Call the `shutdown` function before the process exits. If you omit shutdown, the providers do not send the final batch of telemetry.
 
 ## Confirming the result
 
@@ -127,4 +127,4 @@ var rm metricdata.ResourceMetrics
 err = reader.Collect(ctx, &rm)
 ```
 
-**Note:** Register a `ManualReader` with only one `MeterProvider`. A second registration is rejected with a log line rather than an error, leaving a meter that records nothing. Always build a fresh reader per provider.
+**Note:** Register a `ManualReader` with only one `MeterProvider`. The reader rejects a second registration with a log line rather than an error, and the second provider's meter records nothing. Always build a fresh reader per provider.

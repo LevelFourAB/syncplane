@@ -18,18 +18,16 @@ export const file_syncplane_v1_history: GenFile = /*@__PURE__*/
 /**
  * Records the state of a row's changed fields before an editing session began.
  *
- * The server appends a record whenever a write to an entity configured with
+ * The server appends a record when a write to an entity configured with
  * `(syncplane.v1.entity).history` modifies one of its fields.
  *
- * A session is one actor's run of writes to a single row, folded into one
- * record while the session remains open through `server.WithHistorySession`. A
- * row edited once produces a record for that single write. A row edited
- * continuously for a minute produces one record that covers that minute. For
- * details on sequence ranges, see `seq` and `through_seq`.
+ * A session folds an actor's writes to a single row into one record while the
+ * session remains open through `server.WithHistorySession`. For sequence
+ * ranges, see `seq` and `through_seq`.
  *
- * Records for all source entities store their changes in this message type.
- * The `prior` field contains serialized bytes rather than a typed message. To
- * read `prior`, decode it as the source entity type.
+ * All source entities store their changes in this message type. The `prior`
+ * field contains serialized bytes. To read `prior`, decode it as the source
+ * entity type.
  *
  * The engine registers `FieldHistory` automatically when an entity opts in.
  * The entity is `server_only`, so clients do not sync it directly. To read
@@ -58,14 +56,13 @@ export type FieldHistory = Message<"syncplane.v1.FieldHistory"> & {
    *
    * The `prior` field holds what the masked fields contained immediately
    * before the write at `seq`. The server writes the initial record at this
-   * sequence number, allowing a change-feed reader to observe the record
-   * alongside the write that triggered it.
+   * sequence number, so a change-feed reader observes the record alongside
+   * the write that triggered it.
    *
-   * When subsequent writes fold into an open session, the server rewrites
-   * the record in place at their sequence numbers but does not change `seq`.
-   * Once additional writes fold into the record, the storage version of the
-   * record runs ahead of `seq`. For the end of the session range, see
-   * `through_seq`.
+   * When subsequent writes fold into an open session, the server updates the
+   * record at their sequence numbers, but does not change `seq`. After that,
+   * the storage version of the record is ahead of `seq`. For the end of the
+   * session range, see `through_seq`.
    *
    * @generated from field: uint64 seq = 3;
    */
@@ -76,15 +73,15 @@ export type FieldHistory = Message<"syncplane.v1.FieldHistory"> & {
    *
    * This value equals `seq` until a second write folds into the session. The
    * record covers the inclusive range `[seq, through_seq]`. The `prior`
-   * field reflects the state before the range began, and no other record for
+   * field reflects the state before the range began. No other record for
    * this actor session covers a sequence number within this range.
    *
    * In a multi-node deployment, record spans for the same row can overlap
    * because nodes track open sessions independently. A node that did not
-   * process earlier writes opens a new record. A node that did process
-   * earlier writes can later fold a write into the earlier record.
-   * Overlapping spans do not affect restoration: `prior` and `mask` always
-   * describe the row state before `seq`.
+   * process earlier writes opens a new record. A node that processed earlier
+   * writes can fold a write into the earlier record. Overlapping spans do
+   * not affect restoration: `prior` and `mask` always describe the row state
+   * before `seq`.
    *
    * @generated from field: uint64 through_seq = 4;
    */
@@ -101,19 +98,17 @@ export type FieldHistory = Message<"syncplane.v1.FieldHistory"> & {
   writes: number;
 
   /**
-   * Indicates that the row did not exist when the session began, marking its
-   * creation.
+   * Indicates that the row did not exist when the session began.
    *
    * When `true`, `mask` and `prior` are empty, and restoring from this
    * record patches nothing. Display this record as "created" rather than as
    * a restorable state.
    *
-   * A creation record absorbs the rest of its session. Because no subsequent
-   * write can produce an earlier field value than "absent", writes that fold
-   * in advance only `through_seq` and `writes`.
+   * A creation record absorbs the rest of its session. Writes that fold into
+   * this record advance only `through_seq` and `writes`.
    *
    * Only the engine sets this field. A history filter can redact or drop a
-   * record, but it cannot modify `row_created`. The write fails if a filter
+   * record, but cannot modify `row_created`. The write fails if a filter
    * modifies this field.
    *
    * @generated from field: bool row_created = 6;
@@ -135,13 +130,12 @@ export type FieldHistory = Message<"syncplane.v1.FieldHistory"> & {
    *   narrower path. The wider path names the entire subtree, and `prior`
    *   retains the value recorded by the narrower path.
    *
-   * The mask includes only fields whose stored values actually changed. A
-   * `PATCH` request narrows its effective mask, and a `PUT` request narrows
-   * the capture set of the entity. A write that changes nothing creates no
-   * history record. Narrowing applies per top-level field, matching the
-   * granularity of the engine's last-write-wins (LWW) conflict resolution. A
-   * `oneof` counts as a single field named by its group name, so multiple
-   * masked paths within one field succeed or fail together.
+   * The mask includes only fields whose stored values changed. A `PATCH`
+   * request narrows its effective mask, and a `PUT` request narrows the
+   * capture set of the entity. A write that changes nothing creates no
+   * history record. Narrowing applies per top-level field. A `oneof` counts
+   * as a single field named by its group name, so multiple masked paths
+   * within one field succeed or fail together.
    *
    * This field is empty when `row_created` is `true`. A history filter that
    * redacts every path also empties this mask. To distinguish a row creation
@@ -152,32 +146,30 @@ export type FieldHistory = Message<"syncplane.v1.FieldHistory"> & {
   mask?: FieldMask | undefined;
 
   /**
-   * Serialized bytes of the source entity message before the write occurred.
+   * State of the source entity before the write occurred.
    *
    * The payload contains the entity key fields and the fields listed in
-   * `mask`, with all other fields omitted. To restore the row state, decode
+   * `mask`. All other fields are omitted. To restore the row state, decode
    * this payload as the source entity type and send a `PATCH` request using
    * `mask`. This field is empty when `row_created` is `true`.
    *
    * Collaborative-text fields contain plain-string values rather than full
-   * documents. The string stores the text as read at capture time, tagged so
-   * a reader can distinguish plain text from a document. Read these fields
-   * using the plain-text helper (`text.PlainText` in Go or `plainTextOf` in
-   * TypeScript); the document decoder rejects them. During a restore, the
+   * documents. The string stores the text read at capture time, tagged so a
+   * reader can distinguish plain text from a document. Read these fields
+   * with the plain-text helper (`text.PlainText` in Go or `plainTextOf` in
+   * TypeScript). The document decoder rejects them. During a restore, the
    * engine converts the text into edits against the live document under the
-   * identity of the writer performing the restore. The server records plain
-   * text rather than the original document so that the edits reflect the
-   * restorer's identity instead of the capture server.
+   * identity of the writer who performs the restore.
    *
-   * Marks do not survive a restore. Restoring re-inserts text as new
-   * content, so formatting anchored to earlier runs is not reapplied.
+   * Marks do not survive a restore. Restoring inserts text as new content,
+   * so formatting anchored to earlier runs is not reapplied.
    *
    * @generated from field: bytes prior = 8;
    */
   prior: Uint8Array;
 
   /**
-   * The verified caller identity that performed the write.
+   * Verified caller identity that performed the write.
    *
    * The engine copies this value from `storage.Actor` at capture time. This
    * field is empty when unauthenticated callers perform writes. If both
@@ -186,47 +178,46 @@ export type FieldHistory = Message<"syncplane.v1.FieldHistory"> & {
    *
    * Each session belongs to a single actor. A write by any other actor opens
    * a new record instead of folding into the current session. This field
-   * attributes the entire session span, not just the write that opened it.
+   * attributes the entire session span, not only the write that opened it.
    *
    * @generated from field: string actor_subject = 9;
    */
   actorSubject: string;
 
   /**
-   * The operator label of a write executed under the engine's trusted
-   * bypass.
+   * Operator label of a write executed under the engine's trusted bypass,
+   * rather than a caller identity.
    *
-   * This value is an operator label rather than a caller identity. It is
-   * empty when an authenticated or unauthenticated caller performs the write
-   * directly. When both `actor_system` and `actor_subject` are set, the
-   * bypass ran during a request on behalf of that caller.
+   * This field is empty when an authenticated or unauthenticated caller
+   * performs the write directly. When both `actor_system` and
+   * `actor_subject` are set, the bypass ran during a request on behalf of
+   * that caller.
    *
    * @generated from field: string actor_system = 12;
    */
   actorSystem: string;
 
   /**
-   * The server wall-clock time when the session opened, intended for
-   * display.
+   * Server wall-clock time when the session opened, intended for display.
    *
-   * This timestamp does not define the ordering of writes; use `seq` to
-   * order records. Two records can share the same timestamp. Folding
-   * subsequent writes into the session does not update `recorded_at`,
-   * preserving the moment when the recorded before-state was modified.
+   * This value does not define the order of writes. Use `seq` to order
+   * records. Two records can share the same timestamp. Folding later writes
+   * into the session does not update `recorded_at`. This preserves the
+   * moment when the recorded before-state was modified.
    *
    * @generated from field: google.protobuf.Timestamp recorded_at = 13;
    */
   recordedAt?: Timestamp | undefined;
 
   /**
-   * The writes folded into this record, grouped by the top-level fields
-   * each write changed.
+   * Writes folded into this record, grouped by the top-level fields each
+   * write changed.
    *
-   * The server uses the groups to compute `seq`, `through_seq` and `writes`
-   * for a caller that may not read some of the fields: a write that changed
-   * only fields the caller may not read does not count. The `Query` RPC
-   * never returns this field. Server-side reads and `Server.Changes` return
-   * it as stored.
+   * The server uses the groups to compute `seq`, `through_seq`, and `writes`
+   * for a caller that cannot read some of the fields. A write that changed
+   * only fields the caller cannot read does not count. The `Query` RPC never
+   * returns this field. Server-side reads and `Server.Changes` return it as
+   * stored.
    *
    * This field is empty in a record written before the server kept groups.
    * Such a record keeps its stored counts for every caller.
@@ -244,22 +235,22 @@ export const FieldHistorySchema: GenMessage<FieldHistory> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_history, 0);
 
 /**
- * The writes of one field-history session that changed the same set of
- * top-level fields.
+ * Writes of one field-history session that changed the same set of top-level
+ * fields.
  *
  * @generated from message syncplane.v1.FieldHistoryWriteGroup
  */
 export type FieldHistoryWriteGroup = Message<"syncplane.v1.FieldHistoryWriteGroup"> & {
   /**
-   * The top-level fields the writes changed, sorted. A `oneof` is named by
-   * its group name. Empty for the write that created the row.
+   * First segments of the `mask` paths the writes changed, sorted and
+   * without duplicates. Empty for the write that created the row.
    *
    * @generated from field: repeated string fields = 1;
    */
   fields: string[];
 
   /**
-   * The number of writes in the group. At least 1.
+   * Number of writes in the group. At least 1.
    *
    * @generated from field: uint32 writes = 2;
    */

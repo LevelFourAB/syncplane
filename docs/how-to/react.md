@@ -4,10 +4,10 @@ This guide shows how to integrate Syncplane into a React application using `sync
 
 ## Prerequisites
 
-Before you begin, ensure you have:
+Before you begin, verify that you have:
 
 - `react` version 18 or later installed.
-- One or more defined entity schemas (for example, `TodoSchema`).
+- One or more defined entity schemas, such as `TodoSchema`.
 
 ## Integrating Syncplane into your application
 
@@ -26,11 +26,11 @@ Follow these steps to set up and use Syncplane in your React application:
    	]);
    ```
 
-   `createReactSync(entities)` mirrors `client.db` with the same uncapitalized schema keys (`uncapitalize(schema.name)`). It throws an error if two entities share the same simple name. Every hook reads the client from context at call time, allowing one `db` instance to work across providers.
+   `createReactSync(entities)` mirrors `client.db` with the same uncapitalized schema keys (`uncapitalize(schema.name)`). It throws an error if two entities share the same simple name. Each hook reads the client from context at call time. This allows one `db` instance to work across providers.
 
 2. **Mount the `<SyncProvider>`:**
 
-   Wrap your component tree in `<SyncProvider>`. Pass **either** `options` **or** `client` (exactly one):
+   Wrap your component tree in `<SyncProvider>`. Pass exactly one of `options` or `client`:
 
    ```tsx
    // The provider builds the client, start()s it, and close()s it when the tree
@@ -42,10 +42,10 @@ Follow these steps to set up and use Syncplane in your React application:
    </SyncProvider>;
    ```
 
-   - **`options`** — the provider constructs the client on mount, calls `start()`, and calls `close()` on unmount. `options` is read once; changing it later has no effect. To switch accounts, remount the provider with a different React `key`.
-   - **`client`** — use this when you manage the client lifecycle outside React (for example, in a test, worker, or non-React route).
+   - **`options`** — The provider constructs the client on mount, calls `start()`, and calls `close()` on unmount. The provider reads `options` once. Changing `options` later has no effect. To switch accounts, remount the provider with a different React `key`.
+   - **`client`** — Pass an existing client when you manage the client lifecycle outside React, such as in a test, worker, or non-React route.
 
-   Children render immediately in both cases. Reads and writes are local-first and function before and without a successful `start()`. A `start()` that fails locally (such as a bad configuration or a key-value format mismatch) is thrown during render for the nearest error boundary to catch; pass `onStartError` to handle it directly. An unreachable server appears on `useSyncStatus()` and retries automatically. The provider is safe under `<StrictMode>`.
+   Children render immediately in both cases. Reads and writes are local-first and function before and without a successful `start()`. If `start()` fails locally (such as from a bad configuration or a key-value format mismatch), the provider throws during render for the nearest error boundary to catch. Pass `onStartError` to handle it directly. An unreachable server appears on `useSyncStatus()` and retries automatically. The provider is safe under `<StrictMode>`.
 
 3. **Scope workspaces:**
 
@@ -61,7 +61,7 @@ Follow these steps to set up and use Syncplane in your React application:
    const personal = db.todo.useQuery({}, { workspaceId: 'personal' });
    ```
 
-   Every hook resolves its workspace in this order: an explicit `{ workspaceId }` option, then the nearest `<WorkspaceProvider>`, then the client's `defaultWorkspace`. One client covers an account and all its workspaces (see [Hold several workspaces on one client](multiple-workspaces.md)), so switching workspaces triggers a re-render rather than a reconnect. Reads, writes, text handles, undo, and `useWorkspaceStatus()` follow the resolved workspace; `useSyncStatus()` remains account-wide. A client that holds several workspaces with no default throws a hook-level error.
+   Each hook resolves its workspace in this order: an explicit `{ workspaceId }` option, the nearest `<WorkspaceProvider>`, then the client's `defaultWorkspace`. One client covers an account and all its workspaces (see [Hold several workspaces on one client](multiple-workspaces.md)), so switching workspaces triggers a re-render rather than a reconnect. Reads, writes, text handles, undo, and `useWorkspaceStatus()` follow the resolved workspace. `useSyncStatus()` remains account-wide. If a client holds multiple workspaces with no default workspace, hooks throw an error.
 
 4. **Query data in components:**
 
@@ -77,7 +77,7 @@ Follow these steps to set up and use Syncplane in your React application:
    }
    ```
 
-   The query is compiled and structurally hashed on every render. A structurally equal query reuses the subscription, while a changed query resubscribes.
+   The query is compiled and structurally hashed on every render. A structurally equal query reuses the subscription. A changed query resubscribes.
 
 5. **Mutate data:**
 
@@ -105,7 +105,7 @@ Follow these steps to set up and use Syncplane in your React application:
    });
    ```
 
-   The handler receives an `info` object containing `targets` (the rows targeted by the mutation) and `mutator` (when a custom mutator was used). By default, only the resolved workspace's rejections are delivered; pass `{ allWorkspaces: true }` to receive rejections across the entire application.
+   The callback receives an `info` object containing `targets` (the rows targeted by the mutation) and `mutator` (when the mutation used a custom mutator). By default, only the resolved workspace's rejections are delivered. Pass `{ allWorkspaces: true }` to receive rejections across the entire application.
 
 ## Confirming the result
 
@@ -130,11 +130,11 @@ To verify that Syncplane is working in your React application:
    }
    ```
 
-2. Perform a mutation (such as creating or updating an item) and verify that the UI updates immediately and that `pendingMutations` decrements once synced.
+2. Perform a mutation, such as creating or updating an item. Verify that the UI updates immediately and that `pendingMutations` decrements once synced.
 
 ## Virtualizing a long list
 
-Pass a `window` option instead of placing `offset` and `limit` inside the query. The subscription holds the complete match set, so adjusting the window re-pages existing data without performing a store read or resubscription. The `total` property provides the full item count to your virtualized list component:
+Pass a `window` option instead of placing `offset` and `limit` inside the query. The subscription holds the complete match set, so adjusting the window re-pages existing data without a store read or resubscription. The `total` property provides the full item count to your virtualized list component:
 
 ```tsx
 function TodoList() {
@@ -189,7 +189,7 @@ Writes under the provider record to the isolated scope stack. Reads are shared w
 
 ## Editing a row outside the subscription scope
 
-A row found by `queryServer`, or opened from a link, is outside every declared subscription. Pass `{ hold: true }` to keep it in scope for as long as the component is mounted:
+A row found by `queryServer`, or opened from a link, is outside every declared subscription. Pass `{ hold: true }` to keep it in scope while the component is mounted:
 
 ```tsx
 function DocumentEditor({ id }: { id: string }) {
@@ -225,12 +225,7 @@ const archive = () =>
 	}, { cas: true });
 ```
 
-Use compare-and-swap when a concurrent edit must be rejected rather than merged, and only for one-shot writes. Avoid compare-and-swap for text input fields for these reasons:
-
-- `Row.version` reflects the server-confirmed version. The optimistic overlay does not advance it, so it remains constant until a pull returns the updated row. Subsequent keystrokes will conflict and be dropped.
-- The version guard applies to the entire row rather than individual fields (see [the convergence model](../explanation/convergence-model.md)).
-
-Unguarded writes apply per-field last-writer-wins. For concurrent text editing, use a [collaborative text field](use-collaborative-text.md).
+Use compare-and-swap only for one-shot writes when a concurrent edit must be rejected rather than merged. Do not use compare-and-swap on a text input. `Row.version` does not change until the next pull returns the row, so after the first keystroke the next keystrokes conflict and are lost. See [the convergence model](../explanation/convergence-model.md). For concurrent text editing, use a [collaborative text field](use-collaborative-text.md).
 
 ## Related
 

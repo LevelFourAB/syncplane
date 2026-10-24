@@ -2,7 +2,7 @@
 
 Use the `connect` package to synchronize an external store—such as an existing database or a directory of files—bidirectionally with the engine.
 
-The external store remains the source of truth for its own tooling. The engine maintains a sync-optimized mirror and provides ordering, per-field conflict resolution, delta sync, and offline client support. External edits enter through `Mutate` on a `server.Trusted` context. Committed engine changes flow out through the change feed.
+The external store remains the source of truth for its own tooling. The engine maintains a mirror and provides ordering, per-field conflict resolution, delta sync, and offline client support. External edits enter through `Mutate` on a `server.Trusted` context. Committed engine changes flow out through the change feed.
 
 ## Prerequisites
 
@@ -24,7 +24,7 @@ Before you start, ensure you have the following:
    }
    ```
 
-   If your external store supports writes, also implement the `connect.Writer` interface unless every entity is bound as `connect.IngressOnly`:
+   If your external store supports writes, implement the `connect.Writer` interface unless every entity is bound as `connect.IngressOnly`:
 
    ```go
    // Implement this too unless every entity is bound IngressOnly.
@@ -44,7 +44,7 @@ Before you start, ensure you have the following:
 
 3. Initialize the connector.
 
-   Create a connector instance using `connect.New` and provide your configuration:
+   Create a connector instance with `connect.New`:
 
    ```go
    conn, _ := connect.New(connect.Config{
@@ -57,7 +57,7 @@ Before you start, ensure you have the following:
 
 4. Start the sync loop.
 
-   Start the connector to drain commits and sync on an interval, and trigger kicks on external events:
+   Start the connector to drain commits and sync on an interval. Trigger kicks on external events:
 
    ```go
    conn.Start(ctx)        // drains on commit, syncs on an interval
@@ -118,9 +118,9 @@ func (s *mySource) Changes(ctx context.Context, ws, cursor string) (connect.Delt
 
 Set `ReconcileInterval` to the desired polling frequency. Set `FullReconcileInterval` to the desired safety net interval, or set it to a negative value to run full passes only when the cursor breaks.
 
-Keep the following operational behaviors in mind:
+Operational behaviors:
 
-- The cursor persists after its page applies. A crash causes that page to replay. Redelivery is a no-op because an unchanged fingerprint short-circuits and a deletion checks the row before writing a tombstone, but `Write` must remain idempotent.
+- The cursor persists after its page applies. A crash causes that page to replay. Redelivery is a no-op because an unchanged fingerprint short-circuits and a deletion checks the row before writing a tombstone. `Write` must remain idempotent.
 - The deletion sweep (detecting rows where a shadow exists but the source did not list the item) runs during the full pass. An incremental pass only processes explicit entries in `Deletions`. If a source deletes items without reporting them, leave the safety net interval enabled.
 
 ### Configuring per-workspace credentials
@@ -149,11 +149,11 @@ The connector builds the source on the workspace's first pass and reuses it for 
 
 - Calling `Close`.
 - Calling `Forget(workspaceID)`.
-- Encountering a pass failure with an error wrapping `connect.ErrNeedsUserAction`.
+- Encountering a pass failure with an error that wraps `connect.ErrNeedsUserAction`.
 
-Store the new token after re-authentication, and the next pass picks it up without restarting the process.
+Store the new token after re-authentication. The next pass uses the new token without restarting the process.
 
-Use `Forget` when a user disconnects an account. It drops the workspace and releases the source, but preserves shadows and cursors so reconnecting resumes without re-importing. To prevent a workspace from being rediscovered, exclude it from `Config.Workspaces`.
+Use `Forget` when a user disconnects an account. `Forget` drops the workspace and releases the source, but preserves shadows and cursors so reconnection resumes without re-importing. To prevent a workspace from being rediscovered, exclude it from `Config.Workspaces`.
 
 ### Configuring read-only sources
 
@@ -165,7 +165,7 @@ Bindings: []connect.Binding{
 },
 ```
 
-Egress paths skip `IngressOnly` entities. The three-way merge leaves unchanged fields intact and applies changed source fields over the engine state. Collaborative text leaves untouched fields unmodified and applies source changes as minimal diffs onto the live document.
+Egress paths skip `IngressOnly` entities. Three-way merge leaves unchanged fields intact and applies changed source fields over the engine state. Collaborative text applies source changes as minimal diffs onto the live document (see [How connectors converge](../explanation/connectors.md) and [Collaborative text](../explanation/collaborative-text.md)).
 
 ### Handling errors and backoff
 
@@ -192,11 +192,11 @@ IngestChunk: 200,                   // after every 200 engine writes…
 IngestPause: 50 * time.Millisecond, // …yield for this long
 ```
 
-Only actual writes count toward `IngestChunk`; unchanged items do not trigger pauses.
+Only actual writes count toward `IngestChunk`. Unchanged items do not trigger pauses.
 
 ## A worked example
 
-`cmd/mdtodo` is a complete connector syncing the todo app with a folder
+`cmd/mdtodo` is a complete connector that synchronizes the todo app with a folder
 of Markdown files, including `Note` rows as Markdown documents.
 
 ## Related

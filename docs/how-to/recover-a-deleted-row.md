@@ -4,14 +4,14 @@ This guide shows you how to recover deleted rows by modeling deletion as a field
 
 ## Prerequisites
 
-Before you begin, ensure you have:
+Before you begin, verify that you have:
 
 - An entity schema configured with field history tracking.
-- Server authentication enabled, if you need history records to identify the actor who deleted the row.
+- Server authentication enabled, if history records must identify the actor who deleted the row.
 
 ## 1. Model deletion as a captured field
 
-Define your entity schema with a deletion timestamp field and enable field history tracking. In a schema that uses the [access model](declare-roles-and-permissions.md), give the entity no access rule that admits `delete`, so clients cannot issue hard deletes:
+Define your entity schema with a deletion timestamp field and enable field history tracking. If your schema uses the [access model](declare-roles-and-permissions.md), do not define an access rule that admits `delete`. This prevents clients from issuing hard deletes:
 
 ```proto
 message Project {
@@ -33,11 +33,11 @@ message Project {
 }
 ```
 
-Setting `history: true` on `deleted_at_ms` ensures removals are logged with their actor and timestamp.
+Setting `history: true` on `deleted_at_ms` logs removals with their actor and timestamp.
 
-No rule admits `delete`, so the server refuses the `DELETE` primitive to every caller that it authorizes, including the in-process API, and the TypeScript client rejects `del` at the call site. This prevents clients from bypassing soft deletion. The rules govern the primitive, not deletion as an outcome. The rows that a custom mutator body writes are not checked against the rules, so place checks inside any mutator that deletes.
+Because no rule admits `delete`, the server rejects the `DELETE` primitive for all authorized callers, including the in-process API. The TypeScript client also rejects `del` at the call site. Access rules govern the primitive, not deletion as an outcome. Custom mutator writes bypass access rules, so add authorization checks inside any mutator that deletes.
 
-In a schema that does not use the access model, leave out `access` and refuse the `DELETE` of the entity in `CanMutate`. See [Reserve an operation for trusted writes](authentication-and-permissions.md#reserve-an-operation-for-trusted-writes).
+In a schema that does not use the access model, leave out `access` and reject `DELETE` operations for the entity in `CanMutate`. See [Reserve an operation for trusted writes](authentication-and-permissions.md#reserve-an-operation-for-trusted-writes).
 
 ## 2. Delete a row by updating the field
 
@@ -49,11 +49,11 @@ await client.db.project.mutate.update(id, (p) => {
 });
 ```
 
-This mutation is optimistic, undoable, and queued offline if needed. The resulting history record includes `deleted_at_ms` in its mask and records the caller's subject ID if the server [authenticates callers](authentication-and-permissions.md).
+This mutation is optimistic and undoable. If the client is offline, it queues the mutation. The resulting history record includes `deleted_at_ms` in its mask and records the caller's subject ID if the server [authenticates callers](authentication-and-permissions.md).
 
 ## 3. Filter removed rows from reads
 
-Because the row remains in the database, queries match it unless you filter it out.
+The row remains in the database. Queries return the row unless you filter it out.
 
 To exclude removed rows from client queries, filter by predicate:
 
@@ -76,15 +76,15 @@ func (p *policy) ReadFilter(_ context.Context, _ server.Principal, _, entity str
 }
 ```
 
-**Note:** A `ReadFilter` that hides removed rows also hides their history, because history records are served under the source row's filter. To view or restore trash, you must use a caller that the filter admits or a mutator running under `Trusted`.
+**Note:** A `ReadFilter` that hides removed rows also hides their history, because history records are served under the source row's filter. To view or restore removed rows, use a caller that the filter admits or a mutator running under `Trusted`.
 
-If removed rows are numerous and you want to prevent them from syncing, exclude them with a [subscription predicate](partial-sync.md):
+This step is optional. Do it when removed rows are many. To keep removed rows from syncing to the client, exclude them with a [subscription predicate](partial-sync.md):
 
 ```ts
 subscriptions: [ subscription(ProjectSchema, (p) => p.deletedAtMs.eq(0n)) ];
 ```
 
-When using a subscription predicate, query the trash using `queryServer`. Perform restores with a custom mutator rather than a client-side `update`, because read-modify-write operations fail on keys that the local store does not hold.
+When you use a subscription predicate, query removed rows with `queryServer`. Restore rows with a custom mutator rather than a client-side `update`. Read-modify-write operations fail on keys that the local store does not hold.
 
 ## 4. Restore the row
 
@@ -96,7 +96,7 @@ await client.db.project.mutate.update(id, (p) => {
 });
 ```
 
-Because the row was not removed by a `DELETE` primitive, no tombstone exists and no re-bootstrap is needed. Fields untouched by the removal remain intact. To restore individual fields that were changed before deletion, use [field-history restore](restore-a-field.md).
+Because the row was not removed by a `DELETE` primitive, no tombstone exists and no re-bootstrap is required. Fields unchanged by the removal remain intact. To restore individual fields changed before deletion, use [field-history restore](restore-a-field.md).
 
 ## 5. Permanently erase rows when required
 

@@ -1,6 +1,6 @@
 # Testing your app without a server
 
-This guide shows you how to test your application's sync logic without running a remote server. Use `syncplane/testing` to run a real `SyncClient` on an in-memory store connected to an in-process test server.
+This guide shows you how to test application sync logic without running a remote server. Use `syncplane/testing` to run a real `SyncClient` on an in-memory store connected to an in-process test server.
 
 ## Prerequisites
 
@@ -11,7 +11,7 @@ Before you begin, ensure you have:
 
 1. Initialize a test client:
 
-   Import `createTestClient` from `syncplane/testing` and pass your entity schemas:
+   Import `createTestClient` from `syncplane/testing`. Pass your entity schemas:
 
    ```ts
    import { createTestClient } from 'syncplane/testing';
@@ -20,11 +20,11 @@ Before you begin, ensure you have:
    const t = await createTestClient({ entities: [ TodoSchema ] });
    ```
 
-   `t.client` is a `SyncClient` instance, and `t.db` is its database facade. You can pass any `SyncClientOptions` fields into `createTestClient`, including `mutators`, `mergers`, `subscriptions`, and callbacks.
+   `t.client` is a `SyncClient` instance, and `t.db` is its database facade. You can pass any `SyncClientOptions` field into `createTestClient`, including `mutators`, `mergers`, `subscriptions`, and callbacks.
 
 2. Trigger sync cycles manually:
 
-   Apply local mutations and call `t.sync()` to run a push and pull cycle. The testing kit disables polling, presence, and the subscribe stream, and defers push debouncing indefinitely:
+   Apply local mutations. Call `t.sync()` to run a push and pull cycle. The test kit disables polling, presence, and the subscribe stream, and defers push debouncing indefinitely:
 
    ```ts
    await t.db.todo.mutate.put({ id: 't1', title: 'Buy milk' });
@@ -33,7 +33,7 @@ Before you begin, ensure you have:
    expect(t.server.get(TodoSchema, 't1')).toBeDefined();
    ```
 
-   Assertions before and after `t.sync()` inspect the pre-cycle and post-cycle states directly without timers or sleeps.
+   Assertions before and after `t.sync()` inspect the pre-cycle and post-cycle states directly without timers or sleep calls.
 
 3. Reject a write and assert the rollback:
 
@@ -50,7 +50,7 @@ Before you begin, ensure you have:
    expect(await t.db.todo.get('t1')).toBeUndefined(); // what the user sees
    ```
 
-   Rules accept field matches (`entity`, `key`, `op`, `mutator`, `clientId`, `once`) or a predicate over the raw `Mutation`. The returned function removes the rule. While offline, every remote procedure call (RPC) fails as `unavailable` and writes continue queueing.
+   Rules accept field matches (`entity`, `key`, `op`, `mutator`, `clientId`, `once`) or a predicate over the raw `Mutation`. The returned function removes the rule. While offline, every remote procedure call (RPC) fails as `unavailable`, and writes continue to queue.
 
 4. Test convergence across multiple clients:
 
@@ -77,7 +77,7 @@ Before you begin, ensure you have:
 
 5. Seed and inspect server state:
 
-   Use `server.put` and `server.del` to write rows directly to the server, and use `server.get` and `server.rows` to inspect committed server state:
+   Use `server.put` and `server.del` to write rows directly to the server. Use `server.get` and `server.rows` to inspect committed server state:
 
    ```ts
    server.put(TodoSchema, { id: 'seeded', title: 'Already there' });
@@ -97,7 +97,7 @@ Before you begin, ensure you have:
    await t.sync(); // re-bootstraps; 'stale' is gone locally, nothing thrown
    ```
 
-   A client that last synced before the call receives a `reset` on its next pull and transparently re-bootstraps.
+   A client that last synced before the call receives a `reset` on its next pull and re-bootstraps.
 
 7. Hold pushes in flight:
 
@@ -133,7 +133,7 @@ Before you begin, ensure you have:
 
 9. Test access predictions:
 
-   Give the caller roles with `server.setCallerAccess`. The test server finds each role in the `grant` options of the registered entities, and gives the permissions of the role and of its `includes`. Set `serve: 'readable'` to send the client only the rows the caller can read, as the real server does:
+   Assign caller roles with `server.setCallerAccess`. The test server finds each role in the `grant` options of the registered entities, and gives the permissions of the role and of its `includes`. Set `serve: 'readable'` to send the client only the rows the caller can read, as the remote server does:
 
    ```ts
    const server = createTestServer({ entities, serve: 'readable' });
@@ -151,7 +151,7 @@ Before you begin, ensure you have:
    expect(await t.client.can(TaskSchema, 't2', 'read')).toBe('unknown');
    ```
 
-   Omit `at` to hold a role at the workspace root, as a root role from `WithCallerAccess` does. A misspelled role, or an `at` row that the role's grant rows cannot point at, throws. Call `setCallerAccess` again to change the access: on the next sync, the client receives the rows the caller can now read and loses the rows it cannot. The test server does not check writes against the access; use `server.reject` to refuse a write.
+   Omit `at` to hold a role at the workspace root, as a root role from `WithCallerAccess` does. A misspelled role, or an `at` row that the role's grant rows cannot point to, throws an error. Call `setCallerAccess` again to change caller access. On the next sync cycle, the client receives the rows the caller can read and loses the rows it cannot read. The test server does not check writes against access rules; use `server.reject` to refuse a write.
 
 ## Confirming the results
 

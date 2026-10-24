@@ -21,18 +21,18 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// The result status of a schema registration request.
+// Outcome of a schema registration request.
 type RegisterStatus int32
 
 const (
-	// Default unspecified status. Do not use.
+	// Default value. Do not use.
 	RegisterStatus_REGISTER_STATUS_UNSPECIFIED RegisterStatus = 0
-	// Indicates that a new application was registered.
+	// The server registered a new application.
 	RegisterStatus_REGISTER_STATUS_CREATED RegisterStatus = 1
-	// Indicates that an existing application's schema was additively updated.
+	// The server additively updated an existing application schema.
 	RegisterStatus_REGISTER_STATUS_UPDATED RegisterStatus = 2
-	// Indicates that the submitted schema was identical to the registered
-	// schema, resulting in no changes.
+	// The submitted schema was identical to the registered schema. The server
+	// made no changes.
 	RegisterStatus_REGISTER_STATUS_UNCHANGED RegisterStatus = 3
 )
 
@@ -79,33 +79,33 @@ func (RegisterStatus) EnumDescriptor() ([]byte, []int) {
 	return file_syncplane_v1_admin_proto_rawDescGZIP(), []int{0}
 }
 
-// Request message for registering or updating an application schema.
+// Request to register or update an application schema.
 type RegisterRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The application identifier used as a routing and storage partition key.
+	// Routing and storage partition key for the application.
 	//
-	// This value is not encoded in the Protocol Buffer package, allowing
-	// different applications to define the same message names without
-	// collision. Required.
+	// This value is not encoded in the Protocol Buffer package. Different
+	// applications can define identical message names without collision.
+	// Required.
 	AppId string `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
-	// The serialized `google.protobuf.FileDescriptorSet` for the application.
+	// Serialized `google.protobuf.FileDescriptorSet` for the application.
 	//
-	// Must be self-contained, bundling `descriptor.proto`,
-	// `syncplane/v1/options.proto`, and the synthesized entity files, such as
-	// the output of `defineSchema(...).toBinary()`. Required.
+	// Must be self-contained and bundle `descriptor.proto`,
+	// `syncplane/v1/options.proto`, and the synthesized entity files.
+	// Required.
 	DescriptorSet []byte `protobuf:"bytes,2,opt,name=descriptor_set,json=descriptorSet,proto3" json:"descriptor_set,omitempty"`
-	// An optional optimistic-concurrency guard revision.
+	// Optimistic-concurrency guard revision.
 	//
 	// If set, the server rejects the registration with `FAILED_PRECONDITION`
-	// unless this value matches the application's current revision. If empty,
-	// the server does not check the revision.
+	// unless this value matches the current revision of the application. If
+	// empty, the server does not check the revision.
 	ExpectedRevision string `protobuf:"bytes,3,opt,name=expected_revision,json=expectedRevision,proto3" json:"expected_revision,omitempty"`
-	// Allows the registration to change the access model of an entity that is
-	// already registered: its `access` or `grant` options, or the names of the
-	// enum values its role field matches.
+	// Permits changes to the access model of an already registered entity: its
+	// `access` or `grant` options, or the enum value names that its role field
+	// matches.
 	//
-	// If `false`, the server rejects such a change with
-	// `FAILED_PRECONDITION`. A change makes every client resync the affected
+	// If `false`, the server rejects such changes with `FAILED_PRECONDITION`.
+	// Changing the access model causes all clients to resync the affected
 	// rows.
 	AllowAccessChange bool `protobuf:"varint,4,opt,name=allow_access_change,json=allowAccessChange,proto3" json:"allow_access_change,omitempty"`
 	unknownFields     protoimpl.UnknownFields
@@ -170,13 +170,13 @@ func (x *RegisterRequest) GetAllowAccessChange() bool {
 	return false
 }
 
-// Response message returned after a schema registration request.
+// Result of a schema registration request.
 type RegisterResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The application's schema revision after registration.
+	// Schema revision of the application after registration.
 	//
-	// This is a stable hash of the canonical descriptor set bytes. Clients
-	// observe this value as `SchemaRevision`.
+	// This value is a stable hash of the canonical descriptor set bytes.
+	// Clients observe this value as `SchemaRevision`.
 	Revision string `protobuf:"bytes,1,opt,name=revision,proto3" json:"revision,omitempty"`
 	// The outcome of the registration request.
 	Status RegisterStatus `protobuf:"varint,2,opt,name=status,proto3,enum=syncplane.v1.RegisterStatus" json:"status,omitempty"`
@@ -237,10 +237,10 @@ func (x *RegisterResponse) GetEntityNames() []string {
 	return nil
 }
 
-// Request message for retrieving an application schema.
+// Request to retrieve an application schema.
 type GetSchemaRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The application identifier whose schema you want to retrieve. Required.
+	// Application identifier whose schema to retrieve. Required.
 	AppId         string `protobuf:"bytes,1,opt,name=app_id,json=appId,proto3" json:"app_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -283,7 +283,7 @@ func (x *GetSchemaRequest) GetAppId() string {
 	return ""
 }
 
-// Response message containing the requested application schema.
+// Response containing the requested application schema.
 type GetSchemaResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The application's serialized `google.protobuf.FileDescriptorSet`, as
@@ -291,14 +291,12 @@ type GetSchemaResponse struct {
 	//
 	// This field is empty if `found` is `false`.
 	DescriptorSet []byte `protobuf:"bytes,1,opt,name=descriptor_set,json=descriptorSet,proto3" json:"descriptor_set,omitempty"`
-	// The schema revision string of the registered application.
+	// Schema revision of the registered application.
 	//
 	// This field is empty if `found` is `false`.
 	Revision string `protobuf:"bytes,2,opt,name=revision,proto3" json:"revision,omitempty"`
-	// Whether the application schema was found.
-	//
-	// Set to `true` if the application exists and schema descriptors are
-	// returned, or `false` if the application is unknown.
+	// `true` if the application exists and schema descriptors are returned, or
+	// `false` if the application is unknown.
 	Found         bool `protobuf:"varint,3,opt,name=found,proto3" json:"found,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

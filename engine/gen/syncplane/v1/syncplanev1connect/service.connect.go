@@ -47,35 +47,44 @@ const (
 
 // SyncServiceClient is a client for the syncplane.v1.SyncService service.
 type SyncServiceClient interface {
-	// Push applies batches of client mutations, one write transaction per
-	// workspace. Business rejections are MutationResults, not RPC errors, and a
-	// failure scoped to one workspace (a mutation-id gap, a revoked workspace)
-	// is reported in that workspace's results rather than failing the request.
-	Push(context.Context, *connect.Request[v1.PushRequest]) (*connect.Response[v1.PushResponse], error)
-	// Pull returns row changes for one workspace since the given cursor.
-	Pull(context.Context, *connect.Request[v1.PullRequest]) (*connect.Response[v1.PullResponse], error)
-	// Bootstrap streams a full snapshot of one workspace: Begin, Chunk*, End.
-	Bootstrap(context.Context, *connect.Request[v1.BootstrapRequest]) (*connect.ServerStreamForClient[v1.BootstrapResponse], error)
-	// Subscribe is "a Pull that never closes", multiplexed over a set of
-	// workspaces. It catches each scope up from its cursor, then pushes changed
-	// rows down the stream as those workspaces change, so an already-subscribed
-	// client applies them directly and skips the follow-up Pull RTT. Every
-	// frame names the workspace it concerns. Subscribe carries payload and must
-	// never silently drop a patch.
+	// Applies batches of client mutations, using one write transaction per
+	// workspace.
 	//
-	// The scope set is fixed for the life of the stream — adding a workspace,
-	// removing one, or changing a subscription set is a close + reopen, since
-	// the browser ConnectRPC subset has no bidi channel for an in-band control
-	// message. Clients reconnect with backoff and fall back to Pull + polling.
+	// Business rejections return as `MutationResult` messages, not RPC errors.
+	// The server reports a failure scoped to one workspace (such as a mutation
+	// ID gap or a revoked workspace) in that workspace's results without
+	// failing the request.
+	Push(context.Context, *connect.Request[v1.PushRequest]) (*connect.Response[v1.PushResponse], error)
+	// Returns row changes for one workspace since the specified cursor.
+	Pull(context.Context, *connect.Request[v1.PullRequest]) (*connect.Response[v1.PullResponse], error)
+	// Streams a full snapshot of one workspace in sequence: `Begin`, zero or
+	// more `Chunk` messages, and `End`.
+	Bootstrap(context.Context, *connect.Request[v1.BootstrapRequest]) (*connect.ServerStreamForClient[v1.BootstrapResponse], error)
+	// Streams row changes across a set of workspaces.
+	//
+	// Catches up each workspace scope from its cursor, then sends row changes
+	// as those workspaces update. Every frame identifies the workspace that it
+	// concerns. The stream carries change payloads and must never silently
+	// drop a patch.
+	//
+	// The set of workspace scopes is fixed for the life of the stream. To add
+	// or remove a workspace, or to change a subscription set, close and reopen
+	// the stream. Clients reconnect with backoff and fall back to `Pull`
+	// polling.
 	Subscribe(context.Context, *connect.Request[v1.SubscribeRequest]) (*connect.ServerStreamForClient[v1.SubscribeResponse], error)
-	// Query runs a one-shot predicate query against current server state —
-	// for data outside the synced subset. Results are snapshots: they are not
-	// merged with local optimistic state and not stored. A declared secondary
-	// index serves the query when one covers its predicate and ordering;
-	// without one it scans and decodes every visible row of the entity per
-	// request, O(entity) in time regardless of limit. Memory is bounded to the
-	// page; prefer a selective predicate over deep pagination, and page with
-	// after/before rather than offset.
+	// Runs a one-shot predicate query against current server state for data
+	// outside the synced subset.
+	//
+	// Results are snapshots. They are not merged with local optimistic state
+	// and are not stored.
+	//
+	// A declared secondary index serves the query when one covers the query
+	// predicate and ordering. Without a covering index, the query scans and
+	// decodes every visible row of the entity per request, running in
+	// O(entity) time regardless of limit.
+	//
+	// Memory is bounded to the page. Prefer selective predicates over deep
+	// pagination, and paginate with `after` or `before` rather than `offset`.
 	Query(context.Context, *connect.Request[v1.QueryRequest]) (*connect.Response[v1.QueryResponse], error)
 }
 
@@ -159,35 +168,44 @@ func (c *syncServiceClient) Query(ctx context.Context, req *connect.Request[v1.Q
 
 // SyncServiceHandler is an implementation of the syncplane.v1.SyncService service.
 type SyncServiceHandler interface {
-	// Push applies batches of client mutations, one write transaction per
-	// workspace. Business rejections are MutationResults, not RPC errors, and a
-	// failure scoped to one workspace (a mutation-id gap, a revoked workspace)
-	// is reported in that workspace's results rather than failing the request.
-	Push(context.Context, *connect.Request[v1.PushRequest]) (*connect.Response[v1.PushResponse], error)
-	// Pull returns row changes for one workspace since the given cursor.
-	Pull(context.Context, *connect.Request[v1.PullRequest]) (*connect.Response[v1.PullResponse], error)
-	// Bootstrap streams a full snapshot of one workspace: Begin, Chunk*, End.
-	Bootstrap(context.Context, *connect.Request[v1.BootstrapRequest], *connect.ServerStream[v1.BootstrapResponse]) error
-	// Subscribe is "a Pull that never closes", multiplexed over a set of
-	// workspaces. It catches each scope up from its cursor, then pushes changed
-	// rows down the stream as those workspaces change, so an already-subscribed
-	// client applies them directly and skips the follow-up Pull RTT. Every
-	// frame names the workspace it concerns. Subscribe carries payload and must
-	// never silently drop a patch.
+	// Applies batches of client mutations, using one write transaction per
+	// workspace.
 	//
-	// The scope set is fixed for the life of the stream — adding a workspace,
-	// removing one, or changing a subscription set is a close + reopen, since
-	// the browser ConnectRPC subset has no bidi channel for an in-band control
-	// message. Clients reconnect with backoff and fall back to Pull + polling.
+	// Business rejections return as `MutationResult` messages, not RPC errors.
+	// The server reports a failure scoped to one workspace (such as a mutation
+	// ID gap or a revoked workspace) in that workspace's results without
+	// failing the request.
+	Push(context.Context, *connect.Request[v1.PushRequest]) (*connect.Response[v1.PushResponse], error)
+	// Returns row changes for one workspace since the specified cursor.
+	Pull(context.Context, *connect.Request[v1.PullRequest]) (*connect.Response[v1.PullResponse], error)
+	// Streams a full snapshot of one workspace in sequence: `Begin`, zero or
+	// more `Chunk` messages, and `End`.
+	Bootstrap(context.Context, *connect.Request[v1.BootstrapRequest], *connect.ServerStream[v1.BootstrapResponse]) error
+	// Streams row changes across a set of workspaces.
+	//
+	// Catches up each workspace scope from its cursor, then sends row changes
+	// as those workspaces update. Every frame identifies the workspace that it
+	// concerns. The stream carries change payloads and must never silently
+	// drop a patch.
+	//
+	// The set of workspace scopes is fixed for the life of the stream. To add
+	// or remove a workspace, or to change a subscription set, close and reopen
+	// the stream. Clients reconnect with backoff and fall back to `Pull`
+	// polling.
 	Subscribe(context.Context, *connect.Request[v1.SubscribeRequest], *connect.ServerStream[v1.SubscribeResponse]) error
-	// Query runs a one-shot predicate query against current server state —
-	// for data outside the synced subset. Results are snapshots: they are not
-	// merged with local optimistic state and not stored. A declared secondary
-	// index serves the query when one covers its predicate and ordering;
-	// without one it scans and decodes every visible row of the entity per
-	// request, O(entity) in time regardless of limit. Memory is bounded to the
-	// page; prefer a selective predicate over deep pagination, and page with
-	// after/before rather than offset.
+	// Runs a one-shot predicate query against current server state for data
+	// outside the synced subset.
+	//
+	// Results are snapshots. They are not merged with local optimistic state
+	// and are not stored.
+	//
+	// A declared secondary index serves the query when one covers the query
+	// predicate and ordering. Without a covering index, the query scans and
+	// decodes every visible row of the entity per request, running in
+	// O(entity) time regardless of limit.
+	//
+	// Memory is bounded to the page. Prefer selective predicates over deep
+	// pagination, and paginate with `after` or `before` rather than `offset`.
 	Query(context.Context, *connect.Request[v1.QueryRequest]) (*connect.Response[v1.QueryResponse], error)
 }
 

@@ -1,8 +1,8 @@
 # syncplane documentation
 
-Organized along [Diátaxis](https://diataxis.fr): four kinds of documentation
-serving four different needs. If you are not sure where to start, the first
-tutorial builds a working app end to end.
+This documentation follows [Diátaxis](https://diataxis.fr): four kinds of
+documentation serving four different needs. If you are not sure where to start,
+the first tutorial builds a working app end to end.
 
 | If you want to…                  | Read                            |
 | -------------------------------- | ------------------------------- |
@@ -16,13 +16,13 @@ tutorial builds a working app end to end.
 Learning-oriented, start to finish. Follow them in order.
 
 1. [Your first sync app](tutorials/your-first-sync-app.md) — a todo app with a
-   Go server and a TypeScript client, syncing between two browser tabs.
+   Go server and a TypeScript client that syncs between two browser tabs.
 2. [Adding collaborative text](tutorials/adding-collaborative-text.md) — a
    shared note that two people can type into at once.
 
 ## How-to guides
 
-Task-oriented recipes. Each assumes you already have something running.
+Task-oriented guides. Each guide assumes you already have a running app.
 
 **Modeling and schemas**
 
@@ -33,6 +33,7 @@ Task-oriented recipes. Each assumes you already have something running.
 **Server**
 
 - [Authentication and permissions](how-to/authentication-and-permissions.md)
+- [Choose an access control](how-to/choose-an-access-control.md)
 - [Declare roles and permissions (access model)](how-to/declare-roles-and-permissions.md)
 - [Share a project with the whole workspace or with chosen teams](how-to/share-with-the-workspace-or-chosen-teams.md)
 - [Create a workspace and invite people](how-to/create-a-workspace-and-invite-people.md)
@@ -66,7 +67,7 @@ Task-oriented recipes. Each assumes you already have something running.
 
 ## Reference
 
-Information-oriented, structured to be looked things up in.
+Information-oriented. Use these pages to look up facts.
 
 - [Go server API](reference/server.md) — construction, options, limits, GC,
   trusted writes, the change feed, `Manager` and the admin service.
@@ -89,7 +90,7 @@ Information-oriented, structured to be looked things up in.
 
 ## Explanation
 
-Understanding-oriented. Read these when a behaviour surprises you.
+Understanding-oriented. Read these when a behavior surprises you.
 
 - [The convergence model](explanation/convergence-model.md) — sequences,
   per-field last-writer-wins, rebase, tombstones, compare-and-swap.
@@ -115,7 +116,7 @@ Understanding-oriented. Read these when a behaviour surprises you.
   echo breaker and three-way merge base, and text across the boundary.
 - [Multi-node architecture](explanation/multi-node-architecture.md) — which tier
   holds state, what each failure costs, and why leases stay advisory.
-- [Multi-tab behaviour](explanation/multi-tab.md) — one store, one stream
+- [Multi-tab behavior](explanation/multi-tab.md) — one store, one stream
   leader per plane, and what only a real browser can verify.
 - [Rooms: the ephemeral plane](explanation/rooms.md) — presence and broadcast,
   why the mutation log is the wrong home for them, and expiry by

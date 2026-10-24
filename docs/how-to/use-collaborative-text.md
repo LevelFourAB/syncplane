@@ -40,7 +40,7 @@ message Comment {
 }
 ```
 
-Each element holds its own document addressed by an instance path, which is the dotted proto path containing the element key (for example, `text(id, 'comments.<commentId>.body')` or `WithTextString("comments.<commentId>.body", s)`). The element lifecycle controls the document: removing the element removes its document. Unkeyed lists cannot contain collaborative text fields.
+Each element holds its own document addressed by an instance path. The instance path is the dotted proto path containing the element key (for example, `text(id, 'comments.<commentId>.body')` or `WithTextString("comments.<commentId>.body", s)`). The element lifecycle controls the document: removing the element removes its document. Unkeyed lists cannot contain collaborative text fields.
 
 ## 2. Edit text with a live handle
 
@@ -64,9 +64,9 @@ await text.close(); // stops watching, returns the peer, drains queued PATCHes
 
 Positions use UTF-16 string indices. The handle converts indices to code points internally.
 
-Remote changes arrive as item-graph deltas containing retain, insert, and delete operations. Editors patch in place and transform carets through deltas without jumping. When a delta sets `marksChanged` to `true`, re-read `marks()`.
+Remote changes arrive as item-graph deltas containing retain, insert, and delete operations. Editors patch in place and transform carets through deltas without jumping. If a delta sets `marksChanged` to `true`, re-read `marks()`.
 
-When you finish editing, call `text.close()` to stop watching and return the leased writer identity. Identities are leased per handle and must never be shared. For more information, see [Collaborative text](../explanation/collaborative-text.md#writer-identities).
+When you finish editing, call `text.close()` to stop watching and return the leased writer identity. Each handle leases an identity. Never share identities between handles. For more information, see [Collaborative text](../explanation/collaborative-text.md#writer-identities).
 
 ### Recovering from handle failures
 
@@ -94,7 +94,7 @@ area.addEventListener('input', () => {
 
 The `setString` method diffs the string against the current merged document and sends operations. Untouched regions retain their identity, which protects concurrent remote edits from being overwritten by the `<textarea>` contents.
 
-Release the handle when you finish editing. Closing the handle stops the watch, releases the leased writer identity, and drains queued edits:
+When you finish editing, close the handle to stop watching, release the writer identity, and drain queued edits:
 
 ```ts
 await text.close();
@@ -109,11 +109,9 @@ const { value, setText } = db.scratch.useText('notes', 'body');
 <textarea value={ value } onChange={ (e) => setText(e.target.value) } />;
 ```
 
-In React, `useText` automatically closes the handle on unmount.
-
 The hook opens a handle in the [resolved workspace](react.md#integrating-syncplane-into-your-application). Pass `{ workspaceId }` as the third argument to override the workspace.
 
-The hook re-renders on local and remote deltas. It closes the handle on unmount or when the workspace, row, or field changes. The `marks` array keeps its reference until spans move, and `setText(s)` performs whole-value writes for controlled `<textarea>` components:
+The hook re-renders on local and remote deltas. It closes the handle on unmount or when the workspace, row, or field changes. The `marks` array keeps its reference until spans move. The `setText(s)` function performs whole-value writes for controlled `<textarea>` components:
 
 ```tsx
 const { value, marks, handle, error, setText } = db.doc.useText(id, 'body');
@@ -123,7 +121,7 @@ If the handle fails, `useText` surfaces the failure in `error` while rendering t
 
 ## 5. Read and write text without a handle
 
-If you only need to read a text field without watching for live updates, read the bytes directly:
+To read a text field without watching for live updates, read the bytes directly:
 
 ```ts
 const rows = await client.db.doc.query({});
@@ -174,8 +172,8 @@ To read collapsed marks, call `marksAt(index)` for active formatting at a caret 
 To verify that collaborative text editing works:
 
 1. Open handles from two client sessions on the same row.
-2. Type into both tabs or client sessions at the same time and verify that both streams of characters appear in a stable order and merge without interleaving.
-3. Apply a mark with `text.mark()` and verify that `text.marks()` reports the updated spans after concurrent edits.
+2. Type into both tabs or client sessions at the same time. Verify that both streams of characters appear in a stable order and merge without interleaving.
+3. Apply a mark with `text.mark()`. Verify that `text.marks()` reports the updated spans after concurrent edits.
 
 ## Related
 

@@ -35,7 +35,7 @@ Rules for consumer names and durability:
 
 ## Change event fields
 
-`Watch` declares the fields that a consumer requires before-state for. The runtime stores a shadow copy of only those watched fields. Each watched consumer stores one shadow row for every processed row. Declaring no watched fields stores no shadows and uses no additional storage.
+`Watch` declares the fields for which a consumer requires before-state. The runtime stores a shadow copy of only those watched fields. Each watched consumer stores one shadow row for every processed row. Declaring no watched fields stores no shadows and uses no additional storage.
 
 Change events provide the following fields to watched consumers:
 
@@ -54,4 +54,4 @@ Change events provide the following fields to watched consumers:
 - A row existed before consumer registration.
 - A row is sighted for the first time after a horizon reset.
 
-Because shadow rows reflect consumer memory rather than row history, these three cases are indistinguishable. Skip `FirstSeen` events to react only to observed transitions, or treat them as changes to react to existing rows.
+These three cases are indistinguishable because shadow rows reflect consumer memory rather than row history. To react to observed transitions or existing rows, see [React to changes](../how-to/react-to-changes.md).

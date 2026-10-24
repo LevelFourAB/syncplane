@@ -1,6 +1,6 @@
 # Running tests
 
-Use this guide to select and run tests across the server, client, and browser tiers, or to run individual test cases during development.
+Use this guide to select and run tests across the server, client, and browser tiers, or to run individual tests during development.
 
 ## Prerequisites
 
@@ -24,7 +24,7 @@ This command downloads Chromium by default (approximately 100 MB).
    | Integration        | `task test:ts:integration` | TypeScript client against a spawned Go test server. Use for cross-language wire behavior.           |
    | End-to-end browser | `task test:e2e`            | Playwright with real browser tabs. Use for behavior that depends on multiple tabs.                  |
 
-2. Run the test suite for your chosen tier, or run all non-browser suites together:
+2. Run the test suite for your chosen tier or for all non-browser suites:
 
    - To run all suites except the browser tier:
 
@@ -32,9 +32,9 @@ This command downloads Chromium by default (approximately 100 MB).
      task ci
      ```
 
-   - To run a specific tier, execute the corresponding command listed in step 1.
+   - To run a specific tier, run the command from step 1.
 
-3. Run individual tests to target a specific test case, package, or browser:
+3. Run individual tests to target a specific test, package, or browser:
 
    - To run a single Go test by name:
 
@@ -103,15 +103,15 @@ This command downloads Chromium by default (approximately 100 MB).
 Verify that all executed tests pass:
 
 - Go tests output passing spec summaries.
-- Vitest and Playwright test runs report zero failed tests.
+- Vitest and Playwright report zero failed tests.
 - `task ci` completes without error exit codes across all non-browser suites.
 
 ## Shared conformance vectors
 
-Three directories serve as contracts between the Go and TypeScript implementations. Extend them when modifying the semantics that they pin, and update both implementations in one change:
+Three directories serve as contracts between the Go and TypeScript implementations. Extend them when changing the semantics that they pin, and update both implementations in one change:
 
 - `testdata/queryeval/`: Query-evaluation vectors.
-- `testdata/indexkey/`: Index-entry encoding (`encodeCases` pin the bytes), entry-vs-comparator agreement (`orderCases`), and query planner decisions (`probeCases`). A planner that chooses differently still returns the right rows, but at a different cost.
+- `testdata/indexkey/`: Index-entry encoding (`encodeCases` pin the bytes), entry-vs-comparator agreement (`orderCases`), and query planner decisions (`probeCases`). A planner that chooses differently still returns the correct rows, but at a different cost.
 - `testdata/text/`: Text CRDT vectors. The `encodedHex` checks pin the canonical encoding byte for byte. Any change to `engine/text` or `client/src/text` must update the other implementation and the vectors together.
 
 ## Fixing a bug
@@ -122,7 +122,7 @@ Follow a test-first workflow when fixing bugs:
 2. Verify that the test fails for the expected reason.
 3. Apply the fix and verify that the test passes.
 
-A bug that shipped without a test indicates a missing test case; adding the test is part of the fix. When adding new features, include tests with the change.
+When you fix a bug or add a feature, include tests with the change. A bug that shipped without a test shows a missing test case. Add the test as part of the fix, not as a follow-up.
 
 ## Related
 

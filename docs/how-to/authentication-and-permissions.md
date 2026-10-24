@@ -1,8 +1,8 @@
 # Authentication and permissions
 
-Syncplane separates identity from access control: an `Authenticator` establishes who is calling, and `Permissions` decides what the caller can do. Neither is installed by default. The engine's default configuration assumes the server runs behind your own authentication layer, which is safe only when untrusted traffic cannot reach the sync endpoint.
+Syncplane separates identity from access control: an `Authenticator` establishes who calls, and `Permissions` decides what the caller can do. Neither is installed by default. The default configuration assumes the server runs behind your authentication layer, which is safe only when untrusted traffic cannot reach the sync endpoint.
 
-**Note:** By default, `server.AllowAll` admits every caller into every workspace. This configuration is suitable for single-tenant deployments, but multi-tenant deployments must override `CanAccessWorkspace`.
+**Note:** By default, `server.AllowAll` admits every caller into every workspace. This is fine for a single-tenant deployment. A multi-tenant deployment must override `CanAccessWorkspace`.
 
 ## Authenticating callers
 
@@ -28,13 +28,13 @@ func (a myAuth) Authenticate(ctx context.Context, h http.Header) (server.Princip
 srv, err := server.New(store, server.WithAuthenticator(myAuth{verifier: v}))
 ```
 
-Return `server.ErrUnauthenticated`, or an error wrapping it, to reject the request with HTTP status code 401. The engine treats any other returned error as an infrastructure fault (HTTP 500). This prevents an identity-provider outage from appearing to a client as an invalid credential.
+Return `server.ErrUnauthenticated`, or an error wrapping it, to reject the request with HTTP status 401. The engine treats any other returned error as an infrastructure fault (HTTP 500). This prevents an identity-provider outage from appearing to a client as an invalid credential.
 
 In both cases, the server logs the error message but does not send it to the client. The wire protocol carries a fixed message, so you can wrap errors freely. To admit an anonymous caller, return a zero `server.Principal` with a `nil` error.
 
-For fixed API keys, you can use `server.StaticTokenAuthenticator`. It is not a login system.
+For fixed API keys, use `server.StaticTokenAuthenticator`. It is not a login system.
 
-If you authenticate requests in HTTP middleware, call `server.WithPrincipal(ctx, p)` to attach the principal to the context so permission hooks can access it.
+If you authenticate requests in HTTP middleware, call `server.WithPrincipal(ctx, p)` to attach the principal to the context for permission hooks.
 
 ## Configuring permissions
 
@@ -87,7 +87,7 @@ Return the appropriate error type based on the failure condition:
 | `server.DenyWorkspace(...)` | Settled denial       | Receives `permission_denied` and `workspace_access_revoked`, then stops syncing |
 | Any other error             | Policy cannot decide | Receives an infrastructure error, then retries                                  |
 
-In a schema that uses the access model, a caller that `CanAccessWorkspace` admits but that holds no permission in the workspace gets `permission_denied` with `workspace_no_access`. In-process calls return `server.ErrNoAccess`. This denial is not permanent: the client keeps its queue and syncs again once a grant exists. A caller that loses its last permission first receives a pull that removes the rows it can no longer read. See [Create a workspace and invite people](create-a-workspace-and-invite-people.md).
+In a schema that uses the access model, a caller that `CanAccessWorkspace` admits but that holds no permission in the workspace receives `permission_denied` with `workspace_no_access`. In-process calls return `server.ErrNoAccess`. This denial is not permanent: the client keeps its queue and syncs again once a grant exists. A caller that loses its last permission first receives a pull that removes unreadable rows; see [Create a workspace and invite people](create-a-workspace-and-invite-people.md).
 
 **Note:** Do not return a denial when a membership store is unreachable. Return the transient error so clients retry instead of discarding valid local data.
 
@@ -95,21 +95,21 @@ In a schema that uses the access model, a caller that `CanAccessWorkspace` admit
 
 `CanMutate` gates write operations. When `CanMutate` rejects a mutation, the engine returns the rejection as an operation result rather than an RPC error. The client rolls back the mutation locally and reports it through `onMutationRejected`.
 
-`ReadFilter` returns a per-row predicate. `FilterEpoch` versions the visibility inputs behind `ReadFilter` so that a permission change triggers a delta resync instead of requiring a full re-bootstrap. For more information, see [Partial sync and coverage](../explanation/partial-sync-and-coverage.md).
+`ReadFilter` returns a per-row predicate. `FilterEpoch` versions the visibility inputs behind `ReadFilter`. Implement `FilterEpoch` so that a permission change resyncs only the rows that changed. Without it, clients download the workspace again. See [Partial sync and coverage](../explanation/partial-sync-and-coverage.md).
 
-`ReadFilter` also gates writes. The engine refuses a `PUT`, `PATCH`, or `DELETE` of a stored row that the filter hides with `permission_denied`, or with `access_denied` on an entity in the access model. A caller therefore cannot change, delete, or reveal a row that it cannot read. To decide writes with a different rule, see [Check writes against the stored row](#check-writes-against-the-stored-row).
+`ReadFilter` also gates writes. The engine refuses a `PUT`, `PATCH`, or `DELETE` of a stored row that the filter hides with `permission_denied`, or with `access_denied` on an entity in the access model. A caller cannot change, delete, or reveal a row that it cannot read. To decide writes with a different rule, see [Check writes against the stored row](#check-writes-against-the-stored-row).
 
 Keep membership checks out of `ReadFilter`. Handle membership in `CanAccessWorkspace`. Combining the two can cause a `nil` return to leak entities across tenants.
 
-Keep secrets out of keys. A filter hides row values, but the entity, key, and version can reach subscribed clients as tombstones upon deletion or when an edit hides a row the client previously held. Key rows by surrogate ID and place sensitive data such as email addresses, slugs, or invite codes in filtered fields. For more information, see [Read filter trade-offs](../explanation/limits-and-trade-offs.md#a-read-filter-hides-values-not-existence).
+Do not put secrets such as email addresses, slugs or invite codes in row keys. A client can learn the key of a row that it cannot read, for example after the row is deleted. Key rows by a surrogate ID, and put the secret in a field that the filter hides. See [Read filter trade-offs](../explanation/limits-and-trade-offs.md#a-read-filter-hides-values-not-existence).
 
 ### Performance considerations
 
 Hooks run outside storage transactions, so a slow hook does not hold the workspace write lock. However, a slow hook stalls its caller. Verify credentials and cache membership lookups to avoid I/O operations on every call.
 
-As an exception, `Server.Mutate` executes `CanMutate` inside its write transaction because writes in the closure are not known until it runs. `Apply` executes outside the write transaction.
+`Server.Mutate` executes `CanMutate` inside its write transaction because writes in the closure are unknown until the closure runs. `Apply` executes outside the write transaction.
 
-The row check is the one part of a policy that always runs inside the write transaction, because it needs the stored row. The function that `WriteFilter` returns runs there; `WriteFilter` itself runs before the transaction opens, so do lookups in `WriteFilter`.
+Row checks run inside the write transaction because they require the stored row. The function that `WriteFilter` returns runs inside the transaction. `WriteFilter` itself runs before the transaction opens, so perform lookups in `WriteFilter`.
 
 ## Authorizing in-process API calls
 
@@ -131,9 +131,9 @@ err := srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error { ...
 
 `server.Trusted` skips every permission hook, including `CanAccessWorkspace`, `CanMutate`, and the row check. Omitting `server.Trusted` fails safe: the engine authorizes the call as anonymous, and the policy rejects it. To record a specific actor name on written rows during a trusted operation, use `server.TrustedAs(ctx, name)`.
 
-The engine uses the principal to attribute writes. Every row records its last writer, which appears in the change feed. For more information, see [Change feed attribution](../reference/server.md#change-feed). Because attribution derives from the context that the hooks read, attribution cannot disagree with authorization.
+Every row stores its last writer, and the change feed shows it; see [Change feed attribution](../reference/server.md#change-feed).
 
-Note the following behavior regarding stored write attribution:
+Write attribution requires the following configuration:
 
 - **Authentication is required for write attribution:** Rows record only the subject. On a server that admits all requests as anonymous, every push records an empty actor. Features such as echo suppression and actor-filtered notifications do not operate without an authenticated subject.
 - **Multi-issuer authenticators must namespace subjects:** The engine stores the subject but not the issuer. If two callers from different issuers share the same subject, they collapse into the same actor in the change feed and field history. Prefix the subject (for example, `google:1234` or `saml:1234`) when accepting principals from multiple identity providers.
@@ -196,7 +196,7 @@ func (myPermissions) CanMutate(_ context.Context, p server.Principal, ws string,
 - **A custom mutator reaches the hook as one `Write` with `Custom` set,** and the rows that its body writes do not. A mutator that deletes projects therefore needs its own check.
 - **The client cannot predict this refusal.** It queues the delete, and reverts it when the server rejects it.
 
-`CanMutate` cannot enforce a rule that depends on the stored row, such as "only edit your own comment". An access rule can when a field of the row names the caller: set `caller_is` on the rule to that field. For other rules, use a write filter if the rule depends on the stored row's fields, or a custom mutator if it depends on who last wrote the row. For more information, see [Check writes against the stored row](#check-writes-against-the-stored-row) and [Check ownership in a mutator](#check-ownership-in-a-mutator).
+`CanMutate` cannot enforce a rule that depends on the stored row, such as editing only your own comments. An access rule can enforce this when a row field names the caller: set `caller_is` on the rule to that field. For other rules, use a write filter if the rule depends on stored row fields, or a custom mutator if it depends on who last wrote the row; see [Check writes against the stored row](#check-writes-against-the-stored-row) and [Check ownership in a mutator](#check-ownership-in-a-mutator).
 
 To keep individual fields of a writable row from clients, give the entity a field guard whose only rule is the read rule. A `PATCH` whose mask names a guarded field is rejected with `access_denied`. A `PUT` keeps the stored value of the guarded field and applies the rest of the row:
 
@@ -217,7 +217,7 @@ message Order {
 }
 ```
 
-A guard can also give a field back to some callers, such as a status that only managers set, and keep a field from some readers, such as a salary that only HR reads. For more information, see [Field guards](../reference/proto-options.md#field-guards).
+A field guard can also let only some callers write a field (such as a status that only managers set) or hide a field from some readers (such as a salary that only HR reads). See [Field guards](../reference/proto-options.md#field-guards).
 
 ## Check writes against the stored row
 
@@ -282,7 +282,7 @@ server.WithMutator("editComment", &appv1.EditComment{},
 
 Check and reject anonymous callers before comparing subjects. Unauthenticated callers and rows written without an authenticated actor both have an empty `Actor.Subject`, which evaluates as a match if unchecked.
 
-`meta.Actor` reflects the last writer of the row. If a moderator edits a comment created by an author, `meta.Actor` reports the moderator. To restrict edits to the original creator, mark a field of the row `(syncplane.v1.field_behavior).creator`: the server stores the caller's subject in it on the create, and no client write changes it later. An access rule with `caller_is` on that field then admits only the creator, and needs no mutator. See [Access model](../reference/proto-options.md#access-model).
+`meta.Actor` is the last writer, not the creator: after a moderator edits a comment, `meta.Actor` names the moderator. To allow edits only by the creator, mark a field `(syncplane.v1.field_behavior).creator` and use `caller_is` on it in an access rule. This needs no mutator. See [Access model](../reference/proto-options.md#access-model).
 
 `meta.Version` contains the row version. Because a mutator holds the workspace write lock, read-then-write operations within a mutator are serializable. When performing the same check in an `Apply` closure, pass the version to `server.WithExpectedVersion` so the write fails if the row changes concurrently. To read metadata in a read-only transaction, call `ViewTx.GetMeta` inside a `View`.
 
@@ -320,7 +320,7 @@ The change feed and admin service do not authenticate callers or evaluate `Permi
 
 ## Authorizing room access
 
-A room anchored to a row admits a caller only if the entity's `ReadFilter` permits reading that row. Presence on an entity follows the entity's existing read permissions. For more information, see [Rooms](../explanation/rooms.md).
+A room anchored to a row admits a caller only if the entity's `ReadFilter` permits reading that row; see [Rooms](../explanation/rooms.md).
 
 Unanchored rooms check `CanAccessWorkspace`. To customize access control for rooms, implement `RoomPermissions`:
 
@@ -348,10 +348,10 @@ Room permission hooks execute upon joining, and `CanJoinRoom` runs again on stre
 
 When a server returns a settled denial (`server.DenyWorkspace`), the client stops syncing the workspace and sets `status().workspaces[id].access`.
 
-The client does not automatically delete local data upon denial. To remove cached data, call `removeWorkspace(id, { purge: true })`. For more information, see [Handle failures](handle-failures.md).
+The client does not automatically delete local data upon denial. To remove cached data, call `removeWorkspace(id, { purge: true })`; see [Handle failures](handle-failures.md).
 
 **Note:** Active streams verify workspace access on heartbeats, but do not re-evaluate credentials with `Authenticate`. A credential that expires during an open stream remains valid until the stream closes. Configure stream lifetime limits if credentials must be refreshed periodically.
 
 ## Configuring multiple apps on one host
 
-`server.Manager` supports a shared authenticator with per-app permissions. For more information, see [Host multiple apps](host-multiple-apps.md#steps).
+`server.Manager` supports a shared authenticator with per-app permissions; see [Host multiple apps](host-multiple-apps.md#steps).

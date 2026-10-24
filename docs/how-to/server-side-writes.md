@@ -2,12 +2,11 @@
 
 This guide shows you how to write data from server-side Go code—such as HTTP
 handlers, agents, or cron jobs—through the storage path used by clients. Use
-this guide when your application needs to apply atomic mutations directly on the
-server.
+this guide when you need to apply atomic mutations directly on the server.
 
 ## Prerequisites
 
-Before you begin, ensure you have:
+Before you begin, verify that you have:
 
 - A configured server instance (`srv`).
 - A workspace ID (`workspaceID`).
@@ -21,8 +20,8 @@ surface against the principal on the context.
 To configure caller authorization, choose one of the following methods:
 
 1. **Authenticate as a specific user:** Attach the authenticated identity to
-   `ctx` using `server.WithPrincipal`. The engine evaluates your handler
-   against the same policy applied to clients:
+   `ctx` with `server.WithPrincipal`. The engine evaluates your handler
+   against the client policy:
 
    ```go
    ctx = server.WithPrincipal(ctx, server.Principal{Subject: userID})
@@ -43,9 +42,9 @@ To configure caller authorization, choose one of the following methods:
    records `"system"` as the actor.
 
 3. **Bypass authorization with a named actor:** If you write on a schedule or in
-   a loop, call `server.TrustedAs(ctx, name)`. The name is recorded on every
-   written row and appears on the [change feed](../reference/server.md#change-feed) as
-   the write's actor:
+   a loop, call `server.TrustedAs(ctx, name)`. The engine records the name on
+   every written row. The name appears on the
+   [change feed](../reference/server.md#change-feed) as the actor of the write:
 
    ```go
    ctx = server.TrustedAs(ctx, "connect:markdown")
@@ -55,15 +54,15 @@ To configure caller authorization, choose one of the following methods:
    `TrustedAs` compose with an existing principal.
 
 **Note:** `Invoke` authorizes once on the verb (`Write{Custom}` carrying the
-mutator name and arguments). The rows written by the mutator body are not
-authorized individually.
+mutator name and arguments). The engine does not authorize the rows written by
+the mutator body individually.
 
 ## Applying mutations
 
-Writes are authorized against the principal on the context. For details, see
-[Acting as a caller](#acting-as-a-caller).
+The engine authorizes writes against the principal on the context. For details,
+see [Acting as a caller](#acting-as-a-caller).
 
-To write data using `Apply`:
+To write data with `Apply`:
 
 1. Execute writes within an `Apply` closure:
 
@@ -92,9 +91,9 @@ To write data using `Apply`:
    - To execute a registered mutator instead of an inline closure, call
      `srv.Invoke`.
 
-2. If you need to page large entities, call `ApplyTx.ScanPage(prototype, afterKey, limit, fn)`.
-   This method returns the last visited key and a boolean value indicating
-   whether more rows follow.
+2. If you need to page large entities, call
+   `ApplyTx.ScanPage(prototype, afterKey, limit, fn)`. This method returns the
+   last visited key and a boolean value that indicates whether more rows follow.
 
 **Note:** `Apply` does not use client watermarks. Calling `Apply` twice applies
 the mutation twice. If callers can retry, use `ApplyIdempotent`.
@@ -116,11 +115,11 @@ document. To update a collaborative-text field from a plain string:
    ```
 
    The engine diffs the string against the stored document and applies the
-   difference as edits. Text omitted from the string is deleted. An empty string
-   deletes all visible text. On `tx.Patch`, the engine adds the field to the
-   mask.
+   difference as edits. The engine deletes text omitted from the string. An
+   empty string deletes all visible text. On `tx.Patch`, the engine adds the
+   field to the mask.
 
-2. Specify a unique peer name using `server.WithTextPeer`. Prefix the peer name
+2. Specify a unique peer name with `server.WithTextPeer`. Prefix the peer name
    per service. Writers that can produce diverging documents outside
    transactions must not share a peer name.
 
@@ -166,7 +165,7 @@ To verify that the write succeeded:
    `srv.ApplyIdempotent`. A `nil` error indicates that all writes committed
    atomically under a single sequence number.
 2. For `srv.ApplyIdempotent`, inspect `out.Applied` to confirm whether the
-   closure executed (`true`) or replayed a prior result (`false`), and inspect
+   closure executed (`true`) or replayed a prior result (`false`). Inspect
    `out.Seq` for the assigned sequence number.
 3. Confirm that connected clients received the commit notification dispatched by
    the engine.

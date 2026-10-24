@@ -32,12 +32,14 @@ time. When a client that was offline for a week reconnects and pushes its queue,
 it receives the newest sequence numbers. Its edits overwrite modifications made
 by other clients while it was disconnected on a per-field basis.
 
+The trade-off is that real-time ordering would need a hybrid logical clock per
+mutation, compared per field; the engine does not do this.
+
 Field masks limit overwrites to the fields that the client modified. This is an
-accepted trade-off for collaborative applications. If you need to detect a
-concurrent edit instead of silently merging it, use compare-and-swap (see
+accepted trade-off for collaborative applications. To detect a concurrent edit
+instead of silently merging it, use compare-and-swap (see
 [Opting out of silent convergence](#opting-out-of-silent-convergence)) rather
-than time ordering. Using a hybrid logical clock (HLC) per mutation compared
-per field is the only alternative for real-time ordering, and is out of scope.
+than time ordering.
 
 ### A mask through a nested message does not move its presence
 
@@ -54,8 +56,8 @@ observable, a mask that names a leaf inside a nested message (such as
 The trade-off is that an empty message container does not survive a masked merge.
 Writing `settings: {}` and then patching `settings.color` to unset drops
 `settings` completely, because the merge logic treats an empty container and an
-absent container identically. If you need to preserve container presence,
-include an explicit field.
+absent container identically. To preserve container presence, include an
+explicit field.
 
 ### A oneof is one field
 
@@ -66,12 +68,11 @@ Individual members cannot be masked; a mask that names a member is rejected by
 both the client and the server.
 
 The group must be the atomic unit. Protocol Buffers allows only one member of a
-oneof to hold a value. A member-level mask could specify that `choice_text` is
-now `x`, but it cannot define what unsetting `choice_text` means for sibling
-fields. Interpreting whether `choice_number` survives or the entire oneof becomes
-empty are both possible interpretations, and per-field LWW cannot resolve this
-ambiguity. Naming the group eliminates ambiguity and prevents client and server
-implementations from drifting.
+oneof to hold a value. A member-level mask can say that `choice_text` is now `x`,
+but it cannot say what unsetting `choice_text` means for its sibling
+`choice_number` (does `choice_number` survive, or does the whole oneof become
+empty). Per-field LWW cannot resolve this ambiguity. Naming the group eliminates
+ambiguity and prevents client and server implementations from drifting.
 
 Writes to a oneof group participate in per-field LWW like any other field. A
 concurrent write to an unrelated field (such as `label`) does not affect the
@@ -119,17 +120,17 @@ equals the workspace sequence number of the write that last modified the row. An
 absent or deleted row returns a version of `0`, regardless of tombstone garbage
 collection (GC).
 
-Version guards are useful when concurrent edits must be detected rather than
-merged. However, consider the following constraints:
+Version guards detect concurrent edits instead of merging them. Consider these
+constraints:
 
 - Guards cover the whole row rather than individual fields. A guard fails even
   if a concurrent change touched only unrelated fields.
 - `Row.version` advances only when the client pulls from the server. If a
   client issues multiple writes to the same row between pulls, each write names
   the same `expectedVersion`. The first write to reach the server advances the
-  row version, causing subsequent writes in that batch to reject against their
-  own predecessor. Rapid successive edits on a single row should use plain LWW
-  instead of guards.
+  row version. Subsequent writes in that batch reject against their own
+  predecessor. Use plain LWW instead of guards for rapid successive edits on a
+  single row.
 
 The client combines un-pushed writes that share a guard into a single guarded
 mutation that succeeds or fails as a unit. In React bindings, `useRow` mutation
@@ -140,9 +141,9 @@ unguarded writes to prevent self-conflict.
 
 Each mutation in a push batch executes inside a database savepoint. If a
 mutation fails business validation, the server rolls back that mutation while
-committing the remaining mutations in the batch. The server still acknowledges
-the rejected mutation (`ack`), causing the client to remove it from the queue
-and invoke `onMutationRejected`, but the mutation consumes no sequence number.
+committing the remaining mutations in the batch. The server acknowledges the
+rejected mutation (`ack`). The client removes it from the queue and invokes
+`onMutationRejected`. The mutation consumes no sequence number.
 
 Rejections persist through dropped push responses. The server records the
 verdict against the client watermark in the transaction that updates the
@@ -150,17 +151,17 @@ watermark. If the client resends the push, the server returns `REJECTED` with
 the original error code and message instead of returning `ALREADY_APPLIED`.
 
 On the client, a queue with an unacknowledged push retains its mutations across
-rebases rather than retiring them based on watermark progress alone. This ensures
-that the client resends the push to retrieve the rejected verdict before firing
-`onMutationRejected`, which occurs one synchronization cycle later.
+rebases rather than retiring them based on watermark progress alone. The client
+resends the push to retrieve the rejected verdict before firing
+`onMutationRejected`, one synchronization cycle later.
 
 The server retains rejection verdicts within the following limits:
 
 - The server drops verdicts oldest-first when stored codes and messages exceed
   64 KiB per client.
 - Garbage collection (`WithGC`) clears the verdicts of a client that has not
-  pushed within the tombstone retention. The watermark stays, so a later resend
-  is answered with a bare `ALREADY_APPLIED` and is still not applied.
+  pushed within the tombstone retention. The watermark stays. A later resend
+  returns `ALREADY_APPLIED` and the server does not apply the mutation.
 
 ## Atomic batches
 
@@ -169,62 +170,61 @@ You can bundle multiple CRUD mutations into a single transaction using
 savepoint, one sequence number, and one acknowledgment or rejection. It forms a
 single entry in the client queue and a single undo step.
 
-Within `fn`, subsequent operations observe earlier writes. However, the batch
-remains invisible to reads until `fn` completes, and rolls back completely if
-`fn` throws an error. Custom mutators cannot run inside a `transact()` batch.
+Within `fn`, subsequent operations observe earlier writes. The batch remains
+invisible to reads until `fn` completes. If `fn` throws an error, the batch rolls
+back completely. Custom mutators cannot run inside a `transact()` batch.
 
 The ledger read, the writes, and the key claim all commit in **one transaction**
-under the workspace's write exclusion, so a concurrent retry can never see
-"unclaimed" while the first call is mid-write, and no outcome is recorded that
-the store did not keep.
+under the workspace write exclusion. A concurrent retry cannot see "unclaimed"
+while the first call is writing, and the store records no outcome that it did
+not keep.
 
-That coupling also decides what happens on failure: an error or `Reject` rolls
-the key back with the writes, leaving the operation retryable — only committed
-outcomes replay.
+An error or `Reject` rolls the key back with the writes, leaving the operation
+retryable. Only committed outcomes replay.
 
 ## Idempotency
 
 Syncplane achieves idempotency through per-client mutation ID watermarks,
 checked for contiguity per `(workspace, caller, client_id)`. The caller is the
-authenticated principal, by issuer and subject, and every anonymous caller
-counts as one caller. In-process writes that support retries use a separate
-ledger keyed by a caller-supplied idempotency key, scoped to the caller in the
-same way; trusted calls share one key space of their own. Caller-supplied keys
-do not require contiguity and survive idle-client garbage collection.
+authenticated principal, identified by issuer and subject. All anonymous
+callers count as one caller. In-process writes that support retries use a
+separate ledger keyed by a caller-supplied idempotency key, scoped to the caller
+in the same way. Trusted calls share one key space of their own, separate from
+every caller's key space. Caller-supplied keys do not
+require contiguity and survive idle-client garbage collection.
 
 The `client_id` parameter is an unauthenticated handle asserted by the client.
-It does not represent identity; do not use it for authorization decisions. The
+It does not represent identity. Do not use it for authorization decisions. The
 watermark names the caller for this reason: a principal that pushes under
-another principal's `client_id` moves only its own watermark, so it cannot use
-up or skip the IDs that the other principal sends.
+another principal's `client_id` moves only its own watermark, so it cannot
+consume or skip IDs sent by the other principal.
 
 ## Deletes and the horizon
 
 Deleting a row creates a **tombstone** so that offline clients receive the
 deletion on their next pull. Garbage collection removes tombstones after a
 retention window and advances the workspace horizon. If a client cursor
-predates the horizon, the client transparently performs a full re-bootstrap.
+predates the horizon, the client performs a full re-bootstrap.
 
-Configure the retention window to exceed your longest anticipated client
-offline duration. A client that returns after the window re-bootstraps, but its
-watermark survives: the pending queue it brings back is resent against the
-same idempotency record it was pushed against. Only `WithClientRetention`
-deletes watermark records, and a client whose record is gone is re-admitted at
-its next pushed mutation ID; see
+Set the retention window to exceed the longest expected client offline duration.
+A client that returns after the window re-bootstraps, but its watermark survives.
+The client resends its pending queue against the original idempotency record.
+Only `WithClientRetention` deletes watermark records. A client whose record is
+deleted is readmitted at its next pushed mutation ID. See
 [Limits and trade-offs](limits-and-trade-offs.md#deleting-idle-client-watermarks-can-apply-a-resend-twice)
-for what that costs.
+for the associated costs.
 
 ## A bootstrap survives a dropped connection
 
 Snapshot bootstrapping streams in chunks. The client stores staged rows and an
-opaque progress token durably in local storage. If the connection drops during
-download, the client resumes the snapshot by sending the token to receive only
-the remaining chunks. Closing the browser tab does not restart the bootstrap.
+opaque progress token in local storage. If the connection drops during download,
+the client resumes the snapshot by sending the token to receive only the
+remaining chunks. Closing the browser tab does not restart the bootstrap.
 
 The resumed snapshot stream retains the cursor assigned during its initial
-attempt, ensuring consistent state across chunk boundaries. Because rows can
+attempt to ensure a consistent state across chunk boundaries. Because rows can
 span multiple workspace states across pages, the pull that follows the snapshot
-starts from that initial cursor to re-deliver changes written since the snapshot
+starts from that initial cursor to redeliver changes written since the snapshot
 began.
 
 The server validates whether a snapshot can resume. The server requires a fresh
@@ -245,26 +245,26 @@ When a fresh bootstrap is required, the client discards the partial snapshot.
 
 ## Workspaces are a hard partition
 
-The `workspace_id` is a hard partition key everywhere, and the server sequences
-per workspace. Each workspace keeps its own cursor, pending queue, and
-mutation-id counter. The server requires gap-free IDs per
-`(workspace, caller, client_id)`.
+The `workspace_id` is a hard partition key. The server sequences per
+workspace. Each workspace keeps its own cursor, pending queue, and mutation ID
+counter. The server requires gap-free IDs per `(workspace, caller, client_id)`.
 
-Sharing occurs at the transport and storage layers only: a single client can
+Sharing occurs at the transport and storage layers only. A single client can
 manage multiple workspaces simultaneously, sharing a local store, change
-stream, and push transport while maintaining independent cursors, pending
+stream, and push transport. The client maintains independent cursors, pending
 queues, and mutation ID counters for each workspace.
 
 Writes, `transact()` batches, undo operations, and `queryServer` calls cannot
-cross workspace boundaries. Reads can query across workspaces when explicitly
-requested. An entity reference resolves in its holder's workspace, unless the
-schema declares it as a
-[workspace-qualified reference](../reference/proto-options.md#syncplanev1reference--workspace-qualified-references),
-whose stored value names the workspace its target lives in; the client resolves
-those across the workspaces it holds, the server inside one.
+cross workspace boundaries. Reads can query across workspaces when requested.
+An entity reference resolves in the workspace of its holder, unless the schema
+declares it as a
+[workspace-qualified reference](../reference/proto-options.md#syncplanev1reference--workspace-qualified-references).
+The stored value of a workspace-qualified reference names the workspace of its
+target. The client resolves workspace-qualified references across the
+workspaces it holds, and the server resolves them inside one workspace.
 
 Clients self-assert `workspace_id`. The server enforces access boundaries
-through `CanAccessWorkspace`; the default authorization policy allows all
+through `CanAccessWorkspace`. The default authorization policy allows all
 access.
 
 ## Schema evolution is additive
@@ -276,9 +276,9 @@ with field masks for partial updates, and design entity schema changes to be
 additive.
 
 A client that reads a row, modifies a single field, and writes back the entire
-row overwrites any concurrent changes to other fields. To prevent this, the
-TypeScript client's `patch` method rejects full row objects and provides
-`update(key, recipe)` instead, masking only the fields modified by the recipe
+row overwrites concurrent changes to other fields. To prevent this, the
+TypeScript client `patch` method rejects full row objects and provides
+`update(key, recipe)` instead, which masks only the fields modified by the recipe
 function (see [Writes](../reference/typescript-client.md#which-write-verb)).
 
 Collaborative-text fields are the exception to whole-row replacement: they union
@@ -289,13 +289,14 @@ with the stored document on every `PUT` path.
 Clients and servers maintain separate schema registries that can diverge. When
 a server deploys new schemas, a full-sync client receives all server entities,
 including entities omitted from its own build. The client cannot decode, index,
-or query undeclared schemas, so it drops those rows. Similarly, the server never
-returns rows for entities missing from its own catalog.
+or query undeclared schemas, so it drops those rows. The server never returns
+rows for entities missing from its own catalog.
 
 Registering a previously unsynced entity triggers a workspace re-bootstrap.
-Because existing rows were written before the client's current cursor, a normal
-pull cannot retrieve them; a snapshot bootstrap is required. This is a one-time
-cost paid when a build containing the new schema runs for the first time.
+Because existing rows were written before the current cursor of the client, a
+normal pull cannot retrieve them, and a snapshot bootstrap is required. This is
+a one-time cost paid when a build containing the new schema runs for the first
+time.
 
 When multiple browser tabs run different builds, they share a single local
 store. The store syncs the union of all registered schemas across open tabs. A
@@ -310,8 +311,9 @@ unknown entities or fields declared only in newer builds, the tab skips
 optimistic application, logs an error to `console.error`, and retains the entry
 in the queue until push retirement. The confirmed row displays in that tab until
 the server acknowledges the write, while tabs with the updated schema display
-optimistic updates. Replaying unknown mutations is skipped rather than failing
-the rebase to prevent stalling cursor advancement in the shared workspace.
+optimistic updates. The tab skips replaying unknown mutations rather than
+failing the rebase, which prevents stalled cursor advancement in the shared
+workspace.
 
 ## Related
 

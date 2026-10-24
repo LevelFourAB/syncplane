@@ -6,7 +6,9 @@ For a complete listing of failure channels and error codes, see the [sync status
 
 ## Prerequisites
 
-Before you begin, ensure you have a configured `SyncClient` instance.
+Before you begin, ensure you have:
+
+- A configured `SyncClient` instance.
 
 ## Steps
 
@@ -34,11 +36,11 @@ Before you begin, ensure you have a configured `SyncClient` instance.
 
    Codes are exported as constants with `RejectionCode` and `SyncErrorCode` unions over them. Both fields widen the union with `(string & {})`, so custom mutator codes typecheck while known codes autocomplete. Use a `switch` statement with a `default` case.
 
-   Use `info.targets` to identify which rows were affected. For CRUD mutations, `info.targets` contains one entry. For batch mutations, it contains one entry per member. If you use a custom mutator, `info.targets` is empty and `info.mutator` contains the mutator name.
+   Use `info.targets` to identify the affected rows. For CRUD mutations, `info.targets` contains one entry. For batch mutations, it contains one entry per member. If you use a custom mutator, `info.targets` is empty and `info.mutator` contains the mutator name.
 
    If you use React, call `useOnMutationRejected(handler)` to tie the handler to the component lifecycle ([Build a UI with React](../reference/typescript-client.md#the-hooks)). Outside a constructor, call `client.onMutationRejected(cb)` to subscribe and receive an unsubscribe function.
 
-   If a push response is lost, the server records the verdict with the watermark and replays it on the resend. The client keeps the mutation queued until the resend collects it ([the convergence model](../explanation/convergence-model.md#rejections-are-results-not-errors)). Because the rejection arrives one sync cycle late, ensure that handlers closing dialogs or dropping drafts can safely run after a delay.
+   Because push rejections can arrive one sync cycle late when a push response is lost, ensure that handlers that close dialogs or drop drafts can safely run after a delay ([the convergence model](../explanation/convergence-model.md#rejections-are-results-not-errors)).
 
 2. **Monitor connection status.** Register an `onStatusChange` listener to update your UI when connectivity changes or when mutations are pending:
 
@@ -49,9 +51,9 @@ Before you begin, ensure you have a configured `SyncClient` instance.
    });
    ```
 
-   `start()` returns immediately and does not throw on the first sync. An unreachable server surfaces as `state: "error"` while mutations stay queued, and sync recovers automatically with backoff.
+   `start()` returns immediately and does not throw on the first sync. If the server is unreachable, `state` becomes `'error'`. Mutations stay queued, and sync recovers automatically with backoff.
 
-   If local setup fails before sync begins (such as a missing `url` or `transport`, or a local store that fails to open), `start()` rejects. Fix the cause or wait for the store to recover, then call `start()` again. Concurrent callers share one start attempt.
+   If local setup fails before sync begins (for example, a missing `url` or `transport`, or a local store that fails to open), `start()` rejects. Fix the cause or wait for the store to recover, then call `start()` again. Concurrent callers share one start attempt.
 
 3. **Handle revoked workspace access.** Check the access state and remove revoked workspaces from the client.
 
@@ -66,20 +68,18 @@ Before you begin, ensure you have a configured `SyncClient` instance.
    }
    ```
 
-   In a schema that uses the access model, a caller that holds no permission in the workspace gets `'none'` instead. This is not permanent: the client keeps the local rows and the queue, and syncs the workspace again by itself once a grant exists. Show the user that they wait for access. Call `client.syncNow()` to ask again at once, for example after your backend writes the grant. See [Create a workspace and invite people](create-a-workspace-and-invite-people.md).
+   In a schema that uses the access model, a caller that holds no permission in the workspace receives `'none'` instead. This state is temporary. The client retains local rows and the queue, and resumes sync when a grant exists. Notify users to wait for access. Call `client.syncNow()` to retry immediately, for example after your backend writes the grant. See [Create a workspace and invite people](create-a-workspace-and-invite-people.md).
 
 4. **Handle schema version skew during deployment.** Configure `schemaRevision` and `onSchemaSkew` to detect and respond to schema differences between the client and server.
 
-   When the server uses `WithSchemaRevision`, it advertises an application-defined revision on every stream frame, push, pull, server query, and bootstrap. Configure `schemaRevision` on the client to compare revisions. When a mismatch occurs, the client runs `onSchemaSkew`. Use this callback to surface an update notification, switch to read-only mode (`block`), or force a clean re-bootstrap (`resync`).
-
-   This makes the skew window during a rolling deployment visible and actionable instead of silently dropping writes.
+   When the server uses `WithSchemaRevision`, it advertises an application-defined revision on every stream frame, push, pull, server query, and bootstrap. Configure `schemaRevision` on the client to compare revisions. When a mismatch occurs, the client runs `onSchemaSkew`. Use this callback to surface an update notification, switch to read-only mode (`block`), or force a clean re-bootstrap (`resync`). `onSchemaSkew` does not prevent lost writes. It makes the skew window during a rolling deployment visible, so that your application can act instead of writes being dropped silently.
 
 ## Confirming the result
 
 To verify your failure handling setup:
 
 - Trigger a write conflict and confirm that `onMutationRejected` runs and displays the expected notification.
-- Disconnect the network and verify that `onStatusChange` reports `state: "error"` with `lastError` and updates the pending mutation count.
+- Disconnect the network and confirm that `onStatusChange` reports `state: "error"` with `lastError` and updates the pending mutation count.
 - Revoke workspace access on the server and confirm that `status().workspaces[id]?.access` updates to `'revoked'`.
 
 ## Related

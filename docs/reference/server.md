@@ -35,9 +35,9 @@ http.ListenAndServe(addr, srv.HTTPHandler())   // HTTP/1.1 suffices
 
 `server.New` validates and applies all options before returning. Declaration options (`WithEntities`, `WithMutator`, `WithMerger`) are evaluated in dependency order rather than registration order. A `WithMerger` option can reference an entity defined in a subsequent `WithEntities` declaration.
 
-The caller retains ownership of the underlying storage adapter. `srv.Close()` stops background maintenance tasks, including garbage collection, index backfills, text compaction sweeps, and notify-coalescing timers. Calling `srv.Close()` does not close the underlying storage adapter (which may back multiple apps in a [Manager](../how-to/host-multiple-apps.md)) or a notifier configured with `WithNotifier`.
+The caller retains ownership of the underlying storage adapter. `srv.Close()` stops background maintenance tasks, including garbage collection, index backfills, text compaction sweeps, and notify-coalescing timers. Calling `srv.Close()` does not close the storage adapter or a notifier configured with `WithNotifier`. An adapter can back multiple apps in a [Manager](../how-to/host-multiple-apps.md).
 
-`srv.HTTPHandler()` returns an `http.Handler` mounted at its default path. To mount the service on a custom router alongside other routes, use `path, handler := srv.Handler()`. Connect routes RPCs by full method path and cannot be mounted at an arbitrary root prefix.
+`srv.HTTPHandler()` returns an `http.Handler` mounted at its default path. To mount the service on a custom router alongside other routes, use `path, handler := srv.Handler()`. Connect routes RPCs by full method path. You cannot mount RPCs at an arbitrary root prefix.
 
 ## Options
 
@@ -112,7 +112,7 @@ The following table lists request and data bounds in `server.Limits`:
 
 Increasing `MaxMutationsPerPush` or `MaxValueBytes` requires increasing `MaxRequestBytes` accordingly.
 
-Each limit applies to a single request or stream. Limits do not constrain overall request rates or concurrent stream counts. For details, see [the default posture is open](../explanation/limits-and-trade-offs.md#the-default-posture-is-open).
+Each limit applies to a single request or stream. Limits do not constrain overall request rates or concurrent stream counts. See [the default posture is open](../explanation/limits-and-trade-offs.md#the-default-posture-is-open).
 
 Exceeding a limit returns an error that names the counted value, the violated field, the current limit, and the configuration option:
 
@@ -122,16 +122,16 @@ push of 300 mutations, over MaxMutationsPerPush (256); raise it with server.With
 
 ## Error messages
 
-Errors returned by Go API calls (`RegisterEntity`, `RegisterMerger`, `EntityKey`, transaction methods, and options applied in `New`) are prefixed with `server:` and can reference Go identifiers:
+Errors returned by Go API calls (`RegisterEntity`, `RegisterMerger`, `EntityKey`, transaction methods, and options applied in `New`) have the `server:` prefix and can reference Go identifiers:
 
 ```
 server: syncplane.example.v1.Todo is not a registered entity; register it first
 with server.WithEntities(&Todo{}) or Server.RegisterEntity
 ```
 
-Errors returned over RPC carry no `server:` prefix. Wire errors are Connect errors with machine-readable error codes in metadata; see [sync status and codes](sync-status-and-codes.md).
+Errors returned over RPC do not include the `server:` prefix. RPC errors are Connect errors with machine-readable error codes in metadata. See [sync status and codes](sync-status-and-codes.md).
 
-Errors reporting bounds violations state the configuration option to modify. Errors referencing unregistered entities specify the registration call. Handle errors by matching error codes rather than error message text.
+Errors that report bounds violations state the configuration option to modify. Errors referencing unregistered entities specify the registration call. Handle errors by matching error codes rather than error message text.
 
 ## Garbage collection
 
@@ -139,12 +139,12 @@ Errors reporting bounds violations state the configuration option to modify. Err
 
 A garbage collection pass prunes:
 
-- **Tombstones** (`WithGC`): Pruned based on tombstone retention duration. Tombstone retention must exceed the maximum expected client offline window.
+- **Tombstones** (`WithGC`): Prunes tombstones based on tombstone retention duration. Tombstone retention must exceed the maximum expected client offline window.
 - **Text delta logs** (`WithTextDeltaRetention`): Prunes collaborative-text delta entries.
 - **Idempotency keys** (`WithIdempotencyRetention`): Prunes keys claimed by `MutateIdempotent`. Retention must cover caller retry windows to prevent duplicate execution.
-- **Field history** (`WithHistoryRetention`): Prunes historical field records. Retention is independent of tombstone retention. A record's age is calculated from its last appended write rather than its initial `recorded_at` timestamp.
-- **Client rejection verdicts** (`WithGC`): Clears the verdicts recorded for clients that have not pushed within the tombstone retention. A resend of a refused mutation then receives `ALREADY_APPLIED` instead of the original verdict.
-- **Idle client watermark records** (`WithClientRetention`): Deletes the records of clients that have not pushed for the configured duration. Not deleted unless the option is set. A deleted watermark lets a resend of an already-applied mutation apply again; see [Limits and trade-offs](../explanation/limits-and-trade-offs.md#deleting-idle-client-watermarks-can-apply-a-resend-twice).
+- **Field history** (`WithHistoryRetention`): Prunes historical field records independently of tombstone retention. Record age is calculated from its last appended write, not from its initial `recorded_at` timestamp.
+- **Client rejection verdicts** (`WithGC`): Clears verdicts recorded for clients that have not pushed within the tombstone retention window. A resend of a refused mutation then receives `ALREADY_APPLIED` instead of the original verdict.
+- **Idle client watermark records** (`WithClientRetention`): Deletes watermark records of clients that have not pushed for duration `d`. The server keeps every record when this option is unset. A deleted watermark allows a resend of an already-applied mutation to apply again. See [Limits and trade-offs](../explanation/limits-and-trade-offs.md#deleting-idle-client-watermarks-can-apply-a-resend-twice).
 
 Field-history records are hard-deleted without creating tombstones.
 
@@ -181,10 +181,10 @@ Compaction sweeps evaluate rows modified between the previous pass position and 
 
 Compaction behavior includes:
 
-- Rewriting a document assigns a new sequence number, causing connected clients to re-fetch that field once.
-- Text writes based on purged states are rejected with `CodeTextStateStale`, requiring the client to re-apply changes against the current state.
+- Rewriting a document assigns a new sequence number, which causes connected clients to re-fetch that field once.
+- Text writes based on purged states are rejected with `CodeTextStateStale`. The client must re-apply changes against the current state.
 
-The `minPurged` argument specifies the minimum number of reclaimable items required to rewrite a row. Lowering `minPurged` causes subsequent sweeps to re-evaluate all workspaces from the beginning. Raising `minPurged` does not trigger a full re-sweep. For details, see [the collaborative text explanation](../explanation/collaborative-text.md).
+The `minPurged` argument specifies the minimum number of reclaimable items required to rewrite a row. Lowering `minPurged` causes subsequent sweeps to re-evaluate all workspaces from the beginning. Raising `minPurged` does not trigger a full re-sweep. See [the collaborative text explanation](../explanation/collaborative-text.md).
 
 ## Registration
 
@@ -205,11 +205,11 @@ srv.RegisterDynamicEntity(spec server.DynamicEntity, opts ...server.RegisterOpti
 srv.RegisterDynamicEntities(specs ...server.DynamicEntity)
 ```
 
-Mutators and mergers must be registered at construction time and cannot be registered dynamically at runtime.
+Register mutators and mergers at construction time. You cannot register them dynamically.
 
 A mutator receives arguments matching its registered prototype. If registered with a message prototype, the mutator always receives a non-nil message of that type (zeroed if omitted by the caller). If registered with `nil`, the mutator always receives `nil`. Supplying arguments to a mutator registered without a prototype returns an error.
 
-Dynamic schema construction helpers include `server.DynamicField` (`Message`, `Ref`/`RefWorkspace`/`ReverseRelation`, `KeyField`/`OrderField`, `MapKey`/`MapValue`) with `server.BuildDynamicFile` and `server.RegisterDynamicEntities`, which builds a set of referencing entities into one file like the TypeScript builder. See [Define schemas in TypeScript](../how-to/define-schemas-in-typescript.md).
+Dynamic schema construction helpers include `server.DynamicField` (`Message`, `Ref`/`RefWorkspace`/`ReverseRelation`, `KeyField`/`OrderField`, `MapKey`/`MapValue`) with `server.BuildDynamicFile` and `server.RegisterDynamicEntities`, which builds a set of referencing entities into one file. See [Define schemas in TypeScript](../how-to/define-schemas-in-typescript.md).
 
 Schema registration validates that entity names conform to identifier rules and that `key_fields` match supported client types. See [Naming rules](naming.md).
 
@@ -236,9 +236,9 @@ server.DynamicEntity{
 ### Registration guarantees
 
 - **Trust**: `RegisterAuthorizer` defaults to deny (`DenyAll`). The built-in `TokenAuthorizer` checks an `Authorization: Bearer <token>` header in constant time. A denied call never touches state.
-- **Persistence**: Each app's schema is stored and re-registered on boot before serving. A restart leaves every app immediately syncable, with the same entities and access model as before. A registration adds and replaces the entities of its set and keeps the others, so the stored schema is the merge of every set the app registered: the definitions of the last set, and every definition of the schema before it that the set does not replace. A set that declares the message of a registered entity as another entity, or with no entity option, is refused, because an entity cannot be renamed or removed. `Manager.Register` returns the revision of that merged schema, and the entities of the set it registered. Registrations of one app run one at a time.
-- **Idempotence and evolution**: Re-registering an identical set is a no-op. New entities and appended fields upsert. The manager rejects conflicting changes without partially applying them. Conflicting changes include removed, renumbered, or retyped fields, references retargeted to different entities, or changed `key_fields`. Each app's schema revision is a stable hash of its canonical descriptor bytes, surfaced to clients as `schema_revision` so that a schema change causes clients to re-bootstrap.
-- **Access model changes**: A change to the access model of a registered entity, to whether the schema declares a role, or, with `WithCallerAccess`, a role name the served schema does not declare, is refused unless the registration passes `server.AllowAccessChange()` (`allow_access_change` on `AdminService.Register`). `RegisterEntity` and `RegisterDynamicEntity` take the same option. See [Changing the access model](proto-options.md#changing-the-access-model).
+- **Persistence**: The server stores and re-registers each app's schema on boot before serving. A restart leaves every app immediately syncable with its previous entities and access model. Registration merges entity sets: the stored schema contains the definitions of the latest set and all previous definitions that the set does not replace. The manager rejects a set that redeclares an existing entity under another name or without an entity option. You cannot rename or remove an entity. `Manager.Register` returns the revision of the merged schema and the entities of the registered set. Registrations for an app run sequentially.
+- **Idempotence and evolution**: Re-registering an identical set is a no-op. New entities and appended fields upsert. The manager rejects conflicting changes without partially applying them. Conflicting changes include removed, renumbered, or retyped fields, references retargeted to different entities, or changed `key_fields`. Each app's schema revision is a stable hash of its canonical descriptor bytes, surfaced to clients as `schema_revision`. A schema change causes clients to re-bootstrap.
+- **Access model changes**: The server rejects a change to the access model of a registered entity, a change to whether the schema declares a role, or, with `WithCallerAccess`, a role name that the served schema does not declare, unless registration passes `server.AllowAccessChange()` (`allow_access_change` on `AdminService.Register`). `RegisterEntity` and `RegisterDynamicEntity` accept the same option. See [Changing the access model](proto-options.md#changing-the-access-model).
 
 ## In-process writes
 
@@ -271,26 +271,26 @@ In-process writes do not update or consult client watermarks. See [Write from se
 
 ### Choosing between Apply and Mutate
 
-`Apply` executes its closure against a snapshot, records intended writes, evaluates permissions, and commits all writes in a single atomic mutation. The closure runs once outside the workspace write lock. For a read-modify-write under `Apply`, pass the version you read as `Patch`'s `expected` argument, which turns a concurrent edit into a `conflict` rejection instead of a silent merge. Most operations and request handlers should use `Apply`.
+`Apply` executes its closure against a snapshot, records intended writes, evaluates permissions, and commits all writes in a single atomic mutation. The closure runs once outside the workspace write lock. For a read-modify-write under `Apply`, pass the read version as the `expected` argument to `Patch`. A concurrent edit then returns a `conflict` rejection instead of merging. Most operations and request handlers should use `Apply`.
 
-`Mutate` runs its closure inside the write transaction, holding the workspace's write lock for everything the closure does (a storage adapter may hold a wider lock, such as SQLite), and calls `CanMutate` from inside the transaction. `Mutate` may run the closure more than once if the storage adapter retries, so keep side effects out of it.
+`Mutate` runs its closure inside the write transaction, holding the workspace write lock throughout execution. A storage adapter can hold a wider lock, such as SQLite. The adapter calls `CanMutate` from inside the transaction. Storage adapter retries can run the closure multiple times, so keep side effects out of it.
 
-Under a caller who is not `Trusted`, reads in a `Mutate` or `MutateIdempotent` closure apply the caller's read rules, guards and `ReadFilter`, as in `Apply`: a row the caller cannot read is absent, a field a guard hides from the caller has its zero value, and a `Query` whose `Where` or `OrderBy` names a field the caller does not read on every row fails with `CodePermissionDenied`. The first read, and the first after a write, calls `ReadFilter` once for each registered entity inside the transaction. Under `Trusted`, reads see every row.
+For callers who are not `Trusted`, reads in a `Mutate` or `MutateIdempotent` closure apply the caller's read rules, guards, and `ReadFilter`, as in `Apply`. A row the caller cannot read returns as absent. A field hidden by a guard returns its zero value. A `Query` whose `Where` or `OrderBy` references a field the caller does not read on every row fails with `CodePermissionDenied`. The first read, and the first read after a write, calls `ReadFilter` once for each registered entity inside the transaction. Reads under `Trusted` access see every row.
 
 `Mutate` provides two capabilities that `Apply` does not:
 
-- genuinely serializable read-then-write operations, where nothing can move between the read and the write;
-- streaming writes that do not buffer in memory, suitable for bulk imports of many thousands of rows.
+- Serializable read-then-write operations where no concurrent write can intervene.
+- Streaming writes that do not buffer in memory, for bulk imports of many rows.
 
 ### Choosing idempotency keys
 
-Keys are per workspace and per caller. Each principal has its own key space, identified by issuer and subject, and all anonymous callers share one. A key that one principal claimed is a new key for another principal: the call runs its closure under its own authorization and never receives the first caller's result. Calls with a `Trusted` context share one key space, separate from every principal's. Derive trusted keys from data the caller owns, and prefix them per source when multiple systems write to the same workspace.
+Idempotency keys are scoped per workspace and per caller. Each principal has an independent key space identified by issuer and subject. All anonymous callers share one key space. A key claimed by one principal is distinct from the same key name used by another principal: the call executes under its own authorization and never returns the previous caller's result. Calls with a `Trusted` context share a single key space separate from all principals.
 
-Key considerations:
+Key semantics:
 
-- A successful call claims the key even when the closure wrote nothing. The empty result replays and registers the workspace.
-- Keys expire according to `WithIdempotencyRetention` (default 24 hours). Set retention above the longest retry window callers use; a retry arriving after its key has expired applies again.
-- Idempotency keys use a separate ledger from client watermarks. Watermarks are contiguity-checked per client and pruned once a client goes idle, which an API caller's retry key cannot satisfy or survive.
+- A successful call claims the key even if the closure wrote nothing. Replays return the empty result and register the workspace.
+- Keys expire according to `WithIdempotencyRetention` (default 24 hours). Set retention above the longest retry window that callers use. A retry that arrives after key expiration executes as a new write.
+- Idempotency keys use a ledger separate from client watermarks. Client watermarks require contiguous sequence numbers and are pruned when clients go idle.
 
 ## Reads
 
@@ -426,7 +426,7 @@ When both fields are set, a bypass ran under that caller's request. A zero actor
 
 Attribution limitations:
 
-- **Last writer only**: The feed reports state rather than transitions. Writes that coalesce into one change leave only the final actor. Suppressing based on actor drops triggers if someone else's write coalesced behind your write.
+- **Last writer only**: The feed reports state rather than transitions. Writes that coalesce into one change record only the final actor. Filtering by actor drops triggers if another caller's write coalesces behind your write.
 - **Authentication requirement**: Caller writes are attributed only if you install an `Authenticator`. By default, client pushes record a zero actor with an empty `Subject`. The `client_id` is not recorded or substituted.
 - **System is a label**: `System` is not verified and no policy runs against it. It indicates which pass made the write, not whether the write was permitted.
 
@@ -558,25 +558,58 @@ Before the write transaction opens, the server refuses a write that can only be 
 
 A `PUT` without an expected version is a create when the row does not exist and an update when it exists.
 
-The grant-row rule runs on every `PUT` and `DELETE` of a grant row, and on a `PATCH` whose mask reaches the subject, the role or the access parent: its field, or the oneof group of a polymorphic one. A caller can therefore grant and revoke only what it holds itself. Every write path, `Trusted` included, refuses with `CodeInvalidArgument` a grant row with no subject, an undeclared role, or no access parent where the entity has one, a row that would sit below itself or more than `MaxAccessDepth` hops below a row without an access parent, a row that would put a row below it more than `MaxAccessDepth` hops below such a row, and a row whose access parents would name more rows than `MaxAccessParents`. A `Trusted` write may delete a row that rows sit below, or a team row that grant rows name; those rows then anchor at nothing, or grant to no one. A `Trusted` write may also create a row whose key such rows name, and they then sit below it, or grant to it. All other refusals are `CodeAccessDenied`, with one message whether the row or its parent is missing, hidden or refused by the rules. `CanMutate`, `FieldPermissions` and `RowWritePermissions` still run and can refuse what the model allows, with `CodePermissionDenied`.
+The grant-row rule executes on every `PUT` and `DELETE` of a grant row, and on a `PATCH` whose mask reaches the subject, the role, or the access parent (the field or its polymorphic oneof group). A caller can grant and revoke only permissions that it holds.
 
-The message of a refusal names only what the caller sent. To see why a write was refused, set the server's logger to debug level: each refusal logs one `access refused` record with the `entity`, `key`, `op` and the caller's `subjects`, and in `rules` each rule that names the operation with what it did not admit, such as:
+Every write path, including `Trusted`, rejects the following with `CodeInvalidArgument`:
+
+- A grant row without a subject, with an undeclared role, or with no access parent where the entity requires one.
+- A row that sits below itself or more than `MaxAccessDepth` hops below a row without an access parent.
+- A row that places a row below it more than `MaxAccessDepth` hops below a row without an access parent.
+- A row whose access parents reference more rows than `MaxAccessParents`.
+
+A `Trusted` write can delete an access parent row or a team row referenced by grant rows; child rows then anchor at nothing, or grant to no one. A `Trusted` write can also create a row whose key is referenced by existing rows. All other refusals return `CodeAccessDenied`, using an identical error message whether the row or its parent is missing, hidden, or refused by the rules. `CanMutate`, `FieldPermissions`, and `RowWritePermissions` still run and can reject operations permitted by the access model with `CodePermissionDenied`.
+
+The refusal error message names only what the caller sent. When the server logger runs at debug level, each refusal logs an `access refused` record containing `entity`, `key`, `op`, and the caller's `subjects`. The `rules` field lists each rule that evaluated the operation and why it did not admit the write:
 
 ```
 allow[1] write:requires=edit_tasks: edit_tasks is not held at the root, the row or a row above it
 allow[2] update:requires=post:subject=author_id:fields=body: the update changes title, and fields lists body
 ```
 
-The record can name subjects and permissions the caller did not send, so keep debug logs where only operators read them.
+Because these log records can contain subjects and permissions that the caller did not send, restrict debug log access to operators.
 
-A mutator is checked by its `MutatorAccess`, inside the write transaction before its body runs:
+The server checks mutator permissions using `MutatorAccess` inside the write transaction before running the mutator body:
 
 ```go
 server.WithMutator("rename_task", &taskv1.TaskArgs{}, renameTask,
 	server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
 ```
 
-The caller must hold `Permission` at the row of `Entity` whose key the args' `KeyField` holds, or up its chain, or at the root when both are empty. With `Admitted: true`, and the other fields empty, every caller that passed the workspace gate may invoke the mutator; this is how a schema without roles opens a mutator to clients. A row that does not exist refuses the invocation. A refused invocation is `CodeAccessDenied`. With `TrustedOnly: true`, and the other fields empty, only a `Trusted` caller may invoke the mutator. In a schema that uses the access model, a mutator without `MutatorAccess` is refused for every caller who is not `Trusted` too, and registration logs a warning for it; `TrustedOnly` states that this is intended and logs nothing. The rows the body writes through its `EntityTx` are not checked. A write through `tx.AsCaller()` passes the same checks as the write from the invoking caller's client, `CanMutate` excepted: the access rules, refused with `CodeAccessDenied`, and `FieldPermissions` and `RowWritePermissions`, refused with `CodePermissionDenied`. Reads through `tx.AsCaller()` (`Get`, `GetMeta`, `Scan`, `ScanPage`, `Query`) apply the invoking caller's read rules and `ReadFilter`, as `View` does: a row the caller cannot read is absent, a field a guard hides from the caller has its zero value, and a `Query` whose `Where` or `OrderBy` names a field the caller does not read on every row fails with `CodePermissionDenied`. These reads see the transaction's earlier writes, and the first one, and the first after a write, call `ReadFilter` once for each registered entity inside the transaction. Reads through `tx` itself are not filtered. Under a `Trusted` invocation, `AsCaller` returns the transaction itself. In a `Mutate` for a caller who is not `Trusted`, `AsCaller` also returns the transaction itself, whose reads apply that caller's read rules. `EntityTx.Can(permission, prototype, key)` reports whether the invoking caller holds a permission at a row. It returns an error that wraps `ErrUnknownPermission` for a permission that no role grants, in a `Trusted` transaction too. Registration refuses a `MutatorAccess` that sets `Admitted` or `TrustedOnly` together with another field, whose permission no role grants, whose entity is not registered, or whose key field is not a singular string field of the args.
+The caller must hold `Permission` at the row of `Entity` specified by the arguments' `KeyField`, along its access parent chain, or at the root if both fields are empty. If `Admitted` is `true` and other fields are empty, any caller admitted by the workspace gate can invoke the mutator. If the target row does not exist, the server refuses the invocation. A refused invocation fails with `CodeAccessDenied`.
+
+If `TrustedOnly` is `true` and other fields are empty, only a `Trusted` caller can invoke the mutator. In a schema that uses the access model, a mutator without `MutatorAccess` fails for all untrusted callers and registration logs a warning. Setting `TrustedOnly: true` suppresses this warning.
+
+Rows written directly through `EntityTx` bypass permission checks. Writes performed through `tx.AsCaller()` enforce standard client checks (except `CanMutate`):
+
+- Access rules, which fail with `CodeAccessDenied`.
+- `FieldPermissions` and `RowWritePermissions`, which fail with `CodePermissionDenied`.
+
+Reads through `tx.AsCaller()` (`Get`, `GetMeta`, `Scan`, `ScanPage`, `Query`) apply the caller's read rules and `ReadFilter`:
+
+- Unreadable rows return as absent.
+- Guarded fields return zero values.
+- A `Query` whose `Where` or `OrderBy` references an unreadable field fails with `CodePermissionDenied`.
+
+These reads observe earlier writes from the same transaction. The first read, and the first read following a write, invokes `ReadFilter` once per registered entity inside the transaction. Reads directly through `tx` are unfiltered. For `Trusted` invocations, `AsCaller` returns `tx` directly. In a `Mutate` call for an untrusted caller, `AsCaller` also returns `tx`, and its reads apply the caller's read rules.
+
+`EntityTx.Can(permission, prototype, key)` checks whether the invoking caller holds a permission at a specified row. It returns an error wrapping `ErrUnknownPermission` if no role grants that permission, including in `Trusted` transactions.
+
+Registration rejects `MutatorAccess` configurations that:
+
+- Combine `Admitted` or `TrustedOnly` with other fields.
+- Reference a permission that no role grants.
+- Reference an unregistered entity.
+- Reference a `KeyField` that is not a singular string field on the arguments message.
 
 A grant row counts only when its subject matches, its role is declared, and its anchor row exists. The engine derives an index over each grant entity's subject field, so the read costs one probe per subject once the index is built, and a scan of the grant entity before that. A schema with teams adds a second pass: one probe of each team reference per team the caller is a member of.
 
@@ -594,13 +627,13 @@ A cursor records what its caller could read: a hash in the cursor, and the full 
 | The caller holds no permission now, and held one when the cursor was issued                                                                                                                                                                                                                                                                                          | A resync that tombstones every row the caller read, with a `CallerAccess` that holds nothing and `has_more` set. The next pull fails with `workspace_no_access`. |
 | An entity the cursor knows has read rules that admit other callers, or another access parent, or joined or left the model; another `MaxAccessDepth`; a record the store no longer holds; other subjects; grants that change again during a resync; a move during a resync that changes what the caller can read; or more moves since the cursor than `MaxResyncScan` | `reset`; the client bootstraps again.                                                                                                                            |
 
-Without a cursor-state store, every change of a caller's grants resets that caller's clients. So does an entity that joins or leaves the access model or changes who its read rules admit or its access parent. A caller without a store whose last permission goes gets `workspace_no_access` and keeps its rows.
+Without a cursor-state store, any change to a caller's grants resets connected clients. Changes to an entity's access model, read rules, or access parents also trigger resets. If a caller without a store loses their last permission, the pull returns `workspace_no_access` and the client retains its rows.
 
-A pull reads at or past the position its cursor's record and moves were read at, so a read replica that lags behind it does not serve the pull. A Bootstrap classifies every page with the access parents rows had at its Begin position.
+A pull reads at or past the position where its cursor record and moves were evaluated, preventing lagging read replicas from serving the request. A Bootstrap classifies each page using the access parents present at its `Begin` position.
 
-Every response that changes what the caller holds carries a `CallerAccess` summary (`PullResponse.caller_access`, `BootstrapResponse.Begin.caller_access`), which the TypeScript client stores and answers `can()` from. It lists the permissions held at the workspace root, and each anchor row once, in a group with the other rows that hold the same permissions. Its size is proportional to the number of anchor rows, plus one list of permissions for each distinct set.
+Every response that modifies caller permissions carries a `CallerAccess` summary (`PullResponse.caller_access`, `BootstrapResponse.Begin.caller_access`). The TypeScript client stores this summary to evaluate `can()`. The summary lists permissions held at the workspace root and groups anchor rows sharing identical permissions. Its size is proportional to the number of anchor rows plus distinct permission sets.
 
-A pull sends a `CallerAccessDelta` in its place (`PullResponse.caller_access_delta`) when the request names the summary the client holds (`PullRequest.caller_access_version`, `WorkspaceScope.caller_access_version`) and the cursor-state store recorded that summary for the request's cursor. The delta holds only the anchor rows whose permissions changed, and the rows the caller holds nothing at any more. Its size is proportional to the rows that changed. The response sends the whole summary when:
+A pull sends a `CallerAccessDelta` (`PullResponse.caller_access_delta`) instead of a full summary if the request specifies the client's version (`PullRequest.caller_access_version`, `WorkspaceScope.caller_access_version`) and the cursor-state store recorded that summary for the request's cursor. The delta holds only anchor rows whose permissions changed and rows where permissions were removed. Its size is proportional to the rows that changed. The response sends the full summary under the following conditions:
 
 | Condition                                                         | Reason                                                                        |
 | ----------------------------------------------------------------- | ----------------------------------------------------------------------------- |
@@ -612,7 +645,7 @@ A pull sends a `CallerAccessDelta` in its place (`PullResponse.caller_access_del
 | The caller's subjects or root permissions changed                 | A delta changes only anchor rows, never the subjects or the root permissions. |
 | The delta is not smaller than the whole summary                   | Most rows changed, or the caller holds few.                                   |
 
-The store records the summary only for a client that names a version: on its first pull or stream page after a bootstrap, and when the summary changes. A grant change writes one entry for the summary, and one more only when it also changes what the caller reads. A Subscribe frame that carries a summary or a delta always carries its cursor, so the client's cursor names the summary it holds.
+The store records summaries only for clients that provide a version: on the first pull or stream page after bootstrap, and when the summary changes. A grant change writes one entry for the summary, and a second entry only if readable rows also change. A `Subscribe` frame that includes a summary or delta always includes its cursor.
 
 ## Rooms
 
@@ -640,9 +673,9 @@ Room admission is evaluated when joining, at each stream heartbeat, and on `Publ
 | Any other settled denial: `CanAccessWorkspace`, the anchor row, or `CanJoinRoom` | `REASON_ACCESS_REVOKED` | Stop showing the room.                 |
 | A hook or storage error                                                          | `REASON_ERROR`          | Reopen with backoff.                   |
 
-Other topics on the stream continue uninterrupted. A missing, a deleted and an unreadable anchor row give the same reason and the same `message`, so a drop does not tell the caller whether a key exists. The server log names which of the three it was, at level `INFO` with the message `room anchor refused the caller`.
+Other topics on the stream continue without interruption. Missing, deleted, and unreadable anchor rows return the same reason and `message` to avoid disclosing whether a key exists. The server logs the specific reason at level `INFO` with the message `room anchor refused the caller`.
 
-Anchor row lookups are memoized across streams sharing the same anchor.
+Anchor row lookups are memoized across streams sharing an anchor.
 
 ```go
 type RoomPermissions interface {
@@ -655,11 +688,11 @@ Implement `RoomPermissions` to enforce room policies. Embed `server.AllowAllRoom
 
 ### Identity
 
-`Participant.Issuer` and `Participant.Subject` are derived from the authenticated request principal. Clients receive the subject only. `session_id` is assigned by the client, and the server binds each `Watch` stream to the principal that opened it.
+`Participant.Issuer` and `Participant.Subject` derive from the authenticated request principal. Clients receive only the subject. The client assigns `session_id`, and the server binds each `Watch` stream to the principal that opened it.
 
-- A presence record belongs to the issuer and subject that first wrote it. A state or departure for the same session ID from another issuer or another subject is ignored, on every node.
-- A `Watch` stream keeps alive only the records of its own principal. A stream may name a session ID that another principal holds; it is admitted, but it does not keep that principal's records alive.
-- A `Publish` request is rejected with `permission_denied` when the serving node holds `Watch` streams for the session ID and none of them belongs to the caller. A stream belongs to the caller when its principal has the same `Issuer` and the same `Subject`.
+- A presence record belongs to the issuer and subject that first wrote it. Every node ignores state updates or departures for the same session ID from a different issuer or subject.
+- A `Watch` stream maintains only records belonging to its own principal. A stream can reference a session ID held by another principal; the stream is admitted, but does not keep the other principal's records alive.
+- A `Publish` request fails with `permission_denied` if the serving node holds `Watch` streams for the session ID and none belong to the caller. A stream belongs to the caller when its principal has matching `Issuer` and `Subject` values.
 
 ### The bus
 
@@ -670,11 +703,11 @@ type Bus interface {
 }
 ```
 
-`WithPresenceBus` sets the presence bus implementation. The default is in-process. A bus carries `Participant.Issuer` and `Participant.Subject` verbatim, and must not fold together the state of two issuers or two subjects. `presencetest.Conformance` is the suite that every bus must pass.
+`WithPresenceBus` sets the presence bus implementation. The default is in-process. A bus carries `Participant.Issuer` and `Participant.Subject` unchanged and must not merge state across distinct issuers or subjects. Every bus implementation must pass the `presencetest.Conformance` test suite.
 
-`pgpresence` writes the issuer on every event. A node of a release that does not write it is ignored for state and departures. During a rolling deploy, the sessions of such a node are missing from the rosters of the new nodes until the deploy ends. Broadcasts from such a node are delivered.
+`pgpresence` includes the issuer on every event. Nodes running older releases that do not write the issuer are ignored for state updates and departures. During rolling deployments, sessions from those nodes do not appear in rosters on updated nodes until the deployment completes. Broadcasts from those nodes are delivered.
 
-Nodes re-announce active sessions every `WithRoomAnnounce` interval. Records not re-announced within three intervals are discarded. `Publish` returns the announcement interval to allow standalone publishers to refresh records.
+Nodes re-announce active sessions at the `WithRoomAnnounce` interval. Records not re-announced within three intervals are discarded. `Publish` returns the announcement interval so standalone publishers can refresh records.
 
 ## Hosting many apps
 
@@ -694,13 +727,13 @@ mgr.Close()          // stops every hosted app's *Server (not the root adapter)
 
 The default authorizer is `server.DenyAll`. See [Host multiple apps](../how-to/host-multiple-apps.md).
 
-Several Managers can share one root adapter:
+Multiple `Manager` instances can share a single root adapter:
 
-- `Register` merges the new set over the schema that the catalog stores, also when another node stored it. The new set is checked against that schema, including the check for `AllowAccessChange`.
-- An app serves a merged schema only after the catalog stores it. If the store fails, the app keeps the stored schema, and a retry of the same set stores it.
-- When other nodes store schemas of the app faster than `Register` can merge, `Register` returns an error that wraps `storage.ErrCatalogConflict`.
-- The other nodes serve a stored schema at once when their apps share a notifier (`WithNotifier` in `WithServerOptions`). Otherwise they serve it at the next catalog poll.
-- `WithCatalogPollInterval` sets the poll interval. The default is 30 seconds, and 0 or less turns the poll off. The poll also hosts the apps that another node registered first. With no poll, a node serves such an app only after a restart.
+- `Register` merges the new schema set into the schema stored in the catalog, including schemas stored by other nodes. The server validates the new set against the stored schema, including the `AllowAccessChange` check.
+- An application serves a merged schema only after the catalog stores it. If storage fails, the application retains the current schema; retrying registration stores the merged schema.
+- If concurrent nodes store schemas faster than `Register` can merge them, `Register` returns an error wrapping `storage.ErrCatalogConflict`.
+- Other nodes serve a newly stored schema immediately if their applications share a notifier (`WithNotifier` in `WithServerOptions`). Otherwise, they serve it on the next catalog poll.
+- `WithCatalogPollInterval` sets the poll interval (default 30 seconds). Setting `0` or a negative value disables polling. Polling also loads applications registered by other nodes. Without polling, a node serves newly registered applications only after restarting.
 
 ## Storage
 
@@ -712,14 +745,13 @@ A cursor-state store caches membership state for windowed and reference-followin
 
 Available backends:
 
-- **Adapter-provided** (default): Uses the underlying storage adapter (`cursorstate.Provider`). Entries are shared across nodes on `pgstore` and persist across restarts. `sqlitestore` and `pgstore` remove an entry 30 days after it was written, and a `Get` of an entry older than 7.5 days renews it.
-- **`cursorstate.NewMemory(maxBytes)`**: In-memory storage. Restarts clear state and cause connected clients to re-bootstrap. When full, it evicts the entries read least recently.
-
-A delta resync after a change of `FilterEpoch` needs a store. With a Permissions that implements `EpochReadFilters`, every cursor names a membership entry, even when its sets are small enough to inline. Without a store, or when the store lost the entry, a change of epoch resets the client.
-
-A pull reads the access record and the membership entry of the cursor it serves, the ones it issues again unchanged included, and a stream reads its access record at least once an hour. An entry that an active client keeps presenting therefore stays in a store that expires entries by age or evicts by recency.
-
+- **Adapter-provided** (default): Uses the storage adapter (`cursorstate.Provider`). Entries are shared across nodes on `pgstore` and persist across restarts. `sqlitestore` and `pgstore` delete an entry 30 days after creation; a `Get` on an entry older than 7.5 days renews it.
+- **`cursorstate.NewMemory(maxBytes)`**: In-memory storage. Restarts clear state and require connected clients to re-bootstrap. When full, it evicts least recently read entries.
 - **Custom `cursorstate.Store`**: Custom implementation for external caches (such as Redis or Memcached). Entries store row keys.
+
+A delta resync after a `FilterEpoch` change requires a cursor-state store. With a `Permissions` implementation that supports `EpochReadFilters`, every cursor references a membership entry, even when sets are small enough to inline. Without a store, or if the store loses the entry, an epoch change resets the client.
+
+A pull reads the access record and membership entry for the cursor it serves, including cursors reissued without changes. A stream reads its access record at least once per hour. An entry presented repeatedly by an active client remains in stores that expire entries by age or evict by recency.
 
 The metric `syncplane.cursor_state.misses` records cache misses. See [Telemetry](telemetry.md#cursor-state).
 
@@ -733,4 +765,4 @@ Background maintenance acquires a non-blocking lease for each `(role, workspace)
 - `indexes`: Secondary index backfills.
 - `effects/<consumer>`: Background effect consumers.
 
-If a lease is held by another process, the sweep is skipped. If the lease provider returns an error, the task executes without a lease. Application workers leasing custom work through `Server.Leases()` must use role names the engine does not take.
+If another process holds the lease, the sweep is skipped. If the lease provider returns an error, the task executes without a lease. Application workers leasing custom tasks through `Server.Leases()` must use role names that the engine does not reserve.

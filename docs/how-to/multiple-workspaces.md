@@ -4,7 +4,7 @@ This guide shows you how to configure and use a single client across multiple wo
 
 ## Prerequisites
 
-Before you begin, ensure you have:
+Before you begin, verify that you have:
 
 - An account ID (`accountId`) for the user.
 - The list of workspace IDs the user belongs to.
@@ -25,7 +25,7 @@ Before you begin, ensure you have:
    await client.start();
    ```
 
-   `accountId` names the store and is required when the client holds more than one workspace. For a single-workspace client, `accountId` defaults to the workspace ID. If you have two accounts, create two separate clients because credentials attach per request and cannot share a stream or a `client_id`.
+   `accountId` names the store and is required when the client holds more than one workspace. For a single-workspace client, `accountId` defaults to the workspace ID. If you have two accounts, create two separate clients. Credentials attach per request and cannot share a stream or a `client_id`.
 
 2. Write mutations to the default workspace or to a specific workspace:
 
@@ -36,13 +36,13 @@ Before you begin, ensure you have:
 
    The client-level API binds to the default workspace. To target a different workspace, call `client.ws(id)`.
 
-   **Note:** The server sequences partition operations individually. Operations such as writes, `transact()` batches, undo steps, `queryServer`, and bootstraps do not cross workspaces. A reference resolves in its holder's workspace unless it is declared as a [workspace-qualified reference](#referencing-a-row-in-another-workspace).
+   **Note:** Partition operations (writes, `transact()` batches, undo steps, `queryServer`, and bootstraps) do not cross workspaces; see [Workspaces are a hard partition](../explanation/convergence-model.md#workspaces-are-a-hard-partition). A reference resolves in its holder's workspace unless declared as a [workspace-qualified reference](#referencing-a-row-in-another-workspace).
 
 ## Reading across workspaces
 
 To read data across multiple workspaces, use cross-workspace query methods such as `scanAll`, `queryAll`, or `watchQueryAll`.
 
-Cross-workspace reads are exact, not a fan-out-and-merge operation. Every workspace's rows for an entity sit under one key prefix, so ordering and limits apply to the merged set. Each row includes its `workspaceId`, which routes write operations back to that workspace:
+Cross-workspace reads are exact, not fan-out-and-merge operations. Every workspace's rows for an entity sit under one key prefix, so ordering and limits apply to the merged set. Each row includes its `workspaceId` to route write operations back to that workspace:
 
 ```ts
 const mine = await client.ws('personal').db.todo.scan();
@@ -73,7 +73,7 @@ const followed = db.todo.useQueryAll({ where: (t) => t.completed.eq(false) }, {
 
 The read covers only the specified workspaces, and `followed.total` counts only rows within those workspaces. An empty array reads nothing and is not shorthand for all workspaces.
 
-Reads across workspaces use [secondary indexes](../reference/proto-options.md#secondary-indexes) like any other query. This holds for any number of workspaces, with or without the `workspaces` option. You do not need to limit a read to a single workspace to keep it fast.
+Reads across any number of workspaces use [secondary indexes](../reference/proto-options.md#secondary-indexes), with or without the `workspaces` option. You do not need to narrow a read to one workspace to keep it fast.
 
 You can also pass `workspaces` to one-shot queries:
 
@@ -98,7 +98,7 @@ const mine = db.task.useQueryAll({
 
 Only the predicate varies per workspace. Query options such as `orderBy`, `limit`, `offset`, and `total` apply to the merged result. Each workspace query leg runs as a single-workspace query and can use an index. The `byWorkspace` option requires `workspaces` and throws an error without it.
 
-To order results by relevance, use [`relevance()`](search.md#searching-across-workspaces). Give each workspace predicate its own `match` call, and the merged result returns best matches first across all workspaces.
+To order results by relevance, use [`relevance()`](search.md#searching-across-workspaces). Give each workspace predicate its own `match` call. The merged result returns best matches first across all workspaces.
 
 ### Rows named one by one
 
@@ -160,15 +160,15 @@ A reference resolves in the workspace of the row that holds it. To let a row nam
 
    A target in a workspace the client does not hold resolves to `undefined`, like any orphan.
 
-The server resolves `matches()`, `include`, and `follow` inside the request's workspace only, so `queryServer` and a `follow` spec never see a stub that names another workspace. Use local reads for those. For the full rules, see [References](../reference/proto-options.md#references).
+The server resolves `matches()`, `include`, and `follow` inside the request workspace only, so `queryServer` and `follow` specs do not see stubs that name another workspace. For stubs that name another workspace, use local reads. The [References](../reference/proto-options.md#references) section has the full rules.
 
-To reference one of several entity types, declare the target as a `oneof` beside the workspace field. The stored value records both the workspace and the active case. For more information, see [Polymorphic references](../reference/proto-options.md#polymorphic-references).
+To reference one of several entity types, declare the target as a `oneof` beside the workspace field. The stored value records both the workspace and the active case; see [Polymorphic references](../reference/proto-options.md#polymorphic-references).
 
 ## Adding and removing
 
-To add or remove workspaces dynamically on an active client:
+To add or remove workspaces on an active client:
 
-1. Add a new workspace by calling `addWorkspace`:
+1. Add a workspace by calling `addWorkspace`:
 
    ```ts
    client.addWorkspace('archive'); // bootstraps on the next cycle
@@ -186,7 +186,7 @@ To add or remove workspaces dynamically on an active client:
 
    A purge drops the rows, overlay, cursor, and queued mutations for that workspace.
 
-   Discarded mutations cannot be acknowledged by the server. The client returns them in `result.discarded`, reading each mutation inside the transaction that deleted it. The client also reports each discarded mutation through `onMutationRejected` with the `workspace_purged` code. Use the return value if your application needs to preserve unsent work.
+   Discarded mutations cannot be acknowledged by the server. The client returns them in `result.discarded`, reading each mutation inside the transaction that deleted it. The client also reports each discarded mutation through `onMutationRejected` with the `workspace_purged` code. Use `result.discarded` if your application needs to preserve unsent work.
 
 ## Confirming the result
 

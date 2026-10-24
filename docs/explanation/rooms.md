@@ -2,7 +2,7 @@
 
 This document explains why syncplane separates ephemeral state from the durable mutation log, how rooms manage transient presence and broadcast messages, and the architectural trade-offs involved. syncplane converges durable state through a server-linearized, per-workspace mutation log (see [the convergence model](convergence-model.md)). Rooms provide a second plane alongside the log for transient state that matters only while users are connected, such as cursors, selections, viewing rosters, typing indicators, and token streams.
 
-Nothing on the ephemeral plane is stored, replayed, or acknowledged. The entire room architecture follows from this design principle.
+The ephemeral plane does not store, replay, or acknowledge state. The room architecture follows this design principle.
 
 ## The dividing test
 
@@ -10,20 +10,20 @@ To decide whether state belongs in a table row or in a room, ask one question:
 
 > Would a reader arriving later want this?
 
-If yes, the state belongs in a row. A comment, a document title, and a completed checkbox are all data that a user opening the page later expects to find. These updates go through `mutate` and receive every guarantee the mutation log provides.
+If yes, the state belongs in a row. A comment, a document title, and a completed checkbox are data that a user opening the page later expects to find. These updates go through `mutate` and receive every guarantee the mutation log provides.
 
-If no, the state belongs in a room. Where your cursor is right now is useless to somebody who arrives after you leave. Similarly, a typing indicator that outlives the typing activity is worse than no indicator at all.
+If no, the state belongs in a room. Your cursor position is useless to someone who arrives after you leave. A typing indicator that outlives typing activity is worse than no indicator.
 
 ## Why the mutation log is the wrong home
 
-Routing cursor positions and transient updates through the mutation log is inefficient and conflicts with the log's design. In the mutation log, every update would:
+Routing cursor positions and transient updates through the mutation log is inefficient and conflicts with log design. In the mutation log, every update would:
 
 - **Burn a workspace sequence number.** A document with five users moving cursors advances the sequence faster than the application writes durable data.
-- **Drag every subscriber cursor forward.** Every subscriber must re-read a position that carries no lasting value.
+- **Drag every subscriber cursor forward.** Every subscriber must reread a position that carries no lasting value.
 - **Require storage until garbage collection (GC).** Storage retention must be sized for pointer movements rather than durable edits.
-- **Serialize against durable writes.** A workspace commits one write transaction at a time, so cursor updates block real writes.
+- **Serialize against durable writes.** A workspace commits one write transaction at a time, so cursor updates block durable writes.
 
-The ephemeral plane avoids all of these costs. It never opens a write transaction, never touches storage, and never advances a sequence number.
+The ephemeral plane avoids these costs. It never opens a write transaction, never touches storage, and never advances a sequence number.
 
 ## Addressing
 
@@ -36,9 +36,9 @@ ws.room(DocumentSchema, 'doc-42', 'cursors'); // anchored to a row
 
 The `workspace_id` is the hard partition key across syncplane. There are no cross-workspace rooms.
 
-The anchor is an authorization mechanism, not a label. An anchored topic admits a caller only if the application's `ReadFilter` allows them to read that row. A cursor room on a document inherits the document's permissions and requires no separate policy. Membership can never be looser than the data it describes.
+The anchor is an authorization mechanism, not a label. An anchored topic admits a caller only if the application `ReadFilter` allows them to read that row. A cursor room on a document inherits document permissions and requires no separate policy. Membership cannot be looser than the data it describes.
 
-An unanchored topic requires workspace access, plus the application's own `RoomPermissions.CanJoinRoom` check if configured.
+An unanchored topic requires workspace access, plus the application `RoomPermissions.CanJoinRoom` check if configured.
 
 ## Two primitives
 
@@ -54,17 +54,17 @@ A presence record has no reliable owner to remove it. A tab closes, a laptop lid
 - Each record carries a `session_id` and a client-minted, monotonic `revision`.
 - The node holding a session's `Watch` stream re-announces its records every announce interval (`WithRoomAnnounce`, default 5 seconds).
 - A record that no node re-announces within three announce intervals is dropped locally and reported to watchers as `left`.
-- Closing a room publishes an explicit departure, making the common case immediate rather than waiting for the timeout window.
+- Closing a room publishes an explicit departure. This makes the common case immediate instead of waiting for the timeout window.
 
-A publisher without an open `Watch` stream—such as a client with `presenceEnabled: false` or a non-browser client that only writes—has no node re-announcing for it. Its records lapse three intervals after the last publish. To prevent this, `Publish` returns the announce interval so the client can re-publish its own state on schedule. Re-publishing at the same revision is lightweight: the server treats an unchanged revision as a liveness heartbeat and fans out no frames.
+A publisher without an open `Watch` stream—such as a client with `presenceEnabled: false` or a non-browser client that only writes—has no node re-announcing for it. Its records lapse three intervals after the last publish. To prevent this, `Publish` returns the announce interval so the client can re-publish its state on schedule. Re-publishing at the same revision is lightweight: the server treats an unchanged revision as a liveness heartbeat and fans out no frames.
 
-This design allows the plane to run with no time-to-live (TTL) table, no GC horizon, and no storage-adapter involvement. It also makes presence self-healing across lossy transport paths. An event dropped by a full queue, lost during a bus reconnect, or discarded by a slow watcher is corrected by the next announcement.
+This design runs with no time-to-live (TTL) table, no GC horizon, and no storage-adapter involvement. It also makes presence self-healing across lossy transport paths. The next announcement corrects an event dropped by a full queue, lost during a bus reconnect, or discarded by a slow watcher.
 
 A browser shares one `Watch` stream across all tabs for an account. The stream names all sessions it is responsible for, not just its own. This prevents a room from dropping sessions from other tabs. For details, see [multi-tab behavior](multi-tab.md).
 
 ## At-most-once delivery and what it costs
 
-Delivery carries no guarantee. Presence survives dropped messages because it re-announces state periodically. Broadcast does not survive dropped messages. A broadcast message reaches only current watchers; if a connection is reconnecting, the message is lost.
+Delivery carries no guarantee. Presence survives dropped messages because it re-announces state periodically. Broadcast does not survive dropped messages. A broadcast message reaches only current watchers. If a connection is reconnecting, the message is lost.
 
 This behavior is a deliberate contract, not a limitation to work around. If an application must not lose a message, write a row to the mutation log. If you want the message to appear immediately, publish a broadcast alongside the mutation as a hint.
 
@@ -72,7 +72,7 @@ This behavior is a deliberate contract, not a limitation to work around. If an a
 
 The ephemeral plane and the durable data plane are independent streams with independent leadership. The system does not order a room frame against a mutation in either direction.
 
-Because streams are independent, a peer's cursor can reference a row or collaborative-text offset that you have not pulled yet. Presence records carry the workspace `seq` they were authored against. A recipient can compare this sequence number to determine whether they are behind or if the state is invalid, holding the state until the data stream catches up.
+Because streams are independent, a peer cursor can reference a row or collaborative-text offset that you have not pulled yet. Presence records carry the workspace `seq` they were authored against. A recipient can compare this sequence number to determine whether they are behind or if the state is invalid, holding the state until the data stream catches up.
 
 Send positions as [text anchors](collaborative-text.md) rather than integer offsets. An anchor stays attached to its character as concurrent edits move it. An integer offset changes meaning as soon as someone edits earlier text.
 
@@ -80,19 +80,19 @@ Send positions as [text anchors](collaborative-text.md) rather than integer offs
 
 The scope set for `Subscribe` is fixed for the life of the stream. Catch-up and the live tail run under a single scope set, avoiding delta re-synchronizations mid-stream. In contrast, room membership changes whenever a user navigates between documents.
 
-Combining rooms into `Subscribe` would force a data-stream reconnect and full catch-up on every navigation. Reopening `Watch` is inexpensive: it has no cursor, requires no backlog replay, and immediately returns the current room snapshot.
+Combining rooms into `Subscribe` would force a data-stream reconnect and full catch-up on every navigation. Reopening `Watch` has low cost: it has no cursor, requires no backlog replay, and immediately returns the current room snapshot.
 
 The trade-off is one additional long-lived connection per account. For details, see [limits and trade-offs](limits-and-trade-offs.md#browser-connection-limits).
 
 ## What is not guaranteed
 
-The ephemeral plane does not provide the following guarantees:
+The ephemeral plane does not provide these guarantees:
 
 - **Cross-topic ordering:** No ordering exists across topics or between room frames and the mutation log.
 - **History and replay:** The ephemeral plane retains no history, replay, or cursors. Use table rows for durable state.
 - **Delivery guarantees:** Messages are delivered at most once.
-- **Global roster truth:** A roster represents a single node's view, combining its local session streams with bus updates. A record published elsewhere arrives within one announce interval. Single-node deployments do not observe this difference.
-- **Frequency rate limiting:** Beyond the size and count limits in `Limits`, the plane enforces no message frequency limits. Message sizes remain strictly bounded.
+- **Global roster truth:** A roster represents a single node view, combining local session streams with bus updates. A record published elsewhere arrives within one announce interval. Single-node deployments do not observe this difference.
+- **Frequency rate limiting:** Beyond the size and count limits in `Limits`, the plane enforces no message frequency limits. Message sizes remain bounded.
 
 ## Multi-node deployments
 

@@ -19,21 +19,27 @@ export const file_syncplane_v1_service: GenFile = /*@__PURE__*/
   fileDesc("ChpzeW5jcGxhbmUvdjEvc2VydmljZS5wcm90bxIMc3luY3BsYW5lLnYxIlEKDldvcmtzcGFjZUJhdGNoEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIpCgltdXRhdGlvbnMYAiADKAsyFi5zeW5jcGxhbmUudjEuTXV0YXRpb24iPAoLUHVzaFJlcXVlc3QSLQoHYmF0Y2hlcxgBIAMoCzIcLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VCYXRjaCKLAQoOTXV0YXRpb25SZXN1bHQSEwoLbXV0YXRpb25faWQYASABKAQSLAoGc3RhdHVzGAIgASgOMhwuc3luY3BsYW5lLnYxLk11dGF0aW9uU3RhdHVzEgsKA3NlcRgDIAEoBBISCgplcnJvcl9jb2RlGAQgASgJEhUKDWVycm9yX21lc3NhZ2UYBSABKAkiggEKEFdvcmtzcGFjZVJlc3VsdHMSFAoMd29ya3NwYWNlX2lkGAEgASgJEi0KB3Jlc3VsdHMYAiADKAsyHC5zeW5jcGxhbmUudjEuTXV0YXRpb25SZXN1bHQSEgoKZXJyb3JfY29kZRgDIAEoCRIVCg1lcnJvcl9tZXNzYWdlGAQgASgJIlgKDFB1c2hSZXNwb25zZRIvCgdyZXN1bHRzGAEgAygLMh4uc3luY3BsYW5lLnYxLldvcmtzcGFjZVJlc3VsdHMSFwoPc2NoZW1hX3JldmlzaW9uGAIgASgJIvIBCgtQdWxsUmVxdWVzdBIUCgx3b3Jrc3BhY2VfaWQYASABKAkSEQoJY2xpZW50X2lkGAIgASgJEg4KBmN1cnNvchgDIAEoDBIxCg1zdWJzY3JpcHRpb25zGAQgAygLMhouc3luY3BsYW5lLnYxLlN1YnNjcmlwdGlvbhINCgVsaW1pdBgFIAEoDRIZChFub19kZWx0YV9lbnRpdGllcxgGIAMoCRIPCgdtaW5fc2VxGAcgASgEEiIKFWNhbGxlcl9hY2Nlc3NfdmVyc2lvbhgIIAEoBkgAiAEBQhgKFl9jYWxsZXJfYWNjZXNzX3ZlcnNpb24inwIKDFB1bGxSZXNwb25zZRIiCgVwYXRjaBgBIAEoCzITLnN5bmNwbGFuZS52MS5QYXRjaBITCgtuZXh0X2N1cnNvchgCIAEoDBIeChZsYXN0X2Fja2VkX211dGF0aW9uX2lkGAMgASgEEg0KBXJlc2V0GAQgASgIEhAKCGhhc19tb3JlGAUgASgIEgsKA3NlcRgGIAEoBBIXCg9zY2hlbWFfcmV2aXNpb24YByABKAkSMQoNY2FsbGVyX2FjY2VzcxgIIAEoCzIaLnN5bmNwbGFuZS52MS5DYWxsZXJBY2Nlc3MSPAoTY2FsbGVyX2FjY2Vzc19kZWx0YRgJIAEoCzIfLnN5bmNwbGFuZS52MS5DYWxsZXJBY2Nlc3NEZWx0YSKkAQoMQ2FsbGVyQWNjZXNzEgsKA3NlcRgCIAEoBBIQCghzdWJqZWN0cxgDIAMoCRIYChByb290X3Blcm1pc3Npb25zGAQgAygJEjAKDWFuY2hvcl9ncm91cHMYBSADKAsyGS5zeW5jcGxhbmUudjEuQW5jaG9yR3JvdXASDwoHdmVyc2lvbhgGIAEoBhIYChBtYXhfYWNjZXNzX2RlcHRoGAcgASgNIqQBChFDYWxsZXJBY2Nlc3NEZWx0YRILCgNzZXEYASABKAQSFAoMYmFzZV92ZXJzaW9uGAIgASgGEg8KB3ZlcnNpb24YAyABKAYSMAoNYW5jaG9yX2dyb3VwcxgEIAMoCzIZLnN5bmNwbGFuZS52MS5BbmNob3JHcm91cBIpCgdyZW1vdmVkGAUgAygLMhguc3luY3BsYW5lLnYxLkFuY2hvclJvd3MiTQoLQW5jaG9yR3JvdXASEwoLcGVybWlzc2lvbnMYASADKAkSKQoHYW5jaG9ycxgCIAMoCzIYLnN5bmNwbGFuZS52MS5BbmNob3JSb3dzIioKCkFuY2hvclJvd3MSDgoGZW50aXR5GAEgASgJEgwKBGtleXMYAiADKAkiuAEKEEJvb3RzdHJhcFJlcXVlc3QSFAoMd29ya3NwYWNlX2lkGAEgASgJEhEKCWNsaWVudF9pZBgCIAEoCRIxCg1zdWJzY3JpcHRpb25zGAMgAygLMhouc3luY3BsYW5lLnYxLlN1YnNjcmlwdGlvbhIZChFwcmlvcml0eV9lbnRpdGllcxgEIAMoCRItCgZyZXN1bWUYBSABKAsyHS5zeW5jcGxhbmUudjEuQm9vdHN0cmFwUmVzdW1lIjAKD0Jvb3RzdHJhcFJlc3VtZRIOCgZjdXJzb3IYASABKAwSDQoFdG9rZW4YAiABKAwiwgMKEUJvb3RzdHJhcFJlc3BvbnNlEjYKBWJlZ2luGAEgASgLMiUuc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3BvbnNlLkJlZ2luSAASNgoFY2h1bmsYAiABKAsyJS5zeW5jcGxhbmUudjEuQm9vdHN0cmFwUmVzcG9uc2UuQ2h1bmtIABIyCgNlbmQYAyABKAsyIy5zeW5jcGxhbmUudjEuQm9vdHN0cmFwUmVzcG9uc2UuRW5kSAAaswEKBUJlZ2luEg4KBmN1cnNvchgBIAEoDBIeChZsYXN0X2Fja2VkX211dGF0aW9uX2lkGAIgASgEEgsKA3NlcRgDIAEoBBIXCg9zY2hlbWFfcmV2aXNpb24YBCABKAkSEAoIZW50aXRpZXMYBSADKAkSDwoHcmVzdW1lZBgGIAEoCBIxCg1jYWxsZXJfYWNjZXNzGAcgASgLMhouc3luY3BsYW5lLnYxLkNhbGxlckFjY2VzcxpECgVDaHVuaxIlCgRyb3dzGAEgAygLMhcuc3luY3BsYW5lLnYxLlJvd0NoYW5nZRIUCgxyZXN1bWVfdG9rZW4YAiABKAwaBQoDRW5kQgYKBGJvZHki7wIKDFF1ZXJ5UmVxdWVzdBIUCgx3b3Jrc3BhY2VfaWQYASABKAkSDgoGZW50aXR5GAMgASgJEioKCXByZWRpY2F0ZRgEIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24SKAoIb3JkZXJfYnkYBSADKAsyFi5zeW5jcGxhbmUudjEuT3JkZXJLZXkSDQoFbGltaXQYBiABKA0SDgoGb2Zmc2V0GAcgASgNEg0KBWFmdGVyGAggASgMEg4KBmJlZm9yZRgJIAEoDBIQCghncm91cF9ieRgKIAMoCRIsCglhZ2dyZWdhdGUYCyABKA4yGS5zeW5jcGxhbmUudjEuQWdncmVnYXRlT3ASEQoJcGVyX2dyb3VwGAwgASgNEhcKD3Blcl9ncm91cF90b3RhbBgNIAEoCBIoCgZmYWNldHMYDiADKAsyGC5zeW5jcGxhbmUudjEuUXVlcnlGYWNldEoECAIQA1IJY2xpZW50X2lkIpACCg1RdWVyeVJlc3BvbnNlEiUKBHJvd3MYASADKAsyFy5zeW5jcGxhbmUudjEuUm93Q2hhbmdlEhcKD3NjaGVtYV9yZXZpc2lvbhgCIAEoCRIUCgxzdGFydF9jdXJzb3IYAyABKAwSEgoKZW5kX2N1cnNvchgEIAEoDBIQCghoYXNfbW9yZRgFIAEoCBIoCgZncm91cHMYBiADKAsyGC5zeW5jcGxhbmUudjEuUXVlcnlHcm91cBIvCgpyb3dfZ3JvdXBzGAcgAygLMhsuc3luY3BsYW5lLnYxLlF1ZXJ5Um93R3JvdXASKAoGZmFjZXRzGAggAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5RmFjZXQigAEKDVF1ZXJ5Um93R3JvdXASJwoFdmFsdWUYASABKAsyGC5zeW5jcGxhbmUudjEuUXVlcnlWYWx1ZRIlCgRyb3dzGAIgAygLMhcuc3luY3BsYW5lLnYxLlJvd0NoYW5nZRINCgV0b3RhbBgDIAEoBBIQCghoYXNfbW9yZRgEIAEoCCK4AQoOV29ya3NwYWNlU2NvcGUSFAoMd29ya3NwYWNlX2lkGAEgASgJEg4KBmN1cnNvchgCIAEoDBIxCg1zdWJzY3JpcHRpb25zGAMgAygLMhouc3luY3BsYW5lLnYxLlN1YnNjcmlwdGlvbhIPCgdtaW5fc2VxGAQgASgEEiIKFWNhbGxlcl9hY2Nlc3NfdmVyc2lvbhgFIAEoBkgAiAEBQhgKFl9jYWxsZXJfYWNjZXNzX3ZlcnNpb24ilAEKEFN1YnNjcmliZVJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJEiwKBnNjb3BlcxgCIAMoCzIcLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VTY29wZRINCgVsaW1pdBgDIAEoDRIZChFub19kZWx0YV9lbnRpdGllcxgEIAMoCRIVCg1zcGFyc2VfY3Vyc29yGAUgASgIItEBChBXb3Jrc3BhY2VEcm9wcGVkEjUKBnJlYXNvbhgBIAEoDjIlLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VEcm9wcGVkLlJlYXNvbhIPCgdtZXNzYWdlGAIgASgJInUKBlJlYXNvbhIWChJSRUFTT05fVU5TUEVDSUZJRUQQABIQCgxSRUFTT05fUkVTRVQQARIZChVSRUFTT05fQUNDRVNTX1JFVk9LRUQQAhIQCgxSRUFTT05fRVJST1IQAxIUChBSRUFTT05fTk9fQUNDRVNTEAQi0wEKEVN1YnNjcmliZVJlc3BvbnNlEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIXCg9zY2hlbWFfcmV2aXNpb24YAiABKAkSKgoEcGFnZRgDIAEoCzIaLnN5bmNwbGFuZS52MS5QdWxsUmVzcG9uc2VIABITCgljYXVnaHRfdXAYBCABKAhIABIxCgdkcm9wcGVkGAUgASgLMh4uc3luY3BsYW5lLnYxLldvcmtzcGFjZURyb3BwZWRIABITCgloZWFydGJlYXQYBiABKAhIAEIGCgRib2R5KpEBCg5NdXRhdGlvblN0YXR1cxIfChtNVVRBVElPTl9TVEFUVVNfVU5TUEVDSUZJRUQQABIbChdNVVRBVElPTl9TVEFUVVNfQVBQTElFRBABEiMKH01VVEFUSU9OX1NUQVRVU19BTFJFQURZX0FQUExJRUQQAhIcChhNVVRBVElPTl9TVEFUVVNfUkVKRUNURUQQAzLtAgoLU3luY1NlcnZpY2USPQoEUHVzaBIZLnN5bmNwbGFuZS52MS5QdXNoUmVxdWVzdBoaLnN5bmNwbGFuZS52MS5QdXNoUmVzcG9uc2USPQoEUHVsbBIZLnN5bmNwbGFuZS52MS5QdWxsUmVxdWVzdBoaLnN5bmNwbGFuZS52MS5QdWxsUmVzcG9uc2USTgoJQm9vdHN0cmFwEh4uc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlcXVlc3QaHy5zeW5jcGxhbmUudjEuQm9vdHN0cmFwUmVzcG9uc2UwARJOCglTdWJzY3JpYmUSHi5zeW5jcGxhbmUudjEuU3Vic2NyaWJlUmVxdWVzdBofLnN5bmNwbGFuZS52MS5TdWJzY3JpYmVSZXNwb25zZTABEkAKBVF1ZXJ5Ehouc3luY3BsYW5lLnYxLlF1ZXJ5UmVxdWVzdBobLnN5bmNwbGFuZS52MS5RdWVyeVJlc3BvbnNlQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_syncplane_v1_mutation, file_syncplane_v1_patch, file_syncplane_v1_query]);
 
 /**
- * WorkspaceBatch is one workspace's slice of a push. Mutation ids are per
- * (workspace, caller, client_id): the server keeps one watermark for each, and
- * the contiguity rule (id == watermark+1) applies within a batch, never across
- * batches. A client holding several workspaces therefore keeps a separate
- * mutation-id counter and pending queue per workspace.
+ * Contains mutations for one workspace in a `Push` request.
  *
- * The caller is the authenticated principal, by issuer and subject. Every
- * anonymous caller counts as one caller. A push from another caller under the
- * same client_id does not move this caller's watermark, and Pull, Bootstrap
- * and Subscribe report each caller its own.
+ * Mutation IDs are tracked per `(workspace, caller, client_id)`. The server
+ * maintains one watermark for each tuple. The contiguity rule (`id ==
+ * watermark + 1`) applies within a batch, never across batches. A client that
+ * holds several workspaces must keep a separate mutation ID counter and
+ * pending queue per workspace.
+ *
+ * The caller is the authenticated principal, identified by issuer and subject.
+ * All anonymous callers count as one caller. A push from another caller under
+ * the same `client_id` does not advance this caller's watermark. `Pull`,
+ * `Bootstrap`, and `Subscribe` report each caller their own watermark.
  *
  * @generated from message syncplane.v1.WorkspaceBatch
  */
 export type WorkspaceBatch = Message<"syncplane.v1.WorkspaceBatch"> & {
   /**
+   * Identifies the workspace for this batch of mutations. Serves as the
+   * partition key for sequences, cursors, write exclusion, and access
+   * control.
+   *
    * @generated from field: string workspace_id = 1;
    */
   workspaceId: string;
@@ -377,9 +383,10 @@ export type PullResponse = Message<"syncplane.v1.PullResponse"> & {
   callerAccess?: CallerAccess | undefined;
 
   /**
-   * A change to the CallerAccess that PullRequest.caller_access_version
-   * names, in place of caller_access. At most one of the two is present,
-   * and only a request that sets caller_access_version receives this one.
+   * Delta for the CallerAccess identified by
+   * PullRequest.caller_access_version, sent in place of caller_access. The
+   * response contains at most one of caller_access or caller_access_delta.
+   * Only a request that sets caller_access_version receives this field.
    *
    * @generated from field: syncplane.v1.CallerAccessDelta caller_access_delta = 9;
    */
@@ -394,72 +401,73 @@ export const PullResponseSchema: GenMessage<PullResponse> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_service, 6);
 
 /**
- * What one caller holds in one workspace under the access model: the
- * permissions it holds at the workspace root, and the rows it holds
- * permissions at, grouped by the permissions held there.
+ * Summary of permissions held by one caller in one workspace under the access
+ * model. Lists permissions held at the workspace root, and rows where the
+ * caller holds permissions grouped by the permissions held there.
  *
  * The caller holds a permission at a row when root_permissions lists it, or
- * when the anchor group that lists the row lists it. A permission held at a
- * row applies to the row and to every row whose access parent points at it.
- * A permission that no list names is held nowhere.
+ * when an anchor group that lists the row lists it. A permission held at a row
+ * applies to that row and to every row whose access parent points at it. A
+ * permission not named in any list is not held anywhere.
  *
- * Every list except subjects is sorted and holds no duplicates, so equal
+ * Every list except subjects is sorted and contains no duplicates, so equal
  * access has one encoding, apart from seq and version.
  *
- * It is advisory. The server decides every read and every write itself, and a
- * client uses this to predict an answer, for example to hide a control the
- * caller cannot use.
+ * This summary is advisory. The server decides every read and every write
+ * itself. A client uses this summary to predict server decisions, for example
+ * to hide a control the caller cannot use.
  *
  * @generated from message syncplane.v1.CallerAccess
  */
 export type CallerAccess = Message<"syncplane.v1.CallerAccess"> & {
   /**
-   * The workspace sequence this summary is current through.
+   * Workspace sequence through which this summary is current.
    *
    * @generated from field: uint64 seq = 2;
    */
   seq: bigint;
 
   /**
-   * The caller's subjects: the values grant rows and `subject` checks
-   * compare with. The first is the primary subject, which a create stores
-   * in each `creator` field. Empty for an anonymous caller.
+   * Subjects of the caller, compared against grant rows and `subject`
+   * checks. The first element is the primary subject, which a create
+   * operation stores in each `creator` field. Empty for an anonymous caller.
    *
    * @generated from field: repeated string subjects = 3;
    */
   subjects: string[];
 
   /**
-   * The permissions the caller holds at the workspace root, which covers
-   * every row. Sorted.
+   * Permissions the caller holds at the workspace root, which cover every
+   * row. The list is sorted.
    *
    * @generated from field: repeated string root_permissions = 4;
    */
   rootPermissions: string[];
 
   /**
-   * One group for each distinct set of permissions the caller holds at rows,
-   * sorted by permission list: compared element by element, with a list
-   * before the longer lists it begins. A row is in at most one group, which
-   * lists all the permissions the caller's grants at the row give together.
+   * One group for each distinct set of permissions the caller holds at rows.
+   * The list is sorted by permission list: compared element by element, with
+   * a list placed before longer lists that begin with it. A row appears in
+   * at most one group, which lists all permissions that the caller's grants
+   * at that row give together.
    *
    * @generated from field: repeated syncplane.v1.AnchorGroup anchor_groups = 5;
    */
   anchorGroups: AnchorGroup[];
 
   /**
-   * Identifies what the summary holds: equal summaries have equal versions,
-   * whatever their seq. Never 0 in a summary from the server.
+   * Identifies the content of this summary. Equal summaries have equal
+   * versions, regardless of their seq. Never 0 in a summary from the server.
    *
    * @generated from field: fixed64 version = 6;
    */
   version: bigint;
 
   /**
-   * The most access parent hops the server follows up from a row: its
-   * MaxAccessDepth. A permission held at a row further up does not apply to
-   * the row. 0 from a server that does not send it, and a client then
-   * assumes 32, the default.
+   * Maximum number of access parent hops the server follows up from a row:
+   * its MaxAccessDepth. A permission held at a row further up does not apply
+   * to the row. 0 from a server that does not send it; clients then assume
+   * 32, the default.
    *
    * @generated from field: uint32 max_access_depth = 7;
    */
@@ -474,53 +482,56 @@ export const CallerAccessSchema: GenMessage<CallerAccess> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_service, 7);
 
 /**
- * A change to a CallerAccess: applied to the summary whose version is
- * base_version, it gives the summary whose version is version. Subjects,
- * root_permissions and max_access_depth do not change.
+ * Updates a CallerAccess summary from base_version to version. The subjects,
+ * root_permissions, and max_access_depth fields do not change.
  *
- * To apply it, put each row that anchor_groups lists in the group with the
- * permissions listed there, and take it out of the group it was in. Then
- * take each row that removed lists out of every group, and drop the groups
- * that hold no rows. A client whose summary has another version must not
- * apply it: when its summary already has version, the delta changes nothing,
- * and otherwise the client keeps its summary and pulls again with
- * PullRequest.caller_access_version, which gets it the change from there.
+ * To apply the delta:
+ * 1. Move each row listed in anchor_groups into the group with the specified
+ *    permissions, and remove the row from its previous group.
+ * 2. Remove each row listed in removed from all groups.
+ * 3. Remove groups that contain no rows.
+ *
+ * Do not apply this delta if the summary version does not match base_version.
+ * If the summary already has version, the delta changes nothing. Otherwise,
+ * keep the current summary and pull again with
+ * PullRequest.caller_access_version to receive the delta from that version.
  *
  * @generated from message syncplane.v1.CallerAccessDelta
  */
 export type CallerAccessDelta = Message<"syncplane.v1.CallerAccessDelta"> & {
   /**
-   * The workspace sequence the new summary is current through.
+   * The workspace sequence that the new summary is current through.
    *
    * @generated from field: uint64 seq = 1;
    */
   seq: bigint;
 
   /**
-   * The version of the summary the delta applies to.
+   * The summary version that the delta applies to.
    *
    * @generated from field: fixed64 base_version = 2;
    */
   baseVersion: bigint;
 
   /**
-   * The version of the summary the delta gives.
+   * The summary version that results from applying the delta.
    *
    * @generated from field: fixed64 version = 3;
    */
   version: bigint;
 
   /**
-   * The rows whose permissions changed, and rows the caller holds
-   * permissions at for the first time, each with all the permissions it now
-   * holds there. Ordered and grouped as in CallerAccess.anchor_groups.
+   * The rows with changed permissions and rows where the caller holds
+   * permissions for the first time. Each row includes all permissions
+   * currently held at that row. Ordered and grouped as in
+   * CallerAccess.anchor_groups.
    *
    * @generated from field: repeated syncplane.v1.AnchorGroup anchor_groups = 4;
    */
   anchorGroups: AnchorGroup[];
 
   /**
-   * The rows that are in no group of the new summary. Sorted by entity.
+   * The rows that are in no group in the new summary. Sorted by entity.
    *
    * @generated from field: repeated syncplane.v1.AnchorRows removed = 5;
    */
@@ -535,22 +546,22 @@ export const CallerAccessDeltaSchema: GenMessage<CallerAccessDelta> = /*@__PURE_
   messageDesc(file_syncplane_v1_service, 8);
 
 /**
- * Rows at which the caller holds the same set of permissions.
+ * Groups rows where the caller holds the same set of permissions.
  *
  * @generated from message syncplane.v1.AnchorGroup
  */
 export type AnchorGroup = Message<"syncplane.v1.AnchorGroup"> & {
   /**
-   * The permissions held at each row of the group. Sorted and never empty.
-   * It leaves out the permissions in CallerAccess.root_permissions, so a row
-   * whose permissions are all held at the root is in no group.
+   * The permissions held at each row in the group. Sorted and never empty.
+   * Omits permissions in CallerAccess.root_permissions. A row whose
+   * permissions are all held at the root is in no group.
    *
    * @generated from field: repeated string permissions = 1;
    */
   permissions: string[];
 
   /**
-   * The rows, per entity, sorted by entity.
+   * Contains rows grouped by entity, sorted by entity.
    *
    * @generated from field: repeated syncplane.v1.AnchorRows anchors = 2;
    */
@@ -565,7 +576,7 @@ export const AnchorGroupSchema: GenMessage<AnchorGroup> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_service, 9);
 
 /**
- * Rows of one entity, by key.
+ * Rows of one entity, identified by key.
  *
  * @generated from message syncplane.v1.AnchorRows
  */
@@ -576,7 +587,7 @@ export type AnchorRows = Message<"syncplane.v1.AnchorRows"> & {
   entity: string;
 
   /**
-   * Row keys, sorted.
+   * Row keys in sorted order.
    *
    * @generated from field: repeated string keys = 2;
    */
@@ -605,7 +616,7 @@ export type BootstrapRequest = Message<"syncplane.v1.BootstrapRequest"> & {
   clientId: string;
 
   /**
-   * Scopes the snapshot. Empty = full sync.
+   * Scopes the snapshot. An empty list requests a full sync.
    *
    * @generated from field: repeated syncplane.v1.Subscription subscriptions = 3;
    */
@@ -833,14 +844,14 @@ export type QueryRequest = Message<"syncplane.v1.QueryRequest"> & {
   workspaceId: string;
 
   /**
-   * Entity name as declared via EntityOptions.
+   * Entity name declared in `EntityOptions`.
    *
    * @generated from field: string entity = 3;
    */
   entity: string;
 
   /**
-   * Absent = all rows (read filters still apply).
+   * When unset, matches all rows. Read filters still apply.
    *
    * @generated from field: syncplane.v1.Condition predicate = 4;
    */
@@ -852,48 +863,52 @@ export type QueryRequest = Message<"syncplane.v1.QueryRequest"> & {
   orderBy: OrderKey[];
 
   /**
-   * Maximum rows to return. 0 means "server default"; the server clamps to
-   * its own maximum either way.
+   * Maximum rows to return. A value of 0 uses the server default. The server
+   * clamps the limit to its own maximum in both cases.
    *
    * @generated from field: uint32 limit = 6;
    */
   limit: number;
 
   /**
-   * Rows to skip after ordering. The server retains offset+limit rows in
-   * memory, so offsets beyond the server's maximum are rejected (not clamped:
-   * a clamp would silently return the wrong page).
+   * Number of rows to skip after ordering.
    *
-   * It is the way to jump to an arbitrary rank, which `after`/`before` cannot
-   * do; for walking pages in sequence those are cheaper and stable, and
-   * setting an offset alongside either is rejected.
+   * The server rejects offsets beyond the server maximum instead of clamping
+   * them. The server also rejects requests that set `offset` alongside
+   * `after` or `before`.
    *
    * @generated from field: uint32 offset = 7;
    */
   offset: number;
 
   /**
-   * Exclusive lower bound: only rows sorting strictly after this position are
-   * returned. Opaque bytes from a prior QueryResponse of the SAME query — its
-   * end_cursor to step forward, its start_cursor to bound the page below.
+   * Exclusive lower bound. Only rows that sort strictly after this position
+   * are returned.
    *
-   * A cursor is tied to the (entity, order_by) pair it was issued under; one
-   * replayed against a different entity or ordering is INVALID_ARGUMENT, as
-   * is one sent alongside a non-zero offset. `limit` counts forward from this
-   * bound.
+   * Opaque bytes from a prior `QueryResponse` of the same query:
+   * `end_cursor` to step forward, or `start_cursor` to bound the page below.
+   *
+   * A cursor is tied to the (`entity`, `order_by`) pair it was issued under.
+   * The server returns `INVALID_ARGUMENT` if a cursor is replayed against a
+   * different entity or ordering, or sent alongside a non-zero `offset`.
+   *
+   * `limit` counts forward from this bound.
    *
    * @generated from field: bytes after = 8;
    */
   after: Uint8Array;
 
   /**
-   * Exclusive upper bound: only rows sorting strictly before this position
-   * are returned. Same rules as `after`.
+   * Exclusive upper bound. Only rows that sort strictly before this position
+   * are returned. Follows the same rules as `after`.
    *
-   * With `before` alone, `limit` counts BACKWARD from this bound, so passing
-   * a page's start_cursor returns the page preceding it. With both bounds set
-   * the request reads a bounded range and `limit` counts forward from
-   * `after`. Rows always come back in order_by order whichever bounds are
+   * When only `before` is set, `limit` counts backward from this bound.
+   * Passing a page's `start_cursor` returns the preceding page.
+   *
+   * When both `after` and `before` are set, the request reads a bounded
+   * range and `limit` counts forward from `after`.
+   *
+   * Rows always return in `order_by` order regardless of which bounds are
    * set.
    *
    * @generated from field: bytes before = 9;
@@ -901,74 +916,76 @@ export type QueryRequest = Message<"syncplane.v1.QueryRequest"> & {
   before: Uint8Array;
 
   /**
-   * Answer with GROUPS of the match set rather than with its rows: the rows
-   * are partitioned by the value at this path, and `aggregate` says what to
-   * compute for each partition. Absent = an ordinary row query.
+   * Partitions matching rows by the value at this path and returns groups
+   * instead of individual rows. The `aggregate` field defines what to compute
+   * for each partition. When unset, executes a standard row query.
    *
-   * Groups come back in ascending value order with the no-value group last —
-   * the order an ascending `order_by` on the same path puts rows in — and
-   * `limit` caps how many are returned. The other paging fields describe a
-   * page of rows and have no counterpart here, so `offset`, `after` and
-   * `before` are rejected alongside it, as is `order_by` under an aggregate
-   * that answers with numbers: only AGGREGATE_OP_ROWS has rows to order.
+   * Groups return in ascending value order, with the no-value group last.
+   * `limit` caps the number of returned groups.
    *
-   * A path through a REPEATED field groups per ELEMENT: a row holding three
-   * labels joins three groups, so the counts do not sum to the number of
-   * matching rows. That is what a label facet wants and what a row count is
-   * not.
+   * The server rejects requests that set `offset`, `after`, or `before`
+   * alongside `group_by`. The server also rejects `order_by` under an
+   * aggregate that returns numbers: only `AGGREGATE_OP_ROWS` has rows to
+   * order.
    *
-   * Only groups the match set produces exist. A status no row currently holds
-   * is absent rather than zero — the set of possible values is the caller's
-   * schema, not something a read over rows can recover.
+   * A path through a repeated field groups per element. A row with multiple
+   * elements joins multiple groups, so counts do not sum to the number of
+   * matching rows.
+   *
+   * Only groups that the match set produces exist. A value that no matching
+   * row holds is omitted rather than returned with zero.
    *
    * @generated from field: repeated string group_by = 10;
    */
   groupBy: string[];
 
   /**
-   * What to compute per group. Required with `group_by`, rejected without it.
+   * Operation to compute per group. Required with `group_by`. The server
+   * rejects this field without `group_by`.
    *
    * @generated from field: syncplane.v1.AggregateOp aggregate = 11;
    */
   aggregate: AggregateOp;
 
   /**
-   * Rows to return per group under AGGREGATE_OP_ROWS, counted from the first
-   * in `order_by` order. Required there and rejected under every other
-   * aggregate.
+   * Number of rows to return per group under `AGGREGATE_OP_ROWS`, counted
+   * from the first in `order_by` order. Required with `AGGREGATE_OP_ROWS`,
+   * and rejected under every other aggregate.
    *
-   * The response carries `limit` × `per_group` rows, so both are clamped
-   * against the row maximum an ungrouped page is clamped to: a request asking
-   * for more groups than that leaves room for gets the first of them, with
-   * has_more set.
+   * The response carries `limit` × `per_group` rows. The server clamps both
+   * fields against the row maximum of an ungrouped page. A request that asks
+   * for more groups than that maximum permits receives the first groups,
+   * with `has_more` set to true.
    *
    * @generated from field: uint32 per_group = 12;
    */
   perGroup: number;
 
   /**
-   * Whether each row group reports how many rows it holds in all. It costs a
-   * walk of every matching row of every returned group, where the rows
-   * themselves cost `per_group` of them — so a caller that shows no count
-   * leaves it false. Ignored without AGGREGATE_OP_ROWS.
+   * Whether each row group reports the total count of rows it holds.
+   *
+   * Computing the total evaluates every matching row in each returned group,
+   * rather than only `per_group` rows. Defaults to false. Ignored without
+   * `AGGREGATE_OP_ROWS`.
    *
    * @generated from field: bool per_group_total = 13;
    */
   perGroupTotal: boolean;
 
   /**
-   * Per-value counts of the match set, computed in the walk that answers the
-   * rows: one QueryFacet per axis, each naming a path, answered in
-   * QueryResponse.facets in the same order. A facet counts every row the
-   * predicate and the cursor bounds admit — the rows `rows` was cut from, not
-   * the page — so its counts sum to what the page's `total` would be, except
-   * on a repeated path, which counts per element (see group_by).
+   * Per-value counts of the match set, with one `QueryFacet` per axis naming
+   * a path. Results appear in `QueryResponse.facets` in the same order.
    *
-   * Facets force the walk over every matching row rather than the page, so
-   * a request carrying one costs what an unlimited read of the predicate
-   * costs; the response stays a page. Rejected alongside group_by — a
-   * grouped read answers with groups already — and capped by the server's
-   * MaxQueryFacets.
+   * A facet counts every row admitted by the predicate and cursor bounds,
+   * not only the rows on the returned page. Counts sum to what the page
+   * `total` would be, except on a repeated path, which counts per element
+   * (see `group_by`).
+   *
+   * Evaluating facets inspects every matching row rather than only the page.
+   * A request with facets costs the same as an unlimited read of the
+   * predicate, but the response remains a page.
+   *
+   * Rejected if `group_by` is set. Capped by `MaxQueryFacets` on the server.
    *
    * @generated from field: repeated syncplane.v1.QueryFacet facets = 14;
    */
@@ -983,32 +1000,31 @@ export const QueryRequestSchema: GenMessage<QueryRequest> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_service, 14);
 
 /**
+ * Contains the results of a `QueryRequest`.
+ *
  * @generated from message syncplane.v1.QueryResponse
  */
 export type QueryResponse = Message<"syncplane.v1.QueryResponse"> & {
   /**
-   * Value changes only (never tombstones), ordered by order_by with ties
-   * broken by row key ascending.
+   * Contains value changes only, never tombstones. Ordered by `order_by`,
+   * with ties broken by row key ascending.
    *
    * @generated from field: repeated syncplane.v1.RowChange rows = 1;
    */
   rows: RowChange[];
 
   /**
-   * The server's schema revision; see PullResponse.schema_revision. A query
-   * answered by a skewed server is otherwise undetectable.
+   * The server schema revision. Callers use this field to detect schema
+   * skew. See `PullResponse.schema_revision`.
    *
    * @generated from field: string schema_revision = 2;
    */
   schemaRevision: string;
 
   /**
-   * Positions of the first and last returned row, for paging on. Send
-   * end_cursor as `after` for the next page, start_cursor as `before` for the
-   * previous one. Both are empty when the page is.
-   *
-   * There is no has_previous: under `after` it is "the request had one",
-   * which the caller already knows.
+   * Position of the first returned row, used for pagination. Send this value
+   * as `before` to fetch the previous page. Send `end_cursor` as `after` to
+   * fetch the next page. Both cursors are empty when the page is empty.
    *
    * @generated from field: bytes start_cursor = 3;
    */
@@ -1242,12 +1258,14 @@ export const SubscribeRequestSchema: GenMessage<SubscribeRequest> = /*@__PURE__*
  */
 export type WorkspaceDropped = Message<"syncplane.v1.WorkspaceDropped"> & {
   /**
+   * Identifies why the server dropped the workspace from the stream.
+   *
    * @generated from field: syncplane.v1.WorkspaceDropped.Reason reason = 1;
    */
   reason: WorkspaceDropped_Reason;
 
   /**
-   * Human-readable detail for logs. Never parse it; branch on reason.
+   * Human-readable detail for logs. Do not parse it. Branch on `reason`.
    *
    * @generated from field: string message = 2;
    */
@@ -1266,22 +1284,24 @@ export const WorkspaceDroppedSchema: GenMessage<WorkspaceDropped> = /*@__PURE__*
  */
 export enum WorkspaceDropped_Reason {
   /**
+   * Default value. The reason is unspecified.
+   *
    * @generated from enum value: REASON_UNSPECIFIED = 0;
    */
   UNSPECIFIED = 0,
 
   /**
-   * The cursor is unusable: it predates the tombstone horizon, its scope
-   * cannot be delta-resynced, or it was issued by a different store
-   * lineage. Re-bootstrap this workspace, then reopen the stream.
+   * The cursor is unusable. It predates the tombstone horizon, its scope
+   * cannot be delta-resynced, or a different store lineage issued it.
+   * Re-bootstrap this workspace, then reopen the stream.
    *
    * @generated from enum value: REASON_RESET = 1;
    */
   RESET = 1,
 
   /**
-   * The workspace-access gate refused this caller, permanently. Stop
-   * syncing the workspace and discard the local copy; retrying will not
+   * The workspace-access gate refused this caller permanently. Stop
+   * syncing the workspace and discard the local copy. Retrying will not
    * change the answer.
    *
    * @generated from enum value: REASON_ACCESS_REVOKED = 2;
@@ -1289,8 +1309,9 @@ export enum WorkspaceDropped_Reason {
   ACCESS_REVOKED = 2,
 
   /**
-   * A failure scoped to this workspace that may not persist (storage
-   * error, a permission hook that could not decide). Reopen with backoff.
+   * A failure scoped to this workspace that may not persist, such as a
+   * storage error or a permission hook that could not decide. Reopen
+   * with backoff.
    *
    * @generated from enum value: REASON_ERROR = 3;
    */
@@ -1298,8 +1319,8 @@ export enum WorkspaceDropped_Reason {
 
   /**
    * The caller holds no permission in the workspace's access model. A
-   * grant written later lifts it, so keep the local copy and the queue,
-   * and retry with backoff.
+   * grant written later lifts this restriction. Keep the local copy and
+   * the queue, and retry with backoff.
    *
    * @generated from enum value: REASON_NO_ACCESS = 4;
    */
@@ -1313,37 +1334,37 @@ export const WorkspaceDropped_ReasonSchema: GenEnum<WorkspaceDropped_Reason> = /
   enumDesc(file_syncplane_v1_service, 19, 0);
 
 /**
- * SubscribeResponse is one frame of the stream, always naming the workspace it
- * concerns — except a heartbeat, which is stream-level.
+ * One frame of the stream. Always names the workspace that it concerns, except
+ * for a stream-level heartbeat.
  *
  * @generated from message syncplane.v1.SubscribeResponse
  */
 export type SubscribeResponse = Message<"syncplane.v1.SubscribeResponse"> & {
   /**
-   * The workspace this frame is about. Empty only on a heartbeat.
+   * Identifies the workspace for this frame. Empty only on a heartbeat.
    *
    * @generated from field: string workspace_id = 1;
    */
   workspaceId: string;
 
   /**
-   * The server's app-defined schema revision, carried on EVERY frame
-   * (including heartbeats) so a connected client learns of a rolling deploy
-   * without waiting for its next page. Empty when the server advertises none.
+   * Application-defined schema revision from the server. Sent on every
+   * frame, including heartbeats. Empty when the server advertises none.
    *
    * @generated from field: string schema_revision = 2;
    */
   schemaRevision: string;
 
   /**
+   * Payload of the stream frame.
+   *
    * @generated from oneof syncplane.v1.SubscribeResponse.body
    */
   body: {
     /**
-     * One forward page for workspace_id: patch / next_cursor /
-     * last_acked_mutation_id / has_more / seq, identical to a Pull
-     * response. `reset` is never set here — that arrives as a dropped
-     * frame, so it can end one workspace without ending the stream.
+     * Forward page for `workspace_id`, identical to `PullResponse`. The
+     * `reset` field is never set here. A reset arrives as a `dropped`
+     * frame.
      *
      * @generated from field: syncplane.v1.PullResponse page = 3;
      */
@@ -1351,7 +1372,7 @@ export type SubscribeResponse = Message<"syncplane.v1.SubscribeResponse"> & {
     case: "page";
   } | {
     /**
-     * Sent once per workspace, after its catch-up backlog drains: that
+     * Sent once per workspace after its catch-up backlog drains. The
      * workspace is now current and its live tail follows. Other scopes may
      * still be catching up.
      *
@@ -1361,7 +1382,7 @@ export type SubscribeResponse = Message<"syncplane.v1.SubscribeResponse"> & {
     case: "caughtUp";
   } | {
     /**
-     * This workspace has left the stream; see WorkspaceDropped.
+     * The workspace has left the stream. See `WorkspaceDropped`.
      *
      * @generated from field: syncplane.v1.WorkspaceDropped dropped = 5;
      */
@@ -1369,9 +1390,9 @@ export type SubscribeResponse = Message<"syncplane.v1.SubscribeResponse"> & {
     case: "dropped";
   } | {
     /**
-     * Liveness keepalive for the whole stream. Carries no workspace and no
-     * page, so the client treats it as a no-op (no rebase, no notify) — it
-     * only proves the connection is still warm.
+     * Liveness keepalive for the entire stream. Carries no workspace and
+     * no page. The client treats this frame as a no-op (no rebase, no
+     * notify).
      *
      * @generated from field: bool heartbeat = 6;
      */
@@ -1425,36 +1446,31 @@ export const MutationStatusSchema: GenEnum<MutationStatus> = /*@__PURE__*/
   enumDesc(file_syncplane_v1_service, 0);
 
 /**
- * SyncService uses only the browser-safe ConnectRPC subset: unary and
- * server-streaming RPCs. Subscribe is a server-streaming RPC (Connect framing
- * over fetch), not literal SSE.
+ * Provides synchronization services using unary and server-streaming
+ * ConnectRPC methods.
  *
- * Workspace multiplicity is split deliberately. `workspace_id` is the hard
- * partition key — sequences, cursors, write exclusion and the access gate are
- * all per workspace — but a client commonly holds SEVERAL workspaces at once,
- * and the browser's per-host connection budget is spent by long-lived streams,
- * not by unary calls. So the two RPCs that carry real cost across workspaces
- * take a set:
+ * `workspace_id` partitions data: sequences, cursors, write exclusion, and
+ * access control apply per workspace.
  *
- *   - Subscribe carries N workspace scopes on ONE stream, so a client's
- *     connection count is independent of how many workspaces it syncs.
- *   - Push carries N per-workspace batches in one round trip. Each batch still
- *     commits in its own write transaction against its own partition; there is
- *     no cross-workspace atomicity and none is implied.
+ * Operations that accept multiple workspaces:
+ * - `Subscribe` carries multiple workspace scopes on one stream.
+ * - `Push` carries batches for multiple workspaces in one request. Each batch
+ *   commits in its own write transaction against its partition. There is no
+ *   cross-workspace atomicity.
  *
- * Bootstrap and Query stay single-workspace: bootstrap is a discrete,
- * transient event per workspace, and a query is by construction one predicate
- * against one partition. Pull likewise stays single-workspace — it is the
- * fallback path when no stream is held, and it is cheap to issue in parallel.
+ * `Bootstrap`, `Pull`, and `Query` operate on a single workspace.
  *
  * @generated from service syncplane.v1.SyncService
  */
 export const SyncService: GenService<{
   /**
-   * Push applies batches of client mutations, one write transaction per
-   * workspace. Business rejections are MutationResults, not RPC errors, and a
-   * failure scoped to one workspace (a mutation-id gap, a revoked workspace)
-   * is reported in that workspace's results rather than failing the request.
+   * Applies batches of client mutations, using one write transaction per
+   * workspace.
+   *
+   * Business rejections return as `MutationResult` messages, not RPC errors.
+   * The server reports a failure scoped to one workspace (such as a mutation
+   * ID gap or a revoked workspace) in that workspace's results without
+   * failing the request.
    *
    * @generated from rpc syncplane.v1.SyncService.Push
    */
@@ -1464,7 +1480,7 @@ export const SyncService: GenService<{
     output: typeof PushResponseSchema;
   },
   /**
-   * Pull returns row changes for one workspace since the given cursor.
+   * Returns row changes for one workspace since the specified cursor.
    *
    * @generated from rpc syncplane.v1.SyncService.Pull
    */
@@ -1474,7 +1490,8 @@ export const SyncService: GenService<{
     output: typeof PullResponseSchema;
   },
   /**
-   * Bootstrap streams a full snapshot of one workspace: Begin, Chunk*, End.
+   * Streams a full snapshot of one workspace in sequence: `Begin`, zero or
+   * more `Chunk` messages, and `End`.
    *
    * @generated from rpc syncplane.v1.SyncService.Bootstrap
    */
@@ -1484,17 +1501,17 @@ export const SyncService: GenService<{
     output: typeof BootstrapResponseSchema;
   },
   /**
-   * Subscribe is "a Pull that never closes", multiplexed over a set of
-   * workspaces. It catches each scope up from its cursor, then pushes changed
-   * rows down the stream as those workspaces change, so an already-subscribed
-   * client applies them directly and skips the follow-up Pull RTT. Every
-   * frame names the workspace it concerns. Subscribe carries payload and must
-   * never silently drop a patch.
+   * Streams row changes across a set of workspaces.
    *
-   * The scope set is fixed for the life of the stream — adding a workspace,
-   * removing one, or changing a subscription set is a close + reopen, since
-   * the browser ConnectRPC subset has no bidi channel for an in-band control
-   * message. Clients reconnect with backoff and fall back to Pull + polling.
+   * Catches up each workspace scope from its cursor, then sends row changes
+   * as those workspaces update. Every frame identifies the workspace that it
+   * concerns. The stream carries change payloads and must never silently
+   * drop a patch.
+   *
+   * The set of workspace scopes is fixed for the life of the stream. To add
+   * or remove a workspace, or to change a subscription set, close and reopen
+   * the stream. Clients reconnect with backoff and fall back to `Pull`
+   * polling.
    *
    * @generated from rpc syncplane.v1.SyncService.Subscribe
    */
@@ -1504,14 +1521,19 @@ export const SyncService: GenService<{
     output: typeof SubscribeResponseSchema;
   },
   /**
-   * Query runs a one-shot predicate query against current server state —
-   * for data outside the synced subset. Results are snapshots: they are not
-   * merged with local optimistic state and not stored. A declared secondary
-   * index serves the query when one covers its predicate and ordering;
-   * without one it scans and decodes every visible row of the entity per
-   * request, O(entity) in time regardless of limit. Memory is bounded to the
-   * page; prefer a selective predicate over deep pagination, and page with
-   * after/before rather than offset.
+   * Runs a one-shot predicate query against current server state for data
+   * outside the synced subset.
+   *
+   * Results are snapshots. They are not merged with local optimistic state
+   * and are not stored.
+   *
+   * A declared secondary index serves the query when one covers the query
+   * predicate and ordering. Without a covering index, the query scans and
+   * decodes every visible row of the entity per request, running in
+   * O(entity) time regardless of limit.
+   *
+   * Memory is bounded to the page. Prefer selective predicates over deep
+   * pagination, and paginate with `after` or `before` rather than `offset`.
    *
    * @generated from rpc syncplane.v1.SyncService.Query
    */

@@ -1,8 +1,8 @@
 # Searching data
 
-This guide shows you how to declare searchable fields on an entity and search data using relevance matching. Use this guide when you want to query data with full-text search across local or server databases.
+This guide shows you how to declare searchable fields on an entity and search data using relevance matching. Use this guide to query data with full-text search across local or server databases.
 
-Search is case-insensitive and accent-insensitive, matches the final term as a prefix while you type, and works offline over the synced subset exactly as it works on the server over all data.
+Search is case-insensitive and accent-insensitive. Search matches the final term as a prefix while you type. Offline search over the synced local subset works the same as server search over all data.
 
 ## Prerequisites
 
@@ -15,7 +15,7 @@ Before you begin, ensure you have:
 
 To make an entity searchable, mark its string fields in your schema definition.
 
-1. In Protocol Buffers, mark fields with `searchable: true` for individual fields, or add an entity-level `search` block to control field importance and analyzer options:
+1. If you use Protocol Buffers, mark fields with `searchable: true` for individual fields, or add an entity-level `search` block to control field importance and analyzer options:
 
 ```proto
 message Article {
@@ -34,9 +34,9 @@ message Article {
 }
 ```
 
-Field order determines importance. Fields marked with `searchable` come first in field order, followed by fields in the `search` block in declaration order. In this example, a match in `title` outranks a match in `summary`, which outranks a match in `body`. A collaborative-text field is searched as the plain text you see.
+Field order determines importance. Fields marked with `searchable` come first in field order, followed by fields in the `search` block in declaration order. In this example, a match in `title` outranks a match in `summary`, which outranks a match in `body`. A collaborative-text field is searched as plain text.
 
-2. In a [TS-first schema](define-schemas-in-typescript.md), mark fields with `.searchable()` or add a `search` options block:
+2. If you use a [TS-first schema](define-schemas-in-typescript.md), mark fields with `.searchable()` or add a `search` options block:
 
 ```ts
 const article = entity('article', {
@@ -64,7 +64,7 @@ const hits = await client.db.article.query({
 });
 ```
 
-Every term must occur in some searchable field. The query analyzer processes terms the same way it processes fields, so `CAFE` matches `Café`. The final term matches as a prefix when the query ends inside it, supporting search-as-you-type (for example, `mil` matches `milk`). A trailing space makes the term exact. An empty query matches every row.
+Every term must occur in a searchable field. The query analyzer processes terms the same way it processes fields. For example, `CAFE` matches `Café`. The last term matches as a prefix only when the query ends inside it (search-as-you-type). For example, `mil` matches `milk`. A trailing space makes the term exact. An empty query matches every row.
 
 2. Combine `match` with other filters or use it in a live query:
 
@@ -78,7 +78,7 @@ const view = client.db.article.watchQuery({
 
 If you do not need relevance ranking, omit `relevance()` to use custom ordering.
 
-3. To execute the query from Go, use `query.Match` and `query.Relevance`:
+3. If you query from Go, use `query.Match` and `query.Relevance`:
 
 ```go
 tx.Query(&articlev1.Article{}, query.Spec{
@@ -108,7 +108,7 @@ const mine = db.doc.useQueryAll({
 
 2. Ensure every workspace predicate contains a single `match` condition. A workspace predicate without a `match` condition throws an error naming the workspace.
 
-Each row ranks against the match condition evaluated for its workspace. Ranks remain comparable across workspaces because rank is computed from the row alone. For more details, see [the search model](../explanation/search.md).
+Across workspaces, each row ranks against the match condition of its own workspace. Ranks are computed from the row alone and remain comparable across workspaces; see [the search model](../explanation/search.md).
 
 ## Local, server, or both
 
@@ -138,7 +138,7 @@ For more information on the coverage pattern, see [Query data](query-data.md).
 
 To confirm that your search configuration works:
 
-1. Run a query with a search term matching known test records.
+1. Run a query with a search term that matches known test records.
 2. Verify that the query returns matching records in order of relevance.
 3. If you use search-as-you-type, verify that prefix queries return expected matches before you enter the complete term.
 

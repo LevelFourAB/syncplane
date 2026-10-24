@@ -23,7 +23,7 @@ To start the sync server, run:
 task demo:server
 ```
 
-This runs `cmd/todoserver`. The server initializes the SQLite store and starts listening on the configured address:
+This runs `cmd/todoserver`. The server initializes the SQLite store and listens on the configured address:
 
 ```go
 store, err := sqlitestore.Open(*dbPath)     // one SQLite file holds everything
@@ -38,7 +38,7 @@ defer srv.Close()
 http.ListenAndServe(*addr, cors(srv.HTTPHandler()))
 ```
 
-The server learns its schema from the declared Protocol Buffers (protobuf) messages, and rows land in generic storage keyed by `(workspace, entity, key)`. There is no schema migration step and no table per entity.
+The server derives its schema from declared Protocol Buffers (protobuf) messages and stores rows keyed by `(workspace, entity, key)`.
 
 ## 2. Starting the app
 
@@ -54,38 +54,38 @@ To test real-time synchronization:
 2. Open the same URL in a second browser tab.
 3. Add a todo item in one tab.
 
-The item appears in the second tab without refreshing the page. The server pushes the changed row over the live `Subscribe` stream to the second tab, which writes it to the shared IndexedDB database.
+The item appears in the second tab without refreshing the page. The server pushes the changed row over the `Subscribe` stream to the second tab, which writes the row to IndexedDB.
 
 Try the following interactions:
 
 - **Toggle a todo:** Select the checkbox. The checkbox updates immediately. The write applies to the local store first and queues for the server.
-- **Reorder the list:** Drag an item to reorder the list. Reordering updates a fractional index field on one row rather than renumbering the list.
-- **Test rejection:** Add a todo item with a title containing `forbidden`. The item appears briefly and then rolls back. The server's `CanMutate` hook rejects the mutation, and the client drops the mutation and restores the previous state.
-- **Undo and redo:** Trigger an undo or redo action. Inverses push as standard mutations, so undo converges the same way as other edits.
+- **Reorder the list:** Drag an item to reorder the list. Reordering updates a fractional index field on one row.
+- **Test rejection:** Add a todo item with a title that contains `forbidden`. The item appears briefly and rolls back. The server's `CanMutate` hook rejects the mutation. The client drops the mutation and restores the previous state.
+- **Undo and redo:** Trigger an undo or redo action. Inverses push as standard mutations. Undo converges the same way as other edits.
 
 ## 3. Testing offline synchronization
 
 To test offline editing:
 
-1. Open browser developer tools and set the network condition to **Offline**.
-2. Edit a todo item. Reads continue from the local store, and writes queue locally. The status line reports pending mutations.
-3. Set the network condition back to **Online**.
+1. In the browser developer tools, set the network condition to **Offline**.
+2. Edit a todo item. Reads continue from the local store. Writes queue locally. The status line reports pending mutations.
+3. Set the network condition to **Online**.
 
-The client pushes queued mutations and pulls changes from the server. The client rebases: it applies server changes, drops acknowledged mutations, clears its optimistic overlay, and replays any pending mutations on top of the new base.
+The client pushes queued mutations and pulls changes from the server. The client rebases: it applies server changes, drops acknowledged mutations, clears its optimistic overlay, and replays pending mutations on top of the new base.
 
 To test concurrent offline edits:
 
 1. Set the network condition to **Offline** in both browser tabs.
 2. Edit different fields of the same todo item in each tab.
-3. Set both tabs back to **Online**.
+3. Set both tabs to **Online**.
 
-Both changes persist because merges occur per field rather than per row. For more information about conflict resolution when editing the same field, see [The convergence model](../explanation/convergence-model.md).
+Both changes persist because merges occur per field. For more information about conflict resolution when editing the same field, see [The convergence model](../explanation/convergence-model.md).
 
 ## 4. Adding an entity
 
 Entities are protobuf messages that carry an annotation.
 
-1. Open `proto/examples/example/todo/v1/todo.proto` and add the `Tag` message:
+1. In `proto/examples/example/todo/v1/todo.proto`, add the `Tag` message:
 
 ```proto
 message Tag {
@@ -100,7 +100,7 @@ message Tag {
 }
 ```
 
-In this definition, `name` specifies the entity name used on the wire and in storage, and `key_fields` lists the fields that form the row key.
+In this definition, `name` specifies the entity name used on the wire and in storage. `key_fields` lists the fields that form the row key.
 
 2. Generate the contract code for Go and TypeScript:
 
@@ -110,13 +110,13 @@ task generate
 
 This emits Go code into `engine/gen/` and TypeScript code into `client/src/gen/`. Do not edit generated files manually.
 
-3. Register the entity on the server by editing `internal/exampleapp/exampleapp.go`:
+3. In `internal/exampleapp/exampleapp.go`, register the entity on the server:
 
 ```go
 server.WithEntities(&todov1.Todo{}, &todov1.Note{}, &todov1.Annotation{}, &todov1.Tag{})
 ```
 
-4. Register the entity on the client by editing `examples/todo/src/main.ts`:
+4. In `examples/todo/src/main.ts`, register the entity on the client:
 
 ```ts
 const client = new SyncClient({
@@ -133,9 +133,9 @@ const client = new SyncClient({
 task demo:server
 ```
 
-6. Reload the application in your browser. You now have create, read, update, and delete (CRUD) operations for tags.
+6. Reload the application in the browser. The application now supports create, read, update, and delete (CRUD) operations for tags.
 
-7. Test the entity from the browser developer console with both tabs open:
+7. Keep both tabs open. In the browser developer console, test the entity:
 
 ```ts
 const id = await client.db.tag.mutate.create({
@@ -149,7 +149,7 @@ client.db.tag.watch((rows) => console.log(rows.length, 'tags'));
 
 The watcher in the second tab logs the change.
 
-The development workflow follows this loop: annotate a message, run `task generate`, register the entity on the server, and register the entity on the client.
+The development workflow follows this sequence: annotate a message, run `task generate`, register the entity on the server, and register the entity on the client.
 
 ## Next steps
 

@@ -1,6 +1,6 @@
 # Querying from server-side code
 
-Use this guide to query entity data from Go server-side code. Use `ViewTx.Query` for read endpoints such as list or search operations, and use `EntityTx.Query` inside mutations to find and update matching rows.
+Use this guide to query entity data from Go server-side code. Use `ViewTx.Query` for read endpoints such as list or search operations. Use `EntityTx.Query` inside mutations to find and update matching rows.
 
 ## Prerequisites
 
@@ -13,9 +13,9 @@ Before querying entities, ensure that you have:
 
 To query entities from server-side code:
 
-1. Build a `query.Spec` with your filter predicate, sort order, and limit using the `query` package. Use proto field names for paths, and use dot notation for nested fields such as `"settings.color"`:
+1. Build a `query.Spec` with your filter predicate, sort order, and limit using the `query` package. Use proto field names for paths. Use dot notation for nested fields such as `"settings.color"`.
 
-   Field paths that do not match a proto field are rejected at compile time. Predicates use the same compiled implementation as the `Query` RPC and the TypeScript client, validated against shared test vectors in `testdata/queryeval/`.
+   The compiler rejects field paths that do not match a proto field. Predicates use the same compiled implementation as the `Query` RPC and the TypeScript client, validated against shared test vectors in `testdata/queryeval/`.
 
 2. Call `tx.Query` inside a `srv.View` read transaction or an `EntityTx` mutation transaction:
 
@@ -47,13 +47,13 @@ To page through query results:
    spec.After = cursorFromTheLastPage // an earlier response's end_cursor
    ```
 
-3. Set `Limit` to specify the page size. `Limit` counts forward from `After`, and backward from `Before` when `Before` is the only bound.
+3. Set `Limit` to specify the page size. `Limit` counts forward from `After`. When `Before` is the only bound, `Limit` counts backward from `Before`.
 
-Cursors represent a position in the sort order rather than a row count to skip. This keeps pages stable when rows are inserted ahead of the cursor and enables index-served queries to seek directly to the position.
+Cursors represent a position in the sort order rather than a row count to skip. Page with cursors instead of `Offset`. Pages stay stable when rows are inserted ahead of the cursor, and an index can seek to the position.
 
 **Note:** A cursor is tied to the `(entity, order_by)` pair it was issued under. Replaying a cursor against a different pair fails with `query.ErrCursorShape`. You cannot set `Offset` alongside `After` or `Before`.
 
-`ViewTx` and `ApplyTx` apply the caller's `ReadFilter`. Filtered rows are omitted from the result, and the page counts only rows the caller may see. `EntityTx` reads are server-authoritative and do not apply `ReadFilter`. To skip the filter across all transaction types, mark the context with `server.Trusted(ctx)`.
+`ViewTx` and `ApplyTx` apply the caller's `ReadFilter`. The result omits filtered rows, and the page counts only rows the caller can see. `EntityTx` reads are server-authoritative and do not apply `ReadFilter`. To skip the filter across all transaction types, mark the context with `server.Trusted(ctx)`.
 
 ## Confirming the result
 

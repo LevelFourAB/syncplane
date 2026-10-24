@@ -40,48 +40,48 @@ Failure reporting channels operate with different lifecycles:
 - `onMutationRejected`: Reports per-mutation rejections. The client rolls back local mutation state before invoking the callback.
 - `status().lastError`: Reports transient sync-loop errors. A successful sync cycle clears `lastError`.
 - `status().workspaces[id].access` and `status().schemaSkew`: Report standing conditions that persist until the underlying condition changes.
+- `TextHandle.status()` and `TextHandle.onError`: Report errors on an individual live text handle without affecting client status.
+- `Room.status()`, `Room.onError`, and `RoomSendError`: Report errors on an individual open room without affecting client status.
 
 Workspace access has these values:
 
 - Unset: The server has not refused the workspace.
 - `'revoked'`: Terminal. The application's `CanAccessWorkspace` denied the caller (`workspace_access_revoked` on the wire). The client stops syncing the workspace and keeps its local rows.
-- `'none'`: Not terminal. The caller holds no permission in the workspace's access model (`workspace_no_access` on the wire). The client keeps the local rows and the queue, and asks again with backoff, 1 to 30 seconds apart, and at once on `syncNow()`. When the caller loses its last permission, the pull before this answer removes the rows of the access model that it read, and `can()` then answers from a summary that holds nothing.
-- `'granted'`: The server admitted the caller after `'none'`. The client syncs the workspace again, queued writes included.
-- `TextHandle.status()` and `TextHandle.onError`: Report errors on an individual live text handle without affecting client status.
-- `Room.status()`, `Room.onError`, and `RoomSendError`: Report errors on an individual open room without affecting client status.
+- `'none'`: Not terminal. The caller holds no permission in the workspace's access model (`workspace_no_access` on the wire). The client keeps the local rows and the queue. It retries with backoff, 1 to 30 seconds apart, and immediately on `syncNow()`. When the caller loses its last permission, the pull before this response removes the read rows of the access model. `can()` then answers from an empty summary.
+- `'granted'`: The server admitted the caller after `'none'`. The client syncs the workspace again, including queued writes.
 
 Room failure codes have the following behaviors:
 
 - `room_dropped`: Terminal. The server re-evaluates access on every heartbeat.
-- A room of a caller that holds no grant in the workspace yet is not dropped: `Room.status()` reports `'waiting'`, with no error. The client asks again with backoff, 1 to 30 seconds apart, and at once when the caller's access in the workspace changes. The room goes to `'open'` when a grant admits the caller. The same happens when the caller's last grant goes while the room is open.
-- `room_offline`: Non-terminal. Indicates that a publish did not reach the server. The room re-sends state when the stream reconnects.
-- Room data is not durable. Room failure codes do not indicate data loss. For more information, see [Rooms](../explanation/rooms.md).
+- If a caller holds no grant in the workspace yet, the server does not drop the room: `Room.status()` reports `'waiting'` with no error. The client retries with backoff, 1 to 30 seconds apart, and immediately when caller access in the workspace changes. The room changes to `'open'` when a grant admits the caller. The same transition occurs if the caller loses its last grant while the room is open.
+- `room_offline`: Non-terminal. A publish did not reach the server. The room resends state when the stream reconnects.
+- Room data is not durable, and room failure codes do not indicate data loss (see [Rooms](../explanation/rooms.md)).
 
 ## Two codes that deliberately appear nowhere above
 
-The following codes are handled automatically and are not surfaced directly as client errors:
+The client handles the following codes automatically and does not surface them directly as errors:
 
-- **`text_full_state_required`**: Returned when a collaborative text `PATCH` delta-state fragment does not fit the row. The coordinator re-sends the update as a complete document.
-- **`text_state_stale`**: Returned when a collaborative text `PATCH` relies on state removed by compaction. The coordinator captures the visible text in the field, re-bootstraps, and re-applies the edit. Visible text is preserved, but marks created over dropped characters are discarded. This code reaches `onMutationRejected` only when the capture finds no text to restore.
+- **`text_full_state_required`**: Returned when a collaborative text `PATCH` delta-state fragment does not fit the row. The coordinator resends the update as a complete document.
+- **`text_state_stale`**: Returned when a collaborative text `PATCH` relies on state removed by compaction. The coordinator captures the visible text in the field, re-bootstraps, and reapplies the edit. The coordinator preserves visible text, but discards marks created over dropped characters. This code reaches `onMutationRejected` only when the capture finds no text to restore.
 
 ## The code vocabulary
 
 Rejection codes are extensible strings. The client exports standard constants and union types:
 
 - **Constants**: Named constants such as `CodeConflict` and `CodeWorkspacePurged`.
-- **Types**: `RejectionCode` and `SyncErrorCode` union types. Both types widen the union with `(string & {})` to allow custom application codes while supporting autocomplete for standard codes. Handle these values using a `switch` statement with a `default` case.
+- **Types**: `RejectionCode` and `SyncErrorCode` union types. Both types widen the union with `(string & {})` to allow custom application codes while supporting autocomplete for standard codes. Use a `switch` statement with a `default` case to handle these values (see [Handle failures](../how-to/handle-failures.md)).
 
 The `lastError.code` property contains one of the following:
 
 - A server-specified error code.
-- `unavailable`: Indicates that the server is unreachable, a request timed out, or a browser fetch failed without an error reason.
-- `internal`: Indicates an internal client error.
+- `unavailable`: The server is unreachable, a request timed out, or a browser fetch failed without an error reason.
+- `internal`: An internal client error.
 
 The `lastError.transportCode` property contains the underlying Connect transport code (for example, `NotFound` or `ResourceExhausted`).
 
 ## Callback isolation
 
-Every application callback that the client invokes runs in isolation after the reported commit or pull completes. The client isolates the following callbacks:
+Application callbacks run in isolation after the reported commit or pull completes. The client isolates the following callbacks:
 
 - `onStatusChange`
 - Watch callbacks
@@ -90,9 +90,9 @@ Every application callback that the client invokes runs in isolation after the r
 - `TextHandle.subscribe`
 - `onSchemaSkew`
 
-An exception in a callback is logged to `console.error` and dropped. It does not fail the write, skip queued callbacks, or mark the sync cycle as errored.
+The client logs callback exceptions to `console.error` and drops them. An exception does not fail the write, skip queued callbacks, or mark the sync cycle as errored.
 
-If `onSchemaSkew` throws an error, the policy falls back to `'warn'`, which is the default behavior when no policy is configured.
+If `onSchemaSkew` throws an error, the policy falls back to `'warn'`. This is the default behavior when no policy is configured.
 
 ## Related
 

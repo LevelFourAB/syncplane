@@ -5,8 +5,8 @@ instrument, its attributes, and the rules the engine follows when adding one.
 For wiring an SDK and an exporter, see
 [Observe the engine](../how-to/observe-the-engine.md).
 
-**Instrument names are a compatibility surface.** Dashboards and alerts are
-written against them, so they change like any other public API.
+**Instrument names are a compatibility surface.** Dashboards and alerts use
+instrument names, which follow public API compatibility rules.
 
 ## Without an SDK installed
 
@@ -15,7 +15,7 @@ installs an SDK, every instrument uses the API no-op implementation: an
 interface call with no side effects. The engine exports nothing and links no
 exporter.
 
-Providers are configured per component and default to the global provider:
+You configure providers per component. Components default to the global provider:
 
 | Component | Configuration                                                   |
 | --------- | --------------------------------------------------------------- |
@@ -24,24 +24,22 @@ Providers are configured per component and default to the global provider:
 | `connect` | `connect.Config.TracerProvider`, `connect.Config.MeterProvider` |
 | `storage` | `otelstore.Wrap(store, otelstore.WithMeterProvider(mp))`        |
 
-Explicitly passing a provider allows tests to assert against their own reader
-and allows a host to run multiple independently reporting engines.
+Passing an explicit provider allows tests to assert against their own reader
+and allows a host to run multiple independent engines.
 
 ## RPC layer
 
-Every RPC is instrumented by
-[`otelconnect`](https://github.com/connectrpc/otelconnect-go), which follows the
-OpenTelemetry RPC semantic conventions: `rpc.server.duration`,
-`rpc.server.request.size`, `rpc.server.response.size`, and related metrics,
-keyed by `rpc.method` and `rpc.grpc.status_code`. It also extracts W3C trace
-context from incoming requests. If a client sends a `traceparent` header,
-server spans are created as children of the client span.
+[`otelconnect`](https://github.com/connectrpc/otelconnect-go) instruments every
+RPC. It follows OpenTelemetry RPC semantic conventions: `rpc.server.duration`,
+`rpc.server.request.size`, `rpc.server.response.size`, and related metrics keyed
+by `rpc.method` and `rpc.grpc.status_code`. It also extracts W3C trace context
+from incoming requests. If a client sends a `traceparent` header, the server
+creates spans as children of the client span.
 
-Peer attributes are disabled to prevent generating unique attribute values per
+The engine disables peer attributes to prevent unique attribute values per
 client on public sync endpoints.
 
-Engine log lines include `trace_id` and `span_id` whenever a trace is
-recording.
+Engine log lines include `trace_id` and `span_id` when a trace records.
 
 ## Metrics
 
@@ -76,15 +74,15 @@ additional signals:
 | `syncplane.push.rejections`     | counter   | `{mutation}` | `mutation_kind`, `entity` or `mutator`, `rejection_code` |
 | `syncplane.push.batch.duration` | histogram | `s`          | `outcome`                                                |
 
-`syncplane.push.rejections` reports rejected mutations. Because a rejected
-mutation is still acknowledged, a push where every mutation is rejected returns
-HTTP `200 OK`.
+`syncplane.push.rejections` reports rejected mutations. Because the server still
+acknowledges a rejected mutation, a push where every mutation is rejected
+returns HTTP `200 OK`.
 
 On `syncplane.push.mutations`, `outcome` is `ok` for applied mutations and
 `skipped` for `ALREADY_APPLIED` (an idempotent replay). A rising `skipped` share
-indicates that clients are resending mutations because a queue is not draining
-or acknowledgments are not arriving. A resend of a rejected mutation increments
-`syncplane.push.rejections` each time the recorded verdict is replayed.
+indicates that clients resend mutations because a queue does not drain or
+acknowledgments do not arrive. A resend of a rejected mutation increments
+`syncplane.push.rejections` each time the server replays the recorded verdict.
 
 `rejection_code` is bounded by the codes passed to `server.Reject`. Do not
 interpolate variable data into a rejection code.
@@ -133,10 +131,10 @@ using rooms holds two long-lived connections per account.
 
 The ratio of `syncplane.rooms.joined` to `syncplane.rooms.streams` represents the
 cost of room re-gating. Every live room re-evaluates its join gate on the stream
-heartbeat, and an anchored room reads its row (memoized across sharing streams).
+heartbeat. An anchored room reads its row, memoized across sharing streams.
 
 `syncplane.rooms.events.dropped` tracks lost events under the at-most-once
-delivery contract. Presence recovers within one announce interval; broadcasts do
+delivery contract. Presence recovers within one announce interval. Broadcasts do
 not recover.
 
 ### Cursor state
@@ -146,15 +144,14 @@ not recover.
 | `syncplane.cursor_state.misses`       | counter | `{miss}`    | —          |
 | `syncplane.cursor_state.put_failures` | counter | `{failure}` | —          |
 
-A miss indicates that the store evicted an entry still referenced by a client,
-causing a client reset recorded under `syncplane.pull.resets` as
+A miss indicates that the store evicted an entry that a client still references.
+This eviction causes a client reset, recorded under `syncplane.pull.resets` as
 `cursor_state_evicted`. This occurs when the store capacity is too small, the
 retention period is shorter than client absence intervals, or an in-process
 store restarted.
 
 A put failure causes the affected cursor to inline its sets. Clients continue
-operating, but payloads include the state data that the store is designed to
-omit.
+operating, but payloads include the state data that the store normally omits.
 
 ### Notify fan-out
 
@@ -165,8 +162,8 @@ omit.
 
 These instruments measure notifications before and after the coalescing
 wrapper. The difference between `syncplane.notify.requested` and
-`syncplane.notify.published` represents the volume collapsed by
-`WithNotifyCoalescing`.
+`syncplane.notify.published` represents the volume that `WithNotifyCoalescing`
+collapses.
 
 ### Storage
 
@@ -180,15 +177,18 @@ attribute is `read` or `write`. The histogram measures duration from the
 perspective of the caller, including retries of the write closure.
 
 `syncplane.replica.reads` counts reads routed through the storage adapter read
-replica capability (`pgstore.WithReadReplica`). If no replica is configured,
+replica capability (`pgstore.WithReadReplica`). When you configure no replica,
 the engine records nothing. The `read_route` attribute has one of the following
 values:
 
 - `replica`: Served from the replica.
 - `fallback_stale`: The replica fell behind the freshness floor; the read was
-  served from the primary.
-- `fallback_error`: The replica failed before the read started; the read was
-  served from the primary.
+  served from the primary. Sustained values indicate that replication lag exceeds
+  the window between a client push acknowledgment and its next pull,
+  concentrating reads on the primary server. Brief bursts after a write spike are
+  normal.
+- `fallback_error`: The replica is unreachable, broken, or failed before the
+  read started; the primary server served the read.
 
 ### Background maintenance
 
@@ -212,8 +212,8 @@ contain collectable data. `outcome=skipped` indicates that another node held the
 workspace lease.
 
 `gc_kind` is one of `client_verdicts`, `idle_clients`, `idempotency_keys`,
-`history_records`, or `stranded_consumers`. `idle_clients` only appears with
-`WithClientRetention`. A value of `stranded_consumers` indicates that an effect
+`history_records`, or `stranded_consumers`. `idle_clients` appears only with
+`WithClientRetention`. The value `stranded_consumers` indicates that an effect
 consumer collected below the horizon stopped processing writes and cannot
 recover missed data.
 
@@ -221,8 +221,8 @@ recover missed data.
 background index builds. Reads scan tables directly until the index build
 completes. An `outcome=skipped` value indicates the index was already built.
 
-`syncplane.text.compact.*` metrics track the collaborative text compaction
-sweep and are emitted only when `WithTextCompaction` is enabled.
+The engine emits `syncplane.text.compact.*` metrics during collaborative text
+compaction when you enable `WithTextCompaction`.
 `syncplane.text.compact.workspaces` counts visited workspaces whose delta
 horizon moved since the previous pass. `outcome=skipped` indicates that another
 node held the lease. Each compacted row generates a new sequence number that
@@ -239,7 +239,10 @@ clients re-fetch once.
 | `syncplane.effects.tracked`       | gauge     | `{pair}`     | —                     |
 
 `syncplane.effects.lag` measures the maximum difference between `Head` and
-`Position` across all workspaces for a consumer.
+`Position` across all workspaces for a consumer. A non-zero value indicates that
+a consumer stopped keeping up. Pair `syncplane.effects.lag` with
+`syncplane.effects.passes{outcome=error}` to distinguish a stuck consumer from a
+busy consumer.
 
 `syncplane.effects.tracked` measures the resident set size of tracked
 workspace-consumer pairs.
@@ -257,8 +260,8 @@ at-least-once, redelivered changes increment the counter again.
 
 `failure_kind` is `none`, `transient`, or `user_action`.
 
-`syncplane.connect.tracked` measures the number of workspaces currently being
-converged.
+`syncplane.connect.tracked` measures the number of workspaces that the engine
+currently converges.
 
 ## Spans
 
@@ -330,17 +333,17 @@ const client = new SyncClient({
 Every event includes an `at` property containing a timestamp from `Date.now()`.
 The `outcome` field distinguishes `offline` from `error`.
 
-The `onSyncEvent` constructor option sets a single handler. You can call
+The `onSyncEvent` constructor option sets a single handler. Call
 `client.onSyncEvent(cb)` to attach or detach additional listeners at runtime.
 For interactive debugging, see `attachDevtools(client)` in the
 [TypeScript client reference](typescript-client.md#devtools).
 
-The `poke` event reports changes received through the real-time stream, while
-`pull` reports changes fetched during poll cycles.
+The `poke` event reports changes received through the real-time stream. The
+`pull` event reports changes fetched during poll cycles.
 
-The `resequence` event indicates recovery after a queued mutation was discarded
-locally before transmission to the server, requiring subsequent mutation IDs to
-be adjusted to the server watermark.
+The `resequence` event indicates recovery after the client discards a queued
+mutation locally before transmission to the server. Subsequent mutation IDs
+adjust to the server watermark.
 
 The `bootstrap` event reports the breakdown of bootstrap timing:
 
@@ -350,11 +353,12 @@ The `bootstrap` event reports the breakdown of bootstrap timing:
   mutex wait time.
 - `swapWrites`: Number of key-value entries written during the swap transaction.
 
-For a re-bootstrap, rows are staged and swapped atomically (`swapWrites` equals
-the row count). For an initial bootstrap into an empty workspace, rows are
-written directly during staging (`stageMs`), resulting in minimal `swapWrites`.
+For a re-bootstrap, the client stages and swaps rows atomically (`swapWrites`
+equals the row count). For an initial bootstrap into an empty workspace, the
+client writes rows directly during staging (`stageMs`), resulting in minimal
+`swapWrites`.
 
-The `resumed` field indicates whether the snapshot continued from a previous
+The `resumed` field indicates whether the snapshot continued from an earlier
 interrupted download.
 
 ### Local reads
@@ -377,23 +381,23 @@ The `path` field indicates the execution strategy: `index` or `scan`. When
 | `budget`    | Index traversal exceeded the row ceiling and fell back to a table scan. A faceted query reports it when the index range it would walk covers too large a share of the entity to beat the scan. |
 
 A cross-workspace read reports `path: 'index'`. The `index` field contains the
-index names joined with `+` (for example, `index1+index2`). The `workspaceId`
-field is set only when exactly one workspace was read. The `candidates` field
-reports the sum of index positions visited across all covered workspaces. While
-any covered workspace's index is still building, the read falls back to a scan
-with `declined: 'not-built'`.
+index names joined with `+` (for example, `index1+index2`). The engine sets the
+`workspaceId` field only when a read targets a single workspace. The
+`candidates` field reports the sum of index positions visited across all
+covered workspaces. While any covered workspace's index is still building, the
+read falls back to a scan with `declined: 'not-built'`.
 
 The `indexing` event fires once per workspace when all declared indexes finish
 building, reporting `rows` indexed and `durationMs`. A first (cold) bootstrap
-writes its rows already indexed, so its event reports `rows: 0`; a re-bootstrap
+writes its rows already indexed, so its event reports `rows: 0`. A re-bootstrap
 of a workspace that already held a snapshot reports the whole snapshot. For query
 optimization guidance, see
 [Making a query cheap](proto-options.md#secondary-indexes).
 
 On the index path, `candidates` measures visited index positions. `durationMs`
 measures elapsed time from invocation to completion. `waitMs` measures time
-spent waiting for concurrent write transactions (such as a rebase, bootstrap
-swap, or index build). Reference hydration (`include`) queries emit separate
+spent waiting for concurrent write transactions, such as a rebase, bootstrap
+swap, or index build. Reference hydration (`include`) queries emit separate
 events.
 
 The `get()`, `scan()`, and `queryServer()` methods do not emit `query` events.
@@ -401,8 +405,8 @@ The `get()`, `scan()`, and `queryServer()` methods do not emit `query` events.
 ### Delivery
 
 Event handlers registered with `onSyncEvent` execute synchronously within the
-sync cycle or read operation. Exceptions thrown in handlers are caught and
-swallowed, but long-running handlers delay sync and query execution.
+sync cycle or read operation. The client catches and swallows exceptions thrown
+in handlers, but long-running handlers delay sync and query execution.
 
 ## Related
 

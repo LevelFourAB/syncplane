@@ -1,6 +1,6 @@
 # Syncplane
 
-Syncplane is a sync engine for local-first applications. Clients read and write a local key-value store, so an application works fully offline. A server-authoritative mutation log keeps every replica converged through optimistic rebase, replaying pending mutations on top of server-confirmed state.
+Syncplane is a sync engine for local-first applications. Clients read and write a local key-value store, so an application works fully offline. A server-authoritative mutation log keeps replicas converged through optimistic rebase. It replays pending mutations on top of server-confirmed state.
 
 ## Features
 
@@ -8,7 +8,7 @@ Syncplane is a sync engine for local-first applications. Clients read and write 
 
 - **Partial sync**: Sync only the rows that a user needs. Filter by predicate, keep a bounded window such as the most recently updated rows, or name the rows a device has pinned by key. Every read reports whether it saw complete data.
 - **Live updates**: The server pushes changed rows to connected clients, with polling as a fallback.
-- **Multi-tab and multi-workspace**: When you open the application in multiple tabs, the tabs share one local store and one server connection. A user in several workspaces syncs all of them over that same connection.
+- **Multi-tab and multi-workspace**: Multiple browser tabs share one local store and one server connection. A user in several workspaces syncs all of them over that same connection.
 
 ### Queries and search
 
@@ -18,7 +18,7 @@ Syncplane is a sync engine for local-first applications. Clients read and write 
 ### Collaboration
 
 - **Collaborative text**: A field can hold a text document that merges concurrent edits. Formatting and comment anchors stay attached to the characters that they cover as other users edit around them.
-- **Presence and broadcast**: Live cursors, user presence indicators, and typing indicators are delivered live and never stored. Attach a room to a row, and any user who can read the row can join the room.
+- **Presence and broadcast**: The server delivers live cursors, presence indicators, and typing indicators without storing them. Attach a room to a row, and any user who can read the row can join the room.
 - **Field history**: Record previous field values and user identities before each editing session. You can restore an old value with a standard write.
 
 ### Server
@@ -67,7 +67,7 @@ message Todo {
 }
 ```
 
-The default posture is open: `AllowAll` admits every caller into every workspace. For shared deployments, see [Authentication and permissions](docs/how-to/authentication-and-permissions.md).
+By default, `AllowAll` admits every caller into every workspace. For shared deployments, see [Authentication and permissions](docs/how-to/authentication-and-permissions.md).
 
 ### TypeScript client
 
@@ -168,11 +168,11 @@ To run the local demo application:
 
 2. Open the printed URL in two browser tabs.
 
-Changes propagate in under one second without polling. The demo demonstrates undo and redo, drag-to-reorder with fractional indexing, partial sync, collaborative notes with comments, and server rejection handling.
+Changes propagate in under one second without polling. The demo shows undo and redo, drag-to-reorder with fractional indexing, partial sync, collaborative notes with comments, and server rejection handling.
 
 ## Documentation
 
-Full documentation is available in the [`docs/`](docs/README.md) directory, organized by Diátaxis documentation type:
+Documentation is in the [`docs/`](docs/README.md) directory, organized by Diátaxis documentation type:
 
 - **[Tutorials](docs/README.md#tutorials)**: Build your first sync application and add collaborative text.
 - **[How-to guides](docs/README.md#how-to-guides)**: Configure permissions, queries, partial sync, collaborative text, server-side writes, change feeds and effects, external store connectors, field history, multi-app hosting, multi-node setups, observability, React, and failure handling.
@@ -181,14 +181,14 @@ Full documentation is available in the [`docs/`](docs/README.md) directory, orga
 
 ## Development
 
-Tool versions are defined in `mise.toml`. Development tasks are defined in `Taskfile.yml`:
+`mise.toml` defines tool versions. `Taskfile.yml` defines development tasks:
 
 ```sh
 task generate          # regenerate Go + TS from proto/
 task ci                # lint, breaking, vet, typecheck, all tests
 task test:go           # Ginkgo suites (engine)
 task test:ts           # every TS client suite: unit, react, integration
-task test:ts:react     # just the syncplane/react hooks (jsdom)
+task test:ts:react     # syncplane/react hooks (jsdom)
 task test:e2e          # multi-tab browser tests (Playwright; not in `task ci`)
 ```
 

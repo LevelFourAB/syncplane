@@ -69,11 +69,11 @@ message ProjectMember {
 }
 ```
 
-`project_admin` includes `project_reader`, so it grants every permission of `project_reader` and the two it lists. When you add a permission to `project_reader`, `project_admin` grants it too. A role can include only roles of its own `grant`, and a role can include a role that includes other roles. Registration refuses a role that includes itself through any chain.
+`project_admin` includes `project_reader`, so it grants every permission of `project_reader` and the two permissions it lists. When you add a permission to `project_reader`, `project_admin` grants that permission too. A role can include only roles of its own `grant`, and a role can include a role that includes other roles. Registration refuses a role that includes itself through any chain.
 
-Role names are unique across the schema. A role granted to a caller can only be given or taken away by a caller who holds all of its permissions at the same row.
+Role names are unique across the schema. A caller can give or take away a role only when that caller holds all permissions of the role at the same row.
 
-Every write refuses a role that the schema does not declare, but registration does not check rows that are already stored. When you add `grant` to an entity that already holds rows, or add a role, each stored row whose role value matches a declared role starts to grant it. Check the stored values before you deploy such a change.
+The server refuses any write that uses a role that the schema does not declare, but registration does not check stored rows. When you add `grant` to an entity that already holds rows, or add a role, each stored row whose role value matches a declared role starts to grant that role. Check stored values before you deploy such a change.
 
 ### Give a role to a team
 
@@ -170,16 +170,16 @@ A `ProjectMember` row with `team` set gives its role to every member of that tea
 Before you ship, check these points:
 
 - **Who manages a team decides who gets its grants.** A grant to a team gives its role to every user added to the team later. Give `manage_teams` only to callers you trust with every grant the team holds.
-- **Every role of the member entity makes a member.** For guests who see a team but do not get its grants, use a separate grant entity anchored at the team.
-- **A team cannot be a member of a team.** Registration refuses a member entity whose subject is a team.
+- **Every role of the member entity makes a member.** Declare a separate grant entity anchored at the team for guests who see a team but must not get its grants.
+- **A team cannot be a member of a team.** Do not declare a team as the subject of a member entity. Registration refuses a member entity whose subject is a team.
 - **To give teams other roles than users**, declare a separate grant entity with a plain `Team team` subject and its own roles. Role names are unique across the schema, so name them differently, such as `project_team_reader`.
 - **To let a user leave a project**, add `{ delete: true requires: "view_roster" caller_is: "user_id" }`. A team's row holds no `user_id`, so the rule does not let a member remove the team.
-- **Delete the grants before the team.** A client cannot delete a team that a live grant row names.
+- **Delete the grants before the team.** Delete grant rows that reference a team before you delete the team. A client cannot delete a team that a live grant row names.
 - **Admins are members only with a row.** A role at the workspace root does not make a caller a member of a team. To let an admin see what a team sees, grant the admin the same permissions at the root.
 
 ## 3. Declare access on the entities the roles govern
 
-An entity that declares no `access` stays open to every caller that enters the workspace, so declare `access` on each entity whose rows a role decides, and leave the others alone. Name the reference that places a row below another row in `parents`; the entity it points at must declare `access` too:
+An entity that declares no `access` stays open to every caller that enters the workspace, so declare `access` on each entity whose rows a role decides, and leave the others alone. Name the reference that places a row below another row in `parents`; the entity it points to must declare `access` too:
 
 ```proto
 message Project {
@@ -256,7 +256,7 @@ message Folder {
 }
 ```
 
-A chain is at most `Limits.MaxAccessDepth` rows long (32 by default). The server refuses a folder moved below itself, or moved where it or a folder below it would sit deeper than that. A client that creates or moves a folder below another folder must read that folder.
+A chain is at most `Limits.MaxAccessDepth` rows long (32 by default). A client that creates or moves a folder below another folder must read that folder. The server refuses to move a folder below itself, or to move a folder where it or a folder below it would sit deeper than that.
 
 A row can sit below one of several entities, such as a comment on a task or on a doc. Name a oneof of references in `parents`. The case a row holds decides where it sits:
 
@@ -290,9 +290,9 @@ The TypeScript schema builder declares the same options with `access`, its `pare
 
 ### Allow some operations and not others
 
-Each rule names the operations it admits. An operation is allowed when at least one rule admits it. An operation that no rule names is open only to trusted writes: code that runs under `server.Trusted`, connectors, effects and the bodies of custom mutators. The server refuses a client write that can only be such an operation before `CanMutate` runs, and the TypeScript client rejects it at the call site.
+Each rule names the operations it admits. An operation is allowed when at least one rule admits it. An operation that no rule names is open only to trusted writes: code that runs under `server.Trusted`, connectors, effects, and the bodies of custom mutators. The server refuses a client write that can only be such an operation before `CanMutate` runs, and the TypeScript client rejects it at the call site.
 
-To give create, update and delete to different permissions, write one rule for each. Here a member who may comment creates comments, and a moderator changes and deletes them:
+To give create, update, and delete to different permissions, write one rule for each. Here a member who may comment creates comments, and a moderator changes and deletes them:
 
 ```proto
 message Comment {
@@ -316,7 +316,7 @@ message Comment {
 
 Add `post_comments` and `moderate_comments` to the roles that must hold them. A move to another task needs one update rule that admits the caller at both tasks, so here only a moderator moves a comment.
 
-To make an entity server-owned, give it a read rule and no other rule. Clients read its rows, and only trusted writes create, change or delete them:
+To make an entity server-owned, give it a read rule and no other rule. Clients read its rows, and only trusted writes create, change, or delete them:
 
 ```proto
 // The server records activity. Clients read it.
@@ -358,9 +358,9 @@ message TaskNote {
 }
 ```
 
-A client creates a note with `put`. The server refuses a `put` of a note that exists, because that write is an update. The TypeScript client rejects `patch`, `update` and `del` on a note before it sends them.
+A client creates a note with `put`. The server refuses a `put` of an existing note, because that write is an update. The TypeScript client rejects `patch`, `update`, and `del` on a note before it sends them.
 
-To let every caller in the workspace read an entity, use `admitted: {}` as the source of the read rule. A caller is admitted when `CanAccessWorkspace` lets it in and, in a schema that declares a role, it holds at least one permission in the workspace:
+To let every caller in the workspace read an entity, use `admitted: {}` as the source of the read rule. A caller is admitted when `CanAccessWorkspace` lets the caller in and, in a schema that declares a role, the caller holds at least one permission in the workspace:
 
 ```proto
 // Every caller in the workspace reads labels. Org admins write them.
@@ -642,7 +642,7 @@ message Task {
 }
 ```
 
-- **A guarded write needs both rules.** An editor without `approve_tasks` changes the title, and a `PATCH` of the status is refused. An approver without `edit_tasks` changes nothing, because no rule in `allow` admits the update.
+- **A guarded write needs both rules.** An editor without `approve_tasks` changes the title, and the server refuses a `PATCH` of the status. An approver without `edit_tasks` changes nothing, because no rule in `allow` admits the update.
 - **A `PUT` keeps what the caller may not write.** An editor who sends the whole row with a new title and a new status changes the title, and the status keeps its stored value.
 - **Every reader reads the field.** Each guard declares `{ read: true admitted: {} }`. To keep a field from some readers, see the next section.
 - **Use `fields` on a rule for the opposite case.** A rule `{ update: true requires: "view_tasks" caller_is: "assignee_id" fields: [ "status" ] }` lets an assignee change the status and nothing else, beside the editors' rule.
@@ -688,9 +688,9 @@ message Staff {
 ```
 
 - **The client receives the field cleared.** A reader without `hr` receives each staff row with `salary` at its zero value, and `Row.hidden` lists `salary`. Show such a field as hidden, not as empty.
-- **A query cannot name it.** A `queryServer` filter, order or facet on `salary`, or a subscription on it, fails with `PermissionDenied` for a caller that does not hold `hr` at the workspace root. A role held at a project shows the salary of that project's rows, and still does not let the caller query by it.
+- **A query cannot name it.** A `queryServer` filter, order, or facet on `salary`, or a subscription on it, fails with `PermissionDenied` for a caller that does not hold `hr` at the workspace root. A role held at a project shows the salary of that project's rows, and still does not let the caller query by it.
 - **A grant change resends the rows.** Give a caller `hr` and the next pull sends the rows again with the salary in them.
-- **A `PUT` keeps what the caller did not read.** An editor who writes back a whole row changes the name and keeps the stored salary, review and bonus.
+- **A `PUT` keeps what the caller did not read.** An editor who writes back a whole row changes the name and keeps the stored salary, review, and bonus.
 - **A field that decides access stays readable.** Registration refuses to hide a field that a rule checks with `caller_is` or `when`, so `person_id` stays visible here.
 - **Only a reader of the review changes who reads it.** A client write that changes `person_id` needs the right to read `review` before and after the write, so an editor cannot point a record at itself to read the review. To reassign a record, use a trusted write, such as a mutator body.
 
@@ -739,9 +739,9 @@ Rows below a row move with it. To move a task to another project, the caller nee
 
 A client cannot delete a row while a live row names it as its access parent. Delete or move the comments first; one batch can delete the comments and the task together. Trusted code can delete the task anyway, and its comments then sit below nothing, so only a caller who holds `view_tasks` at the workspace root reads them.
 
-A client cannot create a task with that key while those comments are live: the create is refused with `conflict`, so a new task does not take over the comments of the old one. The same applies to a row whose key a live grant row names. Delete or move the comments first, or create the row with trusted code, which puts the comments below it.
+A client cannot create a task with that key while those comments are live: the server refuses the create with `conflict`, so a new task does not take over the comments of the old one. The same applies to a row whose key a live grant row names. Delete or move the comments first, or create the row with trusted code, which puts the comments below it.
 
-A client `PATCH` or `DELETE` of a row that does not exist is refused with `access_denied`, the same answer as for a row the caller may not change or a row your `ReadFilter` hides. A client that deletes a row that another client deleted first therefore sees the delete in `onMutationRejected`.
+The server refuses a client `PATCH` or `DELETE` of a row that does not exist with `access_denied`, the same answer as for a row the caller may not change or a row your `ReadFilter` hides. A client that deletes a row that another client deleted first therefore sees the delete in `onMutationRejected`.
 
 ## 4. Tell the server who the caller is
 
@@ -761,7 +761,7 @@ srv, err := server.New(store,
 )
 ```
 
-The hook replaces the default subject. Return `p.Subject` yourself if your grant rows name it. If you change the subjects, write grant rows with the same values. The hook runs on every request, so cache a lookup that is slow.
+The hook replaces the default subject. Return `p.Subject` if your grant rows name it. If you change the subjects, write grant rows with the same values. The hook runs on every request, so cache any lookup that is slow.
 
 ## 5. Create the first grant
 
@@ -773,11 +773,11 @@ err := srv.Mutate(server.Trusted(ctx), workspaceID, func(tx *server.EntityTx) er
 })
 ```
 
-Until a grant exists, the caller's client reports `status().workspaces[id].access === 'none'`, keeps its queued writes, and syncs by itself once the grant exists. To create a workspace from the client, also offline, and to invite people, see [Create a workspace and invite people](create-a-workspace-and-invite-people.md).
+Until a grant exists, the caller's client reports `status().workspaces[id].access === 'none'`, keeps its queued writes, and syncs automatically once the grant exists. To create a workspace from the client, also offline, and to invite people, see [Create a workspace and invite people](create-a-workspace-and-invite-people.md).
 
 ## 6. Declare who may invoke each mutator
 
-In a schema that uses the model, a mutator without `MutatorAccess` can only be invoked by trusted code. Name the permission and the row it is checked at:
+In a schema that uses the model, only trusted code can invoke a mutator without `MutatorAccess`. Name the permission and the row where the server checks that permission:
 
 ```go
 server.WithMutator("complete_task", &taskv1.CompleteTaskArgs{}, completeTask,
@@ -786,7 +786,7 @@ server.WithMutator("complete_task", &taskv1.CompleteTaskArgs{}, completeTask,
 
 To let every caller that enters the workspace invoke a mutator, declare `server.MutatorAccess{Admitted: true}`.
 
-`MutatorAccess` checks only that the caller holds the permission. It does not run the entity's rules, such as `when` and `within`, and the body's own writes are not checked. To apply the rules to a write, write it through `tx.AsCaller()`. The server then checks the write as the same write from the caller's client, and the write returns a `CodeAccessDenied` rejection when the rules refuse it:
+`MutatorAccess` checks only that the caller holds the permission. It does not run the entity's rules, such as `when` and `within`, and does not check writes made by the body. To apply the rules to a write, write through `tx.AsCaller()`. The server then checks the write as if sent by the caller's client, and the write returns a `CodeAccessDenied` rejection when the rules refuse it:
 
 ```go
 func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
@@ -795,7 +795,7 @@ func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) 
 }
 ```
 
-Read through `tx.AsCaller()` too when the body passes on what it reads, for example in a rejection message. Such a read returns what the caller's client would receive: a row the caller cannot read is not found, and a field that a guard hides from the caller has its zero value. A query whose predicate or order names such a field fails with `permission_denied`:
+Read through `tx.AsCaller()` as well when the body passes on what it reads, for example in a rejection message. Such a read returns what the caller's client receives: a row that the caller cannot read is not found, and a field that a guard hides from the caller has its zero value. A query whose predicate or order names such a field fails with `permission_denied`:
 
 ```go
 func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
@@ -818,7 +818,7 @@ Write through `tx` itself where the body must do what the caller cannot, such as
 
 ## 7. Shape the UI on the client
 
-Use `can()` or the `useCan` hook to hide a control the caller cannot use. Ask about the operation the control does, not about a permission: the answer then follows every check of the rules, such as `when` and `within`. The answer is `'yes'`, `'no'` or `'unknown'`, and it is advisory: the server still decides each write.
+Use `can()` or the `useCan` hook to hide a control that the caller cannot use. Ask about the operation that the control performs, not a permission: the answer then includes every check in the rules, such as `when` and `within`. The answer is `'yes'`, `'no'`, or `'unknown'`. This answer is advisory: the server still decides each write.
 
 ```tsx
 function EditButton({ taskId }: { taskId: string }) {
@@ -827,9 +827,9 @@ function EditButton({ taskId }: { taskId: string }) {
 }
 ```
 
-- For a create, use `canCreate()` or `useCanCreate` with the row the control would create.
-- Without `fields`, `can()` answers for some update, so a caller that may change only some fields gets `'yes'`. To decide each input of a form, pass the fields it changes: `useCan(CommentSchema, id, 'update', { fields: [ 'body' ] })`.
-- For a permission that no rule checks, such as the one a mutator needs, use `hasPermission()` or `useHasPermission`.
+- For a create operation, use `canCreate()` or `useCanCreate` with the row the control creates.
+- Without `fields`, `can()` evaluates whether any update is allowed, so a caller that may change only some fields receives `'yes'`. To decide each input of a form, pass the fields it changes: `useCan(CommentSchema, id, 'update', { fields: [ 'body' ] })`.
+- For a permission that no rule checks, such as the permission that a mutator needs, use `hasPermission()` or `useHasPermission`.
 
 See [Predicting access](../reference/typescript-client.md#predicting-access).
 

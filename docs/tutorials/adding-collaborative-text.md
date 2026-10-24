@@ -30,12 +30,12 @@ message Scratch {
 }
 ```
 
-The field holds an encoded convergent text document rather than a UTF-8
+The field holds an encoded convergent text document instead of a UTF-8
 string. Both the Go implementation in `engine/text` and the TypeScript
-implementation in `client/src/text` produce byte-identical encodings, pinned by
-shared vectors in `testdata/text/`.
+implementation in `client/src/text` produce byte-identical encodings. Shared
+vectors in `testdata/text/` pin these encodings.
 
-Regenerate the code and declare the entity:
+Regenerate the code:
 
 ```sh
 task generate
@@ -71,12 +71,12 @@ await text.insert(5, ', world');
 text.value; // 'hello, world'
 ```
 
-Positions are UTF-16 string indices, the same indices used by
-`String.prototype.slice`. The handle converts indices to code points
+Positions are UTF-16 string indices, the same indices that
+`String.prototype.slice` uses. The handle converts indices to code points
 internally.
 
-Open the app in two browser tabs and run the script in the developer console of
-both tabs, typing into the same position. Neither edit is lost and characters do
+Open the app in two browser tabs. Run the script in the developer console of
+both tabs, typing into the same position. Neither edit is lost, and characters do
 not interleave. You see one insertion followed by the other. This ordering
 guarantee comes from [Fugue](https://arxiv.org/abs/2305.00583).
 
@@ -100,8 +100,8 @@ area.addEventListener('input', () => {
 ```
 
 The `setString` method diffs the string against the current merged document and
-sends operations. Untouched regions retain their identity, which protects
-concurrent remote edits from being overwritten by the `<textarea>` contents.
+sends operations. Untouched regions retain their identity, which prevents
+`<textarea>` contents from overwriting concurrent remote edits.
 
 Type into both tabs at the same time. Both streams of characters appear in a
 stable order in both tabs.
@@ -154,9 +154,9 @@ follows the text as you type in front of it.
 - **Concurrent insertions never interleave**, whether they happen a millisecond
   or a week apart.
 - **Offline splits converge on reconnect.** Replication is state-based, so there
-  is no causal-delivery requirement — a client can be gone for days.
-- **Merging is a pure union** — idempotent, commutative, associative — which is
-  why rebase replay and repeated pulls are harmless.
+  is no causal-delivery requirement. A client can be gone for days.
+- **Merging is a pure union.** Merging is idempotent, commutative, and
+  associative, so rebase replay and repeated pulls are harmless.
 - **Typing costs bytes proportional to the edit**, not to the document, in both
   directions and in local storage.
 

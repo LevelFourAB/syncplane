@@ -49,13 +49,13 @@ To run a local query and handle partial sync coverage:
 
 2. Inspect the `rows.coverage` property before treating an empty result as missing data:
    - If `coverage.complete` is `false`, the client holds only a subset of rows. Fetch missing rows from the server with `queryServer()`.
-   - If `coverage.hydrating` is `true`, rows are downloading in the client's initial snapshot. Display a loading indicator rather than sending a server request. The flag clears when the snapshot finishes loading.
+   - If `coverage.hydrating` is `true`, rows are downloading in the client's initial snapshot. Display a loading indicator instead of sending a server request. The flag clears when the snapshot finishes loading.
 
 For more information, see [Sync only part of a workspace](partial-sync.md) and [Partial sync and coverage](../explanation/partial-sync-and-coverage.md).
 
 ## Server queries
 
-Use `queryServer` to send a query to the server's `Query` RPC. This method allows your application to access rows that the client did not sync, such as when searching the full dataset or opening an entity ID not present in the local view.
+Use `queryServer` to send a query to the server `Query` RPC. Use this method to access rows that the client did not sync, such as when searching the full dataset or opening an entity ID not present in the local view.
 
 To execute a server query:
 
@@ -64,15 +64,14 @@ To execute a server query:
 
 Server queries have the following characteristics:
 
-- Results reflect server state. They are not merged with optimistic local mutations, are not stored locally, and do not trigger watchers.
-- Local unpushed edits are not reflected in the results.
+- Results reflect server state. They exclude unpushed local edits, are not stored locally, and do not trigger watchers.
 - Network connectivity is required.
 - Read filters always apply on the server.
 - Queries without a supporting index perform a full entity scan on the server, bounded in memory to the page size. Prefer selective predicates over deep pagination.
 
 ## Paging
 
-To page through results, use `after` and `before` cursors instead of `offset`. Keyset cursors represent a fixed position in the sort order, preventing skipped or duplicated rows when rows are inserted concurrently.
+To page through results, use `after` and `before` cursors instead of `offset`. Keyset cursors represent a fixed position in the sort order. They prevent skipped or duplicated rows when rows are inserted concurrently.
 
 To paginate query results:
 
@@ -102,7 +101,7 @@ To paginate query results:
 4. To query a bounded range, provide both `after` and `before`. The `total` property counts matches within that range.
 5. If your UI does not need the total count, set `total: false` in the query options to skip the count calculation and improve performance on large datasets.
 
-Cursors are base64url-encoded strings suitable for URLs and JSON serialization. Note the following rules when using cursors:
+Cursors are base64url-encoded strings suitable for URLs and JSON serialization. When using cursors:
 
 - A cursor is tied to the entity and sort order under which it was issued. Replaying a cursor with a different `orderBy` clause produces an error.
 - Both `query` and `queryServer` accept and emit the same cursors.
@@ -115,7 +114,7 @@ The `offset` and `limit` options inside a query remain fixed for the lifetime of
 
 To paginate a live query:
 
-1. Initialize a watch query with a `window` object containing `offset` and `limit`:
+1. Initialize a watch query with a `window` object that contains `offset` and `limit`:
 
    ```ts
    const view = client.db.todo.watchQuery(
@@ -126,9 +125,9 @@ To paginate a live query:
    onScroll((first) => view.setWindow({ offset: first, limit: 50 }));
    ```
 
-2. Update the visible slice by calling `view.setWindow({ offset, limit })` as the user navigates.
-3. Pass `view.setWindow({})` to deliver all matching rows without slicing.
-4. When finished, call `view.close()` to stop watching.
+2. Call `view.setWindow({ offset, limit })` to update the visible slice as the user navigates.
+3. Call `view.setWindow({})` to deliver all matching rows without slicing.
+4. Call `view.close()` to stop watching when finished.
 
 The watch maintains the complete matching result set in memory. Calling `setWindow` slices the in-memory set without re-executing a database read, and `rows.total` reports the total number of matched rows.
 
@@ -169,9 +168,9 @@ For lists of messages or to-many references, use `any()` to scope conditions to 
    });
    ```
 
-2. When querying reference lists, address only key fields on the target stub. Accessing non-key fields throws an error. Reference fields are automatically indexed by the engine.
+2. When querying reference lists, address only key fields on the target stub. Accessing non-key fields throws an error. The engine automatically indexes reference fields.
 
-3. For other message lists, declare a composite index specifying the element field path:
+3. For other message lists, declare a composite index that specifies the element field path:
 
    ```proto
    index: {
@@ -325,7 +324,7 @@ To optimize grouped row queries:
   }
   ```
 
-- If using a repeated `by` path, note that an entity appears in each group corresponding to its elements.
+- If you use a repeated `by` path, an entity appears in each group that corresponds to its elements.
 
 ## Confirming the result
 

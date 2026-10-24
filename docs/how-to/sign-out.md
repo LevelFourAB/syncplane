@@ -1,6 +1,6 @@
 # Wiping local data on sign-out
 
-When a user signs out on a shared device or asks to be forgotten, you must wipe their local workspace data from IndexedDB. Calling `close()` leaves rows, the optimistic overlay, the pending queue, cursors, and the `clientId` on the device. Calling `purgeLocalData()` removes this data, empties the store, and closes the client.
+When a user signs out on a shared device or asks to be forgotten, wipe their local workspace data from IndexedDB. Calling `close()` leaves rows, the optimistic overlay, the pending queue, cursors, and the `clientId` on the device. Calling `purgeLocalData()` removes this data, empties the store, and closes the client.
 
 ## Prerequisites
 
@@ -37,7 +37,7 @@ Before wiping local data, ensure that you have:
 
 3. Call `purgeLocalData()`:
 
-   Call `purgeLocalData()` to wipe the store and close the client. The client cannot be reopened after the wipe; create a new `SyncClient` for subsequent sign-ins.
+   Call `purgeLocalData()` to wipe the store and close the client. The client cannot be reopened after the wipe. Create a new `SyncClient` for subsequent sign-ins.
 
    ```ts
    const unsent = await client.purgeLocalData();
@@ -52,7 +52,7 @@ Before wiping local data, ensure that you have:
 
 4. Clear credentials and application state:
 
-   Drop your authentication credentials and clear any remaining application state, tokens, or caches:
+   Drop your authentication credentials. Clear any remaining application state, tokens, or caches:
 
    ```ts
    dropCredential(); // your auth layer
@@ -98,11 +98,11 @@ function App({ accountId, signedIn }: { accountId: string; signedIn: boolean }) 
 }
 ```
 
-Render the signed-out view first so that the provider unmounts, then call `await client.purgeLocalData()`. A provider initialized with `options` owns its client and closes it on unmount without wiping local data.
+Render the signed-out view first so that the provider unmounts. Then call `await client.purgeLocalData()`. A provider initialized with `options` owns its client and closes it on unmount without wiping local data.
 
 ## Switching accounts without wiping
 
-If you switch accounts on a personal device, assign each account its own `accountId`. Each account receives its own IndexedDB store and `SyncClient`. The first account's data remains isolated in its own database without needing a wipe. Only purge data when the device is shared or when a user requests data deletion.
+If you switch accounts on a personal device, assign each account its own `accountId`. Each account receives its own IndexedDB store and `SyncClient`. The first account's data remains isolated in its own database. Purge data only when the device is shared or when a user requests data deletion.
 
 ## Confirming the result
 

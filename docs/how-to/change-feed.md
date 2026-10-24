@@ -1,8 +1,8 @@
 # Following committed changes
 
 Drain committed row changes in `(seq, entity, key)` order from a durable cursor
-using the `Changes` API. Use this guide when you want to build and manage your
-own consumer loop for search indexing, data replication, or custom connectors.
+using the `Changes` API. Use this guide to build and manage a consumer loop for
+search indexing, data replication, or custom connectors.
 
 If you need managed positions, scheduling across workspaces, backoff, health
 checks, and before-state transitions, use the
@@ -10,7 +10,7 @@ checks, and before-state transitions, use the
 
 ## Prerequisites
 
-Before you follow changes, ensure that you have the following:
+Ensure that you have the following:
 
 - A configured server instance (`srv`).
 - A target workspace ID (`workspaceID`).
@@ -58,8 +58,7 @@ actor metadata on `ch`:
 - `ch.Message`: contains the full row document, or `nil` if deleted.
 - `ch.Actor`: contains the writer attribution.
 
-If you want to filter out self-writes or suppress notifications, inspect
-`ch.Actor`:
+To filter out self-writes or suppress notifications, inspect `ch.Actor`:
 
 ```go
 // Don't react to your own writes.
@@ -86,20 +85,20 @@ Always persist the cursor whole, including the `Epoch` field.
 
 ### 5. Handle expired cursors and resynchronize
 
-If `srv.Changes` returns `ErrCursorTooOld`, the cursor cannot be resumed. When
-this occurs:
+If `srv.Changes` returns `ErrCursorTooOld`, you cannot resume the cursor.
+When this occurs, do the steps:
 
 1. Resynchronize your local state against the current workspace state.
 2. Resume reading changes using the new cursor returned by `srv.Changes`.
 
 ## Verifying change processing
 
-To confirm that your change consumer is processing updates:
+To confirm that your change consumer processes updates:
 
 1. Commit a write to the target workspace.
 2. Run your change consumer loop.
-3. Confirm that the change callback processes the new write and that `saveCursor`
-   persists the updated sequence cursor.
+3. Confirm that the change callback processes the new write.
+4. Confirm that `saveCursor` persists the updated cursor.
 
 ## Related
 

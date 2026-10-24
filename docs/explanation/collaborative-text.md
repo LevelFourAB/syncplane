@@ -2,9 +2,9 @@
 
 This document explains why the system uses a convergent conflict-free replicated data type (CRDT) for collaborative text, how concurrent edits merge without data loss, how delta synchronization keeps editing responsive, and how the engine maintains consistency across storage and clients.
 
-Per-field last-writer-wins is the wrong tool for prose: when two people edit the same description concurrently, one person loses their entire field. A `bytes` field marked `text: true` instead holds a **convergent text document** — a first-class CRDT implemented in Go (`engine/text`) and TypeScript (`client/src/text`) with byte-identical canonical encodings, verified by shared test vectors in `testdata/text/`.
+Per-field last-writer-wins is the wrong tool for prose: when two people edit the same description concurrently, one person loses their entire field. A `bytes` field marked `text: true` instead holds a **convergent text document**. This document is a first-class CRDT implemented in Go (`engine/text`) and TypeScript (`client/src/text`) with byte-identical canonical encodings, verified by shared test vectors in `testdata/text/`.
 
-Registration automatically installs the merge hook on both sides. There is no `WithMerger` or `MergerSpec` configuration for text. PATCH operations carrying document states merge as a **pure union**: idempotent, commutative, and associative. This makes rebase replay and repeated pulls harmless by construction.
+Registration automatically installs the merge hook on both sides. Text requires no `WithMerger` or `MergerSpec` configuration. PATCH operations carrying document states merge as a **pure union**: idempotent, commutative, and associative. This property makes rebase replay and repeated pulls harmless by construction.
 
 ## Ordering is Fugue
 
@@ -12,11 +12,11 @@ Concurrent insertions at the same position never interleave. You receive `aliceb
 
 ## Replication is state-based
 
-A shipped state is causally closed. There is no causal-delivery requirement, and offline splits converge on reconnect.
+A shipped state is causally closed. Replication has no causal-delivery requirement, and offline splits converge on reconnect.
 
-Stored rows, bootstrap chunks, and the `Changes` feed always carry the full encoded document. Replication payloads can instead carry a **delta-state fragment** (format version 2): the items, tombstone flips, and mark operations that one state contains beyond a base that the receiver is known to hold, plus the writer's full version vector.
+Stored rows, bootstrap chunks, and the `Changes` feed always carry the full encoded document. Replication payloads can instead carry a **delta-state fragment** (format version 2). A fragment contains the items, tombstone flips, and mark operations that one state contains beyond a base that the receiver is known to hold, plus the writer's full version vector.
 
-Applying a fragment uses the same pure union and produces byte-identical results to a full merge. A fragment that cannot apply because of an unknown parent or anchor is rejected **whole** and answered with full state — the universal fallback — never a partial write.
+Applying a fragment uses the same pure union and produces byte-identical results to a full merge. The engine rejects a fragment **whole** if the fragment cannot apply because of an unknown parent or anchor. The engine answers with full state as the universal fallback, never with a partial write.
 
 ## Deltas in three places
 
@@ -28,9 +28,9 @@ If the server cannot apply a fragment, it rejects the edit with `text_full_state
 
 ### Downstream: pulls ship deltas
 
-Downstream synchronization mirrors the upstream design. Every write of a text-bearing row appends its added fragment to a small per-(row, field) log keyed by the sequence number of the write. A pull operation folds the entries above the client's cursor into one fragment carried beside the row (`RowChange.text_deltas`, with those fields cleared from `value`).
+Downstream synchronization mirrors the upstream design. Every write of a text-bearing row appends its added fragment to a per-(row, field) log keyed by the sequence number of the write. A pull operation folds the entries above the client's cursor into one fragment carried beside the row (`RowChange.text_deltas`, with those fields cleared from `value`).
 
-Catching up on another peer's typing costs a payload proportional to what they typed. A field that remained untouched over the span ships as an empty fragment meaning "keep what you hold". A row whose other fields changed stops re-sending its document entirely. The client folds the fragments back into its confirmed row, so IndexedDB, reads, watches, and rebase replay continue to observe whole documents.
+Catching up on another peer's typing costs a payload proportional to what they typed. A field that remained untouched over the span ships as an empty fragment that means "keep what you hold". A row whose other fields changed stops re-sending its document entirely. The client folds the fragments back into its confirmed row, so IndexedDB, reads, watches, and rebase replay continue to observe whole documents.
 
 The server sends full state instead whenever a fold cannot be trusted:
 
@@ -38,7 +38,7 @@ The server sends full state instead whenever a fold cannot be trusted:
 - A write in the log cannot be expressed as a delta, such as a cleared or deleted document.
 - The fragment saves too little data.
 - The client visibility of the entity might have changed since its cursor due to an application `ReadFilter`, a predicate, a window, or a follow closure.
-- A write in the span changed the row's access parent, or a field that a read rule compares with the caller's subjects. Such a write can show the row to a caller for the first time, and the log cannot tell that caller apart from a caller that held the row. So every reader whose span covers the write receives the documents whole once.
+- A write in the span changed the row's access parent, or a field that a read rule compares with the caller's subjects. Such a write can show the row to a caller for the first time, and the log cannot tell that caller apart from a caller that held the row. Every reader whose span covers the write therefore receives the documents whole once.
 - The pull is the catch-up after a delta resync. The resync sends the rows that the new scope or access shows as of the cursor only, so every page of the catch-up sends full state until the client is current.
 
 Bootstrap chunks, delta resyncs, membership diffs, query results, and the `Changes` feed always send full state.
@@ -49,9 +49,9 @@ The server can make each of these decisions independently. Holding the row is ne
 
 ### Locally: edits are deltas in storage too
 
-A live text handle queues the fragment for the edit that it applied. That same fragment is appended to a per-(row, field) **optimistic text log** (`ot/`) instead of rewriting the optimistic overlay row around it.
+A live text handle queues the fragment for the edit that it applied. The engine appends that same fragment to a per-(row, field) **optimistic text log** (`ot/`) instead of rewriting the optimistic overlay row around it.
 
-A keystroke writes bytes proportional to the keystroke rather than to the document. On a 148 KB document, it commits under a kilobyte where rewriting the row cost ~149,000 bytes. An offline typing burst grows with the text typed rather than with the document size multiplied by keystrokes. Both writes commit in the single transaction that makes a local edit crash-safe.
+A keystroke writes bytes proportional to the keystroke rather than to the document. On a 148 KB document, a keystroke commits under a kilobyte where rewriting the row cost ~149,000 bytes. An offline typing burst grows with the text typed rather than with the document size multiplied by keystrokes. Both writes commit in the single transaction that makes a local edit crash-safe.
 
 Reads fold the log back, so stored rows, rebase replay, and the `Changes` feed continue to observe whole documents without reader-side coordination. The log is derived state with the lifetime of the overlay. Any event that renumbers the queue — such as a rebase, a resequence, or a compaction — clears both the overlay and the log, and replay rebuilds them from the queue. This rebuild is necessary because each log entry is keyed by the mutation id that wrote it.
 
@@ -59,11 +59,11 @@ Only a pure text PATCH whose fields all carry fragments takes this path. A mask 
 
 ## Caches validated by comparison, not invalidation
 
-Three caches make this model efficient. All three rest on the same property: the encoding is **canonical**, so an entry is usable when the bytes it was built from equal the bytes being evaluated (a `memcmp`). A cache hit cannot be invalid, no producer must report a change, and nothing requires invalidation:
+Three caches make this model efficient. All three rely on the same property: the encoding is **canonical**. An entry is usable when the bytes it was built from equal the bytes being evaluated (a `memcmp`). A cache hit cannot be invalid, no producer must report a change, and nothing requires invalidation:
 
 - **The optimistic fold** is served from a per-row cache validated by comparing the row bytes and fragments from which it was built. A concurrent tab writing to the shared store cannot invalidate the cache data. Reading an unchanged row costs comparison checks instead of decoding the document (~0.065 ms compared to ~17 ms at 50,000 code points). The next keystroke extends the cached document with the appended fragment rather than decoding again.
 - **Written documents stay decoded between writes** on the server (`server.WithTextCache`, enabled by default). The write closure decodes the stored document, merges changes, and re-encodes. Decoding is the largest of these three operations. A rejected or retried write leaves a cache miss rather than stale data. At 50,000 code points, 8.4 ms of workspace-exclusive time per keystroke drops to 2.5 ms. `WithTextCache(0)` trades memory for decode execution time.
-- **Read documents stay decoded on the client.** Every client path that modifies a text field materializes a document, including the optimistic fold or an arriving pull page folded into the confirmed row. A moment later, a reader rendering the field decodes those same bytes back into the same document, borrowing it from whichever component built it. Merging takes a document _out_ rather than borrowing it, preventing aliasing during active writes. At 50,000 code points, a remote keystroke applied to the confirmed row costs 6.5 ms instead of 23.7 ms inside the key-value (KV) write transaction, which is held exclusively across tabs. Rendering a row while another user types costs 8.6 ms instead of 50.9 ms. A local keystroke rendered by a watcher other than the typist costs 12.6 ms instead of 32.8 ms. Documents under one kilobyte are not retained in this cache: decoding a small document takes tens of microseconds, and caching hundreds of small text fields would displace larger documents where caching provides substantial gains.
+- **Read documents stay decoded on the client.** Every client path that modifies a text field materializes a document, including the optimistic fold or an arriving pull page folded into the confirmed row. A moment later, a reader rendering the field decodes those same bytes back into the same document, borrowing it from whichever component built it. Merging takes a document _out_ rather than borrowing it, which prevents aliasing during active writes. At 50,000 code points, a remote keystroke applied to the confirmed row costs 6.5 ms instead of 23.7 ms inside the key-value (KV) write transaction, which is held exclusively across tabs. Rendering a row while another peer types costs 8.6 ms instead of 50.9 ms. A local keystroke rendered by a watcher other than the typist costs 12.6 ms instead of 32.8 ms. Documents under one kilobyte are not retained in this cache. Decoding a small document takes tens of microseconds, and caching hundreds of small text fields displaces larger documents where caching provides substantial gains.
 
 ## Writer identities
 
@@ -81,7 +81,7 @@ The merge operation rejects identity violations rather than converging on corrup
 
 ## Marks and anchors
 
-**Marks** (Peritext-style) attach key-value ranges to characters, ensuring they move with the text and survive concurrent edits. Resolution occurs per-key-per-character by highest operation id. Removal is an operation rather than a deletion. The `expand` setting controls whether typing at boundaries expands the mark.
+**Marks** (Peritext-style) attach key-value ranges to characters so that the ranges move with the text and survive concurrent edits. Resolution occurs per-key-per-character by highest operation id. Removal is an operation rather than a deletion. The `expand` setting controls whether typing at boundaries expands the mark.
 
 **Anchors** are stable positions (`(item, before|after)`), encodable to bytes for storage or presence. A deleted target degrades to the nearest live neighbour.
 
@@ -90,27 +90,27 @@ A mark can also be **collapsed** (`start === end`), covering no characters. Both
 - `ExpandBoth` straddles the caret. The first character typed at the caret falls inside, converting the mark into a standard span. This is a **pending format**: you press Cmd-B, then type. It lives in the document rather than in editor memory, surviving page reloads and remaining visible to other peers.
 - `ExpandNone` pins both boundaries to the same edge. The mark stays zero-width for the life of the document while drifting with surrounding text. This represents a **note attached to a position** rather than a span.
 
-Cancelling a pending format requires no new primitive: an unmark operation at the same caret resolves to the same anchors and outranks the pending mark, both while covering nothing and after typing expands it. Because a collapsed mark covers no characters, it is invisible to the span resolver and read through two alternative calls: `marksAt(index)` for styles that typed text inherits, and `points()` for zero-width marks.
+Cancelling a pending format requires no new primitive. An unmark operation at the same caret resolves to the same anchors and outranks the pending mark, both while covering nothing and after typing expands it. Because a collapsed mark covers no characters, it is invisible to the span resolver and read through two alternative calls: `marksAt(index)` for styles that typed text inherits, and `points()` for zero-width marks.
 
 Annotations — such as comments on a range — combine marks, anchors, and an entity row. They are an architectural pattern rather than an engine feature. The range lives inside the document as a mark keyed by `comment:<id>`. The comment body, author, and resolved status live in a standard entity row keyed by that ID. This entity structure provides last-writer-wins merging, permissions, queries, and undo support. To make edits land atomically and undo in a single step, write both operations in one `client.transact()` call. Per-key resolution allows overlapping comments to coexist, and resolution costs O(document + marked text) rather than O(keys × document).
 
 ## Both decoders accept exactly the same documents
 
-Varints are capped at 2^53−1 (the JavaScript safe-integer ceiling), strings must be valid UTF-8, float mark values must be finite, and a mark anchored to an item that the document does not contain is an error rather than a guessed range. Counter 0 belongs to the root sentinel, so an item or a mark operation that holds it is refused. Without that rule, one write could store a document that no reader can decode. A run whose last item counter passes 2^53−1 is refused for the same reason: the encoder writes that counter as a varint in the version vector.
+Varints are capped at 2^53−1 (the JavaScript safe-integer ceiling). Strings must be valid UTF-8. Float mark values must be finite. A mark anchored to an item that the document does not contain is an error rather than a guessed range. Counter 0 belongs to the root sentinel, so an item or a mark operation that holds it is refused. Without that rule, one write could store a document that no reader can decode. A run whose last item counter passes 2^53−1 is refused for the same reason: the encoder writes that counter as a varint in the version vector.
 
-Shared test vectors pin all refusals by payload and exact error message, preventing the engine from storing a document that fails only in the browser.
+Shared test vectors pin all refusals by payload and exact error message. This verification prevents the engine from storing a document that fails only in the browser.
 
 ## The counter ceiling
 
-Every edit takes a counter above every counter the document has seen, from any peer. An insert takes one counter for each code point, and a mark or an unmark takes one. When the next counter would pass 2^53−1, an edit fails and changes nothing: Go returns `text.ErrCounterCeiling`, and TypeScript throws `text: no counters left below the ceiling`. A union never lowers the version vector, so a document whose counters reach the ceiling stays readable but can never be edited again.
+Every edit takes a counter above every counter the document has seen, from any peer. An insert takes one counter for each code point, and a mark or an unmark takes one counter. When the next counter would pass 2^53−1, an edit fails and changes nothing: Go returns `text.ErrCounterCeiling`, and TypeScript throws `text: no counters left below the ceiling`. A union never lowers the version vector, so a document whose counters reach the ceiling stays readable but can never be edited again.
 
-Honest edits cannot get there. The danger is one write that puts a very high counter in the version vector. For this reason the server refuses, with `invalid_argument`, a write that moves the highest counter of a text document more than 2^32 above the stored document; for a new document it measures from 0. The rule covers client pushes and trusted writes. A step of 2^32 is far more than any honest write needs, and reaching the ceiling takes millions of writes to one row instead of one.
+Honest edits cannot reach this ceiling. The danger is one write that puts a very high counter in the version vector. For this reason, the server refuses a write that moves the highest counter of a text document more than 2^32 above the stored document (with error `invalid_argument`). For a new document, the server measures the increase from 0. The rule covers client pushes and trusted writes. A step of 2^32 is far more than any honest write needs, and reaching the ceiling takes millions of writes to one row instead of one.
 
 ## The write boundary takes text, not bytes
 
-Items are code points. A string that cannot be represented as code points is rejected (invalid UTF-8 in Go, or an unpaired surrogate in JavaScript) rather than stored with replacement character U+FFFD.
+Items are code points. The engine rejects a string that cannot be represented as code points (invalid UTF-8 in Go, or an unpaired surrogate in JavaScript) rather than storing it with replacement character U+FFFD.
 
-A substituted document would be well-formed and pass subsequent checks, meaning a writer would discover data loss only when reading the field back. A connector would not detect the failure, because source comparisons would mismatch and rewrite the row on every pass. Connectors skip invalid items (logged per item, leaving shadow state untouched) so that one mis-encoded file does not block ingress for the rest of the source, converging on the first pass after fixing the encoding.
+A substituted document would be well-formed and pass subsequent checks, so a writer would discover data loss only when reading the field back. A connector would not detect the failure, because source comparisons would mismatch and rewrite the row on every pass. Connectors skip invalid items (logged per item, leaving shadow state untouched) so that one mis-encoded file does not block ingress for the rest of the source. Connectors converge on the first pass after you fix the encoding.
 
 String writes use a multi-hunk Myers diff over code points, preserving untouched regions, their items, and attached marks. Strings that diverge beyond the shared `maxDiffCost` bound (1024) fall back to a single replacement hunk. This bound is pinned by shared vectors because it determines which items survive.
 
@@ -135,13 +135,13 @@ Where a value can appear is therefore a matter of **direction, not storage**. A 
 
 Every PUT path (`EntityTx.Put` for trusted server-side writes and connectors, client push PUT, and the client local overlay) **merges** text fields with the stored row instead of replacing them. A PUT operation built from a stale snapshot must not discard edits that its writer never observed, and a PUT racing an in-flight PATCH must not duplicate the document. All other fields maintain replace semantics.
 
-The server also validates text bytes on ingress (PUT and PATCH). Data that decoders cannot read is rejected as `invalid_argument` instead of corrupting the row for readers. A PATCH can carry a delta-state fragment in a text field that its mask names directly, validated and unfolded by the merger. A PUT operation, or a field reached only through an ancestor mask, must carry a full document because nothing merges it there.
+The server also validates text bytes on ingress (PUT and PATCH). The server rejects data that decoders cannot read as `invalid_argument` instead of corrupting the row for readers. A PATCH can carry a delta-state fragment in a text field that its mask names directly, validated and unfolded by the merger. A PUT operation, or a field reached only through an ancestor mask, must carry a full document because nothing merges it there.
 
 ## One document per element
 
 A text field path can cross a keyed message list or a message-valued map. In this case, the field holds one document **per element**, and all references address the document by its **instance path** — the mask form of its position, including the element key (`comments.<id>.body`). The instance path serves as the document identity everywhere per-document state lives: the PATCH mask routing an edit through the merger, the server delta log and compaction floors, decoded-document caches, the client optimistic text log, and `FieldDelta.field` on the wire.
 
-This design is sound because the element key provides a **stable identity**. The merge descends into a keyed element and resolves mergers by schema path (`comments.body` serves every element). Concurrent edits to an element document merge into a union like top-level fields, and edits to different elements do not interfere. Other container shapes remain unsupported: an unkeyed list element lacks an addressable identity, and a field inside a `oneof` disappears when an alternate case is chosen. In both situations, a masked write replaces the enclosing unit entirely, preventing the merger from running.
+This design works because the element key provides a **stable identity**. The merge descends into a keyed element and resolves mergers by schema path (`comments.body` serves every element). Concurrent edits to an element document merge into a union like top-level fields, and edits to different elements do not interfere. Other container shapes remain unsupported: an unkeyed list element lacks an addressable identity, and a field inside a `oneof` disappears when an alternate case is chosen. In both situations, a masked write replaces the enclosing unit entirely, preventing the merger from running.
 
 The element lifecycle controls the document lifecycle. Removing an element removes its document. The write records a gap in the delta log at that position, ensuring readers covering removal and re-creation receive full state rather than a delta that resurrects old text. It also clears the compaction floor, allowing a re-created element under the same key to start a fresh document rather than measuring against earlier purges. A mask naming a whole element (`comments.<id>` without a sub-path) replaces the element and its document. Client diffs avoid emitting whole-element masks for text-bearing elements, narrowing instead to per-unit paths so documents merge while scalar fields maintain last-writer-wins semantics.
 
@@ -151,18 +151,18 @@ A snapshot inverse on a state CRDT merges into a no-op. Handle edits therefore r
 
 Typing coalesces into word-sized undo groups based on idle timeouts and whitespace boundaries. Selection restoration uses the standard delta subscription mechanism.
 
-Undoing a deletion restores text content and formatting, but not original item identities. Tombstones are monotone, so restored content receives new identifiers. The inverse carries marks resolved over the text at deletion time to re-apply them. Formatting and comment ranges survive deletion, undo, and repeated undo/redo cycles. Anchors held outside the document do not follow restored text, so applications must read positions back from marks rather than retaining external anchors across an undo. Restoring through re-marking has two side effects: a concurrent unmark operation can be undone with the deletion, and the original `expand` policy is not retained, defaulting restored marks to `ExpandNone`.
+Undoing a deletion restores text content and formatting, but not original item identities. Tombstones are monotone, so restored content receives new identifiers. The inverse carries marks resolved over the text at deletion time to re-apply them. Formatting and comment ranges survive deletion, undo, and repeated undo/redo cycles. Anchors held outside the document do not follow restored text, so applications must read positions back from marks rather than retaining external anchors across an undo. Restoring through re-marking has two side effects: a concurrent unmark operation can be undone with the deletion, and the engine does not retain the original `expand` policy, defaulting restored marks to `ExpandNone`.
 
 ## Compaction
 
 Without compaction, a document retains one item per typed character and one mark operation per formatting action. Setting `server.WithTextCompaction(minPurged)` runs a background sweep that purges unneeded document state and records the version vector as the field **compaction floor**.
 
-Two types of state are purged:
+The engine purges two types of state:
 
-- **Tombstones** that are deleted, have no children, and are not anchored by a surviving mark. A run that was typed and deleted collapses completely. A tombstone that positions active text is preserved because sibling ordering relies on identifier order, and re-parenting children would shift text positions. Compaction bounds a document by live text **plus the tombstones that position it**, rather than live text alone.
+- **Tombstones** that are deleted, have no children, and are not anchored by a surviving mark. A run that was typed and deleted collapses completely. The engine preserves a tombstone that positions active text because sibling ordering relies on identifier order, and re-parenting children would shift text positions. Compaction bounds a document by live text **plus the tombstones that position it**, rather than live text alone.
 - **Mark operations that can never win again**. An operation is dead when a higher-id operation on the same key shares identical anchors (producing identical coverage under future insertions and permanently shadowing the lower operation), or when it is a removal operation with no remaining targets on its key. Operations cannot be judged dead based on current shadowing alone: two operations covering the same characters with different expand policies diverge when characters are typed at boundaries. Similarly, zero width does not indicate a dead operation, because point annotations are zero-width by design. A mark and its cancelling unmark operation are reclaimed as a pair, preventing abandoned pending formats from retaining permanent operations and pinned tombstones.
 
-Mark operations are purged first because they often represent the only reference keeping boundary tombstones alive. Reclaiming mark operations makes those tombstones eligible for removal in the same pass.
+The sweep purges mark operations first because they often represent the only reference keeping boundary tombstones alive. Reclaiming mark operations makes those tombstones eligible for removal in the same pass.
 
 The sweep processes only **quiet** rows whose last write is at or below the sequence through which the delta log has been pruned (`WithTextDeltaRetention`). At this point, the server can no longer send cheap deltas to readers. The rewrite commits at a new sequence, causing clients to re-fetch the field once, and records a gap in the delta log to prevent folding across a purge.
 
@@ -181,7 +181,7 @@ Because compaction can discard formatting during stale recoveries, it is disable
 
 ## What is out of scope
 
-There is no presence or awareness channel in collaborative text, and rich text formatting is out of scope. Marks are intended for annotations; store formatted prose using markup formats such as Markdown.
+Collaborative text provides no presence or awareness channel, and rich text formatting is out of scope. Marks are intended for annotations; store formatted prose using markup formats such as Markdown.
 
 A client that does not implement the CRDT cannot set a text field directly. The wire protocol rejects plain-string values across all positions, requiring strings to resolve in-process using the TypeScript client enqueue path with a leased peer or Go server code using `EntityTx.Put` or `Patch` with `WithTextPeer`.
 

@@ -80,21 +80,23 @@ func (MutationStatus) EnumDescriptor() ([]byte, []int) {
 type WorkspaceDropped_Reason int32
 
 const (
+	// Default value. The reason is unspecified.
 	WorkspaceDropped_REASON_UNSPECIFIED WorkspaceDropped_Reason = 0
-	// The cursor is unusable: it predates the tombstone horizon, its scope
-	// cannot be delta-resynced, or it was issued by a different store
-	// lineage. Re-bootstrap this workspace, then reopen the stream.
+	// The cursor is unusable. It predates the tombstone horizon, its scope
+	// cannot be delta-resynced, or a different store lineage issued it.
+	// Re-bootstrap this workspace, then reopen the stream.
 	WorkspaceDropped_REASON_RESET WorkspaceDropped_Reason = 1
-	// The workspace-access gate refused this caller, permanently. Stop
-	// syncing the workspace and discard the local copy; retrying will not
+	// The workspace-access gate refused this caller permanently. Stop
+	// syncing the workspace and discard the local copy. Retrying will not
 	// change the answer.
 	WorkspaceDropped_REASON_ACCESS_REVOKED WorkspaceDropped_Reason = 2
-	// A failure scoped to this workspace that may not persist (storage
-	// error, a permission hook that could not decide). Reopen with backoff.
+	// A failure scoped to this workspace that may not persist, such as a
+	// storage error or a permission hook that could not decide. Reopen
+	// with backoff.
 	WorkspaceDropped_REASON_ERROR WorkspaceDropped_Reason = 3
 	// The caller holds no permission in the workspace's access model. A
-	// grant written later lifts it, so keep the local copy and the queue,
-	// and retry with backoff.
+	// grant written later lifts this restriction. Keep the local copy and
+	// the queue, and retry with backoff.
 	WorkspaceDropped_REASON_NO_ACCESS WorkspaceDropped_Reason = 4
 )
 
@@ -143,20 +145,25 @@ func (WorkspaceDropped_Reason) EnumDescriptor() ([]byte, []int) {
 	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{19, 0}
 }
 
-// WorkspaceBatch is one workspace's slice of a push. Mutation ids are per
-// (workspace, caller, client_id): the server keeps one watermark for each, and
-// the contiguity rule (id == watermark+1) applies within a batch, never across
-// batches. A client holding several workspaces therefore keeps a separate
-// mutation-id counter and pending queue per workspace.
+// Contains mutations for one workspace in a `Push` request.
 //
-// The caller is the authenticated principal, by issuer and subject. Every
-// anonymous caller counts as one caller. A push from another caller under the
-// same client_id does not move this caller's watermark, and Pull, Bootstrap
-// and Subscribe report each caller its own.
+// Mutation IDs are tracked per `(workspace, caller, client_id)`. The server
+// maintains one watermark for each tuple. The contiguity rule (`id ==
+// watermark + 1`) applies within a batch, never across batches. A client that
+// holds several workspaces must keep a separate mutation ID counter and
+// pending queue per workspace.
+//
+// The caller is the authenticated principal, identified by issuer and subject.
+// All anonymous callers count as one caller. A push from another caller under
+// the same `client_id` does not advance this caller's watermark. `Pull`,
+// `Bootstrap`, and `Subscribe` report each caller their own watermark.
 type WorkspaceBatch struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	WorkspaceId   string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
-	Mutations     []*Mutation            `protobuf:"bytes,2,rep,name=mutations,proto3" json:"mutations,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Identifies the workspace for this batch of mutations. Serves as the
+	// partition key for sequences, cursors, write exclusion, and access
+	// control.
+	WorkspaceId   string      `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	Mutations     []*Mutation `protobuf:"bytes,2,rep,name=mutations,proto3" json:"mutations,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -655,9 +662,10 @@ type PullResponse struct {
 	// schema without the access model: the client keeps the last one it
 	// received.
 	CallerAccess *CallerAccess `protobuf:"bytes,8,opt,name=caller_access,json=callerAccess,proto3" json:"caller_access,omitempty"`
-	// A change to the CallerAccess that PullRequest.caller_access_version
-	// names, in place of caller_access. At most one of the two is present,
-	// and only a request that sets caller_access_version receives this one.
+	// Delta for the CallerAccess identified by
+	// PullRequest.caller_access_version, sent in place of caller_access. The
+	// response contains at most one of caller_access or caller_access_delta.
+	// Only a request that sets caller_access_version receives this field.
 	CallerAccessDelta *CallerAccessDelta `protobuf:"bytes,9,opt,name=caller_access_delta,json=callerAccessDelta,proto3" json:"caller_access_delta,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
@@ -756,44 +764,45 @@ func (x *PullResponse) GetCallerAccessDelta() *CallerAccessDelta {
 	return nil
 }
 
-// What one caller holds in one workspace under the access model: the
-// permissions it holds at the workspace root, and the rows it holds
-// permissions at, grouped by the permissions held there.
+// Summary of permissions held by one caller in one workspace under the access
+// model. Lists permissions held at the workspace root, and rows where the
+// caller holds permissions grouped by the permissions held there.
 //
 // The caller holds a permission at a row when root_permissions lists it, or
-// when the anchor group that lists the row lists it. A permission held at a
-// row applies to the row and to every row whose access parent points at it.
-// A permission that no list names is held nowhere.
+// when an anchor group that lists the row lists it. A permission held at a row
+// applies to that row and to every row whose access parent points at it. A
+// permission not named in any list is not held anywhere.
 //
-// Every list except subjects is sorted and holds no duplicates, so equal
+// Every list except subjects is sorted and contains no duplicates, so equal
 // access has one encoding, apart from seq and version.
 //
-// It is advisory. The server decides every read and every write itself, and a
-// client uses this to predict an answer, for example to hide a control the
-// caller cannot use.
+// This summary is advisory. The server decides every read and every write
+// itself. A client uses this summary to predict server decisions, for example
+// to hide a control the caller cannot use.
 type CallerAccess struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The workspace sequence this summary is current through.
+	// Workspace sequence through which this summary is current.
 	Seq uint64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
-	// The caller's subjects: the values grant rows and `subject` checks
-	// compare with. The first is the primary subject, which a create stores
-	// in each `creator` field. Empty for an anonymous caller.
+	// Subjects of the caller, compared against grant rows and `subject`
+	// checks. The first element is the primary subject, which a create
+	// operation stores in each `creator` field. Empty for an anonymous caller.
 	Subjects []string `protobuf:"bytes,3,rep,name=subjects,proto3" json:"subjects,omitempty"`
-	// The permissions the caller holds at the workspace root, which covers
-	// every row. Sorted.
+	// Permissions the caller holds at the workspace root, which cover every
+	// row. The list is sorted.
 	RootPermissions []string `protobuf:"bytes,4,rep,name=root_permissions,json=rootPermissions,proto3" json:"root_permissions,omitempty"`
-	// One group for each distinct set of permissions the caller holds at rows,
-	// sorted by permission list: compared element by element, with a list
-	// before the longer lists it begins. A row is in at most one group, which
-	// lists all the permissions the caller's grants at the row give together.
+	// One group for each distinct set of permissions the caller holds at rows.
+	// The list is sorted by permission list: compared element by element, with
+	// a list placed before longer lists that begin with it. A row appears in
+	// at most one group, which lists all permissions that the caller's grants
+	// at that row give together.
 	AnchorGroups []*AnchorGroup `protobuf:"bytes,5,rep,name=anchor_groups,json=anchorGroups,proto3" json:"anchor_groups,omitempty"`
-	// Identifies what the summary holds: equal summaries have equal versions,
-	// whatever their seq. Never 0 in a summary from the server.
+	// Identifies the content of this summary. Equal summaries have equal
+	// versions, regardless of their seq. Never 0 in a summary from the server.
 	Version uint64 `protobuf:"fixed64,6,opt,name=version,proto3" json:"version,omitempty"`
-	// The most access parent hops the server follows up from a row: its
-	// MaxAccessDepth. A permission held at a row further up does not apply to
-	// the row. 0 from a server that does not send it, and a client then
-	// assumes 32, the default.
+	// Maximum number of access parent hops the server follows up from a row:
+	// its MaxAccessDepth. A permission held at a row further up does not apply
+	// to the row. 0 from a server that does not send it; clients then assume
+	// 32, the default.
 	MaxAccessDepth uint32 `protobuf:"varint,7,opt,name=max_access_depth,json=maxAccessDepth,proto3" json:"max_access_depth,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -871,30 +880,33 @@ func (x *CallerAccess) GetMaxAccessDepth() uint32 {
 	return 0
 }
 
-// A change to a CallerAccess: applied to the summary whose version is
-// base_version, it gives the summary whose version is version. Subjects,
-// root_permissions and max_access_depth do not change.
+// Updates a CallerAccess summary from base_version to version. The subjects,
+// root_permissions, and max_access_depth fields do not change.
 //
-// To apply it, put each row that anchor_groups lists in the group with the
-// permissions listed there, and take it out of the group it was in. Then
-// take each row that removed lists out of every group, and drop the groups
-// that hold no rows. A client whose summary has another version must not
-// apply it: when its summary already has version, the delta changes nothing,
-// and otherwise the client keeps its summary and pulls again with
-// PullRequest.caller_access_version, which gets it the change from there.
+// To apply the delta:
+//  1. Move each row listed in anchor_groups into the group with the specified
+//     permissions, and remove the row from its previous group.
+//  2. Remove each row listed in removed from all groups.
+//  3. Remove groups that contain no rows.
+//
+// Do not apply this delta if the summary version does not match base_version.
+// If the summary already has version, the delta changes nothing. Otherwise,
+// keep the current summary and pull again with
+// PullRequest.caller_access_version to receive the delta from that version.
 type CallerAccessDelta struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The workspace sequence the new summary is current through.
+	// The workspace sequence that the new summary is current through.
 	Seq uint64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
-	// The version of the summary the delta applies to.
+	// The summary version that the delta applies to.
 	BaseVersion uint64 `protobuf:"fixed64,2,opt,name=base_version,json=baseVersion,proto3" json:"base_version,omitempty"`
-	// The version of the summary the delta gives.
+	// The summary version that results from applying the delta.
 	Version uint64 `protobuf:"fixed64,3,opt,name=version,proto3" json:"version,omitempty"`
-	// The rows whose permissions changed, and rows the caller holds
-	// permissions at for the first time, each with all the permissions it now
-	// holds there. Ordered and grouped as in CallerAccess.anchor_groups.
+	// The rows with changed permissions and rows where the caller holds
+	// permissions for the first time. Each row includes all permissions
+	// currently held at that row. Ordered and grouped as in
+	// CallerAccess.anchor_groups.
 	AnchorGroups []*AnchorGroup `protobuf:"bytes,4,rep,name=anchor_groups,json=anchorGroups,proto3" json:"anchor_groups,omitempty"`
-	// The rows that are in no group of the new summary. Sorted by entity.
+	// The rows that are in no group in the new summary. Sorted by entity.
 	Removed       []*AnchorRows `protobuf:"bytes,5,rep,name=removed,proto3" json:"removed,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -965,14 +977,14 @@ func (x *CallerAccessDelta) GetRemoved() []*AnchorRows {
 	return nil
 }
 
-// Rows at which the caller holds the same set of permissions.
+// Groups rows where the caller holds the same set of permissions.
 type AnchorGroup struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The permissions held at each row of the group. Sorted and never empty.
-	// It leaves out the permissions in CallerAccess.root_permissions, so a row
-	// whose permissions are all held at the root is in no group.
+	// The permissions held at each row in the group. Sorted and never empty.
+	// Omits permissions in CallerAccess.root_permissions. A row whose
+	// permissions are all held at the root is in no group.
 	Permissions []string `protobuf:"bytes,1,rep,name=permissions,proto3" json:"permissions,omitempty"`
-	// The rows, per entity, sorted by entity.
+	// Contains rows grouped by entity, sorted by entity.
 	Anchors       []*AnchorRows `protobuf:"bytes,2,rep,name=anchors,proto3" json:"anchors,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1022,11 +1034,11 @@ func (x *AnchorGroup) GetAnchors() []*AnchorRows {
 	return nil
 }
 
-// Rows of one entity, by key.
+// Rows of one entity, identified by key.
 type AnchorRows struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Entity string                 `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
-	// Row keys, sorted.
+	// Row keys in sorted order.
 	Keys          []string `protobuf:"bytes,2,rep,name=keys,proto3" json:"keys,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1080,7 +1092,7 @@ type BootstrapRequest struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	WorkspaceId string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
 	ClientId    string                 `protobuf:"bytes,2,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
-	// Scopes the snapshot. Empty = full sync.
+	// Scopes the snapshot. An empty list requests a full sync.
 	Subscriptions []*Subscription `protobuf:"bytes,3,rep,name=subscriptions,proto3" json:"subscriptions,omitempty"`
 	// Entities to ship BEFORE the rest, in this order — what the client needs
 	// on screen first. A snapshot is delivered entity by entity and a cold
@@ -1329,88 +1341,94 @@ func (*BootstrapResponse_End_) isBootstrapResponse_Body() {}
 type QueryRequest struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	WorkspaceId string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
-	// Entity name as declared via EntityOptions.
+	// Entity name declared in `EntityOptions`.
 	Entity string `protobuf:"bytes,3,opt,name=entity,proto3" json:"entity,omitempty"`
-	// Absent = all rows (read filters still apply).
+	// When unset, matches all rows. Read filters still apply.
 	Predicate *Condition  `protobuf:"bytes,4,opt,name=predicate,proto3" json:"predicate,omitempty"`
 	OrderBy   []*OrderKey `protobuf:"bytes,5,rep,name=order_by,json=orderBy,proto3" json:"order_by,omitempty"`
-	// Maximum rows to return. 0 means "server default"; the server clamps to
-	// its own maximum either way.
+	// Maximum rows to return. A value of 0 uses the server default. The server
+	// clamps the limit to its own maximum in both cases.
 	Limit uint32 `protobuf:"varint,6,opt,name=limit,proto3" json:"limit,omitempty"`
-	// Rows to skip after ordering. The server retains offset+limit rows in
-	// memory, so offsets beyond the server's maximum are rejected (not clamped:
-	// a clamp would silently return the wrong page).
+	// Number of rows to skip after ordering.
 	//
-	// It is the way to jump to an arbitrary rank, which `after`/`before` cannot
-	// do; for walking pages in sequence those are cheaper and stable, and
-	// setting an offset alongside either is rejected.
+	// The server rejects offsets beyond the server maximum instead of clamping
+	// them. The server also rejects requests that set `offset` alongside
+	// `after` or `before`.
 	Offset uint32 `protobuf:"varint,7,opt,name=offset,proto3" json:"offset,omitempty"`
-	// Exclusive lower bound: only rows sorting strictly after this position are
-	// returned. Opaque bytes from a prior QueryResponse of the SAME query — its
-	// end_cursor to step forward, its start_cursor to bound the page below.
+	// Exclusive lower bound. Only rows that sort strictly after this position
+	// are returned.
 	//
-	// A cursor is tied to the (entity, order_by) pair it was issued under; one
-	// replayed against a different entity or ordering is INVALID_ARGUMENT, as
-	// is one sent alongside a non-zero offset. `limit` counts forward from this
-	// bound.
+	// Opaque bytes from a prior `QueryResponse` of the same query:
+	// `end_cursor` to step forward, or `start_cursor` to bound the page below.
+	//
+	// A cursor is tied to the (`entity`, `order_by`) pair it was issued under.
+	// The server returns `INVALID_ARGUMENT` if a cursor is replayed against a
+	// different entity or ordering, or sent alongside a non-zero `offset`.
+	//
+	// `limit` counts forward from this bound.
 	After []byte `protobuf:"bytes,8,opt,name=after,proto3" json:"after,omitempty"`
-	// Exclusive upper bound: only rows sorting strictly before this position
-	// are returned. Same rules as `after`.
+	// Exclusive upper bound. Only rows that sort strictly before this position
+	// are returned. Follows the same rules as `after`.
 	//
-	// With `before` alone, `limit` counts BACKWARD from this bound, so passing
-	// a page's start_cursor returns the page preceding it. With both bounds set
-	// the request reads a bounded range and `limit` counts forward from
-	// `after`. Rows always come back in order_by order whichever bounds are
+	// When only `before` is set, `limit` counts backward from this bound.
+	// Passing a page's `start_cursor` returns the preceding page.
+	//
+	// When both `after` and `before` are set, the request reads a bounded
+	// range and `limit` counts forward from `after`.
+	//
+	// Rows always return in `order_by` order regardless of which bounds are
 	// set.
 	Before []byte `protobuf:"bytes,9,opt,name=before,proto3" json:"before,omitempty"`
-	// Answer with GROUPS of the match set rather than with its rows: the rows
-	// are partitioned by the value at this path, and `aggregate` says what to
-	// compute for each partition. Absent = an ordinary row query.
+	// Partitions matching rows by the value at this path and returns groups
+	// instead of individual rows. The `aggregate` field defines what to compute
+	// for each partition. When unset, executes a standard row query.
 	//
-	// Groups come back in ascending value order with the no-value group last —
-	// the order an ascending `order_by` on the same path puts rows in — and
-	// `limit` caps how many are returned. The other paging fields describe a
-	// page of rows and have no counterpart here, so `offset`, `after` and
-	// `before` are rejected alongside it, as is `order_by` under an aggregate
-	// that answers with numbers: only AGGREGATE_OP_ROWS has rows to order.
+	// Groups return in ascending value order, with the no-value group last.
+	// `limit` caps the number of returned groups.
 	//
-	// A path through a REPEATED field groups per ELEMENT: a row holding three
-	// labels joins three groups, so the counts do not sum to the number of
-	// matching rows. That is what a label facet wants and what a row count is
-	// not.
+	// The server rejects requests that set `offset`, `after`, or `before`
+	// alongside `group_by`. The server also rejects `order_by` under an
+	// aggregate that returns numbers: only `AGGREGATE_OP_ROWS` has rows to
+	// order.
 	//
-	// Only groups the match set produces exist. A status no row currently holds
-	// is absent rather than zero — the set of possible values is the caller's
-	// schema, not something a read over rows can recover.
+	// A path through a repeated field groups per element. A row with multiple
+	// elements joins multiple groups, so counts do not sum to the number of
+	// matching rows.
+	//
+	// Only groups that the match set produces exist. A value that no matching
+	// row holds is omitted rather than returned with zero.
 	GroupBy []string `protobuf:"bytes,10,rep,name=group_by,json=groupBy,proto3" json:"group_by,omitempty"`
-	// What to compute per group. Required with `group_by`, rejected without it.
+	// Operation to compute per group. Required with `group_by`. The server
+	// rejects this field without `group_by`.
 	Aggregate AggregateOp `protobuf:"varint,11,opt,name=aggregate,proto3,enum=syncplane.v1.AggregateOp" json:"aggregate,omitempty"`
-	// Rows to return per group under AGGREGATE_OP_ROWS, counted from the first
-	// in `order_by` order. Required there and rejected under every other
-	// aggregate.
+	// Number of rows to return per group under `AGGREGATE_OP_ROWS`, counted
+	// from the first in `order_by` order. Required with `AGGREGATE_OP_ROWS`,
+	// and rejected under every other aggregate.
 	//
-	// The response carries `limit` × `per_group` rows, so both are clamped
-	// against the row maximum an ungrouped page is clamped to: a request asking
-	// for more groups than that leaves room for gets the first of them, with
-	// has_more set.
+	// The response carries `limit` × `per_group` rows. The server clamps both
+	// fields against the row maximum of an ungrouped page. A request that asks
+	// for more groups than that maximum permits receives the first groups,
+	// with `has_more` set to true.
 	PerGroup uint32 `protobuf:"varint,12,opt,name=per_group,json=perGroup,proto3" json:"per_group,omitempty"`
-	// Whether each row group reports how many rows it holds in all. It costs a
-	// walk of every matching row of every returned group, where the rows
-	// themselves cost `per_group` of them — so a caller that shows no count
-	// leaves it false. Ignored without AGGREGATE_OP_ROWS.
-	PerGroupTotal bool `protobuf:"varint,13,opt,name=per_group_total,json=perGroupTotal,proto3" json:"per_group_total,omitempty"`
-	// Per-value counts of the match set, computed in the walk that answers the
-	// rows: one QueryFacet per axis, each naming a path, answered in
-	// QueryResponse.facets in the same order. A facet counts every row the
-	// predicate and the cursor bounds admit — the rows `rows` was cut from, not
-	// the page — so its counts sum to what the page's `total` would be, except
-	// on a repeated path, which counts per element (see group_by).
+	// Whether each row group reports the total count of rows it holds.
 	//
-	// Facets force the walk over every matching row rather than the page, so
-	// a request carrying one costs what an unlimited read of the predicate
-	// costs; the response stays a page. Rejected alongside group_by — a
-	// grouped read answers with groups already — and capped by the server's
-	// MaxQueryFacets.
+	// Computing the total evaluates every matching row in each returned group,
+	// rather than only `per_group` rows. Defaults to false. Ignored without
+	// `AGGREGATE_OP_ROWS`.
+	PerGroupTotal bool `protobuf:"varint,13,opt,name=per_group_total,json=perGroupTotal,proto3" json:"per_group_total,omitempty"`
+	// Per-value counts of the match set, with one `QueryFacet` per axis naming
+	// a path. Results appear in `QueryResponse.facets` in the same order.
+	//
+	// A facet counts every row admitted by the predicate and cursor bounds,
+	// not only the rows on the returned page. Counts sum to what the page
+	// `total` would be, except on a repeated path, which counts per element
+	// (see `group_by`).
+	//
+	// Evaluating facets inspects every matching row rather than only the page.
+	// A request with facets costs the same as an unlimited read of the
+	// predicate, but the response remains a page.
+	//
+	// Rejected if `group_by` is set. Capped by `MaxQueryFacets` on the server.
 	Facets        []*QueryFacet `protobuf:"bytes,14,rep,name=facets,proto3" json:"facets,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1537,20 +1555,18 @@ func (x *QueryRequest) GetFacets() []*QueryFacet {
 	return nil
 }
 
+// Contains the results of a `QueryRequest`.
 type QueryResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Value changes only (never tombstones), ordered by order_by with ties
-	// broken by row key ascending.
+	// Contains value changes only, never tombstones. Ordered by `order_by`,
+	// with ties broken by row key ascending.
 	Rows []*RowChange `protobuf:"bytes,1,rep,name=rows,proto3" json:"rows,omitempty"`
-	// The server's schema revision; see PullResponse.schema_revision. A query
-	// answered by a skewed server is otherwise undetectable.
+	// The server schema revision. Callers use this field to detect schema
+	// skew. See `PullResponse.schema_revision`.
 	SchemaRevision string `protobuf:"bytes,2,opt,name=schema_revision,json=schemaRevision,proto3" json:"schema_revision,omitempty"`
-	// Positions of the first and last returned row, for paging on. Send
-	// end_cursor as `after` for the next page, start_cursor as `before` for the
-	// previous one. Both are empty when the page is.
-	//
-	// There is no has_previous: under `after` it is "the request had one",
-	// which the caller already knows.
+	// Position of the first returned row, used for pagination. Send this value
+	// as `before` to fetch the previous page. Send `end_cursor` as `after` to
+	// fetch the next page. Both cursors are empty when the page is empty.
 	StartCursor []byte `protobuf:"bytes,3,opt,name=start_cursor,json=startCursor,proto3" json:"start_cursor,omitempty"`
 	EndCursor   []byte `protobuf:"bytes,4,opt,name=end_cursor,json=endCursor,proto3" json:"end_cursor,omitempty"`
 	// Whether rows remain past the end `limit` counted from — after end_cursor
@@ -1932,9 +1948,10 @@ func (x *SubscribeRequest) GetSparseCursor() bool {
 // The client acts on the reason and reopens the stream when it has a usable
 // scope set again.
 type WorkspaceDropped struct {
-	state  protoimpl.MessageState  `protogen:"open.v1"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Identifies why the server dropped the workspace from the stream.
 	Reason WorkspaceDropped_Reason `protobuf:"varint,1,opt,name=reason,proto3,enum=syncplane.v1.WorkspaceDropped_Reason" json:"reason,omitempty"`
-	// Human-readable detail for logs. Never parse it; branch on reason.
+	// Human-readable detail for logs. Do not parse it. Branch on `reason`.
 	Message       string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1984,16 +2001,17 @@ func (x *WorkspaceDropped) GetMessage() string {
 	return ""
 }
 
-// SubscribeResponse is one frame of the stream, always naming the workspace it
-// concerns — except a heartbeat, which is stream-level.
+// One frame of the stream. Always names the workspace that it concerns, except
+// for a stream-level heartbeat.
 type SubscribeResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The workspace this frame is about. Empty only on a heartbeat.
+	// Identifies the workspace for this frame. Empty only on a heartbeat.
 	WorkspaceId string `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
-	// The server's app-defined schema revision, carried on EVERY frame
-	// (including heartbeats) so a connected client learns of a rolling deploy
-	// without waiting for its next page. Empty when the server advertises none.
+	// Application-defined schema revision from the server. Sent on every
+	// frame, including heartbeats. Empty when the server advertises none.
 	SchemaRevision string `protobuf:"bytes,2,opt,name=schema_revision,json=schemaRevision,proto3" json:"schema_revision,omitempty"`
+	// Payload of the stream frame.
+	//
 	// Types that are valid to be assigned to Body:
 	//
 	//	*SubscribeResponse_Page
@@ -2097,29 +2115,28 @@ type isSubscribeResponse_Body interface {
 }
 
 type SubscribeResponse_Page struct {
-	// One forward page for workspace_id: patch / next_cursor /
-	// last_acked_mutation_id / has_more / seq, identical to a Pull
-	// response. `reset` is never set here — that arrives as a dropped
-	// frame, so it can end one workspace without ending the stream.
+	// Forward page for `workspace_id`, identical to `PullResponse`. The
+	// `reset` field is never set here. A reset arrives as a `dropped`
+	// frame.
 	Page *PullResponse `protobuf:"bytes,3,opt,name=page,proto3,oneof"`
 }
 
 type SubscribeResponse_CaughtUp struct {
-	// Sent once per workspace, after its catch-up backlog drains: that
+	// Sent once per workspace after its catch-up backlog drains. The
 	// workspace is now current and its live tail follows. Other scopes may
 	// still be catching up.
 	CaughtUp bool `protobuf:"varint,4,opt,name=caught_up,json=caughtUp,proto3,oneof"`
 }
 
 type SubscribeResponse_Dropped struct {
-	// This workspace has left the stream; see WorkspaceDropped.
+	// The workspace has left the stream. See `WorkspaceDropped`.
 	Dropped *WorkspaceDropped `protobuf:"bytes,5,opt,name=dropped,proto3,oneof"`
 }
 
 type SubscribeResponse_Heartbeat struct {
-	// Liveness keepalive for the whole stream. Carries no workspace and no
-	// page, so the client treats it as a no-op (no rebase, no notify) — it
-	// only proves the connection is still warm.
+	// Liveness keepalive for the entire stream. Carries no workspace and
+	// no page. The client treats this frame as a no-op (no rebase, no
+	// notify).
 	Heartbeat bool `protobuf:"varint,6,opt,name=heartbeat,proto3,oneof"`
 }
 

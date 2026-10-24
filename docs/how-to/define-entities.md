@@ -1,10 +1,8 @@
 # Defining entities in your own module
 
-This guide shows you how to define Syncplane entities in your own Protocol Buffers schemas, generate Go code for them, and register them with a Syncplane server.
+This guide shows you how to define Syncplane entities in your own Protocol Buffers schemas, generate Go code for them, and register them with a Syncplane server. Use this guide when you maintain proto schemas outside the Syncplane repository and need CRUD support for your entities.
 
-Use this guide when you maintain proto schemas outside the Syncplane repository and want full CRUD support for your entities.
-
-If you do not want to use proto code generation, you can declare the schema [in TypeScript](define-schemas-in-typescript.md) and register it at runtime, or build it dynamically in Go with `server.DynamicField`. You can also bypass Go code generation by shipping a `FileDescriptorSet`.
+If you do not use proto code generation, declare the schema [in TypeScript](define-schemas-in-typescript.md) and register it at runtime, or build it dynamically in Go with `server.DynamicField`. You can also bypass Go code generation by shipping a `FileDescriptorSet`.
 
 ## Prerequisites
 
@@ -34,7 +32,7 @@ Run `buf dep update` to pin the dependency in your `buf.lock` file.
 
 If you use `protoc`, export the dependency to your local file system:
 
-```
+```sh
 buf export buf.build/levelfourab/syncplane -o vendor/proto
 ```
 
@@ -42,7 +40,7 @@ This exports `syncplane/v1/options.proto` and the files it imports, such as `syn
 
 ## 2. Annotate your proto message
 
-Import `syncplane/v1/options.proto` and annotate your message with `(syncplane.v1.entity)`:
+Import `syncplane/v1/options.proto`. Annotate your message with `(syncplane.v1.entity)`:
 
 ```proto
 message Thing {
@@ -60,11 +58,11 @@ For more options, such as `key_fields`, keyed lists, movable lists, opaque field
 
 ## 3. Configure Go code generation
 
-Configure your code generator so that `options.proto` and `query.proto`, which `options.proto` imports, point to the `github.com/levelfourab/syncplane` Go module and do not generate Go code in your project.
+Configure your code generator so that `options.proto` and `query.proto`, which `options.proto` imports, point to the `github.com/levelfourab/syncplane` Go module. Do not generate Go code for these files in your project.
 
 ### If you use buf
 
-Managed mode rewrites `go_package` for every file by default. Disable `go_package` rewriting for the `syncplane/v1` files and exclude them from the target inputs in `buf.gen.yaml`:
+Managed mode rewrites `go_package` for every file by default. In `buf.gen.yaml`, disable `go_package` rewriting for `syncplane/v1` files and exclude them from target inputs:
 
 ```yaml
 # buf.gen.yaml
@@ -90,7 +88,7 @@ plugins:
 
 ### If you use protoc
 
-Pass `Msyncplane/v1/options.proto=github.com/levelfourab/syncplane/engine/gen/syncplane/v1` and `Msyncplane/v1/query.proto=github.com/levelfourab/syncplane/engine/gen/syncplane/v1` to `protoc`, and omit both files from the list of target files.
+Pass `Msyncplane/v1/options.proto=github.com/levelfourab/syncplane/engine/gen/syncplane/v1` and `Msyncplane/v1/query.proto=github.com/levelfourab/syncplane/engine/gen/syncplane/v1` to `protoc`. Omit both files from the list of target files.
 
 ## 4. Register the entity with the server
 
@@ -102,8 +100,6 @@ srv, err := server.New(store,
 )
 ```
 
-Registration is identical to registering an in-repo entity.
-
 ## Confirming the registration
 
 Verify that your generated code imports the Syncplane Go package:
@@ -113,7 +109,7 @@ Verify that your generated code imports the Syncplane Go package:
 import _ "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 ```
 
-When you start your server, verify that initialization completes without panicking. The server reads the `(syncplane.v1.entity)` options and provides CRUD operations for the entity.
+Start your server and verify that initialization completes without panicking. The server reads the `(syncplane.v1.entity)` options and provides CRUD operations for the entity.
 
 ## Troubleshooting
 
@@ -121,11 +117,11 @@ When you start your server, verify that initialization completes without panicki
 
 If you generate Go code for `options.proto` in your own repository instead of importing the engine package, protobuf-go rejects the second copy at initialization:
 
-```
+```text
 panic: proto: file "syncplane/v1/options.proto" is already registered
 ```
 
-To resolve this panic, verify that `options.proto` is an import rather than a generation target, and ensure that its `go_package` option points to `github.com/levelfourab/syncplane/engine/gen/syncplane/v1`.
+To resolve this panic, verify that `options.proto` is an import rather than a generation target. Ensure that its `go_package` option points to `github.com/levelfourab/syncplane/engine/gen/syncplane/v1`.
 
 ### Option extension type mismatch
 

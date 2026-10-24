@@ -13,51 +13,51 @@ export const file_syncplane_v1_admin: GenFile = /*@__PURE__*/
   fileDesc("ChhzeW5jcGxhbmUvdjEvYWRtaW4ucHJvdG8SDHN5bmNwbGFuZS52MSJxCg9SZWdpc3RlclJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhYKDmRlc2NyaXB0b3Jfc2V0GAIgASgMEhkKEWV4cGVjdGVkX3JldmlzaW9uGAMgASgJEhsKE2FsbG93X2FjY2Vzc19jaGFuZ2UYBCABKAgiaAoQUmVnaXN0ZXJSZXNwb25zZRIQCghyZXZpc2lvbhgBIAEoCRIsCgZzdGF0dXMYAiABKA4yHC5zeW5jcGxhbmUudjEuUmVnaXN0ZXJTdGF0dXMSFAoMZW50aXR5X25hbWVzGAMgAygJIiIKEEdldFNjaGVtYVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJIkwKEUdldFNjaGVtYVJlc3BvbnNlEhYKDmRlc2NyaXB0b3Jfc2V0GAEgASgMEhAKCHJldmlzaW9uGAIgASgJEg0KBWZvdW5kGAMgASgIKooBCg5SZWdpc3RlclN0YXR1cxIfChtSRUdJU1RFUl9TVEFUVVNfVU5TUEVDSUZJRUQQABIbChdSRUdJU1RFUl9TVEFUVVNfQ1JFQVRFRBABEhsKF1JFR0lTVEVSX1NUQVRVU19VUERBVEVEEAISHQoZUkVHSVNURVJfU1RBVFVTX1VOQ0hBTkdFRBADMqcBCgxBZG1pblNlcnZpY2USSQoIUmVnaXN0ZXISHS5zeW5jcGxhbmUudjEuUmVnaXN0ZXJSZXF1ZXN0Gh4uc3luY3BsYW5lLnYxLlJlZ2lzdGVyUmVzcG9uc2USTAoJR2V0U2NoZW1hEh4uc3luY3BsYW5lLnYxLkdldFNjaGVtYVJlcXVlc3QaHy5zeW5jcGxhbmUudjEuR2V0U2NoZW1hUmVzcG9uc2VCRlpEZ2l0aHViLmNvbS9sZXZlbGZvdXJhYi9zeW5jcGxhbmUvZW5naW5lL2dlbi9zeW5jcGxhbmUvdjE7c3luY3BsYW5ldjFiBnByb3RvMw");
 
 /**
- * Request message for registering or updating an application schema.
+ * Request to register or update an application schema.
  *
  * @generated from message syncplane.v1.RegisterRequest
  */
 export type RegisterRequest = Message<"syncplane.v1.RegisterRequest"> & {
   /**
-   * The application identifier used as a routing and storage partition key.
+   * Routing and storage partition key for the application.
    *
-   * This value is not encoded in the Protocol Buffer package, allowing
-   * different applications to define the same message names without
-   * collision. Required.
+   * This value is not encoded in the Protocol Buffer package. Different
+   * applications can define identical message names without collision.
+   * Required.
    *
    * @generated from field: string app_id = 1;
    */
   appId: string;
 
   /**
-   * The serialized `google.protobuf.FileDescriptorSet` for the application.
+   * Serialized `google.protobuf.FileDescriptorSet` for the application.
    *
-   * Must be self-contained, bundling `descriptor.proto`,
-   * `syncplane/v1/options.proto`, and the synthesized entity files, such as
-   * the output of `defineSchema(...).toBinary()`. Required.
+   * Must be self-contained and bundle `descriptor.proto`,
+   * `syncplane/v1/options.proto`, and the synthesized entity files.
+   * Required.
    *
    * @generated from field: bytes descriptor_set = 2;
    */
   descriptorSet: Uint8Array;
 
   /**
-   * An optional optimistic-concurrency guard revision.
+   * Optimistic-concurrency guard revision.
    *
    * If set, the server rejects the registration with `FAILED_PRECONDITION`
-   * unless this value matches the application's current revision. If empty,
-   * the server does not check the revision.
+   * unless this value matches the current revision of the application. If
+   * empty, the server does not check the revision.
    *
    * @generated from field: string expected_revision = 3;
    */
   expectedRevision: string;
 
   /**
-   * Allows the registration to change the access model of an entity that is
-   * already registered: its `access` or `grant` options, or the names of the
-   * enum values its role field matches.
+   * Permits changes to the access model of an already registered entity: its
+   * `access` or `grant` options, or the enum value names that its role field
+   * matches.
    *
-   * If `false`, the server rejects such a change with
-   * `FAILED_PRECONDITION`. A change makes every client resync the affected
+   * If `false`, the server rejects such changes with `FAILED_PRECONDITION`.
+   * Changing the access model causes all clients to resync the affected
    * rows.
    *
    * @generated from field: bool allow_access_change = 4;
@@ -73,16 +73,16 @@ export const RegisterRequestSchema: GenMessage<RegisterRequest> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_admin, 0);
 
 /**
- * Response message returned after a schema registration request.
+ * Result of a schema registration request.
  *
  * @generated from message syncplane.v1.RegisterResponse
  */
 export type RegisterResponse = Message<"syncplane.v1.RegisterResponse"> & {
   /**
-   * The application's schema revision after registration.
+   * Schema revision of the application after registration.
    *
-   * This is a stable hash of the canonical descriptor set bytes. Clients
-   * observe this value as `SchemaRevision`.
+   * This value is a stable hash of the canonical descriptor set bytes.
+   * Clients observe this value as `SchemaRevision`.
    *
    * @generated from field: string revision = 1;
    */
@@ -111,13 +111,13 @@ export const RegisterResponseSchema: GenMessage<RegisterResponse> = /*@__PURE__*
   messageDesc(file_syncplane_v1_admin, 1);
 
 /**
- * Request message for retrieving an application schema.
+ * Request to retrieve an application schema.
  *
  * @generated from message syncplane.v1.GetSchemaRequest
  */
 export type GetSchemaRequest = Message<"syncplane.v1.GetSchemaRequest"> & {
   /**
-   * The application identifier whose schema you want to retrieve. Required.
+   * Application identifier whose schema to retrieve. Required.
    *
    * @generated from field: string app_id = 1;
    */
@@ -132,7 +132,7 @@ export const GetSchemaRequestSchema: GenMessage<GetSchemaRequest> = /*@__PURE__*
   messageDesc(file_syncplane_v1_admin, 2);
 
 /**
- * Response message containing the requested application schema.
+ * Response containing the requested application schema.
  *
  * @generated from message syncplane.v1.GetSchemaResponse
  */
@@ -148,7 +148,7 @@ export type GetSchemaResponse = Message<"syncplane.v1.GetSchemaResponse"> & {
   descriptorSet: Uint8Array;
 
   /**
-   * The schema revision string of the registered application.
+   * Schema revision of the registered application.
    *
    * This field is empty if `found` is `false`.
    *
@@ -157,10 +157,8 @@ export type GetSchemaResponse = Message<"syncplane.v1.GetSchemaResponse"> & {
   revision: string;
 
   /**
-   * Whether the application schema was found.
-   *
-   * Set to `true` if the application exists and schema descriptors are
-   * returned, or `false` if the application is unknown.
+   * `true` if the application exists and schema descriptors are returned, or
+   * `false` if the application is unknown.
    *
    * @generated from field: bool found = 3;
    */
@@ -175,35 +173,35 @@ export const GetSchemaResponseSchema: GenMessage<GetSchemaResponse> = /*@__PURE_
   messageDesc(file_syncplane_v1_admin, 3);
 
 /**
- * The result status of a schema registration request.
+ * Outcome of a schema registration request.
  *
  * @generated from enum syncplane.v1.RegisterStatus
  */
 export enum RegisterStatus {
   /**
-   * Default unspecified status. Do not use.
+   * Default value. Do not use.
    *
    * @generated from enum value: REGISTER_STATUS_UNSPECIFIED = 0;
    */
   UNSPECIFIED = 0,
 
   /**
-   * Indicates that a new application was registered.
+   * The server registered a new application.
    *
    * @generated from enum value: REGISTER_STATUS_CREATED = 1;
    */
   CREATED = 1,
 
   /**
-   * Indicates that an existing application's schema was additively updated.
+   * The server additively updated an existing application schema.
    *
    * @generated from enum value: REGISTER_STATUS_UPDATED = 2;
    */
   UPDATED = 2,
 
   /**
-   * Indicates that the submitted schema was identical to the registered
-   * schema, resulting in no changes.
+   * The submitted schema was identical to the registered schema. The server
+   * made no changes.
    *
    * @generated from enum value: REGISTER_STATUS_UNCHANGED = 3;
    */
@@ -219,30 +217,24 @@ export const RegisterStatusSchema: GenEnum<RegisterStatus> = /*@__PURE__*/
 /**
  * Manages runtime schema registration on a trusted server-side control plane.
  *
- * This service is separate from `SyncService` so that you can bind it to a
- * private interface instead of the public synchronization surface that
- * browsers access. Every call requires authorization through a
- * `RegisterAuthorizer` (deny-by-default), such as the built-in
- * `TokenAuthorizer` that checks a bearer token.
+ * This service is separate from `SyncService`. Every call requires
+ * authorization (deny-by-default), such as a bearer token.
  *
  * @generated from service syncplane.v1.AdminService
  */
 export const AdminService: GenService<{
   /**
-   * Registers or evolves an application's schema to serve full CRUD
-   * synchronization.
+   * Registers or evolves an application schema for CRUD synchronization.
    *
-   * Takes a serialized `google.protobuf.FileDescriptorSet`, persists it,
-   * and updates the application entities. This operation is idempotent:
-   * - Registering an app that was not registered before returns
+   * This operation is idempotent:
+   * - Registering an application that was not registered before returns
    *   `REGISTER_STATUS_CREATED`.
    * - Submitting an additive evolution returns `REGISTER_STATUS_UPDATED`.
    * - Submitting an identical schema returns `REGISTER_STATUS_UNCHANGED`.
    *
-   * The server rejects conflicting schema changes. If
-   * `expected_revision` is set and does not match the application's
-   * current revision, the server rejects the call with
-   * `FAILED_PRECONDITION`.
+   * The server rejects conflicting schema changes. If `expected_revision` is
+   * set and does not match the current application revision, the server
+   * rejects the call with `FAILED_PRECONDITION`.
    *
    * @generated from rpc syncplane.v1.AdminService.Register
    */
@@ -254,10 +246,8 @@ export const AdminService: GenService<{
   /**
    * Retrieves the persisted descriptor set for an application.
    *
-   * Clients can use this descriptor set to rebuild descriptors directly from
-   * the server instead of importing a schema bundle. If the application is
-   * unknown, the server returns a response with `found` set to `false` and
-   * an empty `descriptor_set`.
+   * If the application is unknown, the server returns a response with
+   * `found` set to `false` and an empty `descriptor_set`.
    *
    * @generated from rpc syncplane.v1.AdminService.GetSchema
    */

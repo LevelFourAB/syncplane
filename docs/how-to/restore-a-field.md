@@ -8,7 +8,7 @@ Before you begin, ensure you have:
 
 - A Syncplane server and TypeScript client configured in your project.
 - An entity defined with Protocol Buffers (Protobuf).
-- Active network connectivity to the server.
+- Network connectivity to the server.
 
 ## 1. Opt the entity into field history
 
@@ -28,7 +28,7 @@ message Issue {
 }
 ```
 
-Field capture is explicit: the server records only marked fields. An entity that opts into history without marking at least one field is rejected at registration. Unmarked fields, such as `sort_key`, do not generate history records when modified.
+Field capture is explicit: the server records only marked fields. The engine rejects the entity at registration if it opts into history without marking at least one field. Unmarked fields, such as `sort_key`, do not generate history records when modified.
 
 The engine registers the history entity (`syncplane.v1.FieldHistory`, wire name `syncplane_field_history`) when an entity opts in. The server captures changes across all write paths, including client pushes, mutators, connectors, and trusted writes.
 
@@ -49,7 +49,7 @@ const client = new SyncClient({
 });
 ```
 
-Registering the entity does not sync local rows or require a re-bootstrap. Do not add `FieldHistorySchema` to subscription sets, because subscribing to a server-only entity throws an error.
+Registering the entity does not sync local rows or require a re-bootstrap. Do not add `FieldHistorySchema` to subscription sets. Subscribing to a server-only entity throws an error.
 
 ## 3. Read the history log
 
@@ -63,7 +63,7 @@ const log = await client.queryServer(FieldHistorySchema, {
 });
 ```
 
-`queryServer` requires active network connectivity. Field history is not cached locally, so history cannot be read offline.
+`queryServer` requires network connectivity. Field history is not cached locally. You cannot read history offline.
 
 The server checks permissions using the read filter of the source row. A user who cannot read `issue/i-42` receives no history records for that row. You do not need to register a separate filter for the history entity.
 
@@ -73,7 +73,7 @@ Each returned history row provides the following fields:
 - `actorSubject`: The user who made the change, or `actorSystem` if written by the engine or a connector.
 - `mask.paths`: The fields that changed during the session.
 
-An entry represents an editing session rather than an individual write. Sequential writes to one row by the same actor fold into a single record. `prior` holds the values before the session began, `seq` through `throughSeq` specifies the sequence range, and `writes` contains the number of folded writes. You can configure the session window using [`WithHistorySession`](../reference/server.md#field-history).
+An entry represents an editing session rather than an individual write. Sequential writes to one row by the same actor fold into a single record. The `prior` field holds the values before the session began. The fields `seq` through `throughSeq` specify the sequence range. The `writes` field contains the number of folded writes. You can configure the session window using [`WithHistorySession`](../reference/server.md#field-history).
 
 ## 4. Restore the field value
 
@@ -89,15 +89,15 @@ await client.mutate.patch(IssueSchema, issueId, prior, {
 });
 ```
 
-In Go, call `tx.Patch(prior, rec.GetMask().GetPaths(), nil)`. If the entity contains a text field, pass `server.WithTextPeer(...)` to specify the identity under which the restored edits are minted.
+In Go, call `tx.Patch(prior, rec.GetMask().GetPaths(), nil)`. If the entity contains a text field, pass `server.WithTextPeer(...)` to specify the identity that mints the restored edits.
 
-Restoring a collaborative text field requires an implementation that resolves the recorded value into edits, such as the TypeScript client or server-side Go. A direct RPC client can restore non-text fields by removing the text field from the mask, leaving text field restoration to a server-side handler. See [Write from server-side code](server-side-writes.md#writing-collaborative-text).
+Restoring a collaborative text field requires an implementation that resolves the recorded value into edits, such as the TypeScript client or server-side Go. A direct RPC client can restore non-text fields by removing the text field from the mask. That client leaves text field restoration to a server-side handler. See [Write from server-side code](server-side-writes.md#writing-collaborative-text).
 
 To display a recorded value without restoring it, read text fields with `plainTextOf` (in Go, `text.PlainText`).
 
 ## 5. Show before and after values
 
-A history record contains the value a field had before the write. The value it changed to is the next newer recorded value or the live row. To construct a timeline, query records in descending order and fold each record's `prior` value back over a cursor:
+A history record contains the value a field had before the write. The resulting value is the next newer recorded value or the live row. To construct a timeline, query records in descending order and fold each record's `prior` value back over a cursor:
 
 ```ts
 import { mergeMask } from 'syncplane';

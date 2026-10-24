@@ -79,11 +79,11 @@ The `SyncClientOptions<E extends readonly DescMessage[]>` interface accepts the 
 | `debugVerifyIndexReads`   | `boolean`                                      | Optional | `SYNC_DEBUG_VERIFY_TOUCHES` value       | Cross-checks index queries against scans and throws on divergence.                                                                                              |
 
 The store retains only the entities declared in `entities`.
-Rows for undeclared schemas received from the server are discarded.
+The client discards rows for undeclared schemas received from the server.
 Adding an entity to a later build triggers a one-time re-bootstrap of the workspace ([why](../explanation/convergence-model.md#a-client-holds-only-the-entities-it-declares)).
 
 The client invokes callbacks in isolation.
-Errors thrown inside callbacks are logged to `console.error` and ignored.
+The client logs errors thrown inside callbacks to `console.error` and ignores them.
 They do not fail the synchronization cycle and do not interrupt subsequent callbacks.
 A throwing `onSchemaSkew` handler defaults to `'warn'`.
 
@@ -116,7 +116,7 @@ A closed client throws `"SyncClient is closed"` and cannot be reopened.
 Create a new instance instead.
 
 `purgeLocalData()` stops synchronization, deletes all account data (workspace rows, overlay, staging, cursors, queues, and `clientId`), and closes the client.
-Queued mutations are discarded rather than pushed, returned in the result array, and emitted to `onMutationRejected` with code `workspace_purged`.
+The client discards queued mutations rather than pushing them, returns them in the result array, and emits them to `onMutationRejected` with code `workspace_purged`.
 The IndexedDB database remains in place and empty.
 Calling `purgeLocalData()` on a closed client returns an empty array.
 See [Wipe local data on sign-out](../how-to/sign-out.md).
@@ -146,7 +146,7 @@ A `WorkspaceClient` binds reads, `mutate`, `db`, `transact`, `text`, `hold`, `un
 Cross-workspace reads (`scanAll`, `queryAll`, `watchQueryAll`) remain on the root client and label each row with its `workspaceId`.
 
 When `purge` is `true` in `removeWorkspace`, the client deletes the workspace's local rows, overlay, cursors, and mutation queue.
-Queued mutations are returned in `discarded` and sent to `onMutationRejected` with code `workspace_purged`.
+The client returns queued mutations in `discarded` and emits them to `onMutationRejected` with code `workspace_purged`.
 Removing the default workspace leaves the client without a default.
 
 ## Reads
@@ -306,8 +306,8 @@ interface Row<T = unknown> {
 - `hidden` names, by accessor name with a oneof by its own name, the fields the server did not send because a [field guard](proto-options.md#who-reads-a-guarded-field) hides them from the caller. Each reads as its zero value in `value`. The property is absent when the caller reads every field. It follows the server-confirmed row, so a local write does not remove a name from it, and a watcher receives a new `Row` when it changes.
 - A text handle on a hidden field rejects with an `Error` when it opens.
 - `queryServer` queries the server directly without merging local overlay state.
-  Results are not cached locally and do not update watchers.
-  Unavailable inside `transact`.
+  The client does not cache results locally, and results do not update watchers.
+  The method is unavailable inside `transact`.
   A [secondary index](proto-options.md#secondary-indexes) serves server queries when one matches the predicate and ordering.
 
 ## Writes and mutations
@@ -338,7 +338,7 @@ Write methods:
   Does not create rows; patching an absent row produces no local change and rejects with `conflict`.
 - `update`: Reads the row, passes a draft to `recipe`, and patches fields modified by the recipe.
 - `create`: Facade-only method. Performs a `put` with an auto-generated time-ordered ID when the key is omitted or empty.
-- `custom`: Invokes a server-registered mutator by name. Clears undo and redo stacks. Not available on the entity facade and cannot be batched inside transactions.
+- `custom`: Invokes a server-registered mutator by name. Clears undo and redo stacks. Not available on the entity facade, and transactions cannot batch it.
 
 ### Which write verb
 
@@ -370,7 +370,7 @@ await client.db.todo.mutate.update(id, (t) => {
 
 Behavior rules:
 
-- When no fields are modified by `recipe`, no mutation is queued.
+- When `recipe` modifies no fields, the client queues no mutation.
 - When the target row is absent, `update` throws an error.
 - The `recipe` function must execute synchronously. Modifying key fields throws an error.
 - Inside `transact`, the draft reflects row state before the batch began.
@@ -433,9 +433,9 @@ Behavior rules:
 
 - Writes made through `tx` collect into a single `BatchMutation`.
 - Reads on `tx` see pre-batch state. Buffered writes are invisible until the callback resolves.
-- If the callback throws, the entire batch is discarded.
-- Scoping is lexical by handle: writes issued on `client.mutate.*` during an await are not captured in the batch.
-- `tx` supports read operations, `tx.mutate` (CRUD operations only), and `tx.db`. Custom mutators are not supported in transactions.
+- If the callback throws, the client discards the entire batch.
+- Scoping is lexical by handle: the batch does not capture writes issued on `client.mutate.*` during an await.
+- `tx` supports read operations, `tx.mutate` (CRUD operations only), and `tx.db`. Transactions do not support custom mutators.
 
 ## Queries
 
@@ -511,7 +511,7 @@ Facet behavior rules:
 - **Execution costs**:
   - In one-shot queries (`query`, `queryAll`, `queryServer`), computing facets reads all matching rows rather than only the paged limit.
   - In live queries (`watchQuery`, `watchQueryAll`, and hooks), counts update incrementally from changed rows on each commit without additional reads.
-- **Server limit**: Requests specifying more facet axes than the server limit `MaxQueryFacets` are rejected by the server.
+- **Server limit**: The server rejects requests that specify more facet axes than the server limit `MaxQueryFacets`.
 
 ### Paging: after and before
 
@@ -541,7 +541,7 @@ Pagination rules:
 - Cursors are bound to the `(entity, orderBy)` combination that generated them. Using a cursor with a different entity or ordering throws `CursorShapeError`.
 - `query` and `queryServer` accept the same cursors.
 - Setting `offset` alongside `after` or `before` throws an error.
-- Cursors are unsupported on `queryAll` and `watchQueryAll`.
+- `queryAll` and `watchQueryAll` do not support cursors.
 
 ### Operator surface by field type
 
@@ -680,7 +680,7 @@ The query engine uses consistent ordering and type semantics across client and s
 - **`NaN` comparisons**: The `gt`, `gte`, `lt`, and `lte` operators return `false` when comparing against `NaN`, matching the behavior of `eq`. Ordering ranks values in the order `real < NaN < missing`. Both `NaN` and missing values sort at the end under both `asc` and `desc` directions.
 - **Collation**: String ordering uses UTF-16 collation across client and server environments.
 - **Collaborative text**: Collaborative text fields query against their visible string representation (for example, `where: (d) => d.body.contains('word')`).
-- **Lone surrogates**: A string with a lone surrogate is converted to U+FFFD on the server.
+- **Lone surrogates**: The server converts a string with a lone surrogate to U+FFFD.
 
 ### Underlying AST types (exported)
 
@@ -758,7 +758,7 @@ const view = client.db.issue.watchGroupRows(q, (groups) => {});
 ```
 
 Re-executes per commit and fires when groups, member rows, totals, or `hasMore` flags change.
-Returned rows are decoded independently per read.
+The watcher decodes returned rows independently per read.
 
 ### Watching rows by key: watchRows
 
@@ -1197,7 +1197,7 @@ Validation rules:
 - Setting `orderBy` or `byRecency` without `limit` throws an error.
 - Supplying a non-positive or non-integer `limit` throws an error.
 - Supplying both `orderBy` and `byRecency` throws an error.
-- Window sizes exceeding the server maximum (`MaxWindowSize`, [default 1000](server.md)) are rejected by the server.
+- The server rejects window sizes that exceed the server maximum (`MaxWindowSize`, [default 1000](server.md)).
 - See [Partial sync and coverage](../explanation/partial-sync-and-coverage.md).
 
 ### Key sets: naming a subscription's rows
@@ -1216,7 +1216,7 @@ Validation rules:
 
 - Supplying `keys` together with `where`, `limit`, `orderBy` or `byRecency` throws an error.
 - Supplying an empty key, or one with a control character, throws an error.
-- Sets exceeding the server maximum (`MaxSubscriptionKeys`, [default 1000](server.md)) are rejected by the server.
+- The server rejects sets that exceed the server maximum (`MaxSubscriptionKeys`, [default 1000](server.md)).
 
 ### Holds: one row in scope on demand
 
@@ -1465,11 +1465,11 @@ A rule can also set checks on the row: `callerIs` names a `text()` field by acce
 `access.guard` lists field guards, each `{ fields, allow }`: `fields` names the fields the guard restricts by accessor name, and `allow` holds rules with the shape of `access.allow` except `delete` and `fields`. A guard with the read rule `{ read: true, admitted: true }` shows its fields to every reader of the row; a narrower read rule, or none, hides them from some readers or from all. A guard lowers to `syncplane.v1.FieldGuard`; see [Field guards](proto-options.md#field-guards). `entity()` throws on a guard that names a key field, a field that `parents` names, a `.creator()` field or a field another guard names, on a guard rule whose `callerIs` or `when` reads a guarded field, and on a guard that can hide a field a rule in `allow` checks with `callerIs` or `when`, or the `grant.subject` or `grant.role` field.
 Each role sets `grants`, `includes` or both. `includes` names roles of the same `grant`, and the role grants every permission of each of them.
 `entity()` throws on the rules that concern one entity. `defineSchema()` also throws on a parent that references an entity without `access`, a `grant.subject` reference to an entity without `members`, and a `members` option that does not name a grant entity of the schema whose one access parent is the team entity and whose subject is a `text()` field. The server checks the remaining rules that span entities, such as permission coverage and unique role names, when the schema is registered.
-TypeScript checks the field names in `parents`, `subject`, `fields`, `grant.subject` and `grant.role` against the entity's fields: `subject` and `grant.role` take a `text()` field, and `grant.subject` a `text()` field or a singular reference. Lists such as `grants`, `includes` and `fields` take `readonly` arrays. To share rules between entities, declare them with `satisfies schema.AccessDecl`, not with an `AccessDecl` annotation, which takes any name and does not fit an entity's options.
+TypeScript checks the field names in `parents`, `subject`, `fields`, `grant.subject` and `grant.role` against the entity's fields: `subject` and `grant.role` take a `text()` field, and `grant.subject` a `text()` field or a singular reference. Lists such as `grants`, `includes` and `fields` take `readonly` arrays. To share rules between entities, declare them with `satisfies schema.AccessDecl`, not with an `AccessDecl` annotation, because the annotation takes any name and does not fit an entity's options.
 
 `put`, `patch`, `update` and `del` reject with an `Error` before they change local state when the write can only be an operation that no rule of the entity names: `del` without a delete rule, `patch` and `update` without an update rule, `put` with `expectedVersion: 0n` without a create rule, `put` with another `expectedVersion` without an update rule, and `put` with no `expectedVersion` when no rule names create or update. See [Operations no rule admits](proto-options.md#operations-no-rule-admits).
 
-`patch` and `update` also reject with an `Error` when they name a field whose guard has no rule for `update`, or a `.creator()` field. `put` keeps the local value of such a field in the optimistic row, and the zero value of a guarded field whose guard has no rule for `create` on a new row. A guard rule that admits only some callers is decided by the server: the write is queued, and a refused `patch` comes back as a rejection ack.
+`patch` and `update` also reject with an `Error` when they name a field whose guard has no rule for `update`, or a `.creator()` field. `put` keeps the local value of such a field in the optimistic row, and the zero value of a guarded field whose guard has no rule for `create` on a new row. The server decides a guard rule that admits only some callers: the client queues the write, and a refused `patch` comes back as a rejection ack.
 
 #### Predicting access
 
@@ -1761,10 +1761,10 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
 ### The hooks
 
 - **`useQuery(query, opts?)`** — the query is compiled and structurally hashed on
-  every render instead of taking a deps array: a structurally equal query (new
+  every render: a structurally equal query (new
   lambdas included) reuses the subscription, a changed one resubscribes. The
   result is the same `coverage`-carrying array `client.query` returns, and it
-  keeps its reference until the rows actually change, so a memoized child does
+  keeps its reference until the rows change, so a memoized child does
   not re-render on unrelated commits.
 
   It also carries `loading`, `hydrating` and `error` — non-enumerable, like
@@ -1778,21 +1778,20 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   ```
 
   `loading` is true until the first callback — the only way to tell "not read
-  yet" from "read, and there is nothing", since both are `[]`. `hydrating` is
+  yet" from "read, and empty", since both are `[]`. `hydrating` is
   the same question one level out: a cold client's first snapshot lands entity
   by entity, so a result can be read, empty, and still on its way. Guard an
-  empty state with both. `error` is set when the subscription could not be
-  established at all (the store never came up), which means no rows will ever
-  arrive; rows already delivered stay put. `{ include }` hydrates references and
-  is folded into the subscription identity.
+  empty state with both. Setting `error` means the subscription could not be
+  established at all (the store never came up): no rows will ever
+  arrive; rows already delivered stay. `{ include }` hydrates references and
+  is part of the subscription identity.
 
 - **`useQueryAll(query, opts?)`** — the same read across workspaces, as one
-  subscription rather than one per workspace: every workspace the client holds,
+  subscription: every workspace the client holds,
   or the set `opts.workspaces` names. Each row carries the `workspaceId` it came
   from, which is what groups the result and routes a write back through
-  `client.ws(row.workspaceId)`. Reach for it when the workspaces are a list the
-  app learns at runtime: a hook per workspace is a hook count that depends on the
-  data, which hooks cannot have. It takes no `workspaceId` and has no suspense
+  `client.ws(row.workspaceId)`. Use it when the workspaces are a list the
+  app learns at runtime. It takes no `workspaceId` and has no suspense
   flavor. See [Hold several workspaces on one client](../how-to/multiple-workspaces.md).
 
   ```tsx
@@ -1802,8 +1801,7 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   const byWorkspace = Map.groupBy(everywhere, (row) => row.workspaceId);
   ```
 
-  `opts.workspaces` narrows the read to workspaces you name, which is what makes
-  a subset view exact rather than read-everything-then-filter: only those
+  `opts.workspaces` narrows the read to workspaces you name: only those
   workspaces are read, and `total` counts only them. It joins the subscription
   identity as a **set**, so a fresh array literal per render is fine and only a
   changed set resubscribes. Cross-workspace reads use
@@ -1827,19 +1825,18 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   [Hold several workspaces on one client](../how-to/multiple-workspaces.md).
 
 - **`useRow(key, opts?)`** — `{ row, loading, hydrating, error, patch, update,
-  del }`, where the writers go through per-field last-writer-wins like every
+  del }`, where writers use per-field last-writer-wins like every
   other mutate call. Pass `{ cas: true }` to guard one on the row's current
   `version` (see [compare-and-swap](#compare-and-swap)). They
-  reject with a clear error while the row is undefined, and
-  `loading`/`hydrating` separate the reasons it can be undefined — the entity
-  has not been read yet, its rows are still arriving, or it has all of them and
+  reject with a clear error while the row is undefined.
+  `loading`/`hydrating` separate the three reasons the row can be undefined:
+  not read yet, rows still arriving, or all rows here and
   this key is not one.
 
-  Every `useRow` on the same workspace, entity and `include` shares **one**
-  subscription, which reads exactly the keys those hooks hold. A list of row
-  hooks therefore costs one watch and one point read per row — nothing about it
-  scales with how big the entity is — and a commit re-renders only the hooks
-  whose own row moved.
+  All `useRow` hooks on the same workspace, entity and `include` share one
+  subscription that reads exactly the keys those hooks hold. A list of row
+  hooks costs one watch and one point read per row; nothing scales with
+  entity size. A commit re-renders only hooks whose own row moved.
 
   Pass `{ hold: true }` to keep the row in scope while the component is
   mounted, for a row the declared subscriptions do not cover (see
@@ -1848,9 +1845,8 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
 
 - **`useRows(keys, opts?)`** — the same subscription, read as a set: one result
   slot per key, in the order given, `undefined` where a key names no row.
-  `loading` stays true until every key has been answered. Reach for it when the
-  keys come from data rather than from the component tree, since a list of
-  `useRow` calls cannot change length between renders.
+  `loading` is true until every key is answered. Use it when the
+  keys come from data.
 
   ```tsx
   const selected = db.todo.useRows(selectedIds);
@@ -1859,13 +1855,13 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   );
   ```
 
-  Growing `keys` reads the added keys alone; the rows already held are not
+  Growing `keys` reads only the added keys; held rows are not
   re-read, and the returned array keeps its identity while nothing in it moves.
 
 - **`useRowsAll(refs, opts?)`** — `useRows` over rows named by workspace **and**
   key, so one call site can hold rows from several workspaces at once. This is
   the cross-workspace read `useQueryAll` cannot express: a set assembled outside
-  the entity — a personal task list, a pinned set, ids stored somewhere else —
+  the entity — a personal task list, a pinned set, ids stored elsewhere —
   that no predicate describes. The same key in two workspaces is two refs and
   two slots.
 
@@ -1888,11 +1884,8 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
 
 - **`useSuspenseQuery(query, opts?)` / `useSuspenseRow(key, opts?)` /
   `useSuspenseRows(keys, opts?)`** — the same
-  hooks, waiting for the first callback instead of reporting `loading`. They are
-  separate hooks rather than an option because the choice picks a fixed hook path
-  and must not change between renders of a call site. A subscription that fails
-  throws here for the nearest error boundary, since a suspended component has no
-  render to carry an error state.
+  hooks, waiting for the first callback instead of reporting `loading`. A
+  subscription that fails throws to the nearest error boundary.
 
 - **`useMutate(opts?)`** — the stable `{ put, patch, update, del }` facade.
   Mutations are optimistic, so these promises resolve on **local** commit; a
@@ -1925,24 +1918,23 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   can be edited without a scope change.
 
 - **`useCan(schema, key, operation, opts?)`** — `client.can` as a hook. `opts`
-  takes `fields`, `detail` and `workspaceId`. Asks again when an access input in
-  the row changes (whether the row is held, its access parent, or a field that
-  a check of the access rules or field guards reads: a `callerIs` field, a field
+  takes `fields`, `detail` and `workspaceId`. Re-asks when an access input of
+  the row changes: whether the row is held, its access parent, or a field that
+  a check of the access rules or field guards reads (a `callerIs` field, a field
   a `when` condition reads, and the same for a `within` entry on the entity
-  itself) and when `onAccessChange` reports the workspace. For a `'delete'`,
-  it also asks again when a row is written of an entity whose rows can name
-  the row as their access parent or their subject. A change
-  of any other field of the row does not ask again. The first render gives an
-  answer at once: `'yes'` or `'no'` when the summary the client read last
-  decides it without a row, else the answer the same question got last in this
-  client, else `'unknown'`. An answer from the client's memory can be out of
-  date until the hook's first read of the store finishes. With
-  `{ detail: true }`, the hook returns a `CanDetail`, whose reason is
+  itself), and when `onAccessChange` reports the workspace. For a `'delete'`,
+  it also re-asks when a row is written of an entity whose rows can name
+  the row as their access parent or their subject. Any other field change
+  does not re-ask. The first render answers at once: `'yes'` or `'no'`
+  when the summary the client read last decides it without a row, else the answer
+  the same question got last in this client, else `'unknown'`. An answer from
+  memory can be out of date until the hook's first read of the store finishes.
+  With `{ detail: true }`, the hook returns a `CanDetail`, whose reason is
   `'loading'` before that first read. See
   [Predicting access](#predicting-access).
-  **`useCanCreate(schema, row, opts?)`** — `client.canCreate` as a hook; asks
-  again when `row` changes by value. **`useHasPermission(schema, key,
-  permission, opts?)`** — `client.hasPermission` as a hook; asks again as
+  **`useCanCreate(schema, row, opts?)`** — `client.canCreate` as a hook; re-asks
+  when `row` changes by value. **`useHasPermission(schema, key,
+  permission, opts?)`** — `client.hasPermission` as a hook; re-asks as
   `useCan` does, except that the fields the checks read are not inputs. Both take
   `detail` and `workspaceId`, and start as `useCan` does.
 
@@ -1968,8 +1960,8 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   reference do not.
 
 All of them are built on `useSyncExternalStore` with an SSR snapshot, and
-nothing hands out a mutable row: results are readonly, which is what makes the
-snapshot stable and tearing-free.
+nothing hands out a mutable row: results are readonly, and snapshots are stable
+and tearing-free.
 
 ### Workspace resolution
 

@@ -27,9 +27,9 @@ type Incremental interface {
 // Optional, on the value returned by Config.OpenSource: io.Closer.
 ```
 
-Every method accepts `workspaceID`, including when `OpenSource` creates one source per workspace.
+Every method accepts `workspaceID`, even when `OpenSource` creates one source per workspace.
 
-Delivery is at-least-once in both directions. `Write` must be an idempotent upsert, and `Delete` must treat a missing item as a no-op.
+Delivery is at-least-once in both directions. `Write` must be an idempotent upsert. `Delete` must treat a missing item as a no-op.
 
 ### Item
 
@@ -78,7 +78,7 @@ type Binding struct {
 }
 ```
 
-`Config.Entities` is a shorthand for all `Bidirectional` bindings. `Config.Bindings` defines explicit bindings. The connector merges both fields. Binding the same entity in both fields causes an error.
+`Config.Entities` binds entities bidirectionally. `Config.Bindings` defines bindings with an explicit `Direction`. The connector merges both fields. Binding the same entity in both fields causes an error.
 
 ## Config
 
@@ -95,11 +95,11 @@ The `Config` struct contains the following fields:
 | `BatchSize`                   | `256`                  | The number of rows per change-feed page during egress.                                                                                                                                                                              |
 | `Workers`                     | `16`                   | The number of concurrent passes across all workspaces.                                                                                                                                                                              |
 | `ReconcileInterval`           | `1m`                   | The interval between workspace passes and discovery sweeps. A negative value disables periodic passes while discovery sweeps continue at `1m` intervals. For an `Incremental` source, this sets the polling interval for `Changes`. |
-| `FullReconcileInterval`       | `1h`                   | The maximum time an `Incremental` source runs using cursor changes before a full `List` pass runs. A negative value runs a full pass only on `ErrCursorInvalid` or a missing cursor. Ignored for non-incremental sources.           |
+| `FullReconcileInterval`       | `1h`                   | The maximum time an `Incremental` source runs using cursor changes before a full `List` pass runs. A negative value runs a full pass only on `ErrCursorInvalid` or a missing cursor. Non-incremental sources ignore this setting.   |
 | `RetryMin` / `RetryMax`       | `5s` / `5m`            | The per-workspace backoff bounds after a failed pass. A negative `RetryMin` disables backoff.                                                                                                                                       |
 | `IngestChunk` / `IngestPause` | `0` / `0` (disabled)   | The pause duration after every `IngestChunk` writes during an ingress pass. Only writes count toward the chunk count.                                                                                                               |
 | `OnHealth`                    | `nil`                  | A callback invoked with the workspace `Health` status after each pass on the calling goroutine.                                                                                                                                     |
-| `Workspaces`                  | Engine workspace list  | The list of workspaces that `Start` manages, re-evaluated on every sweep. Any workspace omitted from the list is dropped. Provide this function for source-first workspaces.                                                        |
+| `Workspaces`                  | Engine workspace list  | The list of workspaces that `Start` manages, re-evaluated on every sweep. The connector drops any workspace omitted from the list. Provide this function for source-first workspaces.                                               |
 | `WriterID`                    | Per-instance unique ID | The collaborative-text writer identity for the connector. Set a fixed value to maintain identity across restarts. Do not share this value between connectors running concurrently.                                                  |
 | `Logger`                      | `slog.Default()`       | The logger for background loops.                                                                                                                                                                                                    |
 
@@ -158,11 +158,11 @@ func (c *Connector) Health(workspaceID string) (Health, bool)
 func (c *Connector) HealthAll() []Health
 ```
 
-The connector updates the `Health` entry for a workspace after every scheduled or direct pass. When a workspace is no longer managed through `Forget` or removal from `Config.Workspaces`, the connector deletes its health record. Any error not marked with `ErrNeedsUserAction` is classified as `FailureTransient`.
+The connector updates the `Health` entry for a workspace after every scheduled or direct pass. When a workspace is removed from `Config.Workspaces` or stopped with `Forget`, the connector deletes its health record. The connector classifies any error not marked with `ErrNeedsUserAction` as `FailureTransient`.
 
 ## State
 
-`State` provides reconstructible cache storage. If state data is lost, the connector requires a full reconciliation pass without data loss.
+`State` provides reconstructible cache storage. If state data is lost, a full reconciliation pass restores it without data loss.
 
 The `State` interface defines the following methods:
 
@@ -190,4 +190,4 @@ The state store manages the following types:
 
 Implementations do not require cross-row transactions. The connector orders write operations so recovery from crashes occurs during redelivery or reconciliation.
 
-Store the egress `server.Cursor` value in full, including `Epoch` and across all 64 bits. The `Epoch` field identifies the engine store instance to prevent egressing rows if a database is swapped at the same address. For more information, see [Falling behind](../explanation/effects-and-the-change-feed.md#tombstone-horizons-and-falling-behind). A cursor value of `0` indicates an unknown lineage and skips validation.
+Store the egress `server.Cursor` value in full, including `Epoch` and across all 64 bits. The `Epoch` field identifies the engine store instance; see [Falling behind](../explanation/effects-and-the-change-feed.md#tombstone-horizons-and-falling-behind). A cursor value of `0` indicates an unknown lineage and skips validation.

@@ -19,7 +19,7 @@ Before you configure partial sync, ensure that you have:
    	subscriptions: [
    		// Predicate scope: every open todo.
    		subscription(TodoSchema, (t) => t.completed.eq(false)),
-   		// Rank scope: the 500 most recently changed comments, whatever they are.
+   		// Rank scope: the 500 most recently changed comments.
    		subscription(CommentSchema, undefined, { limit: 500, byRecency: true }),
    		// Rank scope by a field: the top 100 issues by priority.
    		subscription(IssueSchema, (i) => i.state.eq('open'), {
@@ -34,11 +34,11 @@ Before you configure partial sync, ensure that you have:
 
    You can scope subscriptions in four ways:
    - **Predicate scope**: Match records that satisfy a condition.
-   - **Window scope by recency**: Limit records by recent changes with `{ limit: <count>, byRecency: true }`. This is the cheapest ordering to maintain because ranking by write sequence requires no field comparison.
+   - **Window scope by recency**: Limit records by recent changes with `{ limit: <count>, byRecency: true }`. Ranking by write sequence is the cheapest scope ordering to maintain, because it needs no field comparison.
    - **Window scope by field**: Limit records ordered by field values with `{ limit: <count>, orderBy: ... }`.
-   - **Key scope**: Name the records by row key with `{ keys: [...] }`. Use it for a set no field expresses, such as the documents a user pinned for offline use, next to a predicate subscription that syncs the metadata of every document.
+   - **Key scope**: Name records by row key with `{ keys: [...] }`. Use this for sets that no field expresses, such as documents pinned for offline use, alongside a predicate subscription for the metadata of every document.
 
-   A `limit` makes a subscription windowed. `orderBy` or `byRecency` decides which rows win ranks, ties break on row key, and the server bounds the cap with `MaxWindowSize` (default 1000). A key scope holds only the named rows: the keys are the row keys `get()` takes, an empty array names no rows, and the server bounds the set with `MaxSubscriptionKeys` (default 1000). `keys` cannot combine with `where` or `limit`; `include` works with all of them. An empty subscription set syncs the full workspace.
+   A `limit` makes a subscription windowed. The `orderBy` or `byRecency` option determines row rank, and ties break on row key. The server bounds the cap with `MaxWindowSize` (default 1000). A key scope holds only the named rows. The keys match the row keys that `get()` accepts, an empty array names no rows, and the server bounds the set with `MaxSubscriptionKeys` (default 1000). You cannot combine `keys` with `where` or `limit`. The `include` option works with all scopes. An empty subscription set syncs the full workspace.
 
 2. Update subscriptions when the required scope changes.
    If you need to change subscriptions after initialization, call `setSubscriptions`:
@@ -52,10 +52,10 @@ Before you configure partial sync, ensure that you have:
    ]);
    ```
 
-   Changing the subscription set delta-resyncs the difference without re-bootstrapping. For a key scope the server reads only the rows named on either side of the change.
+   Changing the subscription set delta-resyncs the difference without re-bootstrapping. For a key scope, the server reads only the rows named on either side of the change.
 
 3. Check coverage on local reads.
-   A client with scoped data cannot answer local queries ordered differently than the subscription scope. Check `coverage.complete` on query results:
+   A client with scoped data cannot answer local queries ordered differently from the subscription scope. Check `coverage.complete` on query results:
 
    ```ts
    const rows = await client.db.issue.query({
@@ -70,10 +70,10 @@ Before you configure partial sync, ensure that you have:
 
    If `rows.coverage.complete` is `false`, handle the bounds:
    - If bounds include `unsubscribed`, `predicate`, or `window`, call `queryServer` to fetch full results from the server. A key scope reports `predicate`.
-   - If the bound is `hydrating`, display a loading state instead of querying the server. The initial snapshot lands entity by entity, and readers re-fire when the snapshot fills. `bootstrapPriority` decides which entities land first, and `status().workspaces[id].hydration` reports outstanding entities.
+   - If the bound is `hydrating`, display a loading state instead of querying the server. The initial snapshot lands entity by entity. Readers re-fire when the snapshot fills. `bootstrapPriority` determines which entities land first, and `status().workspaces[id].hydration` reports outstanding entities.
 
 4. Bring one row into scope on demand.
-   A row found by `queryServer` is a snapshot: it is not stored locally, so it cannot be watched or edited. Hold it to sync it while it is open:
+   A row returned by `queryServer` is a snapshot. The client does not store it locally, so you cannot watch or edit it. To sync the row while open, hold it:
 
    ```ts
    const hits = await client.db.document.queryServer({
@@ -87,11 +87,11 @@ Before you configure partial sync, ensure that you have:
    hold.release();
    ```
 
-   The row arrives on the next sync cycle and stays until the last hold on it is released, plus `holdGraceMs` (default 30 seconds). In React, `useRow(key, { hold: true })` and `useText(key, field, { hold: true })` take the hold for the component's lifetime. See [Holds](../reference/typescript-client.md#holds-one-row-in-scope-on-demand).
+   The row arrives on the next sync cycle. The row remains until you release the last hold on it, plus `holdGraceMs` (default 30 seconds). In React, `useRow(key, { hold: true })` and `useText(key, field, { hold: true })` hold the row for the lifetime of the component. See [Holds](../reference/typescript-client.md#holds-one-row-in-scope-on-demand).
 
 ## Confirming the result
 
-To confirm that partial sync is working:
+To confirm that partial sync works:
 
 1. Run a local query for an entity within your subscription scope.
 2. Verify that returned rows match the expected predicate or window limits.
@@ -101,5 +101,5 @@ To confirm that partial sync is working:
 
 - [Partial sync API](../reference/typescript-client.md#partial-sync-and-subscriptions)
 - [Partial sync and coverage](../explanation/partial-sync-and-coverage.md) — how
-  windows are maintained exactly, and what `coverage.complete` really promises.
-- [Query data](query-data.md).
+  windows are maintained, and what `coverage.complete` guarantees.
+- [Query data](query-data.md)
