@@ -30,7 +30,8 @@ import (
 // prototype always receives a non-nil message of that type — zeroed when the
 // invocation carried none — and one registered without a prototype always
 // receives nil. That holds on every entry point (a client push, Invoke,
-// InvokeIdempotent), so a body may type-assert its prototype unconditionally.
+// InvokeIdempotent), so a body may type-assert its prototype unconditionally,
+// or be declared through Mutator, which does the assertion.
 type MutatorFunc func(ctx context.Context, tx *EntityTx, args proto.Message) error
 
 type mutatorInfo struct {
@@ -83,9 +84,9 @@ type MutatorOption interface {
 // in the model, or KeyField is not a singular string field of the args. In a
 // schema without the access model, it has no effect.
 //
-//	server.WithMutator("complete_task", &taskv1.CompleteTaskArgs{}, completeTask,
+//	server.Mutator("complete_task", completeTask,
 //		server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
-//	server.WithMutator("send_feedback", &feedbackv1.SendArgs{}, sendFeedback,
+//	server.Mutator("send_feedback", sendFeedback,
 //		server.MutatorAccess{Admitted: true})
 //	server.WithMutator("rebuild_index", nil, rebuildIndex,
 //		server.MutatorAccess{TrustedOnly: true})
@@ -103,7 +104,7 @@ func (ma MutatorAccess) applyMutator(mi *mutatorInfo) {
 
 // WithMutator declares a custom mutation handler. argsPrototype defines the
 // expected google.protobuf.Any payload type; pass nil for a mutator that takes
-// no arguments.
+// no arguments. Mutator declares one whose fn receives the arguments typed.
 //
 // Mutators are construction-time only: they are funcs, so unlike a schema they
 // cannot be provisioned at runtime (see DynamicEntity, the CRUD-only dynamic
@@ -1015,6 +1016,12 @@ func (e *EntityTx) Scan(prototype proto.Message, fn func(msg proto.Message) erro
 // Through an AsCaller view, and in a Server.Mutate for a caller who is not
 // Trusted, it answers as ViewTx.Query does for the caller (see AsCaller).
 func (e *EntityTx) Query(prototype proto.Message, spec query.Spec, fn func(msg proto.Message) error) error {
+	return e.queryMeta(prototype, spec, func(msg proto.Message, _ RowMeta) error {
+		return fn(msg)
+	})
+}
+
+func (e *EntityTx) queryMeta(prototype proto.Message, spec query.Spec, fn func(proto.Message, RowMeta) error) error {
 	info, err := e.info(prototype)
 	if err != nil {
 		return err
@@ -1030,12 +1037,7 @@ func (e *EntityTx) Query(prototype proto.Message, spec query.Spec, fn func(msg p
 	if err != nil {
 		return err
 	}
-	for _, r := range rows {
-		if err := fn(r.msg); err != nil {
-			return err
-		}
-	}
-	return nil
+	return eachQueryRow(rows, fn)
 }
 
 // ScanPage iterates up to limit live rows with key > afterKey, in key order.
@@ -1045,6 +1047,12 @@ func (e *EntityTx) Query(prototype proto.Message, spec query.Spec, fn func(msg p
 // skips the rows the caller may not read (see AsCaller); a skipped row still
 // counts toward limit.
 func (e *EntityTx) ScanPage(prototype proto.Message, afterKey string, limit int, fn func(msg proto.Message) error) (lastKey string, more bool, err error) {
+	return e.scanMeta(prototype, afterKey, limit, func(msg proto.Message, _ RowMeta) error {
+		return fn(msg)
+	})
+}
+
+func (e *EntityTx) scanMeta(prototype proto.Message, afterKey string, limit int, fn func(proto.Message, RowMeta) error) (string, bool, error) {
 	info, err := e.info(prototype)
 	if err != nil {
 		return "", false, err
@@ -1053,7 +1061,9 @@ func (e *EntityTx) ScanPage(prototype proto.Message, afterKey string, limit int,
 	if err != nil {
 		return "", false, err
 	}
-	return scanPageRows(e.tx, info, afterKey, limit, g.visible, g.project, func(msg proto.Message, _ uint64) error {
-		return fn(msg)
-	})
+	return scanPageRows(e.tx, info, afterKey, limit, g.visible, g.project, fn)
+}
+
+func (e *EntityTx) getMeta(dst proto.Message, key string) (bool, RowMeta, error) {
+	return e.GetMeta(dst, key)
 }

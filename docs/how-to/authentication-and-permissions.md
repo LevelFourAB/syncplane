@@ -175,8 +175,9 @@ message Project {
 In a schema that uses the access model, a client can invoke only a mutator that declares a `MutatorAccess`. Without roles, declare `server.MutatorAccess{Admitted: true}` to let every caller that enters the workspace invoke it:
 
 ```go
-server.WithMutator("send_feedback", &appv1.SendFeedbackArgs{}, sendFeedback,
-	server.MutatorAccess{Admitted: true})
+func sendFeedback(ctx context.Context, tx *server.EntityTx, args *appv1.SendFeedbackArgs) error { … }
+
+server.Mutator("send_feedback", sendFeedback, server.MutatorAccess{Admitted: true})
 ```
 
 If you later add a grant entity, the schema declares its first role, and the workspace gate then refuses every caller that holds no permission. Registration refuses that change unless you allow it; see [Changing the access model](../reference/proto-options.md#changing-the-access-model).
@@ -260,9 +261,8 @@ A write filter sees only the fields of the row. To decide based on who last wrot
 When authorization depends on who last wrote a row, implement a custom mutator. Custom mutators are authorized once by name, and the mutator function evaluates access. `EntityTx.GetMeta` returns the actor stamped on the row:
 
 ```go
-server.WithMutator("editComment", &appv1.EditComment{},
-	func(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
-		in := args.(*appv1.EditComment)
+server.Mutator("editComment",
+	func(ctx context.Context, tx *server.EntityTx, in *appv1.EditComment) error {
 		var comment appv1.Comment
 		found, meta, err := tx.GetMeta(&comment, in.GetId())
 		if err != nil {

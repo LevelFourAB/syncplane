@@ -91,9 +91,30 @@ To write data with `Apply`:
    - To execute a registered mutator instead of an inline closure, call
      `srv.Invoke`.
 
-2. If you need to page large entities, call
-   `ApplyTx.ScanPage(prototype, afterKey, limit, fn)`. This method returns the
-   last visited key and a boolean value that indicates whether more rows follow.
+2. To visit every row of an entity, range over `server.Scan`. It reads the
+   entity in pages, so it does not hold the whole entity in memory:
+
+   ```go
+   err := srv.Apply(ctx, workspaceID, func(tx *server.ApplyTx) error {
+       for todo, err := range server.Scan[*todov1.Todo](tx) {
+           if err != nil {
+               return err
+           }
+           if todo.GetCompleted() {
+               if err := server.Delete[*todov1.Todo](tx, todo.GetId()); err != nil {
+                   return err
+               }
+           }
+       }
+       return nil
+   })
+   ```
+
+   To also get each row's version for a compare-and-swap, range over
+   `server.ScanRows` and read `row.Version`. To stop at a page boundary
+   yourself, call `ApplyTx.ScanPage(prototype, afterKey, limit, fn)`. This
+   method returns the last visited key and a boolean value that indicates
+   whether more rows follow.
 
 **Note:** `Apply` does not use client watermarks. Calling `Apply` twice applies
 the mutation twice. If callers can retry, use `ApplyIdempotent`.

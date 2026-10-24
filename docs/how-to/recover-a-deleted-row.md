@@ -70,9 +70,9 @@ func (p *policy) ReadFilter(_ context.Context, _ server.Principal, _, entity str
 	if entity != "project" {
 		return nil, nil
 	}
-	return func(_ string, msg proto.Message) bool {
-		return msg.(*appv1.Project).GetDeletedAtMs() == 0
-	}, nil
+	return server.FilterRows(func(_ string, project *appv1.Project) bool {
+		return project.GetDeletedAtMs() == 0
+	}), nil
 }
 ```
 

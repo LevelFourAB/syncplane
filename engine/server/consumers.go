@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"iter"
 
 	"github.com/levelfourab/syncplane/engine/storage"
 )
@@ -103,6 +104,41 @@ func (s *Server) ConsumerPendingWorkspaces(ctx context.Context, consumer, after 
 		return nil, fmt.Errorf("server: limit must be positive, got %d", limit)
 	}
 	return s.store.ListPendingWorkspaceIDs(ctx, consumer, storage.Range{After: after}, limit)
+}
+
+// pendingPage is how many workspaces PendingWorkspaces asks the store for per
+// step.
+const pendingPage = 512
+
+// PendingWorkspaces yields every workspace where the named consumer has changes
+// it has not acted on, in id order. It pages through ConsumerPendingWorkspaces
+// and keeps its guarantees: a workspace whose position was behind when its page
+// was read is always yielded, and a listed workspace may hold only changes the
+// consumer filters out. Each page is its own snapshot, so a workspace written
+// during the iteration may or may not be yielded.
+//
+// An error ends the sequence: PendingWorkspaces yields it with an empty id and
+// stops. Each page is one store query, run when the loop reaches it.
+func (s *Server) PendingWorkspaces(ctx context.Context, consumer string) iter.Seq2[string, error] {
+	return func(yield func(string, error) bool) {
+		after := ""
+		for {
+			ids, err := s.ConsumerPendingWorkspaces(ctx, consumer, after, pendingPage)
+			if err != nil {
+				yield("", err)
+				return
+			}
+			for _, id := range ids {
+				if !yield(id, nil) {
+					return
+				}
+			}
+			if len(ids) < pendingPage {
+				return
+			}
+			after = ids[len(ids)-1]
+		}
+	}
 }
 
 // AdvanceConsumer commits a consumer's new feed position together with the

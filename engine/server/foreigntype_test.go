@@ -93,6 +93,25 @@ var _ = Describe("A compiled message on a schema from a descriptor set", func() 
 		Expect(got.GetName()).To(Equal("ann"))
 	})
 
+	It("reads rows through the typed reads", func() {
+		f.seed(&accessv1.Staff{Id: "s1", Project: project("p1"), Name: "ann"})
+
+		Expect(f.srv.View(trusted(), ws, func(tx *server.ViewTx) error {
+			got, found, err := server.Get[*accessv1.Staff](tx, "s1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(got.GetName()).To(Equal("ann"))
+
+			var names []string
+			for s, err := range server.Scan[*accessv1.Staff](tx) {
+				Expect(err).NotTo(HaveOccurred())
+				names = append(names, s.GetName())
+			}
+			Expect(names).To(Equal([]string{"ann"}))
+			return nil
+		})).To(Succeed())
+	})
+
 	It("clears the fields a guard hides from the caller of a read", func() {
 		f.seed(&accessv1.Staff{Id: "s1", Project: project("p1"), Name: "ann", Salary: 5000})
 

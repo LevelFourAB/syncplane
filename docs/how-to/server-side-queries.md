@@ -17,23 +17,25 @@ To query entities from server-side code:
 
    The compiler rejects field paths that do not match a proto field. Predicates use the same compiled implementation as the `Query` RPC and the TypeScript client, validated against shared test vectors in `testdata/queryeval/`.
 
-2. Call `tx.Query` inside a `srv.View` read transaction or an `EntityTx` mutation transaction:
+2. Range over `server.Query` inside a `srv.View` read transaction, an `Apply` closure or an `EntityTx` mutation transaction:
 
    ```go
    err := srv.View(ctx, workspaceID, func(tx *server.ViewTx) error {
-       return tx.Query(&todov1.Todo{}, query.Spec{
+       for todo, err := range server.Query[*todov1.Todo](tx, query.Spec{
            Where:   query.And(query.Eq("completed", false), query.Contains("title", "milk")),
            OrderBy: []*syncplanev1.OrderKey{query.Desc("created_at_ms")},
            Limit:   20,
-       }, func(msg proto.Message, version uint64) error {
-           todo := msg.(*todov1.Todo)
-           // version round-trips into a compare-and-swap Patch
-           return nil
-       })
+       }) {
+           if err != nil {
+               return err
+           }
+           // todo is a *todov1.Todo
+       }
+       return nil
    })
    ```
 
-3. Process each matching row in the iterator callback. The callback receives the proto message and the row version.
+3. Process each matching row in the loop body. To get the row version for a compare-and-swap `Patch`, range over `server.QueryRows` instead and read `row.Msg` and `row.Version`. The methods `tx.Query` on each transaction type take a callback instead of returning an iterator.
 
 ## Paging
 

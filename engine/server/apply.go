@@ -411,6 +411,12 @@ func (a *ApplyTx) GetMeta(dst proto.Message, key string) (found bool, meta RowMe
 // Rows this closure has recorded writes for are returned as they were in the
 // snapshot; recorded writes are not visible to any read (see Apply).
 func (a *ApplyTx) ScanPage(prototype proto.Message, afterKey string, limit int, fn func(msg proto.Message, version uint64) error) (lastKey string, more bool, err error) {
+	return a.scanMeta(prototype, afterKey, limit, func(msg proto.Message, meta RowMeta) error {
+		return fn(msg, meta.Version)
+	})
+}
+
+func (a *ApplyTx) scanMeta(prototype proto.Message, afterKey string, limit int, fn func(proto.Message, RowMeta) error) (string, bool, error) {
 	info, err := a.info(prototype)
 	if err != nil {
 		return "", false, err
@@ -432,6 +438,12 @@ func (a *ApplyTx) ScanPage(prototype proto.Message, afterKey string, limit int, 
 // A spec that names a field the caller does not read on every row fails as on
 // ViewTx.Query. Recorded writes are not visible to it (see Apply).
 func (a *ApplyTx) Query(prototype proto.Message, spec query.Spec, fn func(msg proto.Message, version uint64) error) error {
+	return a.queryMeta(prototype, spec, func(msg proto.Message, meta RowMeta) error {
+		return fn(msg, meta.Version)
+	})
+}
+
+func (a *ApplyTx) queryMeta(prototype proto.Message, spec query.Spec, fn func(proto.Message, RowMeta) error) error {
 	info, err := a.info(prototype)
 	if err != nil {
 		return err
@@ -443,12 +455,11 @@ func (a *ApplyTx) Query(prototype proto.Message, spec query.Spec, fn func(msg pr
 	if err != nil {
 		return err
 	}
-	for _, r := range rows {
-		if err := fn(r.msg, r.row.Version); err != nil {
-			return err
-		}
-	}
-	return nil
+	return eachQueryRow(rows, fn)
+}
+
+func (a *ApplyTx) getMeta(dst proto.Message, key string) (bool, RowMeta, error) {
+	return a.GetMeta(dst, key)
 }
 
 // Put records a full-row snapshot write; the key derives from key_fields. It

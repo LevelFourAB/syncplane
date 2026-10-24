@@ -780,7 +780,7 @@ Until a grant exists, the caller's client reports `status().workspaces[id].acces
 In a schema that uses the model, only trusted code can invoke a mutator without `MutatorAccess`. Name the permission and the row where the server checks that permission:
 
 ```go
-server.WithMutator("complete_task", &taskv1.CompleteTaskArgs{}, completeTask,
+server.Mutator("complete_task", completeTask,
 	server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
 ```
 
@@ -789,8 +789,8 @@ To let every caller that enters the workspace invoke a mutator, declare `server.
 `MutatorAccess` checks only that the caller holds the permission. It does not run the entity's rules, such as `when` and `within`, and does not check writes made by the body. To apply the rules to a write, write through `tx.AsCaller()`. The server then checks the write as if sent by the caller's client, and the write returns a `CodeAccessDenied` rejection when the rules refuse it:
 
 ```go
-func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
-	id := args.(*taskv1.CompleteTaskArgs).GetTaskId()
+func completeTask(ctx context.Context, tx *server.EntityTx, args *taskv1.CompleteTaskArgs) error {
+	id := args.GetTaskId()
 	return tx.AsCaller().Patch(&taskv1.Task{Id: id, Done: true}, []string{"done"}, nil)
 }
 ```
@@ -798,8 +798,8 @@ func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) 
 Read through `tx.AsCaller()` as well when the body passes on what it reads, for example in a rejection message. Such a read returns what the caller's client receives: a row that the caller cannot read is not found, and a field that a guard hides from the caller has its zero value. A query whose predicate or order names such a field fails with `permission_denied`:
 
 ```go
-func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
-	id := args.(*taskv1.CompleteTaskArgs).GetTaskId()
+func completeTask(ctx context.Context, tx *server.EntityTx, args *taskv1.CompleteTaskArgs) error {
+	id := args.GetTaskId()
 	var task taskv1.Task
 	found, err := tx.AsCaller().Get(&task, id)
 	if err != nil {

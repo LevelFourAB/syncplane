@@ -73,10 +73,9 @@ func (*Permissions) ReadFilter(_ context.Context, _ server.Principal, _ string, 
 	if entity != "todo" {
 		return nil, nil
 	}
-	return func(_ string, row proto.Message) bool {
-		todo, ok := row.(*todov1.Todo)
-		return !ok || !strings.Contains(todo.GetTitle(), "secret")
-	}, nil
+	return server.FilterRows(func(_ string, todo *todov1.Todo) bool {
+		return !strings.Contains(todo.GetTitle(), "secret")
+	}), nil
 }
 
 func (p *Permissions) FilterEpoch(_ context.Context, _ server.Principal, workspaceID string) (uint64, error) {
@@ -132,16 +131,12 @@ func Options(perms *Permissions) []server.Option {
 func MutatorOptions(perms *Permissions) []server.Option {
 	open := server.MutatorAccess{Admitted: true}
 	return []server.Option{
-		server.WithMutator("complete_all", &todov1.CompleteAllArgs{},
-			func(_ context.Context, tx *server.EntityTx, _ proto.Message) error {
-				var todos []*todov1.Todo
-				if err := tx.Scan(&todov1.Todo{}, func(msg proto.Message) error {
-					todos = append(todos, msg.(*todov1.Todo))
-					return nil
-				}); err != nil {
-					return err
-				}
-				for _, todo := range todos {
+		server.Mutator("complete_all",
+			func(_ context.Context, tx *server.EntityTx, _ *todov1.CompleteAllArgs) error {
+				for todo, err := range server.Scan[*todov1.Todo](tx) {
+					if err != nil {
+						return err
+					}
 					if todo.GetCompleted() {
 						continue
 					}
@@ -155,9 +150,8 @@ func MutatorOptions(perms *Permissions) []server.Option {
 		// write_then_reject writes the given todo and then rejects. It exists so
 		// the Go and TS test suites can verify that a rejection rolls back the
 		// rows the mutator already wrote (push runs mutations in savepoints).
-		server.WithMutator("write_then_reject", &todov1.Todo{},
-			func(_ context.Context, tx *server.EntityTx, args proto.Message) error {
-				todo, _ := args.(*todov1.Todo)
+		server.Mutator("write_then_reject",
+			func(_ context.Context, tx *server.EntityTx, todo *todov1.Todo) error {
 				if todo.GetId() == "" {
 					todo = &todov1.Todo{Id: "rejected", Title: "should never persist"}
 				}
@@ -179,9 +173,8 @@ func MutatorOptions(perms *Permissions) []server.Option {
 		// writes "guarded".owner on behalf of a caller no ordinary write would
 		// let near it. Integration tests use it to give a guarded field a
 		// value, which is the only way one acquires one.
-		server.WithMutator("set_owner", &testdatav1.Guarded{},
-			func(_ context.Context, tx *server.EntityTx, args proto.Message) error {
-				g := args.(*testdatav1.Guarded)
+		server.Mutator("set_owner",
+			func(_ context.Context, tx *server.EntityTx, g *testdatav1.Guarded) error {
 				return tx.Patch(g, []string{"owner"}, nil)
 			}, open),
 		// bump_epoch lets integration tests exercise filter-epoch revocation

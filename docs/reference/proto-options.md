@@ -751,10 +751,10 @@ Additional constraints:
 - The rows that a custom mutator body writes are not checked against the rules. The invocation is checked by its `MutatorAccess`; see [Access model](server.md#access-model). A mutator can therefore make a change that no rule admits to the caller:
 
   ```go
-  server.WithMutator("archiveProject", &appv1.ArchiveArgs{},
-  	func(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
+  server.Mutator("archiveProject",
+  	func(ctx context.Context, tx *server.EntityTx, args *appv1.ArchiveArgs) error {
   		// … whatever must happen first …
-  		return tx.Delete(&appv1.Project{}, args.(*appv1.ArchiveArgs).GetId())
+  		return server.Delete[*appv1.Project](tx, args.GetId())
   	},
   	server.MutatorAccess{Permission: "edit_projects", Entity: "project", KeyField: "id"})
   ```

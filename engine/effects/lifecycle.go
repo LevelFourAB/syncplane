@@ -7,12 +7,6 @@ import (
 	"time"
 )
 
-// sweepPage bounds one page of a sweep's pending-workspace query. The sweep
-// pages because the answer is "every workspace with work", which for a consumer
-// registered against a store that already holds history is every workspace
-// there is.
-const sweepPage = 512
-
 // Start launches the background loops and returns. Close (or cancelling ctx)
 // stops everything.
 //
@@ -187,20 +181,13 @@ func (rt *Runtime) sweep(ctx context.Context) error {
 	return nil
 }
 
-// sweepConsumer pages through one consumer's pending workspaces, queueing each.
+// sweepConsumer queues each of one consumer's pending workspaces.
 func (rt *Runtime) sweepConsumer(ctx context.Context, c *consumer) error {
-	after := ""
-	for {
-		ids, err := rt.srv.ConsumerPendingWorkspaces(ctx, c.name, after, sweepPage)
+	for ws, err := range rt.srv.PendingWorkspaces(ctx, c.name) {
 		if err != nil {
 			return err
 		}
-		for _, ws := range ids {
-			rt.wakeConsumer(c, ws)
-		}
-		if len(ids) < sweepPage {
-			return nil
-		}
-		after = ids[len(ids)-1]
+		rt.wakeConsumer(c, ws)
 	}
+	return nil
 }

@@ -12,7 +12,7 @@ defer store.Close()                            // the server does not own the st
 
 srv, err := server.New(store,
     server.WithEntities(&todov1.Todo{}),       // reads (syncplane.v1.entity) options
-    server.WithMutator("complete_all", &todov1.CompleteAllArgs{}, completeAll),
+    server.Mutator("complete_all", completeAll), // args type from completeAll's signature
     server.WithAuthenticator(myAuth{}),        // optional, default anonymous
     server.WithPermissions(myPermissions{}),   // optional, default allow-all
     server.WithLimits(server.Limits{           // optional; non-positive fields keep defaults
@@ -33,7 +33,7 @@ defer srv.Close()                              // stops background work (not the
 http.ListenAndServe(addr, srv.HTTPHandler())   // HTTP/1.1 suffices
 ```
 
-`server.New` validates and applies all options before returning. Declaration options (`WithEntities`, `WithMutator`, `WithMerger`) are evaluated in dependency order rather than registration order. A `WithMerger` option can reference an entity defined in a subsequent `WithEntities` declaration.
+`server.New` validates and applies all options before returning. Declaration options (`WithEntities`, `Mutator`, `WithMutator`, `WithMerger`) are evaluated in dependency order rather than registration order. A `WithMerger` option can reference an entity defined in a subsequent `WithEntities` declaration.
 
 The caller retains ownership of the underlying storage adapter. `srv.Close()` stops background maintenance tasks, including garbage collection, index backfills, text compaction sweeps, and notify-coalescing timers. Calling `srv.Close()` does not close the storage adapter or a notifier configured with `WithNotifier`. An adapter can back multiple apps in a [Manager](../how-to/host-multiple-apps.md).
 
@@ -192,7 +192,8 @@ Static schemas and handlers are registered at server construction:
 
 ```go
 server.WithEntities(&todov1.Todo{}, &todov1.Note{})
-server.WithMutator(name string, args proto.Message, fn)
+server.Mutator[A proto.Message](name string, fn func(ctx, tx *EntityTx, args A) error, opts...)
+server.WithMutator(name string, args proto.Message, fn, opts...)  // nil args for a mutator with no arguments
 server.WithMerger(prototype proto.Message, fieldPath string, fn)  // opaque fields only; see the caveats
 ```
 
@@ -206,6 +207,8 @@ srv.RegisterDynamicEntities(specs ...server.DynamicEntity)
 ```
 
 Register mutators and mergers at construction time. You cannot register them dynamically.
+
+`Mutator` takes the argument type from `fn`, so the body receives a typed message and needs no type assertion. `WithMutator` takes a prototype message and passes the arguments as `proto.Message`.
 
 A mutator receives arguments matching its registered prototype. If registered with a message prototype, the mutator always receives a non-nil message of that type (zeroed if omitted by the caller). If registered with `nil`, the mutator always receives `nil`. Supplying arguments to a mutator registered without a prototype returns an error.
 
@@ -303,6 +306,45 @@ func (s *Server) View(ctx, workspaceID string, fn func(tx *ViewTx) error) error
 `ViewTx` provides `Get`, `GetMeta`, `Query`, and `ScanPage`. Each method returns the entity `version` alongside the message. The caller's `ReadFilter` is evaluated for each row; filtered rows return as absent. In-process reads are not constrained by request row limits. See [Query from server-side code](../how-to/server-side-queries.md).
 
 `GetMeta` returns `RowMeta{Version, Actor}`. `Actor` contains the `storage.Actor` recorded during the row's most recent write. `GetMeta` is also available on `ApplyTx` and `EntityTx`. See [Check ownership in a mutator](../how-to/authentication-and-permissions.md#check-ownership-in-a-mutator).
+
+### Typed reads
+
+Package-level functions read through any transaction handle (`*EntityTx`, `*ViewTx` or `*ApplyTx`, the `server.Reader` interface). The type argument names the entity, and each row arrives as that type:
+
+```go
+func Get[T proto.Message](tx Reader, key string) (T, bool, error)
+func Scan[T proto.Message](tx Reader) iter.Seq2[T, error]
+func ScanRows[T proto.Message](tx Reader) iter.Seq2[Row[T], error]
+func Query[T proto.Message](tx Reader, spec query.Spec) iter.Seq2[T, error]
+func QueryRows[T proto.Message](tx Reader, spec query.Spec) iter.Seq2[Row[T], error]
+func Delete[T proto.Message](tx Writer, key string) error // *EntityTx or *ApplyTx
+```
+
+```go
+for todo, err := range server.Scan[*todov1.Todo](tx) {
+    if err != nil {
+        return err
+    }
+    // todo is a *todov1.Todo
+}
+```
+
+- Typed reads apply the same read rules as the handle's own methods.
+- `Scan` yields every live row in key order. It reads in pages, and the loop body runs between pages.
+- `Query` reads the whole result before it yields the first row.
+- The loop body can write through the same transaction. Through an `EntityTx`, `Scan` can yield a row that the body wrote, with its new value, when the key comes after the current page.
+- `Row[T]` contains `Msg` and the embedded `RowMeta`, so `row.Version` goes straight to `WithExpectedVersion` or to the `expected` argument of `Patch`.
+- An error ends the sequence: the iterator yields it with the zero value and stops.
+- Range the iterator inside the closure or mutator body that received the handle. After the transaction ends, the iterator yields an error.
+- A schema registered from a descriptor set decodes rows as dynamic messages. Typed reads copy each row into a new `T` through its wire bytes.
+
+`server.FilterRows` builds a `RowFilter` from a typed func, for use in `ReadFilter`:
+
+```go
+return server.FilterRows(func(_ string, todo *todov1.Todo) bool {
+    return !strings.Contains(todo.GetTitle(), "secret")
+}), nil
+```
 
 ## Permissions on the in-process API
 
@@ -446,11 +488,12 @@ func (s *Server) ConsumerShadow(ctx, workspaceID, consumer, entity, key string) 
 func (s *Server) AdvanceConsumer(ctx, workspaceID, consumer string, up ConsumerUpdate) error
 func (s *Server) ResetConsumer(ctx, workspaceID, consumer string) error
 func (s *Server) ConsumerPendingWorkspaces(ctx, consumer, after string, limit int) ([]string, error)
+func (s *Server) PendingWorkspaces(ctx, consumer string) iter.Seq2[string, error]
 ```
 
 `AdvanceConsumer` commits an updated cursor position and shadow state in a single transaction.
 
-`ConsumerPendingWorkspaces` returns workspace IDs with unprocessed changes for a consumer, paginated after an exclusive `after` workspace ID.
+`ConsumerPendingWorkspaces` returns workspace IDs with unprocessed changes for a consumer, paginated after an exclusive `after` workspace ID. `PendingWorkspaces` yields all of them in ID order and reads one page at a time. Each page is a separate snapshot.
 
 `ResetConsumer` removes stored positions and shadow states for a consumer. Consumers below the tombstone horizon are pruned by garbage collection. See [the effects runtime](../how-to/react-to-changes.md).
 
@@ -581,7 +624,9 @@ Because these log records can contain subjects and permissions that the caller d
 The server checks mutator permissions using `MutatorAccess` inside the write transaction before running the mutator body:
 
 ```go
-server.WithMutator("rename_task", &taskv1.TaskArgs{}, renameTask,
+func renameTask(ctx context.Context, tx *server.EntityTx, args *taskv1.TaskArgs) error { … }
+
+server.Mutator("rename_task", renameTask,
 	server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
 ```
 
@@ -594,7 +639,7 @@ Rows written directly through `EntityTx` bypass permission checks. Writes perfor
 - Access rules, which fail with `CodeAccessDenied`.
 - `FieldPermissions` and `RowWritePermissions`, which fail with `CodePermissionDenied`.
 
-Reads through `tx.AsCaller()` (`Get`, `GetMeta`, `Scan`, `ScanPage`, `Query`) apply the caller's read rules and `ReadFilter`:
+Reads through `tx.AsCaller()` (`Get`, `GetMeta`, `Scan`, `ScanPage`, `Query`, and the typed reads) apply the caller's read rules and `ReadFilter`:
 
 - Unreadable rows return as absent.
 - Guarded fields return zero values.

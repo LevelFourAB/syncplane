@@ -132,6 +132,12 @@ func (v *ViewTx) GetMeta(dst proto.Message, key string) (found bool, meta RowMet
 // whether more rows follow; pass lastKey back as afterKey to continue. limit
 // must be positive.
 func (v *ViewTx) ScanPage(prototype proto.Message, afterKey string, limit int, fn func(msg proto.Message, version uint64) error) (lastKey string, more bool, err error) {
+	return v.scanMeta(prototype, afterKey, limit, func(msg proto.Message, meta RowMeta) error {
+		return fn(msg, meta.Version)
+	})
+}
+
+func (v *ViewTx) scanMeta(prototype proto.Message, afterKey string, limit int, fn func(proto.Message, RowMeta) error) (string, bool, error) {
 	info, err := v.info(prototype)
 	if err != nil {
 		return "", false, err
@@ -178,6 +184,12 @@ func (v *ViewTx) ScanPage(prototype proto.Message, afterKey string, limit int, f
 // fn runs inside the read snapshot, so it must not start another transaction.
 // An error from fn stops the iteration and surfaces.
 func (v *ViewTx) Query(prototype proto.Message, spec query.Spec, fn func(msg proto.Message, version uint64) error) error {
+	return v.queryMeta(prototype, spec, func(msg proto.Message, meta RowMeta) error {
+		return fn(msg, meta.Version)
+	})
+}
+
+func (v *ViewTx) queryMeta(prototype proto.Message, spec query.Spec, fn func(proto.Message, RowMeta) error) error {
 	info, err := v.info(prototype)
 	if err != nil {
 		return err
@@ -189,12 +201,11 @@ func (v *ViewTx) Query(prototype proto.Message, spec query.Spec, fn func(msg pro
 	if err != nil {
 		return err
 	}
-	for _, r := range rows {
-		if err := fn(r.msg, r.row.Version); err != nil {
-			return err
-		}
-	}
-	return nil
+	return eachQueryRow(rows, fn)
+}
+
+func (v *ViewTx) getMeta(dst proto.Message, key string) (bool, RowMeta, error) {
+	return v.GetMeta(dst, key)
 }
 
 // runQuerySpec compiles a Spec against the entity and answers it over tx,
@@ -271,6 +282,17 @@ func runQuerySpec(
 		}
 	}
 	return rows, nil
+}
+
+// eachQueryRow passes each row of a runQuerySpec result to fn, stopping at the
+// first error fn returns.
+func eachQueryRow(rows []qrow, fn func(proto.Message, RowMeta) error) error {
+	for _, r := range rows {
+		if err := fn(r.msg, RowMeta{Version: r.row.Version, Actor: r.row.Actor}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // specRefuser refuses a Spec on rows of info that names a field a guard hides
@@ -409,7 +431,7 @@ func readRowMeta(
 }
 
 // scanPageRows iterates one page of live rows of info, decoding each into a
-// fresh message and reporting its version. Shared by EntityTx.ScanPage,
+// fresh message and reporting its RowMeta. Shared by EntityTx.ScanPage,
 // ViewTx.ScanPage and ApplyTx.ScanPage. It scans one row past limit to detect
 // truncation without emitting it.
 //
@@ -426,7 +448,7 @@ func scanPageRows(
 	limit int,
 	visible func(storage.Row) (bool, error),
 	project rowProjector,
-	fn func(msg proto.Message, version uint64) error,
+	fn func(msg proto.Message, meta RowMeta) error,
 ) (lastKey string, more bool, err error) {
 	if limit <= 0 {
 		return "", false, fmt.Errorf("server: ScanPage limit must be positive, got %d", limit)
@@ -455,7 +477,7 @@ func scanPageRows(
 		if err := project.apply(info, r.Key, msg); err != nil {
 			return err
 		}
-		return fn(msg, r.Version)
+		return fn(msg, RowMeta{Version: r.Version, Actor: r.Actor})
 	})
 	if err != nil {
 		return "", false, err

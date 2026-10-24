@@ -81,11 +81,13 @@ If you do not need relevance ranking, omit `relevance()` to use custom ordering.
 3. If you query from Go, use `query.Match` and `query.Relevance`:
 
 ```go
-tx.Query(&articlev1.Article{}, query.Spec{
+for article, err := range server.Query[*articlev1.Article](tx, query.Spec{
     Where:   query.Match("milk cow"),
     OrderBy: []*syncplanev1.OrderKey{query.Relevance()},
     Limit:   20,
-}, collect)
+}) {
+    // …
+}
 ```
 
 The `relevance()` ordering requires exactly one `match` condition in the predicate. For pagination, pass the result `endCursor` as `after`. A cursor created locally is valid on the server, and a cursor created on the server is valid locally.
