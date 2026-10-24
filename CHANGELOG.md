@@ -1,5 +1,47 @@
 # Changelog
 
+## [0.2.0](https://github.com/LevelFourAB/syncplane/compare/v0.1.0...v0.2.0) (2026-10-24)
+
+
+### Features
+
+* Add WriteFilter for controlling writes based on current data ([11281b2](https://github.com/LevelFourAB/syncplane/commit/11281b26a9483c59d000419368d5f065e7d4874a))
+* Declare access permissions, roles and access parents within schema ([56165df](https://github.com/LevelFourAB/syncplane/commit/56165df2cbab14397686108add5d5d4aed07b0ab))
+
+
+### Bug Fixes
+
+* **client:** Keep a delete and re-create as separate writes ([992e717](https://github.com/LevelFourAB/syncplane/commit/992e717d96b820ef38ba2782021f7ff357825726))
+* **client:** Keep accepted edits when the server refuses another edit to the same row ([fc1caf8](https://github.com/LevelFourAB/syncplane/commit/fc1caf84eb55638c2a22623c9c4ecf9917ab2ba0))
+* **client:** Keep an unconfirmed edit queued when the client re-downloads a workspace ([c2f7afe](https://github.com/LevelFourAB/syncplane/commit/c2f7afebe4dccc5fc7fe979a8b6a4cb04ae57c5d))
+* **client:** Make useGroupCount and useGroupRows respect the workspaceId option ([c94c757](https://github.com/LevelFourAB/syncplane/commit/c94c757600d34e78916a6a7b7cc938ee843d1288))
+* **client:** Refuse map keys outside the key type's range in local queries ([6d99d52](https://github.com/LevelFourAB/syncplane/commit/6d99d520c6c473db62181704aaafb5b96a869f5f))
+* **client:** Stop text fields that start with U+FEFF from becoming unreadable ([496943b](https://github.com/LevelFourAB/syncplane/commit/496943b514209bbe45385161fb1bb73a313727db))
+* **engine:** Accept compiled messages after a schema is registered from a descriptor set ([354065a](https://github.com/LevelFourAB/syncplane/commit/354065a46d030b3049308801333af1730fa84fce))
+* **engine:** Answer out-of-range mutation ids with invalid_argument ([cf1e439](https://github.com/LevelFourAB/syncplane/commit/cf1e43957c7900bc336c70bc286e2352a51df3eb))
+* **engine:** Keep idempotency keys per caller so one user never receives another's recorded result ([5f9bc9b](https://github.com/LevelFourAB/syncplane/commit/5f9bc9b6f00a84d3b2706cb0a2dae3652d6483bb))
+* **engine:** Let users reconnect to presence after a stranger takes their session id ([f4168e6](https://github.com/LevelFourAB/syncplane/commit/f4168e628b885a37d3f8de42531fb9d8ac636f77))
+* **engine:** Make server queries match local queries for out-of-range integer literals ([c4f230b](https://github.com/LevelFourAB/syncplane/commit/c4f230bdf2fd4a1f221d3873f1b4bb6e206abf94))
+* **engine:** Purge history rows on Postgres for any non-ASCII key prefix ([afbee60](https://github.com/LevelFourAB/syncplane/commit/afbee6064670ed3748e9b9857ce06f34160d38a0))
+* **engine:** Re-check entity write rules under the write lock ([09d5789](https://github.com/LevelFourAB/syncplane/commit/09d578914916a213148342219c711c07b58fb6c8))
+* **engine:** Refuse client ids longer than 128 bytes instead of failing the push on Postgres ([09013b3](https://github.com/LevelFourAB/syncplane/commit/09013b3d77d25f5f89e5843456c82792fbd84d0a))
+* **engine:** Reject writes whose indexed value is too long instead of dead-lettering them on Postgres ([c364310](https://github.com/LevelFourAB/syncplane/commit/c364310a3d561335cfa0cca7fde32fc400847ad0))
+* **engine:** Remove rows from clients when they stop following a reference ([1621ebc](https://github.com/LevelFourAB/syncplane/commit/1621ebc740621d32dd86cfeea523738f08ce9dc2))
+* **engine:** Stop a node from overwriting a newer app schema ([e870857](https://github.com/LevelFourAB/syncplane/commit/e8708579bc32e3713990be9dc418ffee307f1335))
+* **engine:** Stop an edited sync cursor from reading rows the read filter hides ([f1be064](https://github.com/LevelFourAB/syncplane/commit/f1be06456889479ffb25b504459028391d28f153))
+* **engine:** Stop an older presence update from replacing a newer one ([fd8a4e2](https://github.com/LevelFourAB/syncplane/commit/fd8a4e28e7712d40f7ca011d8de85bc2974f0dd7))
+* **engine:** Stop leased background work from running twice on one Postgres node ([d43855d](https://github.com/LevelFourAB/syncplane/commit/d43855d80f7c45ddd31b247f03b08f6ae4db5198))
+* **engine:** Stop open sync streams from sending rows that a permission change hides ([dfeb228](https://github.com/LevelFourAB/syncplane/commit/dfeb228cbed6abd660dc3cd15afd4d0525e873c2))
+* **engine:** Stop other users from blocking a client's writes by reusing its client ID ([af4c330](https://github.com/LevelFourAB/syncplane/commit/af4c330e65e6a6c392f11828b2ab6054ea8f059e))
+* **engine:** Stop pulls failing after a windowed subscription is removed ([ba0e035](https://github.com/LevelFourAB/syncplane/commit/ba0e0353b1ea5acc1aaf67f895fc783b4315047d))
+* **engine:** Use the default heartbeat for a value that is not positive ([24c7eee](https://github.com/LevelFourAB/syncplane/commit/24c7eee93a919c7165bdb1ab0e1b878f217d3dc7))
+* Prevent dynamic registrations disagreeing after a server restart ([a4f7268](https://github.com/LevelFourAB/syncplane/commit/a4f726899471fc880886f90b9aca028974e8aaea))
+* Return the matching rows for prefix searches on descending indexes ([d6bb403](https://github.com/LevelFourAB/syncplane/commit/d6bb4036dff425533fad09548d53408a188dca9d))
+* Stop an edit to an empty-string key from replacing the whole map, set or list ([4fb0588](https://github.com/LevelFourAB/syncplane/commit/4fb0588dd94d8d5a5029240e0978cf1b1038d66a))
+* Stop index reads from rounding integer literals on double fields ([056fecd](https://github.com/LevelFourAB/syncplane/commit/056fecd26c8c7a636b02c8ccd339e01940ffc3cf))
+* Stop one malformed text edit from making a field unreadable for everyone ([80eb325](https://github.com/LevelFourAB/syncplane/commit/80eb32579f768274e2d093c907527c0116b0955e))
+* Stop one write from making a collaborative text field impossible to edit ([4163afe](https://github.com/LevelFourAB/syncplane/commit/4163afebfb3a5c39ecee7db6146068b8b0878a4d))
+
 ## [0.1.0](https://github.com/LevelFourAB/syncplane/compare/v0.0.1...v0.1.0) (2026-09-25)
 
 
