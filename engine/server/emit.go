@@ -213,9 +213,9 @@ type rowEmitter struct {
 	// subscription; empty when nothing is windowed.
 	windows []*compiledWindow
 	// windowMembers is the union of every window's membership for THIS
-	// request. Unlike the closure it is resolved under the request's scope on
-	// the resync path too: a resync classifies rows under both the old and the
-	// new scope, and a window is part of the scope it has to resolve.
+	// request. On the resync path the new side resolves it under the
+	// request's scope, and the old side takes the set the cursor records,
+	// which is what the client holds.
 	windowMembers closureRows
 	// includeServerOnly lets rows of a server_only entity through classify. It
 	// is the difference between the two kinds of consumer this type serves:

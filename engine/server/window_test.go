@@ -10,6 +10,7 @@ import (
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
 
+	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
 	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
@@ -408,8 +409,8 @@ var _ = Describe("Windowed subscriptions", func() {
 			cursor, rows := bootstrap(windowSub(5, countGte(10)))
 			Expect(valueKeys(rows)).To(ConsistOf("a", "b"))
 
-			// Both windows are rebuilt per resync page: the old one (count >= 10)
-			// and the new one (count >= 1).
+			// The old side is the window the cursor records ({a, b}); the new
+			// one (count >= 1) is rebuilt per resync page.
 			_, changes := drain(cursor, windowSub(5, countGte(1)))
 			Expect(valueKeys(changes)).To(ConsistOf("c"))
 		})
@@ -438,6 +439,72 @@ var _ = Describe("Windowed subscriptions", func() {
 			// addition instead of settling.
 			resp := pull(cursor, sub)
 			Expect(resp.GetPatch().GetChanges()).To(BeEmpty())
+		})
+
+		// A window moves for rows nobody wrote: a deleted member lets the next
+		// row rise, and newer rows push the tail out. The resync must diff
+		// against the membership the cursor records, not against the old specs
+		// resolved over current rows, or those rows are never sent or never
+		// dropped.
+		Context("after the window moved since the cursor", func() {
+			putTodo := func(id string) {
+				GinkgoHelper()
+				nextMut++
+				resp, err := client.Push(ctx, connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+					putMutation("c1", nextMut, "todo", id, &todov1.Todo{Id: id}),
+				})))
+				Expect(err).NotTo(HaveOccurred())
+				for _, r := range pushResults(resp.Msg) {
+					Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+				}
+			}
+			todoKeys := func(keys ...string) *syncplanev1.Subscription {
+				return &syncplanev1.Subscription{Entity: "todo", KeySet: &syncplanev1.KeySet{Keys: keys}}
+			}
+
+			It("delivers a row that rose into an unchanged window when another subscription changes", func() {
+				putTodo("t1")
+				putWidget("a", 30)
+				putWidget("b", 20)
+				putWidget("c", 10)
+				cursor, rows := bootstrap(windowSub(2, nil), &syncplanev1.Subscription{Entity: "todo"})
+				Expect(valueKeys(rows)).To(ConsistOf("t1", "a", "b"))
+
+				delWidget("a")
+				cursor, changes := drain(cursor, windowSub(2, nil), todoKeys("t1"))
+				Expect(valueKeys(changes)).To(ConsistOf("c"))
+				Expect(tombstoneKeys(changes)).To(ConsistOf("a"))
+
+				// The cursor records c as held, so the next pull settles.
+				Expect(pull(cursor, windowSub(2, nil), todoKeys("t1")).GetPatch().GetChanges()).To(BeEmpty())
+			})
+
+			It("delivers a row that rose into a window whose limit grew", func() {
+				putWidget("a", 30)
+				putWidget("b", 20)
+				putWidget("c", 10)
+				putWidget("d", 5)
+				cursor, _ := bootstrap(windowSub(2, nil))
+
+				delWidget("a")
+				_, changes := drain(cursor, windowSub(3, nil))
+				Expect(valueKeys(changes)).To(ConsistOf("c", "d"))
+				Expect(tombstoneKeys(changes)).To(ConsistOf("a"))
+			})
+
+			It("removes rows pushed out of an unchanged window when another subscription changes", func() {
+				putTodo("t1")
+				putWidget("a", 1)
+				putWidget("b", 2)
+				cursor, rows := bootstrap(recencySub(2), &syncplanev1.Subscription{Entity: "todo"})
+				Expect(valueKeys(rows)).To(ConsistOf("t1", "a", "b"))
+
+				putWidget("c", 3)
+				putWidget("d", 4)
+				_, changes := drain(cursor, recencySub(2), todoKeys("t1"))
+				Expect(valueKeys(changes)).To(ConsistOf("c", "d"))
+				Expect(tombstoneKeys(changes)).To(ConsistOf("a", "b"))
+			})
 		})
 	})
 

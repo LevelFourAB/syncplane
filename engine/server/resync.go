@@ -82,14 +82,7 @@ func (s *Server) oldVisibility(ctx context.Context, ws string, cur cursorState, 
 		}
 		oldEm.filterEpochShifted = true
 	}
-	// The diff visits only the new scope's entities, and one leaving the set
-	// drops whole, so an old window on a leaving entity has no row to decide.
-	// Resolving it would call that entity's filter inside the snapshot, and the
-	// loop below does not warm it.
 	visited := newEm.entities()
-	oldEm.windows = slices.DeleteFunc(oldEm.windows, func(w *compiledWindow) bool {
-		return !slices.Contains(visited, w.info.name)
-	})
 	// Resolve every filter the scan will consult up front, so an
 	// unreconstructable epoch surfaces here as a clean reset rather than
 	// mid-scan after deltas were already emitted.
@@ -135,12 +128,16 @@ type resyncPos struct {
 // completion the new scope swaps in at the ORIGINAL seq so the next pull
 // catches up on everything written since, under the new visibility.
 //
-// Both emitters' windows are rebuilt HERE, per page, rather than stored in
+// The old side's windows are the membership the cursor records, not a rebuild:
+// a window moves for rows that were never written — a member deleted lets the
+// next one rise, a newer row pushes the tail out — so the old specs resolved
+// against current rows describe a set the client never received. The new
+// side's windows are rebuilt HERE, per page, rather than stored in
 // ResyncState. That keeps the cursor small, and it is safe: the diff visits
 // each row once in (entity, key) order, rows changed since the cursor carry
 // version > cur.seq and belong to the catch-up pull, and a re-emitted row
-// applies idempotently. The price is resolving both emitters' windows once per
-// page of a scope change, which is a rare event.
+// applies idempotently. The price is resolving the new windows once per page
+// of a scope change, which is a rare event.
 //
 // The follow closure is NOT rebuilt here. Both emitters classify with the set
 // the cursor carries — the rows the client holds through follow — so a member
@@ -153,10 +150,11 @@ type resyncPos struct {
 // rebuild would then be in the stored set without the client ever having
 // received it, and the catch-up pull would skip it as already held.
 func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *rowEmitter, wantHash, epoch uint64, subs []*syncplanev1.Subscription, pos resyncPos, limit int, resp *syncplanev1.PullResponse) (cursorState, error) {
-	var err error
-	if oldEm.windowMembers, err = oldEm.buildWindows(tx); err != nil {
-		return cursorState{}, err
+	oldEm.windowMembers = closureRows{}
+	for ck := range cur.windowSet() {
+		oldEm.windowMembers[ck] = storage.Row{}
 	}
+	var err error
 	if newEm.windowMembers, err = newEm.buildWindows(tx); err != nil {
 		return cursorState{}, err
 	}
@@ -193,8 +191,9 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 			// catch-up pull must ship them whole rather than as text delta state.
 			resynced: true,
 			// The window, by contrast, is REPLACED: the resync just emitted the
-			// difference between the old windows and the new ones, so the client
-			// now holds the new membership and the cursor must say so. Carrying
+			// difference between the windows the cursor recorded and the new
+			// ones, so the client now holds the new membership and the cursor
+			// must say so. Carrying
 			// the old set forward would make the catch-up pull re-diff a
 			// membership the client no longer has.
 			windows: newEm.windowStates(),
@@ -363,8 +362,8 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 		if oldEm.accessOnly {
 			// Same scope on both sides, so only the rows below the anchors
 			// that moved can differ.
-			if readAccessUnchanged(oldEm, newEm, entity) && !slices.Contains(oldEm.hiddenEntities, entity) &&
-				!oldEm.movedBelow[entity] {
+			if readAccessUnchanged(oldEm, newEm, entity) && windowsAgree(oldEm, newEm, entity) &&
+				!slices.Contains(oldEm.hiddenEntities, entity) && !oldEm.movedBelow[entity] {
 				continue
 			}
 			keys, narrowed, err = accessDeltaCandidates(tx, oldEm, newEm, newEm.srv.catalogPtr().entities[entity], scanLimit)
@@ -466,14 +465,17 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 // Soundness. Both sides classify a row from the same inputs when all of these
 // hold: the entity's own subscriptions marshal identically (predicate, window,
 // canonical key set and follow spec alike), the read filter is the current
-// epoch's on both sides, and neither side is full sync. The closure is the
-// cursor's on both sides, and window membership is built from the same specs
-// against the same snapshot. Every verdict then agrees, and the diff would
-// emit nothing. Full sync is excluded because it subscribes to an entity
-// without naming it, so two empty per-entity sets do not mean two equal
+// epoch's on both sides, neither side is full sync, and the window membership
+// the cursor records matches the one rebuilt now (see windowsAgree). The
+// closure is the cursor's on both sides. Every verdict then agrees, and the
+// diff would emit nothing. Full sync is excluded because it subscribes to an
+// entity without naming it, so two empty per-entity sets do not mean two equal
 // scopes.
 func entityScopeUnchanged(oldEm, newEm *rowEmitter, entity string) bool {
 	if oldEm.scopes == nil || newEm.scopes == nil || oldEm.filterEpochShifted {
+		return false
+	}
+	if !windowsAgree(oldEm, newEm, entity) {
 		return false
 	}
 	oldRaw, err := canonicalEntitySubs(oldEm.subs, entity)
@@ -489,6 +491,31 @@ func entityScopeUnchanged(oldEm, newEm *rowEmitter, entity string) bool {
 	}
 	for i := range oldRaw {
 		if !bytes.Equal(oldRaw[i], newRaw[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// windowsAgree reports whether both sides of a resync hold the same window
+// members of this entity. The old side holds what the cursor records and the
+// new side what its windows resolve to now, so identical window specs still
+// disagree once a member was deleted or outranked after the cursor.
+func windowsAgree(oldEm, newEm *rowEmitter, entity string) bool {
+	count := func(members closureRows) int {
+		n := 0
+		for ck := range members {
+			if ck.entity == entity {
+				n++
+			}
+		}
+		return n
+	}
+	if count(oldEm.windowMembers) != count(newEm.windowMembers) {
+		return false
+	}
+	for ck := range oldEm.windowMembers {
+		if ck.entity == entity && !newEm.windowMembers.has(ck.entity, ck.key) {
 			return false
 		}
 	}
