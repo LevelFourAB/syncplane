@@ -6,6 +6,7 @@ import {
 	compactDoc,
 	decodeTextDoc,
 	encodeTextDoc,
+	mergeText,
 	purgedByRemote,
 	type TextDelta,
 	TextDoc,
@@ -196,5 +197,80 @@ describe('a live handle whose field the server compacts', () => {
 		// A union, not a rebuild: both sides' edits survive.
 		expect(handle.value).toBe('Xhello?');
 		handle.close();
+	});
+
+	// The reconnect shape: while this client was away a peer edited the row, the
+	// row went quiet and the server compacted it, so the first state the handle
+	// receives holds both the peer's edits and the purge. Only the local edits
+	// may be re-applied over it, never the stale visible text.
+	describe("when the compacted state also carries a peer's edits", () => {
+		/** The server's document after bob's edit and a compaction. */
+		function compactedAfter(server: TextDoc, edit: (bob: TextDoc) => void): Uint8Array {
+			const bob = decodeTextDoc(encodeTextDoc(server), 'bob');
+			edit(bob);
+			const compacted = decodeTextDoc(encodeTextDoc(bob), '');
+			compactDoc(compacted);
+			return encodeTextDoc(compacted);
+		}
+
+		/** What the server holds after merging everything the handle pushed. */
+		function storedAfter(compacted: Uint8Array, patches: Uint8Array[]): string {
+			let stored = compacted;
+			for (const p of patches) stored = mergeText(stored, p);
+			return decodeTextDoc(stored, '').plainText();
+		}
+
+		it('keeps text the peer typed', async () => {
+			const server = trimmed();
+			const h = harness(encodeTextDoc(server));
+			const handle = await openTextHandle(h.deps);
+			const compacted = compactedAfter(server, (bob) => bob.insert(5, ' there'));
+
+			h.deliver(compacted);
+			await flush();
+
+			expect(handle.value).toBe('hello there');
+			expect(storedAfter(compacted, h.patches)).toBe('hello there');
+			handle.close();
+		});
+
+		it('keeps text the peer deleted deleted', async () => {
+			const server = trimmed();
+			const h = harness(encodeTextDoc(server));
+			const handle = await openTextHandle(h.deps);
+			// The compaction purges bob's fresh tombstones too.
+			const compacted = compactedAfter(server, (bob) => bob.delete(2, 3));
+
+			h.deliver(compacted);
+			await flush();
+
+			expect(handle.value).toBe('he');
+			expect(storedAfter(compacted, h.patches)).toBe('he');
+			handle.close();
+		});
+
+		it("keeps both a local unsynced edit and the peer's edit, and pushes both", async () => {
+			const server = trimmed();
+			const h = harness(encodeTextDoc(server));
+			const handle = await openTextHandle(h.deps);
+			const deltas: TextDelta[] = [];
+			handle.subscribe((d) => deltas.push(d));
+			await handle.insert(0, '>');
+			h.patches.length = 0;
+			const compacted = compactedAfter(server, (bob) => bob.insert(5, ' there'));
+
+			const seen = deltas.length;
+			h.deliver(compacted);
+			await flush();
+
+			expect(handle.value).toBe('>hello there');
+			// Subscribers see the peer's text arrive.
+			expect(deltas.slice(seen).map((d) => d.ops)).toEqual([ [ { retain: 6 }, {
+				insert: ' there',
+			} ] ]);
+			expect(h.patches.length).toBeGreaterThan(0);
+			expect(storedAfter(compacted, h.patches)).toBe('>hello there');
+			handle.close();
+		});
 	});
 });

@@ -62,7 +62,7 @@ Room failure codes have the following behaviors:
 The client handles the following codes automatically and does not surface them directly as errors:
 
 - **`text_full_state_required`**: Returned when a collaborative text `PATCH` delta-state fragment does not fit the row. The coordinator resends the update as a complete document.
-- **`text_state_stale`**: Returned when a collaborative text `PATCH` relies on state removed by compaction. The coordinator captures the visible text in the field, re-bootstraps, and reapplies the edit. The coordinator preserves visible text, but discards marks created over dropped characters. This code reaches `onMutationRejected` only when the capture finds no text to restore.
+- **`text_state_stale`**: Returned when a collaborative text `PATCH` relies on state removed by compaction. The coordinator captures the field's document, re-bootstraps, and reapplies only the edits the server's document has not seen, so text other peers wrote meanwhile stays. Marks the stale write created are discarded. This code reaches `onMutationRejected` only when the capture finds no text to restore.
 
 ## The code vocabulary
 

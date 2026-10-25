@@ -13,7 +13,7 @@
 import { CodeTextMergeFailed } from '../codes.js';
 import { reportError, safeInvoke, safeRun } from '../report.js';
 import { decodeTextDoc, encodeTextDoc } from './codec.js';
-import { purgedByRemote } from './compact.js';
+import { purgedByRemote, reapplyUnseen } from './compact.js';
 import {
 	type Anchor,
 	AnchorAfter,
@@ -236,6 +236,20 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 	return true;
 }
 
+/**
+ * The delta from one visible text to another when their documents share no
+ * item history, which diffText needs: a minimal string diff, minted in scratch
+ * documents that are thrown away.
+ */
+function diffVisible(prev: string, next: string): TextDelta['ops'] {
+	const from = new TextDoc('scratch');
+	from.insert(0, prev);
+	const to = new TextDoc('scratch');
+	to.replaceWith(from);
+	to.setString(next);
+	return diffText(from, to).ops;
+}
+
 /** Opens a live handle. The row must exist (PATCH is not an upsert). */
 export async function openTextHandle(deps: TextHandleDeps): Promise<TextHandle> {
 	// One lease per handle, held until close(). Two handles over the same field
@@ -427,21 +441,25 @@ function buildHandle(deps: TextHandleDeps, initial: Uint8Array, lease: PeerLease
 	 * Rebases the live document onto state the server has compacted (see
 	 * text/compact.ts). A union would keep the characters the server dropped and
 	 * every subsequent write would be refused as stale, so the document is
-	 * rebuilt from the incoming state and the local visible text re-applied on
-	 * top as a fresh minimal edit.
+	 * rebuilt from the incoming state and only the local edits the incoming
+	 * state has not seen are re-applied on top (see reapplyUnseen). What peers
+	 * changed meanwhile — text typed, text deleted — stays as they left it.
 	 *
-	 * The visible text is what survives; mark operations this handle minted over
-	 * dropped characters do not. Nothing visible changes, so subscribers get an
-	 * empty delta that only asks them to re-read the marks. The rebuilt state is
+	 * Mark operations this handle minted and the server has not seen do not
+	 * survive. The rebuilt document shares no item history with the one before
+	 * it, so subscribers get a delta of the visible text. The rebuilt state is
 	 * pushed because the edits it re-expresses were queued against ids the
 	 * server no longer has: those PATCHes are being rejected, and this is what
 	 * replaces them.
 	 */
 	function rebuildOnCompaction(incoming: TextDoc, prev: TextDoc, prevText: string): void {
 		doc.replaceWith(incoming);
-		const { deleted, inserted } = doc.setString(prevText);
-		emit({ ops: [], marksChanged: prev.marks.length > 0 || doc.marks.length > 0 }, prevText);
-		if (deleted.length > 0 || inserted.length > 0) {
+		const reapplied = reapplyUnseen(doc, prev, incoming.vv);
+		emit({
+			ops: diffVisible(prevText, doc.plainText()),
+			marksChanged: prev.marks.length > 0 || doc.marks.length > 0,
+		}, prevText);
+		if (reapplied) {
 			// Full state, not a fragment: the document was just rebuilt onto a
 			// compacted state, so this is not a delta of anything the server can
 			// still be holding — the very ids a fragment would build on are what

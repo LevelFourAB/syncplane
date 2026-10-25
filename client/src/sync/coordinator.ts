@@ -78,7 +78,8 @@ import {
 import { readMergedRow } from '../read.js';
 import { reportError, safeCall } from '../report.js';
 import type { StorageNames } from '../storagenames.js';
-import { decodeTextDoc, encodeTextDoc, textOf } from '../text/index.js';
+import { reapplyUnseen } from '../text/compact.js';
+import { decodeTextDoc, encodeTextDoc } from '../text/index.js';
 import { createPeerLeases, type PeerLeases } from '../text/peer.js';
 import { TouchSet } from '../touch.js';
 import { Backoff, sleep, STREAM_STABLE_MS } from './backoff.js';
@@ -103,15 +104,15 @@ interface TextResendRow {
 }
 
 /**
- * One row's text fields captured as VISIBLE TEXT, to be re-applied after a
- * re-bootstrap. Used for `text_state_stale`, where the document bytes are
- * exactly what the server refused: only the text survives the round trip, and
- * it has to be re-diffed against whatever the server now holds.
+ * One row's text documents as the client held them when a write was refused
+ * as `text_state_stale`, to be re-applied after a re-bootstrap. The bytes are
+ * exactly what the server refused, so they are never re-sent: only the edits
+ * the server's document has not seen are re-applied onto it (reapplyUnseen).
  */
 interface TextRestoreRow {
 	entity: string;
 	key: string;
-	fields: { path: string; text: string }[];
+	fields: { path: string; value: Uint8Array }[];
 }
 
 /** One row a rejected mutation would have written. */
@@ -1930,14 +1931,14 @@ export class Coordinator {
 	}
 
 	/**
-	 * Reads back the VISIBLE TEXT of every field a `text_state_stale` rejection
+	 * Reads back the document of every field a `text_state_stale` rejection
 	 * touched and stages it for re-application after a re-bootstrap, which it
 	 * arms. Runs before the rollback, the only moment the edit still exists.
 	 *
 	 * The bytes cannot be re-sent — they are precisely what the server refused —
-	 * so only the text is carried over, to be re-diffed against whatever the row
-	 * holds once this client has read it again. Formatting the stale side applied
-	 * on top of characters the server dropped does not survive that.
+	 * so they are kept only to find the edits the server has not seen, which are
+	 * re-applied onto whatever the row holds once this client has read it again.
+	 * Formatting the stale side applied does not survive that.
 	 *
 	 * Returns the rejections it took ownership of, all-or-nothing per mutation
 	 * for the same reason captureTextFullState is: half a recovered batch reads
@@ -1974,7 +1975,7 @@ export class Coordinator {
 				staged.push({
 					entity: crud.entity,
 					key: crud.key,
-					fields: captured.map((f) => ({ path: f.path, text: textOf(f.value) })),
+					fields: captured,
 				});
 			}
 			if (!complete || staged.length === 0) continue;
@@ -1993,8 +1994,9 @@ export class Coordinator {
 
 	/**
 	 * Re-applies text captured from a `text_state_stale` rejection, now that the
-	 * workspace has re-bootstrapped: each field's saved text is diffed against
-	 * the document the server actually holds and queued as an ordinary PATCH.
+	 * workspace has re-bootstrapped: the edits each saved document holds that the
+	 * server's document has not seen are re-applied onto it and queued as an
+	 * ordinary PATCH. What other peers wrote meanwhile stays as they left it.
 	 *
 	 * Minted here rather than through the client's enqueue, like
 	 * resendTextFullState: this restores an edit the user already made, so it
@@ -2043,7 +2045,7 @@ export class Coordinator {
 								textFieldBytes(def.schema, field.path, merged),
 								lease.peer,
 							);
-							doc.setString(field.text);
+							reapplyUnseen(doc, decodeTextDoc(field.value, ''));
 							setTextFieldBytes(def.schema, field.path, value, encodeTextDoc(doc));
 							paths.push(field.path);
 						}

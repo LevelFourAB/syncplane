@@ -133,4 +133,47 @@ describe('collaborative-text compaction', () => {
 		await observer.close();
 		await stale.close();
 	});
+
+	it('keeps what another peer wrote while re-applying a refused edit', async () => {
+		const ws = freshWorkspace();
+		const stale = newClient(ws);
+		await stale.start();
+
+		const d = new TextDoc('seed');
+		d.insert(0, 'hello world');
+		await stale.mutate.put(WidgetSchema, { id: 'w1', body: encodeTextDoc(d) });
+		await stale.syncNow();
+		d.delete(5, 6);
+		await stale.mutate.patch(WidgetSchema, 'w1', { body: encodeTextDoc(d) });
+		await stale.syncNow();
+
+		// While the stale client is offline, bob prefixes the text, and the row
+		// then goes quiet and is compacted.
+		const bob = newClient(ws);
+		await bob.start();
+		await bob.syncNow();
+		const theirs = decodeTextDoc((await bob.get(WidgetSchema, 'w1'))?.body, 'bob');
+		theirs.insert(0, 'Bob: ');
+		await bob.mutate.patch(WidgetSchema, 'w1', { body: encodeTextDoc(theirs) });
+		await bob.syncNow();
+		await collectGarbage(ws);
+
+		// The stale client appends to the state it still holds, which the server
+		// refuses as built on purged state.
+		const local = decodeTextDoc((await stale.get(WidgetSchema, 'w1'))?.body, 'stale');
+		expect(local.plainText()).toBe('hello');
+		local.insert(local.length, ' again');
+		await stale.mutate.patch(WidgetSchema, 'w1', { body: encodeTextDoc(local) });
+		for (let i = 0; i < 4; i++) await stale.syncNow();
+
+		// Only the refused edit is re-applied, so bob's prefix survives.
+		const observer = newClient(ws);
+		await observer.start();
+		await observer.syncNow();
+		expect(plainTextOf((await observer.get(WidgetSchema, 'w1'))?.body)).toBe('Bob: hello again');
+
+		await observer.close();
+		await bob.close();
+		await stale.close();
+	});
 });

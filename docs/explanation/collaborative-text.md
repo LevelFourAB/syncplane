@@ -175,7 +175,7 @@ The compaction floor ensures safety. An incoming write containing an identifier 
 - If received as a **tombstone** or referencing a purged **mark operation**, the write applies with that identifier skipped, allowing replicas with older reads to continue functioning. Without this rule, the union merge would reintroduce reclaimed operations on subsequent writes.
 - If received **live**, or if the write attaches new text to a purged item, applying it would restore purged state. The server rejects the write with `text_state_stale` without consuming a sequence number or modifying the row.
 
-The client recovers by re-reading the row and re-applying visible text edits. A live `TextHandle` performs this recovery automatically upon detecting compacted state. **This recovery discards formatting**: mark operations applied by the stale client on top of dropped characters do not survive re-diffing.
+The client recovers by re-reading the row and re-applying only its own edits that the row has not seen: deletions of characters the row still shows, and text it typed that the row's version vector does not cover. Edits other peers made in the meantime stay as they are, including text they typed or deleted while the stale client was away. A live `TextHandle` performs this recovery automatically upon detecting compacted state. **This recovery discards formatting**: mark operations the stale client applied that the row has not seen do not survive, and re-applied text gets new identifiers.
 
 Because compaction can discard formatting during stale recoveries, it is disabled by default. Enable compaction for long-lived documents edited over months, and leave it disabled for short-lived documents.
 

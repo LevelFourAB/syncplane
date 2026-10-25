@@ -253,6 +253,72 @@ export function purgedByRemote(local: TextDoc, incoming: TextDoc): boolean {
 }
 
 /**
+ * Re-applies onto `base` the edits `local` holds that `base` has not seen, and
+ * reports whether there were any. `base` is the state to rebuild onto — one
+ * {@link purgedByRemote} says cannot be merged with — and must carry a writer
+ * peer; `local` is not modified. `seen` is the version vector of the state
+ * `base` was built from, which differs from `base`'s own after
+ * {@link TextDoc.replaceWith} keeps the writer's counter.
+ *
+ * Only the difference travels, so whatever `base` holds that `local` lacks —
+ * text a peer typed, text a peer deleted — stays as `base` has it:
+ *
+ *  - A deleted item of `local` that `base` shows is deleted again.
+ *  - A visible item of `local` that `base` neither holds nor covers with its
+ *    version vector is inserted again, as fresh text right after the nearest
+ *    item before it that `base` holds. An item `base` covers but does not hold
+ *    was purged, which compaction does only to tombstones, so it stays gone.
+ *
+ * Re-inserted text gets new ids, and mark operations `base` has not seen are
+ * not carried over.
+ */
+export function reapplyUnseen(
+	base: TextDoc,
+	local: TextDoc,
+	seen: ReadonlyMap<string, number> = base.vv,
+): boolean {
+	let changed = false;
+	for (const n of local.byId.values()) {
+		if (!n.deleted) continue;
+		const held = base.byId.get(n.key);
+		if (held !== undefined && !held.deleted) {
+			// The same union a merge applies: a tombstone carries no counter.
+			held.deleted = true;
+			changed = true;
+		}
+	}
+	// Runs of unseen text, each with the last item before it that base holds
+	// (undefined for the start of the document).
+	const runs: { after: string | undefined; text: string }[] = [];
+	let after: string | undefined;
+	let text = '';
+	for (const n of local.order()) {
+		if (base.byId.has(n.key)) {
+			if (text !== '') runs.push({ after, text });
+			after = n.key;
+			text = '';
+			continue;
+		}
+		if (n.deleted || (seen.get(n.id.peer) ?? 0) >= n.id.counter) continue;
+		text += n.content;
+	}
+	if (text !== '') runs.push({ after, text });
+	// Left to right, each index taken after the runs before it went in.
+	for (const run of runs) {
+		let index = 0;
+		if (run.after !== undefined) {
+			for (const n of base.order()) {
+				if (!n.deleted) index++;
+				if (n.key === run.after) break;
+			}
+		}
+		base.insert(index, run.text);
+		changed = true;
+	}
+	return changed;
+}
+
+/**
  * Serializes a version vector for storage outside a document — the engine keeps
  * one per compacted field. Canonical: peers sorted by UTF-8 bytes.
  */
