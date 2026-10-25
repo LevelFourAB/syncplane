@@ -1,4 +1,4 @@
-import { toBinary } from '@bufbuild/protobuf';
+import { fromBinary, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, it, vi } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
@@ -338,6 +338,33 @@ describe('client.db.<entity>.text', () => {
 			expect(plainTextOf(row!.body)).toBe('first');
 
 			handle.close();
+			await client.close();
+		});
+
+		it('keeps typing into "a/b" out of a write of "a" built from what was read', async () => {
+			// A row key may hold '/', so row "a"'s text log prefix also covers
+			// row "a/b". The first keystroke into an empty document has no origin
+			// and would apply to any document it was folded into.
+			const kv = new MemoryKVStore();
+			const client = newClient(kv);
+			await client.db.widget.mutate.put({ id: 'a', body: bodyDoc('dev1', 'A') });
+			await client.db.widget.mutate.put({ id: 'a/b', body: encodeTextDoc(new TextDoc('dev2')) });
+			const handle = await client.db.widget.text('a/b', 'body');
+			await handle.insert(0, 'leak');
+			handle.close();
+
+			const rowA = (await client.db.widget.get('a'))!;
+			expect(plainTextOf(rowA.body)).toBe('A');
+			await client.db.widget.mutate.put({ ...rowA, label: 'renamed' });
+
+			const tx = await kv.read();
+			const queued = await readPending(tx, 'ws1');
+			tx.release();
+			const lastOfA = queued
+				.filter((m) => m.payload.case === 'crud' && m.payload.value.key === 'a')
+				.at(-1)!;
+			const value = (lastOfA.payload.value as { value: Uint8Array }).value;
+			expect(plainTextOf(fromBinary(WidgetSchema, value).body)).toBe('A');
 			await client.close();
 		});
 	});

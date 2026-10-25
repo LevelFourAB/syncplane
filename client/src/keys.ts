@@ -329,12 +329,19 @@ export const overlayTextPrefix = (entity: string): string => `${OVERLAY_TEXT_ROO
 /** One workspace's text log of one entity. */
 export const overlayTextWsPrefix = (entity: string, workspaceId: string): string =>
 	`${overlayTextPrefix(entity)}${wsSegment(workspaceId)}/`;
-/** Every fragment logged for one row, across its text fields. */
+/**
+ * Every fragment logged for one row, across its text fields — and every
+ * fragment of each row whose key starts with `key/`, since a row key may hold
+ * '/'. A reader of this prefix keeps only the keys {@link isRowTextKey} accepts.
+ */
 export const overlayTextRowPrefix = (
 	entity: string,
 	workspaceId: string,
 	key: string,
 ): string => `${overlayTextWsPrefix(entity, workspaceId)}${key}/`;
+/** Whether the `ot/` key `k`, scanned under `entity`, is a fragment of row `key`. */
+export const isRowTextKey = (entity: string, key: string, k: string): boolean =>
+	splitOverlayTextSuffix(k.slice(overlayTextPrefix(entity).length))?.key === key;
 /**
  * The overlay generation of one entity and workspace: a token restamped by
  * every committed transaction that writes or deletes anything under that pair's

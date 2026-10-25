@@ -73,8 +73,10 @@ export async function foldTextLog(
 	if (registry.textPathsOf(entity).length === 0) return bytes;
 	const fragments = new Map<string, Uint8Array[]>();
 	for await (const [ k, v ] of tx.scan(overlayTextRowPrefix(entity, workspaceId, key))) {
-		const field = fieldOfTextKey(entity, k);
-		if (field === undefined) continue;
+		const parts = splitOverlayTextSuffix(k.slice(overlayTextPrefix(entity).length));
+		// The prefix of row "a" also selects the fragments of row "a/b".
+		if (parts === undefined || parts.key !== key) continue;
+		const field = parts.field;
 		const list = fragments.get(field);
 		if (list === undefined) fragments.set(field, [ v as Uint8Array ]);
 		else list.push(v as Uint8Array);
@@ -135,11 +137,6 @@ export async function readOverlay(
 		cache.put(at, generation, rows, bytes);
 	}
 	return rows;
-}
-
-/** The field segment of an `ot/` key, given the entity it was scanned under. */
-function fieldOfTextKey(entity: string, k: string): string | undefined {
-	return splitOverlayTextSuffix(k.slice(overlayTextPrefix(entity).length))?.field;
 }
 
 /**

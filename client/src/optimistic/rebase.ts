@@ -29,6 +29,7 @@ import {
 	confirmedKey,
 	type ConfirmedRecord,
 	confirmedWsPrefix,
+	isRowTextKey,
 	metaAckedSeq,
 	metaCallerAccess,
 	metaCallerAccessVersion,
@@ -375,7 +376,9 @@ async function clearRowTextLog(
 ): Promise<void> {
 	if (registry.textPathsOf(entity).length === 0) return;
 	const keys: string[] = [];
-	for await (const [ k ] of tx.scan(overlayTextRowPrefix(entity, workspaceId, key))) keys.push(k);
+	for await (const [ k ] of tx.scan(overlayTextRowPrefix(entity, workspaceId, key))) {
+		if (isRowTextKey(entity, key, k)) keys.push(k);
+	}
 	for (const k of keys) await tx.del(k);
 }
 

@@ -382,4 +382,98 @@ describe('optimistic text log', () => {
 		expect(await readMergedRow(tx, registry, 'widget', WS, 'w1')).toBeUndefined();
 		tx.release();
 	});
+
+	// A row key may hold '/', so the log prefix of row "a" is also a prefix of
+	// every fragment of row "a/b".
+	describe('rows whose keys nest ("a" and "a/b")', () => {
+		async function seedRow(tx: KVWrite, key: string, body: Uint8Array): Promise<void> {
+			const rec: ConfirmedRecord = {
+				v: toBinary(WidgetSchema, create(WidgetSchema, { id: key, body })),
+				ver: '1',
+			};
+			await tx.put(confirmedKey('widget', WS, key), rec);
+		}
+		function rowPatch(
+			id: bigint,
+			key: string,
+			value: { body?: Uint8Array; label?: string },
+		): Mutation {
+			return create(MutationSchema, {
+				clientId: 'c1',
+				mutationId: id,
+				payload: {
+					case: 'crud',
+					value: {
+						entity: 'widget',
+						key,
+						op: CrudOp.PATCH,
+						fieldMask: create(FieldMaskSchema, { paths: value.body ? [ 'body' ] : [ 'label' ] }),
+						value: toBinary(WidgetSchema, create(WidgetSchema, { id: key, ...value })),
+					},
+				},
+			});
+		}
+		async function textOf(tx: KVWrite, key: string): Promise<string> {
+			const bytes = await readMergedRow(tx, registry, 'widget', WS, key);
+			return decodeTextDoc(fromBinary(WidgetSchema, bytes!).body, '').plainText();
+		}
+		const docOf = (peer: string, s: string): Uint8Array => {
+			const d = new TextDoc(peer);
+			if (s) d.insert(0, s);
+			return encodeTextDoc(d);
+		};
+
+		it('does not fold the fragments of "a/b" into "a"', async () => {
+			const kv = new MemoryKVStore();
+			const tx = await kv.write();
+			await seedRow(tx, 'a', docOf('p1', 'A'));
+			// An empty document: the first keystroke has no origin, so it would
+			// apply to any document it was folded into.
+			const child = docOf('p2', '');
+			await seedRow(tx, 'a/b', child);
+
+			const edit = typeInto(child, 'p3', 0, 'leak');
+			await applyMutationLocally(
+				tx,
+				registry,
+				noMirrors,
+				WS,
+				rowPatch(1n, 'a/b', { body: edit.fragment }),
+				new TouchSet(),
+			);
+
+			expect(await textOf(tx, 'a/b')).toBe('leak');
+			expect(await textOf(tx, 'a')).toBe('A');
+			tx.release();
+		});
+
+		it('keeps the log of "a/b" when "a" is written', async () => {
+			const kv = new MemoryKVStore();
+			const tx = await kv.write();
+			await seedRow(tx, 'a', docOf('p1', 'A'));
+			const child = docOf('p2', 'B');
+			await seedRow(tx, 'a/b', child);
+
+			const edit = typeInto(child, 'p3', 1, ' typed');
+			await applyMutationLocally(
+				tx,
+				registry,
+				noMirrors,
+				WS,
+				rowPatch(1n, 'a/b', { body: edit.fragment }),
+				new TouchSet(),
+			);
+			await applyMutationLocally(
+				tx,
+				registry,
+				noMirrors,
+				WS,
+				rowPatch(2n, 'a', { label: 'renamed' }),
+				new TouchSet(),
+			);
+
+			expect(await textOf(tx, 'a/b')).toBe('B typed');
+			tx.release();
+		});
+	});
 });
