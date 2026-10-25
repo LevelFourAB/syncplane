@@ -94,6 +94,34 @@ describe('string writes over the wire', () => {
 		await b.close();
 	});
 
+	it('a PUT that carries no document keeps the text another client typed', async () => {
+		const ws = freshWorkspace();
+		const a = newClient(ws);
+		const b = newClient(ws);
+		await a.start();
+		await b.start();
+
+		// a holds the row before b types into it...
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'v1' });
+		await a.syncNow();
+		await b.syncNow();
+		await b.mutate.patch(WidgetSchema, 'w1', { body: "bob's notes" });
+		await b.syncNow();
+
+		// ...and saves the row it read, which has no document.
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'v2' });
+		await a.syncNow();
+		await b.syncNow();
+
+		for (const c of [ a, b ]) {
+			const row = await c.get(WidgetSchema, 'w1');
+			expect(row?.label).toBe('v2');
+			expect(plainTextOf(row?.body)).toBe("bob's notes");
+		}
+		await a.close();
+		await b.close();
+	});
+
 	it('junk text bytes are rejected, not stored', async () => {
 		const ws = freshWorkspace();
 		const rejections: string[] = [];

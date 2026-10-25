@@ -2447,8 +2447,11 @@ export async function applyTextStringsToCrud(
  * Unions every text document of base into next in place, pairing documents by
  * instance path (where both sides carry one for the same position) — the
  * client mirror of the server's PUT exception: a full-row write must merge
- * text documents with the stored row rather than reset them. An element base
- * holds and next dropped is being deleted, and its document goes with it.
+ * text documents with the stored row rather than reset them. A position where
+ * only base carries a document keeps base's: a PUT with no bytes there never
+ * saw the document, and the union with nothing is the stored document. An
+ * element base holds and next dropped is being deleted, and its document goes
+ * with it.
  */
 export function mergeTextFieldsInto(
 	schema: DescMessage,
@@ -2461,8 +2464,12 @@ export function mergeTextFieldsInto(
 			const steps = textFieldSteps(schema, path);
 			const baseBytes = getBytesAt(base as unknown as Rec, steps);
 			const nextBytes = getBytesAt(next as unknown as Rec, steps);
-			if (baseBytes === undefined || nextBytes === undefined) continue;
-			setBytesAt(next as unknown as Rec, steps, mergeText(baseBytes, nextBytes));
+			if (baseBytes === undefined) continue;
+			setBytesAt(
+				next as unknown as Rec,
+				steps,
+				nextBytes === undefined ? baseBytes : mergeText(baseBytes, nextBytes),
+			);
 		}
 	}
 }

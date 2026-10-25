@@ -135,6 +135,8 @@ Where a value can appear is therefore a matter of **direction, not storage**. A 
 
 Every PUT path (`EntityTx.Put` for trusted server-side writes and connectors, client push PUT, and the client local overlay) **merges** text fields with the stored row instead of replacing them. A PUT operation built from a stale snapshot must not discard edits that its writer never observed, and a PUT racing an in-flight PATCH must not duplicate the document. All other fields maintain replace semantics.
 
+A PUT that carries no document for a text field keeps the stored document. Its writer never observed one, and the union of the stored document with nothing is the stored document. To clear the text, write an empty string, which deletes the text through the diff, or send a PATCH whose mask names the field and that carries no bytes. Removing a keyed list element or map entry still removes its document.
+
 The server also validates text bytes on ingress (PUT and PATCH). The server rejects data that decoders cannot read as `invalid_argument` instead of corrupting the row for readers. A PATCH can carry a delta-state fragment in a text field that its mask names directly, validated and unfolded by the merger. A PUT operation, or a field reached only through an ancestor mask, must carry a full document because nothing merges it there.
 
 ## One document per element

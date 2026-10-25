@@ -2305,10 +2305,11 @@ func projectStub(stub protoreflect.Message, keyFields []protoreflect.FieldDescri
 // mergeTextFields unions every text document of base into next in place,
 // pairing documents by instance path: where both sides carry one for the same
 // position — the same fixed field, or the same element of a keyed list or map
-// — the merged state replaces next's. One-sided positions keep plain Put
-// semantics (next's value, or absent, wins) — the same contract the PATCH
-// merger has; in particular an element base holds and next dropped is being
-// deleted, and its document goes with it.
+// — the merged state replaces next's. A position where only base carries a
+// document keeps base's: a PUT with no bytes there never saw the document, and
+// the union with nothing is the stored document. A position only next carries
+// keeps next's. An element base holds and next dropped is being deleted, and
+// its document goes with it.
 //
 // tw carries the row's compaction floors (see textfloor.go) — a document with
 // one refuses state that predates it — and the decoded-document cache entries
@@ -2335,7 +2336,11 @@ func (info *entityInfo) mergeTextFields(
 		for _, ni := range tf.instances(next) {
 			baseBytes := baseByPath[ni.path]
 			nextBytes := ni.bytes()
-			if len(baseBytes) == 0 || len(nextBytes) == 0 {
+			if len(baseBytes) == 0 {
+				continue
+			}
+			if len(nextBytes) == 0 {
+				ni.set(baseBytes)
 				continue
 			}
 			merged, err := tw.mergeField(ni.path, baseBytes, nextBytes)

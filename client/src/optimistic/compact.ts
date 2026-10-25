@@ -22,6 +22,9 @@ import {
 	type EntityMergers,
 	type EntityRegistry,
 	mergeMask,
+	mergeTextFieldsInto,
+	textFieldBytes,
+	textInstancePaths,
 } from '../mutations.js';
 import { isFragment, mergeFragments, mergeText } from '../text/index.js';
 import { TouchSet } from '../touch.js';
@@ -216,6 +219,26 @@ function foldCrud(
 			// the caller may not read it, so it does not carry an earlier write of
 			// that unit: a PATCH's clear, or a PUT's value.
 			if (keepsGuarded(def, base, incoming.value)) return 'barrier';
+			// Text fields are the other exception to "a PUT overwrites": a PUT
+			// unions each document with the stored one and keeps a stored one it
+			// carries no bytes for. So the earlier PUT's documents union into this
+			// one, as the server's sequential apply would. An earlier PATCH may
+			// clear a document, which a PUT without one would not carry.
+			const textPaths = registry.textPathsOf(def.name);
+			if (textPaths.length > 0) {
+				if (base.op === CrudOp.PATCH && patchReachesText(textPaths, base)) return 'barrier';
+				if (base.op === CrudOp.PUT) {
+					const next = fromBinary(def.schema, incoming.value);
+					try {
+						mergeTextFieldsInto(def.schema, textPaths, fromBinary(def.schema, base.value), next);
+					} catch {
+						return 'barrier';
+					}
+					const out = clone(CrudMutationSchema, incoming);
+					out.value = toBinary(def.schema, next);
+					return out;
+				}
+			}
 			// Otherwise a PUT overwrites whatever came before: the row ends at the
 			// PUT value either way.
 			return clone(CrudMutationSchema, incoming);
@@ -247,6 +270,9 @@ function foldCrud(
 				// A clear of a guarded unit folds into a PUT that leaves it unset,
 				// which keeps the stored value for a caller who may not read it.
 				if (keepsGuarded(def, incoming, value)) return 'barrier';
+				// The same holds for a cleared text document: a PUT without one
+				// keeps the stored document.
+				if (clearsText(def, registry.textPathsOf(def.name), incoming, merged)) return 'barrier';
 				return create(CrudMutationSchema, {
 					entity: base.entity,
 					key: base.key,
@@ -408,6 +434,36 @@ function keepsGuarded(def: EntityDef, earlier: CrudMutation, put: Uint8Array): b
 	if (written.length === 0) return false;
 	const value = fromBinary(def.schema, put);
 	return written.some((fields) => !fields.some((f) => isFieldSet(value, f)));
+}
+
+/**
+ * Whether a mask path of `patch` reaches a top-level field that holds one of
+ * the text fields `textPaths` names. Coarse on purpose: a false positive costs
+ * one unfolded slot.
+ */
+function patchReachesText(textPaths: readonly string[], patch: CrudMutation): boolean {
+	const heads = new Set(textPaths.map((p) => p.split('.', 1)[0]!));
+	return (patch.fieldMask?.paths ?? []).some((p) => heads.has(p.split('.', 1)[0]!));
+}
+
+/**
+ * Whether `patch` folded into a PUT leaves a text document its mask reaches
+ * without bytes in `merged`, the folded PUT value. Applied alone, the PATCH
+ * clears that document. A PUT without it keeps the stored one.
+ */
+function clearsText(
+	def: EntityDef,
+	textPaths: readonly string[],
+	patch: CrudMutation,
+	merged: Message,
+): boolean {
+	const mask = patch.fieldMask?.paths ?? [];
+	return textPaths.some((textPath) =>
+		textInstancePaths(def.schema, textPath, merged).some((path) =>
+			mask.some((p) => path === p || path.startsWith(`${p}.`))
+			&& textFieldBytes(def.schema, path, merged) === undefined
+		)
+	);
 }
 
 /**

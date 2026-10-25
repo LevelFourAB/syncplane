@@ -154,6 +154,42 @@ describe('merge semantics for element documents', () => {
 		expect(plainTextOf(put.notes[0]!.body)).toBe('ONE one two');
 		expect(put.notes).toHaveLength(1);
 	});
+
+	it('mergeTextFieldsInto keeps a stored document the PUT carries none of', () => {
+		const stored = create(schema, {
+			id: 'k1',
+			notes: [ { id: 'n1', label: 'a', body: bodyDoc('client', 'typed') } ],
+		});
+		const put = create(schema, { id: 'k1', notes: [ { id: 'n1', label: 'a2' } ] });
+		mergeTextFieldsInto(schema, [ 'notes.body', 'notes.deep.body', 'sections.body' ], stored, put);
+		expect(put.notes[0]!.label).toBe('a2');
+		expect(plainTextOf(put.notes[0]!.body)).toBe('typed');
+	});
+
+	it('a local PUT without a document keeps the one the row holds', async () => {
+		const client = newClient();
+		await client.db.keyedTextEntity.mutate.put({
+			id: 'k1',
+			notes: [ { id: 'n1', label: 'a', body: bodyDoc('client', 'typed') } ],
+		});
+		await client.db.keyedTextEntity.mutate.put({ id: 'k1', notes: [ { id: 'n1', label: 'a2' } ] });
+
+		const row = await client.db.keyedTextEntity.get('k1');
+		expect(row?.notes[0]?.label).toBe('a2');
+		expect(plainTextOf(row!.notes[0]!.body)).toBe('typed');
+	});
+
+	it('a local PUT of an empty string clears the document', async () => {
+		const client = newClient();
+		await client.db.keyedTextEntity.mutate.put({
+			id: 'k1',
+			notes: [ { id: 'n1', body: bodyDoc('client', 'typed') } ],
+		});
+		await client.db.keyedTextEntity.mutate.put({ id: 'k1', notes: [ { id: 'n1', body: '' } ] });
+
+		const row = await client.db.keyedTextEntity.get('k1');
+		expect(plainTextOf(row!.notes[0]!.body)).toBe('');
+	});
 });
 
 describe('text handles on element documents', () => {

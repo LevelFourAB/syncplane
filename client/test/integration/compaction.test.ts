@@ -129,6 +129,34 @@ describe('compaction stores what the separate writes store', () => {
 		await viewer.close();
 	});
 
+	it('a PUT of a row read before the text was typed does not drop that text', async () => {
+		// Given a widget whose text "base" the server holds, and a copy read now
+		const ws = freshWorkspace();
+		const a = newClient(ws, HOLD);
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'a', body: 'base' });
+		await a.syncNow();
+		const snapshot = (await a.get(WidgetSchema, 'w1'))!;
+
+		// And the user types, then saves the old copy with a new label
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'a', body: 'base typed offline' });
+		await a.mutate.put(WidgetSchema, { ...snapshot, label: 'b' });
+		expect(plainTextOf((await a.get(WidgetSchema, 'w1'))?.body)).toBe('base typed offline');
+
+		// When the client pushes the two writes in one compaction pass
+		await a.syncNow();
+
+		// Then the server keeps the typed text, as the separate writes would
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		expect(plainTextOf((await b.get(WidgetSchema, 'w1'))?.body)).toBe('base typed offline');
+		expect(plainTextOf((await a.get(WidgetSchema, 'w1'))?.body)).toBe('base typed offline');
+
+		await a.close();
+		await b.close();
+	});
+
 	it('delete then re-create of a row does not bring back the deleted text', async () => {
 		// Given a widget whose collaborative text "hello" the server holds
 		const ws = freshWorkspace();
@@ -292,6 +320,26 @@ describe('compaction stores what the separate writes store', () => {
 		const stored = await a.get(GuardedSchema, 'g1');
 		expect(stored?.label).toBe('new');
 		expect(stored?.owner).toBe('');
+		await a.close();
+	});
+
+	it('control: a PUT of an old copy with a push between keeps the typed text', async () => {
+		// Given a widget whose text "base" the server holds, and a copy read now
+		const ws = freshWorkspace();
+		const a = newClient(ws, HOLD);
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'a', body: 'base' });
+		await a.syncNow();
+		const snapshot = (await a.get(WidgetSchema, 'w1'))!;
+
+		// When the typing and the save of the old copy go in separate pushes
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'a', body: 'base typed offline' });
+		await a.syncNow();
+		await a.mutate.put(WidgetSchema, { ...snapshot, label: 'b' });
+		await a.syncNow();
+
+		// Then the row keeps the typed text
+		expect(plainTextOf((await a.get(WidgetSchema, 'w1'))?.body)).toBe('base typed offline');
 		await a.close();
 	});
 });

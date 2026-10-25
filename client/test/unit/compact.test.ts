@@ -10,7 +10,12 @@ import {
 	type Mutation,
 	MutationSchema,
 } from '../../src/gen/syncplane/v1/mutation_pb.js';
-import { confirmedKey, type ConfirmedRecord, metaLastMutationId } from '../../src/keys.js';
+import {
+	confirmedKey,
+	type ConfirmedRecord,
+	metaLastMutationId,
+	overlayKey,
+} from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { compactPending, planCompaction } from '../../src/optimistic/compact.js';
@@ -712,6 +717,94 @@ describe('text field compaction', () => {
 			const original = [ queue[0]!, widgetBodyPatch(2n, 'w1', encodeTextDoc(whole)) ];
 			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED);
 			expect(plan.mutations).toHaveLength(2);
+		});
+	});
+
+	// A PUT unions each text document with the stored one and keeps a stored one
+	// it carries no bytes for, on the server and in the overlay. A fold that
+	// ends in a PUT has to reach the same row as the sequential apply.
+	describe('folds that end in a PUT', () => {
+		const confirmedDoc = new TextDoc('c1');
+		confirmedDoc.insert(0, 'base');
+		const baseBody = encodeTextDoc(confirmedDoc);
+		const typedDoc = decodeTextDoc(baseBody, 'c1');
+		typedDoc.insert(4, ' typed offline');
+		const typedBody = encodeTextDoc(typedDoc);
+
+		const confirmed = {
+			[confirmedKey('widget', WS, 'w1')]: {
+				v: toBinary(WidgetSchema, create(WidgetSchema, { id: 'w1', label: 'base', body: baseBody })),
+				ver: '3',
+			},
+		};
+
+		function widgetPut(
+			id: bigint,
+			init: MessageInitShape<typeof WidgetSchema>,
+			expectedVersion?: bigint,
+		): Mutation {
+			return mutation(
+				id,
+				create(CrudMutationSchema, {
+					entity: 'widget',
+					key: 'w1',
+					op: CrudOp.PUT,
+					value: toBinary(WidgetSchema, create(WidgetSchema, { id: 'w1', ...init })),
+					expectedVersion,
+				}),
+			);
+		}
+
+		async function overlayBody(mutations: Mutation[]): Promise<string> {
+			const overlay = await overlayAfterReplay(widgetRegistry, mutations, confirmed);
+			const record = overlay.get(overlayKey('widget', WS, 'w1')) as { v: Uint8Array } | undefined;
+			expect(record).toBeDefined();
+			return plainTextOf(fromBinary(WidgetSchema, record!.v).body);
+		}
+
+		it('keeps the typed text when the later PUT carries no document', async () => {
+			const original = [
+				widgetPut(1n, { label: 'a', body: typedBody }),
+				widgetPut(2n, { label: 'b' }),
+			];
+			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED);
+			expect(plan.mutations).toHaveLength(1);
+			expect(await overlayBody(original)).toBe('base typed offline');
+			await expectSameOverlay(widgetRegistry, original, plan.mutations, confirmed);
+		});
+
+		it('keeps the typed text when the later PUT carries a stale document', async () => {
+			// `put({ ...row, label })` from a row read before the first PUT.
+			const original = [
+				widgetPut(1n, { label: 'a', body: typedBody }),
+				widgetPut(2n, { label: 'b', body: baseBody }),
+			];
+			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED);
+			expect(plan.mutations).toHaveLength(1);
+			expect(await overlayBody(original)).toBe('base typed offline');
+			await expectSameOverlay(widgetRegistry, original, plan.mutations, confirmed);
+		});
+
+		it('keeps a text PATCH apart from a PUT queued after it under the same guard', async () => {
+			const original = [
+				widgetBodyPatch(1n, 'w1', typedBody, 3n),
+				widgetPut(2n, { label: 'b', body: baseBody }, 3n),
+			];
+			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED);
+			expect(plan.mutations).toHaveLength(2);
+			expect(await overlayBody(plan.mutations)).toBe('base typed offline');
+		});
+
+		it('keeps a PATCH that clears the document apart from the PUT before it', async () => {
+			// Folded, the clear would be a PUT without a document, which keeps
+			// the confirmed one.
+			const original = [
+				widgetPut(1n, { label: 'a', body: typedBody }, 3n),
+				widgetBodyPatch(2n, 'w1', new Uint8Array(), 3n),
+			];
+			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED);
+			expect(plan.mutations).toHaveLength(2);
+			expect(await overlayBody(plan.mutations)).toBe('');
 		});
 	});
 

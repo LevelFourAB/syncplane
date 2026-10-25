@@ -161,6 +161,19 @@ var _ = Describe("Text fields", func() {
 			Expect(plainBody(w.GetBody())).To(Equal("one TWO three four"))
 		})
 
+		It("PUT without a document keeps the stored one", func() {
+			// A form save built from a snapshot taken before anyone typed: its
+			// writer never saw the document, so it has nothing to discard.
+			push(putMutation("b", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Label: "v1"}))
+			push(patchMutation("c", 1, "widget", "w1", &testdatav1.Widget{Body: bodyDoc("carol", "carol's notes")}, "body"))
+
+			push(putMutation("b", 2, "widget", "w1", &testdatav1.Widget{Id: "w1", Label: "v2"}))
+
+			w := getWidget("w1")
+			Expect(w.GetLabel()).To(Equal("v2"))
+			Expect(plainBody(w.GetBody())).To(Equal("carol's notes"))
+		})
+
 		It("rejects junk text bytes on PUT with invalid_argument", func() {
 			results := push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{
 				Id: "w1", Body: []byte{0xff, 0x00, 0x01},
@@ -526,6 +539,25 @@ var _ = Describe("Text fields", func() {
 					"the element's document unions with the stored one, matched by key")
 			})
 
+			It("PUT keeps an element's document when the element it carries has none", func() {
+				push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Id:    "k1",
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Label: "a"}},
+				}))
+				push(patchMutation("c2", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: bodyDoc("client", "typed")}},
+				}, "notes.n1.body"))
+
+				push(putMutation("c3", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Id:    "k1",
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Label: "a2"}},
+				}))
+
+				n1 := noteOf(getKeyed("k1"), "n1")
+				Expect(n1.GetLabel()).To(Equal("a2"))
+				Expect(plainBody(n1.GetBody())).To(Equal("typed"))
+			})
+
 			It("replaces the element whole — document included — when the mask names the element", func() {
 				base := bodyDoc("seed", "original")
 				push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
@@ -715,6 +747,30 @@ var _ = Describe("Text fields", func() {
 				return err
 			})).To(Succeed())
 			Expect(plainBody(w.GetBody())).To(Equal("fresh"))
+		})
+
+		It("keeps the stored document when the Put carries none", func() {
+			// A connector whose source has no notion of the text field.
+			srv := newTestServer()
+			ctx := context.Background()
+			Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.Widget{Id: "w1", Label: "from-source"})
+			})).To(Succeed())
+			Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+				return tx.Patch(&testdatav1.Widget{Id: "w1", Body: bodyDoc("client", "typed by a client")}, []string{"body"}, nil)
+			})).To(Succeed())
+
+			Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.Widget{Id: "w1", Label: "from-source-2"})
+			})).To(Succeed())
+
+			var w testdatav1.Widget
+			Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+				_, err := tx.Get(&w, "w1")
+				return err
+			})).To(Succeed())
+			Expect(w.GetLabel()).To(Equal("from-source-2"))
+			Expect(plainBody(w.GetBody())).To(Equal("typed by a client"))
 		})
 	})
 
