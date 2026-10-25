@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
@@ -1176,6 +1177,121 @@ var _ = Describe("Secondary indexes", func() {
 				})).To(Succeed())
 				Expect(keys).To(Equal([]string{"after"}))
 			})
+		})
+	})
+
+	Describe("a PATCH through a sub-path that lww replaces whole", func() {
+		// lww replaces an opaque field and a singular reference message whole,
+		// even when the mask names one sub-path into it. A mask naming a sibling
+		// of the indexed sub-path still moves the row in the index, so the skip
+		// must not decline the rewrite.
+		push := func(srv *server.Server, m *syncplanev1.Mutation) {
+			GinkgoHelper()
+			resp, err := srv.Push(ctx, connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{m})))
+			Expect(err).NotTo(HaveOccurred())
+			results := pushResults(resp.Msg)
+			Expect(results).To(HaveLen(1))
+			Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED),
+				"push rejected: %s", results[0].GetErrorMessage())
+		}
+
+		queryKeys := func(srv *server.Server, entity string, path []string, value string) []string {
+			GinkgoHelper()
+			resp, err := srv.Query(ctx, connect.NewRequest(&syncplanev1.QueryRequest{
+				WorkspaceId: ws,
+				Entity:      entity,
+				Predicate: &syncplanev1.Condition{Kind: &syncplanev1.Condition_Cmp{Cmp: &syncplanev1.CmpCond{
+					Path:  path,
+					Op:    syncplanev1.CmpOp_CMP_OP_EQ,
+					Value: &syncplanev1.QueryValue{Kind: &syncplanev1.QueryValue_StringValue{StringValue: value}},
+				}}},
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			keys := []string{}
+			for _, r := range resp.Msg.GetRows() {
+				keys = append(keys, r.GetKey())
+			}
+			return keys
+		}
+
+		It("moves the row when the mask names a sibling inside an opaque field", func() {
+			srv := newTestServer()
+			Expect(srv.RegisterDynamicEntity(server.DynamicEntity{
+				Name:      "card",
+				KeyFields: []string{"id"},
+				Fields: []server.DynamicField{
+					{Name: "id", Number: 1, Kind: protoreflect.StringKind},
+					{Name: "meta", Number: 2, Opaque: true, Message: []server.DynamicField{
+						{Name: "note", Number: 1, Kind: protoreflect.StringKind},
+						{Name: "tag", Number: 2, Kind: protoreflect.StringKind},
+					}},
+				},
+				Indexes: []server.DynamicIndex{
+					{Name: "by_tag", Key: []server.DynamicIndexKey{{Path: "meta.tag"}}},
+				},
+			})).To(Succeed())
+			meta, ok := srv.Entity("card")
+			Expect(ok).To(BeTrue())
+			mt := dynamicpb.NewMessageType(meta.Descriptor)
+
+			card := func(id, note, tag string) proto.Message {
+				m := mt.New()
+				fds := mt.Descriptor().Fields()
+				if id != "" {
+					m.Set(fds.ByName("id"), protoreflect.ValueOfString(id))
+				}
+				sub := m.Mutable(fds.ByName("meta")).Message()
+				sub.Set(sub.Descriptor().Fields().ByName("note"), protoreflect.ValueOfString(note))
+				sub.Set(sub.Descriptor().Fields().ByName("tag"), protoreflect.ValueOfString(tag))
+				return m.Interface()
+			}
+
+			push(srv, putMutation("c1", 1, "card", "k1", card("k1", "a", "old")))
+			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			Expect(queryKeys(srv, "card", []string{"meta", "tag"}, "old")).To(Equal([]string{"k1"}))
+
+			push(srv, patchMutation("c1", 2, "card", "k1", card("", "b", "new"), "meta.note"))
+
+			Expect(queryKeys(srv, "card", []string{"meta", "tag"}, "new")).To(Equal([]string{"k1"}))
+			Expect(queryKeys(srv, "card", []string{"meta", "tag"}, "old")).To(BeEmpty())
+		})
+
+		It("moves the row when the mask names the workspace of a reference message", func() {
+			srv := newTestServer()
+			Expect(srv.RegisterDynamicEntities(
+				server.DynamicEntity{Name: "person", KeyFields: []string{"id"}, Fields: []server.DynamicField{
+					{Name: "id", Number: 1, Kind: protoreflect.StringKind},
+				}},
+				server.DynamicEntity{Name: "job", KeyFields: []string{"id"}, Fields: []server.DynamicField{
+					{Name: "id", Number: 1, Kind: protoreflect.StringKind},
+					{Name: "owner", Number: 2, Ref: "person", RefWorkspace: true, Indexed: true},
+				}},
+			)).To(Succeed())
+			meta, ok := srv.Entity("job")
+			Expect(ok).To(BeTrue())
+			mt := dynamicpb.NewMessageType(meta.Descriptor)
+
+			job := func(id, ownerID string) proto.Message {
+				m := mt.New()
+				fds := mt.Descriptor().Fields()
+				if id != "" {
+					m.Set(fds.ByName("id"), protoreflect.ValueOfString(id))
+				}
+				ref := m.Mutable(fds.ByName("owner")).Message()
+				stub := ref.Mutable(ref.Descriptor().Fields().ByName("value")).Message()
+				stub.Set(stub.Descriptor().Fields().ByName("id"), protoreflect.ValueOfString(ownerID))
+				return m.Interface()
+			}
+
+			ownerID := []string{"owner", "value", "id"}
+			push(srv, putMutation("c1", 1, "job", "j1", job("j1", "p1")))
+			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			Expect(queryKeys(srv, "job", ownerID, "p1")).To(Equal([]string{"j1"}))
+
+			push(srv, patchMutation("c1", 2, "job", "j1", job("", "p2"), "owner.workspace_id"))
+
+			Expect(queryKeys(srv, "job", ownerID, "p2")).To(Equal([]string{"j1"}))
+			Expect(queryKeys(srv, "job", ownerID, "p1")).To(BeEmpty())
 		})
 	})
 

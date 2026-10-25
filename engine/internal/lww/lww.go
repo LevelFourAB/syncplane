@@ -123,12 +123,7 @@ func mergePath(dst, src protoreflect.Message, path, prefix, instPrefix string, m
 	// a bare path: reading "attrs." as "attrs" would replace the whole
 	// collection with the writer's view of it.
 	bare := rest == "" && (len(seg) == len(path) || !collection)
-	// Whole-replace cases: a bare path, an opaque field (the escape hatch —
-	// replaced/merged whole even when the mask names a sub-path into it), or a
-	// singular reference message, whose workspace and key must never split
-	// across a masked write. A repeated one falls through to mergeItem, which
-	// keeps the two together by addressing each element as one value.
-	if bare || opaque || (IsRefMessageField(fd) && !fd.IsList()) {
+	if bare || ReplacedWhole(fd) {
 		mg, hasMerger := m[prefix+seg]
 		if hasMerger && opaque && src.Has(fd) && (dst.Has(fd) || mg.MergeAbsentBase) {
 			fn := mg.Fn
@@ -1189,6 +1184,15 @@ func deepCopyValue(fd protoreflect.FieldDescriptor, v protoreflect.Value) protor
 func isOpaque(fd protoreflect.FieldDescriptor) bool {
 	b := fieldBehavior(fd)
 	return b.GetOpaque() || b.GetText()
+}
+
+// ReplacedWhole reports whether Merge replaces fd whole even when a mask path
+// names a sub-path into it. That is true for an opaque or text field, and for a
+// singular reference message, whose workspace and key never split across a
+// masked write. A repeated reference message merges per element instead, with
+// the whole element as the identity.
+func ReplacedWhole(fd protoreflect.FieldDescriptor) bool {
+	return isOpaque(fd) || (IsRefMessageField(fd) && !fd.IsList())
 }
 
 // OneofOf returns the oneof a field is a member of, or nil. Synthetic oneofs

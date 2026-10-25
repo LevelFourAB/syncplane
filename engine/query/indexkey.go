@@ -216,7 +216,7 @@ func (c IndexComponent) leafField() protoreflect.FieldDescriptor {
 //
 // Two paths interact when either is a PREFIX of the other: a mask that stops
 // above the component replaces the subtree the component reads through, and one
-// that continues below it writes inside the value the component reads. Three
+// that continues below it writes inside the value the component reads. Four
 // cases make the comparison conservative where a bare name comparison would be
 // wrong, and every one of them answers TRUE:
 //
@@ -225,6 +225,9 @@ func (c IndexComponent) leafField() protoreflect.FieldDescriptor {
 //   - A mask may address one ITEM of a map or keyed list ("tags.red"), so a
 //     segment following a repeated or map field is an item key, not a field
 //     name, and lands inside the collection the component fans out over.
+//   - A mask may name a sub-path into a field lww replaces whole (an opaque
+//     field or a singular reference message, see lww.ReplacedWhole), so a
+//     sibling of the component's path rewrites the value it reads too.
 //   - A path that runs out mid-comparison is a prefix, whichever side it was.
 //
 // Anything else is a genuine divergence at a field the component does not read,
@@ -243,9 +246,10 @@ func maskTouchesSteps(fields []pathStep, segs []string) bool {
 		}
 		fd := fields[i].fd
 		if segs[i] == string(fd.Name()) {
-			if fd.IsList() || fd.IsMap() {
-				// Whatever follows addresses an item of this collection, so it
-				// is inside what the component reads either way.
+			if fd.IsList() || fd.IsMap() || lww.ReplacedWhole(fd) {
+				// Whatever follows addresses an item of this collection, or
+				// lands in a field the merge replaces whole, so it is inside
+				// what the component reads either way.
 				return true
 			}
 			continue

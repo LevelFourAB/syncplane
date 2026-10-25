@@ -431,6 +431,21 @@ var _ = Describe("IndexComponent.MaskTouches", func() {
 		Expect(touches(widget, []string{"members", "uid"}, "members.u1.name")).To(BeTrue())
 	})
 
+	It("says yes for a mask naming a sibling inside an opaque field", func() {
+		// lww replaces an opaque field whole whatever sub-path the mask names,
+		// so "doc.data" rewrites doc.note too.
+		Expect(touches(widget, []string{"doc", "note"}, "doc.data")).To(BeTrue())
+		Expect(touches(widget, []string{"doc", "note"}, "label")).To(BeFalse())
+	})
+
+	It("says yes for a mask naming a sibling inside a singular reference message", func() {
+		// The workspace and the key of a reference message are one merge unit,
+		// so "assignee.workspace_id" also writes the user the component reads.
+		task := (&testdatav1.Task{}).ProtoReflect().Descriptor()
+		Expect(touches(task, []string{"assignee"}, "assignee.workspace_id")).To(BeTrue())
+		Expect(touches(task, []string{"assignee"}, "title")).To(BeFalse())
+	})
+
 	It("is not fooled by an escaped dot inside an item key", func() {
 		// One segment, "a.b", not two — the split has to match the merge's or
 		// the comparison is against a path the merge never walks.

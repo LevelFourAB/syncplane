@@ -98,7 +98,7 @@ Index maintenance costs apply to writes on both the client and the server. A wri
 `PUT` and `PATCH` differ in how they update indexes:
 
 - A `PUT` replaces the entire row, always rewriting the complete entry set.
-- A `PATCH` includes a field mask. If the mask contains only fields that no index reads, the index rewrite is skipped, matching the write cost of an unindexed entity. This check performs a path comparison against compiled components. Masks that cannot be verified (such as those addressing a oneof group or a single collection item) trigger a full rewrite. The TypeScript client's `update()` method derives its mask from a diff, ensuring that edits to unindexed fields do not incur index maintenance costs.
+- A `PATCH` includes a field mask. If the mask contains only fields that no index reads, the index rewrite is skipped, matching the write cost of an unindexed entity. This check performs a path comparison against compiled components. Masks that cannot be verified (such as those addressing a oneof group, a single collection item, or a sub-path into an opaque field or a reference message) trigger a full rewrite. The TypeScript client's `update()` method derives its mask from a diff, ensuring that edits to unindexed fields do not incur index maintenance costs.
 
 An index over a repeated field or map entry causes index entry counts to scale with data size rather than schema size. `MaxIndexEntriesPerRow` (default `1024`) sets the ceiling on index positions per row. Writes that exceed this limit fail immediately, preventing partial indexes that would disagree with full scans.
 
