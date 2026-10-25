@@ -80,7 +80,9 @@ var ErrCursorTooOld = errors.New("server: feed cursor cannot be resumed against 
 // Changes drains committed row changes after the cursor, in (seq, entity,
 // key) order, invoking fn for at most limit rows (limit <= 0 uses the
 // MaxPullChanges limit). It returns the advanced cursor and whether more
-// changes were left unread.
+// changes were left unread. Engine-internal rows count toward the limit
+// without reaching fn, so a page can hold fewer changes than limit, or none,
+// while more is true: keep paging until more is false.
 //
 // The feed is the engine's outbox: a consumer that persists the returned
 // cursor only after acting on the page gets at-least-once delivery of every
@@ -152,20 +154,23 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 			return ErrCursorTooOld
 		}
 		// Scan one row past the limit: seeing it proves truncation without
-		// emitting it.
+		// emitting it. Hidden rows count toward the limit and move the resume
+		// position too: the storage limit applies to every row it scans, so
+		// skipping them in the count would read a full scan as the end of the
+		// feed and jump the cursor to head past rows never read.
 		scanned := 0
 		var last storage.Row
 		if err := tx.ScanChanges(after.Seq, after.Entity, after.Key, limit+1, func(row storage.Row) error {
-			// The engine's own record of a write, not a change of the data.
-			if row.Entity == accessMovesEntity {
-				return nil
-			}
 			scanned++
 			if scanned > limit {
 				more = true
 				return nil
 			}
 			last = row
+			// The engine's own record of a write, not a change of the data.
+			if row.Entity == accessMovesEntity {
+				return nil
+			}
 			ch := Change{Entity: row.Entity, Key: row.Key, Seq: row.Version, Deleted: row.Deleted, Actor: row.Actor}
 			if !row.Deleted {
 				if info, ok := s.catalogPtr().entities[row.Entity]; ok {

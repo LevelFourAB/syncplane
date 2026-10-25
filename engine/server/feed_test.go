@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
+	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage"
@@ -321,6 +323,66 @@ var _ = Describe("Server.Changes", func() {
 			Expect(got[0].Message).To(BeNil())
 			Expect(got[0].Deleted).To(BeFalse())
 		})
+	})
+})
+
+// An access move writes an engine-internal log row at the same seq as the row
+// it moves, and the feed hides that row from consumers. These specs page past
+// one with small limits.
+var _ = Describe("Server.Changes over access moves", func() {
+	var (
+		f    *accessFixture
+		from server.Cursor
+	)
+
+	// drainAll pages the feed from `from` the way a consumer does and returns
+	// every change it was handed as "entity/key".
+	drainAll := func(limit int) []string {
+		GinkgoHelper()
+		var seen []string
+		cur := from
+		for range 50 {
+			next, more, err := f.srv.Changes(f.ctx, ws, cur, limit, func(ch server.Change) error {
+				seen = append(seen, ch.Entity+"/"+ch.Key)
+				return nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+			cur = next
+			if !more {
+				return seen
+			}
+		}
+		Fail("feed did not settle")
+		return nil
+	}
+
+	BeforeEach(func() {
+		f = newDeepFixtureOn(newTestStore())
+		f.seedOrg()
+		f.seedComments()
+		head, err := f.srv.CurrentSeq(f.ctx, ws)
+		Expect(err).NotTo(HaveOccurred())
+		from = server.Cursor{Seq: head}
+
+		Expect(f.srv.Mutate(server.Trusted(f.ctx), ws, func(tx *server.EntityTx) error {
+			return tx.Patch(&accessv1.Task{Id: "t1", Project: project("p2")}, []string{"project"}, nil)
+		})).To(Succeed())
+		for i := range 3 {
+			Expect(f.srv.Mutate(server.Trusted(f.ctx), ws, func(tx *server.EntityTx) error {
+				return tx.Put(&accessv1.Note{Id: fmt.Sprintf("n%d", i), Body: "after the move"})
+			})).To(Succeed())
+		}
+	})
+
+	// The hidden row sorts first in the move's seq group, so with limit 1 the
+	// first page holds no change at all. A scan that did not count it saw no
+	// truncation and jumped the cursor to head, past the notes.
+	It("delivers every change after a hidden row when pages are small", func() {
+		Expect(drainAll(1)).To(Equal([]string{"task/t1", "note/n0", "note/n1", "note/n2"}))
+	})
+
+	It("delivers the same changes in one page", func() {
+		Expect(drainAll(0)).To(Equal([]string{"task/t1", "note/n0", "note/n1", "note/n2"}))
 	})
 })
 
