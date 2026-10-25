@@ -140,6 +140,10 @@ func (s *Server) registerMutator(name string, argsPrototype proto.Message, fn Mu
 
 // EntityTx is the typed storage facade mutators run against. Entity identity
 // comes from the message type passed in; keys derive from key_fields.
+//
+// A Put, Patch or Delete that returns an error writes nothing, so a body may
+// take a Rejection as a refusal and go on. When such a write had begun, the
+// body runs once more on a fresh transaction, as on an adapter retry.
 type EntityTx struct {
 	srv *Server
 	// ctx is the caller's context, carried so the write path can log against
@@ -162,6 +166,18 @@ type EntityTx struct {
 	seq uint64
 	// wrote reports whether Put/Delete ran; Mutate notifies only if so.
 	wrote bool
+	// guarded runs every write inside its own savepoint, so that a write
+	// refused part way rewinds the derived state it already wrote (the text
+	// delta log, floors, index entries, history) along with its sequence.
+	// Savepoints cost statements on every write, so a transaction runs
+	// unguarded first and is run again guarded only when it is spoiled. Read
+	// on the transaction itself, never on its view.
+	guarded bool
+	// spoiled reports that an unguarded write failed after it began writing
+	// derived state. A body may take the refusal as a "no" and go on, so the
+	// transaction cannot commit what it holds: its driver discards the attempt
+	// with errNeedsSavepoints and runs it again guarded.
+	spoiled bool
 	// authz, when non-nil, authorizes each write before it is applied — the
 	// per-write CanMutate that Server.Mutate runs for a caller who is not
 	// Trusted. It is nil on every path that already authorized elsewhere: the
@@ -404,6 +420,35 @@ func (e *EntityTx) writeSeq() (uint64, error) {
 	return e.seq, nil
 }
 
+// atomically runs one Put, Patch or Delete so that a failed write leaves
+// nothing behind (see guarded and spoiled). Every derived-state write comes
+// after writeSeq, so a write that failed with the write count unchanged wrote
+// nothing.
+func (e *EntityTx) atomically(write func() error) error {
+	root := e
+	if e.root != nil {
+		root = e.root
+	}
+	if !root.guarded {
+		writes := root.writes
+		err := write()
+		if err != nil && root.writes != writes {
+			root.spoiled = true
+		}
+		return err
+	}
+	seq, wrote := root.seq, root.wrote
+	err := e.tx.InSavepoint(write)
+	if err != nil {
+		// The rewind gave the sequence back if this write allocated it. writes
+		// stays counted: it only invalidates bound reads, and one extra rebind
+		// is harmless.
+		root.seq, root.wrote = seq, wrote
+		e.access.invalidate()
+	}
+	return err
+}
+
 func (e *EntityTx) info(msg proto.Message) (*entityInfo, error) {
 	return entityInfoFor(e.srv, msg)
 }
@@ -490,6 +535,10 @@ func (e *EntityTx) GetMeta(dst proto.Message, key string) (found bool, meta RowM
 // states create-or-update intent; without one the write is unguarded and
 // follows arrival order like any other.
 func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
+	return e.atomically(func() error { return e.put(msg, opts...) })
+}
+
+func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 	o, err := collectWriteOpts(opts)
 	if err != nil {
 		return err
@@ -712,6 +761,10 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 // an invented identity. Unlike WithTextString it does not widen mask: a value
 // in a field mask does not name is ignored, like any other unmasked field.
 func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opts ...WriteOption) error {
+	return e.atomically(func() error { return e.patch(msg, mask, expected, opts...) })
+}
+
+func (e *EntityTx) patch(msg proto.Message, mask []string, expected *uint64, opts ...WriteOption) error {
 	o, err := collectWriteOpts(opts)
 	if err != nil {
 		return err
@@ -908,6 +961,10 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 
 // Delete writes a tombstone. prototype only identifies the entity type.
 func (e *EntityTx) Delete(prototype proto.Message, key string) error {
+	return e.atomically(func() error { return e.delete(prototype, key) })
+}
+
+func (e *EntityTx) delete(prototype proto.Message, key string) error {
 	info, err := e.info(prototype)
 	if err != nil {
 		return err

@@ -132,7 +132,7 @@ func (s *Server) mutateIdempotent(
 		out   WriteOutcome
 		wrote bool
 	)
-	err := s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+	err := s.withEntityWriteTx(ctx, workspaceID, func(tx storage.WriteTx, guarded bool) error {
 		// Reset per attempt: the closure is re-runnable (see the storage.Adapter
 		// contract), and a captured outcome from an abandoned attempt would
 		// report a sequence that rolled back.
@@ -156,10 +156,13 @@ func (s *Server) mutateIdempotent(
 			return err
 		}
 		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, gate: gate, actor: actor,
-			access: gate.accessOf()}
+			access: gate.accessOf(), guarded: guarded}
 		result, err := fn(etx)
 		if err != nil {
 			return err
+		}
+		if etx.spoiled {
+			return errNeedsSavepoints
 		}
 		if max := s.limits.MaxValueBytes; len(result) > max {
 			return fmt.Errorf("server: idempotent write result is %d bytes, over the %d byte limit", len(result), max)

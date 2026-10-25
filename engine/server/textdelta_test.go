@@ -2,8 +2,10 @@ package server_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -15,7 +17,10 @@ import (
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
+	"github.com/levelfourab/syncplane/engine/internal/pgtest"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
+	"github.com/levelfourab/syncplane/engine/storage/pgstore"
 	"github.com/levelfourab/syncplane/engine/text"
 )
 
@@ -660,4 +665,215 @@ var _ = Describe("Downstream text delta state", func() {
 		Expect(rc.GetTextDeltas()).To(BeEmpty())
 		Expect(rc.GetValue()).To(Equal(storedRow("w1")))
 	})
+})
+
+// Server code may take a Rejection from an in-process write as a "no" and go
+// on. The refused write must then leave no delta state behind, or a reader
+// folding the log ends with text the row never held.
+var _ = Describe("Downstream text delta state after a refused in-process write", func() {
+	const wsID = "ws-refused"
+
+	stores := map[string]func() storage.Adapter{
+		"sqlite": newTestStore,
+		"postgres": func() storage.Adapter {
+			GinkgoHelper()
+			store, err := pgstore.Open(GinkgoT().Context(), pgtest.DSN())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+			return store
+		},
+	}
+
+	for name, open := range stores {
+		Context("on "+name, func() {
+			var (
+				ctx    context.Context
+				srv    *server.Server
+				client syncplanev1connect.SyncServiceClient
+				// mutatorPatch is what the best_effort mutator writes.
+				mutatorPatch *testdatav1.Article
+			)
+
+			BeforeEach(func() {
+				ctx = context.Background()
+				// A small entry budget, so a long summary is refused by the index
+				// limit, which runs after the write has begun on the delta log.
+				srv = mustNewServer(open(),
+					server.WithEntities(&testdatav1.Article{}),
+					server.WithLimits(server.Limits{MaxIndexEntriesPerRow: 16}),
+					server.WithMutator("best_effort", nil, func(_ context.Context, tx *server.EntityTx, _ proto.Message) error {
+						err := tx.Patch(mutatorPatch, []string{"body", "summary"}, nil)
+						if _, ok := server.AsRejection(err); ok {
+							return nil
+						}
+						return err
+					}, server.MutatorAccess{Admitted: true}),
+				)
+				path, handler := srv.Handler()
+				mux := http.NewServeMux()
+				mux.Handle(path, handler)
+				ts := httptest.NewServer(mux)
+				DeferCleanup(ts.Close)
+				client = syncplanev1connect.NewSyncServiceClient(ts.Client(), ts.URL)
+			})
+
+			pull := func(cursor []byte) *syncplanev1.PullResponse {
+				GinkgoHelper()
+				resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+					WorkspaceId: wsID,
+					Cursor:      cursor,
+				}))
+				Expect(err).NotTo(HaveOccurred())
+				return resp.Msg
+			}
+
+			changeFor := func(resp *syncplanev1.PullResponse, key string) *syncplanev1.RowChange {
+				GinkgoHelper()
+				for _, rc := range resp.GetPatch().GetChanges() {
+					if rc.GetEntity() == "article" && rc.GetKey() == key {
+						return rc
+					}
+				}
+				Fail("no change for article " + key)
+				return nil
+			}
+
+			// reconstruct folds a change's delta state into the body the reader
+			// already holds, the way a client does.
+			reconstruct := func(rc *syncplanev1.RowChange, held []byte) string {
+				GinkgoHelper()
+				var next, prev testdatav1.Article
+				Expect(proto.Unmarshal(rc.GetValue(), &next)).To(Succeed())
+				Expect(proto.Unmarshal(held, &prev)).To(Succeed())
+				for _, fd := range rc.GetTextDeltas() {
+					Expect(fd.GetField()).To(Equal("body"))
+					if len(fd.GetFragment()) == 0 {
+						next.Body = prev.GetBody()
+						continue
+					}
+					merged, err := text.ApplyFragmentBytes(prev.GetBody(), fd.GetFragment())
+					Expect(err).NotTo(HaveOccurred())
+					next.Body = merged
+				}
+				return plainBody(next.GetBody())
+			}
+
+			storedBody := func() string {
+				GinkgoHelper()
+				var stored testdatav1.Article
+				Expect(proto.Unmarshal(changeFor(pull(nil), "a1").GetValue(), &stored)).To(Succeed())
+				return plainBody(stored.GetBody())
+			}
+
+			// Long enough that a small edit ships as delta state rather than a
+			// snapshot, and short enough to stay under the entry budget.
+			const tail = "the lazy dog "
+			base := func() []byte {
+				return bodyDoc("seed", "the quick brown fox jumps over "+tail+strings.Repeat("x", 600))
+			}
+			refused := func(doc []byte) *testdatav1.Article {
+				words := make([]string, 40)
+				for i := range words {
+					words[i] = fmt.Sprintf("word%d", i)
+				}
+				return &testdatav1.Article{Id: "a1", Summary: strings.Join(words, " "),
+					Body: editBody(doc, "intruder", func(d *text.Doc) {
+						Expect(d.Insert(0, "REFUSED ")).To(Succeed())
+					})}
+			}
+
+			// seed creates the row and returns a reader caught up through it.
+			seed := func(doc []byte) (*syncplanev1.PullResponse, []byte) {
+				GinkgoHelper()
+				Expect(srv.Mutate(server.Trusted(ctx), wsID, func(tx *server.EntityTx) error {
+					return tx.Put(&testdatav1.Article{Id: "a1", Title: "t", Body: doc})
+				})).To(Succeed())
+				first := pull(nil)
+				return first, changeFor(first, "a1").GetValue()
+			}
+
+			// editLater makes a valid edit of the document after the refused one.
+			editLater := func(doc []byte) {
+				GinkgoHelper()
+				edited := editBody(doc, "alice", func(d *text.Doc) {
+					Expect(d.SetString("the quick brown fox leaps over " + tail + strings.Repeat("x", 600))).To(Succeed())
+				})
+				Expect(srv.Mutate(server.Trusted(ctx), wsID, func(tx *server.EntityTx) error {
+					return tx.Patch(&testdatav1.Article{Id: "a1", Body: edited}, []string{"body"}, nil)
+				})).To(Succeed())
+			}
+
+			It("ships no trace of a PATCH that Mutate's closure was refused and went on from", func() {
+				doc := base()
+				first, held := seed(doc)
+
+				Expect(srv.Mutate(server.Trusted(ctx), wsID, func(tx *server.EntityTx) error {
+					err := tx.Patch(refused(doc), []string{"body", "summary"}, nil)
+					r, ok := server.AsRejection(err)
+					Expect(ok).To(BeTrue(), "the write must be refused as a Rejection, got %v", err)
+					Expect(r.Code).To(Equal(server.CodeInvalidArgument))
+					return nil
+				})).To(Succeed())
+				editLater(doc)
+
+				stored := storedBody()
+				Expect(stored).NotTo(ContainSubstring("REFUSED"))
+				rc := changeFor(pull(first.GetNextCursor()), "a1")
+				Expect(rc.GetTextDeltas()).NotTo(BeEmpty(), "precondition: the catch-up ships delta state")
+				Expect(reconstruct(rc, held)).To(Equal(stored))
+			})
+
+			It("ships no trace of a PATCH that a pushed mutator was refused and went on from", func() {
+				doc := base()
+				first, held := seed(doc)
+
+				mutatorPatch = refused(doc)
+				resp, err := client.Push(ctx, connect.NewRequest(pushOf(wsID, []*syncplanev1.Mutation{{
+					ClientId: "c1", MutationId: 1,
+					Payload: &syncplanev1.Mutation_Custom{Custom: &syncplanev1.CustomMutation{Name: "best_effort"}},
+				}})))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pushResults(resp.Msg)[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+				editLater(doc)
+
+				stored := storedBody()
+				Expect(stored).NotTo(ContainSubstring("REFUSED"))
+				rc := changeFor(pull(first.GetNextCursor()), "a1")
+				Expect(rc.GetTextDeltas()).NotTo(BeEmpty(), "precondition: the catch-up ships delta state")
+				Expect(reconstruct(rc, held)).To(Equal(stored))
+			})
+
+			It("consumes no sequence for a refused write that was the closure's only one", func() {
+				doc := base()
+				seed(doc)
+				var created uint64
+				Expect(srv.Mutate(server.Trusted(ctx), wsID, func(tx *server.EntityTx) error {
+					if err := tx.Patch(&testdatav1.Article{Id: "a1", Title: "t2"}, []string{"title"}, nil); err != nil {
+						return err
+					}
+					created = tx.Seq()
+					return nil
+				})).To(Succeed())
+
+				out, err := srv.MutateIdempotent(server.Trusted(ctx), wsID, "refused-once", func(tx *server.EntityTx) ([]byte, error) {
+					_, ok := server.AsRejection(tx.Patch(refused(doc), []string{"body", "summary"}, nil))
+					Expect(ok).To(BeTrue())
+					return nil, nil
+				})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(out.Applied).To(BeTrue())
+				Expect(out.Seq).To(BeZero(), "the refused write is rewound with its sequence")
+
+				var next uint64
+				Expect(srv.Mutate(server.Trusted(ctx), wsID, func(tx *server.EntityTx) error {
+					if err := tx.Patch(&testdatav1.Article{Id: "a1", Title: "t3"}, []string{"title"}, nil); err != nil {
+						return err
+					}
+					next = tx.Seq()
+					return nil
+				})).To(Succeed())
+				Expect(next).To(Equal(created + 1))
+			})
+		})
+	}
 })

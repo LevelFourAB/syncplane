@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"google.golang.org/protobuf/proto"
@@ -88,7 +89,7 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 	}
 	authz, gate := s.writeAuthorizer(ctx, adm, workspaceID, enforced)
 	wrote := false
-	err = s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+	err = s.withEntityWriteTx(ctx, workspaceID, func(tx storage.WriteTx, guarded bool) error {
 		actor, err := actorOf(ctx)
 		if err != nil {
 			return err
@@ -100,9 +101,12 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 			return err
 		}
 		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, gate: gate, actor: actor,
-			access: gate.accessOf()}
+			access: gate.accessOf(), guarded: guarded}
 		if err := fn(etx); err != nil {
 			return err
+		}
+		if etx.spoiled {
+			return errNeedsSavepoints
 		}
 		wrote = etx.wrote
 		return nil
@@ -114,6 +118,21 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 		s.notifier.Notify(workspaceID)
 	}
 	return nil
+}
+
+// withEntityWriteTx runs fn in a write transaction unguarded, and once more
+// guarded when fn returns errNeedsSavepoints. fn hands guarded to the EntityTx
+// it builds, and returns errNeedsSavepoints when that EntityTx is spoiled.
+func (s *Server) withEntityWriteTx(ctx context.Context, workspaceID string, fn func(tx storage.WriteTx, guarded bool) error) error {
+	err := s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+		return fn(tx, false)
+	})
+	if errors.Is(err, errNeedsSavepoints) {
+		err = s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+			return fn(tx, true)
+		})
+	}
+	return err
 }
 
 // Invoke runs a registered mutator by name through Mutate, reusing

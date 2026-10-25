@@ -295,11 +295,11 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			if guarded {
 				applyErr = tx.InSavepoint(func() error {
 					var err error
-					seq, err = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i])
+					seq, err = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i], true)
 					return err
 				})
 			} else {
-				seq, applyErr = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i])
+				seq, applyErr = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i], false)
 			}
 
 			var result *syncplanev1.MutationResult
@@ -647,11 +647,13 @@ func (b *batchRows) get(entity, key string) (storage.Row, error) {
 // sees an ordinary closure failure and the client sees a typed code.
 var errAbortBatch = errors.New("push batch aborted")
 
-// errNeedsSavepoints rolls a push's first, unguarded write attempt back when a
-// mutation is rejected: without a savepoint around it nothing rewound the rows
-// it wrote before failing. It never escapes pushWorkspace — the batch is run
-// again with every mutation guarded, and that attempt decides the outcome.
-var errNeedsSavepoints = errors.New("push batch needs savepoints")
+// errNeedsSavepoints rolls a first, unguarded write attempt back when a write
+// failed part way: without a savepoint around it nothing rewound what it wrote
+// before failing. A push returns it when a mutation is rejected, and every
+// driver of an EntityTx when the transaction is spoiled (see EntityTx.spoiled).
+// It never escapes its driver — the transaction is run again guarded, and that
+// attempt decides the outcome.
+var errNeedsSavepoints = errors.New("write transaction needs savepoints")
 
 // mutationLabel names a mutation's target for logging: the entity for CRUD, the
 // mutator name for a custom mutation, or a batch summary. Best-effort and
@@ -791,6 +793,7 @@ func (s *Server) applyMutation(
 	g *writeGate,
 	m *syncplanev1.Mutation,
 	authErr error,
+	guarded bool,
 ) (uint64, error) {
 	if err := s.checkLimits(m); err != nil {
 		return 0, err
@@ -819,7 +822,7 @@ func (s *Server) applyMutation(
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Custom:
-		if err := s.applyCustom(ctx, ws, tx, g, m.GetMutationId(), payload.Custom, seq, actor); err != nil {
+		if err := s.applyCustom(ctx, ws, tx, g, m.GetMutationId(), payload.Custom, seq, actor, guarded); err != nil {
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Batch:
@@ -1383,6 +1386,7 @@ func (s *Server) applyCustom(
 	custom *syncplanev1.CustomMutation,
 	seq uint64,
 	actor storage.Actor,
+	guarded bool,
 ) error {
 	mi, ok := s.mutators[custom.GetName()]
 	if !ok {
@@ -1402,9 +1406,17 @@ func (s *Server) applyCustom(
 	if err := s.checkInvocation(ctx, ws, tx, g.accessOf(), mi, args); err != nil {
 		return err
 	}
-	err := mi.fn(markWriteTx(ctx), &EntityTx{
+	etx := &EntityTx{
 		srv: s, ctx: ctx, ws: ws, tx: tx, seq: seq, actor: actor, access: g.accessOf(), caller: g,
-	}, args)
+		guarded: guarded,
+	}
+	err := mi.fn(markWriteTx(ctx), etx, args)
+	if err == nil && etx.spoiled {
+		// The mutation applies, so its own savepoint would keep what the
+		// refused write left: the batch has to run again with every write of
+		// the body guarded too.
+		return errNeedsSavepoints
+	}
 	if _, isRejection := AsRejection(err); err == nil || isRejection {
 		return err
 	}
