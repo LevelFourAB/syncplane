@@ -367,7 +367,9 @@ type WorkspaceResults struct {
 	// order from the client's watermark), "workspace_access_revoked"
 	// (permanent — stop syncing this workspace, see the client's purge path),
 	// "invalid_argument" (deterministic; the batch will never apply),
-	// "internal" (transient; retry).
+	// "mutation_failed" (a custom mutator returned an error; retry, and drop
+	// the mutation after repeated identical failures), "internal" (transient;
+	// retry).
 	ErrorCode     string `protobuf:"bytes,3,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
 	ErrorMessage  string `protobuf:"bytes,4,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
 	unknownFields protoimpl.UnknownFields

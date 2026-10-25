@@ -135,6 +135,17 @@ export const CodeMutationIdGap = 'mutation_id_gap';
 export const CodeInternal = 'internal';
 
 /**
+ * A custom mutator on the server returned an error that is not a rejection, so
+ * NOTHING in the push batch applied. The client retries it, and drops the
+ * mutation with `poison_dropped` once it has failed alone with the same verdict
+ * `poisonThreshold` times.
+ *
+ * Workspace-scoped, like CodeMutationIdGap: it appears on `WorkspaceResults`,
+ * not on any single mutation.
+ */
+export const CodeMutationFailed = 'mutation_failed';
+
+/**
  * Response-metadata key carrying one of the codes above on an RPC-level error.
  * Mirrors ErrorCodeMetadataKey in engine/server/codes.go.
  *

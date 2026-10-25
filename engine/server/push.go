@@ -397,6 +397,19 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 	case badArg != "":
 		return fail(CodeInvalidArgument, "workspace %q: %s", ws, badArg)
 	case err != nil:
+		// A mutator's own error gets its own code: the client counts repeats of
+		// it toward dropping the mutation, which it must never do for an outage.
+		// A cancelled push is the exception, as the body most likely failed on
+		// the cancellation.
+		var mf *mutatorError
+		if errors.As(err, &mf) && ctx.Err() == nil {
+			s.reqLog(ctx, "push", ws, "").LogAttrs(ctx, slog.LevelError, "mutator failed",
+				slog.String("mutator", mf.name),
+				slog.Uint64("mutation_id", mf.mutationID),
+				slog.String("error", mf.err.Error()))
+			return fail(CodeMutationFailed, "workspace %q: mutator %q failed on mutation %d",
+				ws, mf.name, mf.mutationID)
+		}
 		return failInternal("applying the batch", err)
 	}
 	if applied {
@@ -806,7 +819,7 @@ func (s *Server) applyMutation(
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Custom:
-		if err := s.applyCustom(ctx, ws, tx, g, payload.Custom, seq, actor); err != nil {
+		if err := s.applyCustom(ctx, ws, tx, g, m.GetMutationId(), payload.Custom, seq, actor); err != nil {
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Batch:
@@ -1366,6 +1379,7 @@ func (s *Server) applyCustom(
 	ws string,
 	tx storage.WriteTx,
 	g *writeGate,
+	mutationID uint64,
 	custom *syncplanev1.CustomMutation,
 	seq uint64,
 	actor storage.Actor,
@@ -1388,7 +1402,25 @@ func (s *Server) applyCustom(
 	if err := s.checkInvocation(ctx, ws, tx, g.accessOf(), mi, args); err != nil {
 		return err
 	}
-	return mi.fn(markWriteTx(ctx), &EntityTx{
+	err := mi.fn(markWriteTx(ctx), &EntityTx{
 		srv: s, ctx: ctx, ws: ws, tx: tx, seq: seq, actor: actor, access: g.accessOf(), caller: g,
 	}, args)
+	if _, isRejection := AsRejection(err); err == nil || isRejection {
+		return err
+	}
+	return &mutatorError{name: mi.name, mutationID: mutationID, err: err}
 }
+
+// mutatorError marks an error a custom mutator body returned, so the push can
+// tell the mutator's own failure (CodeMutationFailed) from an infrastructure
+// one (CodeInternal). It unwraps, so the storage adapter's retry checks and the
+// workspace gate's refusal check still see the cause.
+type mutatorError struct {
+	name       string
+	mutationID uint64
+	err        error
+}
+
+func (e *mutatorError) Error() string { return fmt.Sprintf("mutator %q: %v", e.name, e.err) }
+
+func (e *mutatorError) Unwrap() error { return e.err }

@@ -743,10 +743,12 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	debugVerifyIndexReads?: boolean;
 	/**
 	 * Identical push failures of the head mutation — an invalid-argument RPC
-	 * error, or a batch the server refuses as a whole with an internal or
-	 * unrecognized code — before the client drops it to the dead-letter surface
-	 * (onMutationRejected, code "poison_dropped"). Backstop against a queue no
-	 * amount of retrying can drain. Default 5; <= 0 disables.
+	 * error, or a batch the server refuses as a whole with "mutation_failed" or
+	 * an unrecognized code — before the client drops it to the dead-letter
+	 * surface (onMutationRejected, code "poison_dropped"). Backstop against a
+	 * queue no amount of retrying can drain. An "internal" batch failure (a
+	 * storage or hook outage) never counts, so an outage of any length keeps the
+	 * queue. Default 5; <= 0 disables.
 	 */
 	poisonThreshold?: number;
 	/**

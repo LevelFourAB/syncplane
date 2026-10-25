@@ -44,6 +44,7 @@ export {
 	CodeFormatUpgraded,
 	CodeInternal,
 	CodeInvalidArgument,
+	CodeMutationFailed,
 	CodeMutationIdGap,
 	CodePermissionDenied,
 	CodePoisonDropped,

@@ -162,7 +162,9 @@ export type WorkspaceResults = Message<"syncplane.v1.WorkspaceResults"> & {
    * order from the client's watermark), "workspace_access_revoked"
    * (permanent — stop syncing this workspace, see the client's purge path),
    * "invalid_argument" (deterministic; the batch will never apply),
-   * "internal" (transient; retry).
+   * "mutation_failed" (a custom mutator returned an error; retry, and drop
+   * the mutation after repeated identical failures), "internal" (transient;
+   * retry).
    *
    * @generated from field: string error_code = 3;
    */

@@ -72,6 +72,13 @@ const (
 	// persist — a storage error, or a permission hook that could not decide.
 	// Retry with backoff. It never means "denied": a denial is always typed.
 	CodeInternal = "internal"
+	// CodeMutationFailed reports that a custom mutator returned an error that
+	// is not a Reject, so NOTHING in the batch was applied. The message names
+	// the mutator and the mutation id; the error itself is logged on the
+	// server only. A retry can succeed only if the mutator's answer changes,
+	// so the client counts repeats of it toward dropping the mutation, and
+	// never counts CodeInternal.
+	CodeMutationFailed = "mutation_failed"
 )
 
 // ErrorCodeMetadataKey is the response-metadata key carrying a machine-readable

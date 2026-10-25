@@ -3,6 +3,8 @@ package server_test
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"net/http"
@@ -411,7 +413,71 @@ var _ = Describe("Push batches", func() {
 			Expect(pullAs("reader").GetSeq()).To(Equal(seq), "a resend applies nothing a second time")
 		})
 	})
+
+	// The client drops a mutation after its batch fails the same way several
+	// times, so the code has to tell a mutator that will keep failing from an
+	// outage that will pass: both repeat one verdict on every attempt.
+	Describe("a batch that fails as a whole", func() {
+		pushBatch := func(mutations ...*syncplanev1.Mutation) *syncplanev1.WorkspaceResults {
+			GinkgoHelper()
+			resp, err := client.Push(ctx, connect.NewRequest(pushOf(ws, mutations)))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetResults()).To(HaveLen(1))
+			return resp.Msg.GetResults()[0]
+		}
+
+		It("reports a mutator's own error as mutation_failed, naming the mutator and the mutation", func() {
+			start(newTestServer(server.WithMutator("explode", nil,
+				func(context.Context, *server.EntityTx, proto.Message) error {
+					return errors.New("ledger row missing")
+				})))
+
+			batch := pushBatch(
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}),
+				customMutation("c1", 2, "explode", &testdatav1.Widget{}),
+			)
+			Expect(batch.GetErrorCode()).To(Equal(server.CodeMutationFailed))
+			Expect(batch.GetErrorMessage()).To(Equal(`workspace "` + ws + `": mutator "explode" failed on mutation 2`))
+			Expect(batch.GetResults()).To(BeEmpty(), "nothing was acked")
+			Expect(pullAs("c1").GetLastAckedMutationId()).To(BeZero())
+			Expect(todoAt("t1")).To(BeNil())
+		})
+
+		It("keeps a mutator's Reject a rejection", func() {
+			start(newTestServer(server.WithMutator("refuse", nil,
+				func(context.Context, *server.EntityTx, proto.Message) error {
+					return fmt.Errorf("wrapped: %w", server.Reject(server.CodeConflict, "no"))
+				})))
+
+			batch := pushBatch(customMutation("c1", 1, "refuse", &testdatav1.Widget{}))
+			Expect(batch.GetErrorCode()).To(BeEmpty())
+			Expect(statuses(batch.GetResults())).To(Equal([]syncplanev1.MutationStatus{refused}))
+		})
+
+		It("reports a storage failure inside a mutator's batch as internal", func() {
+			store := &failingWriteAdapter{Adapter: newTestStore(), err: errors.New("disk on fire")}
+			start(mustNewServer(store, testEntities(), server.WithMutator("noop", nil,
+				func(context.Context, *server.EntityTx, proto.Message) error { return nil })))
+
+			for range 2 {
+				batch := pushBatch(customMutation("c1", 1, "noop", &testdatav1.Widget{}))
+				Expect(batch.GetErrorCode()).To(Equal(server.CodeInternal))
+				Expect(batch.GetErrorMessage()).NotTo(ContainSubstring("disk on fire"))
+			}
+		})
+	})
 })
+
+// failingWriteAdapter fails every write transaction before its closure runs,
+// as a store that is down does.
+type failingWriteAdapter struct {
+	storage.Adapter
+	err error
+}
+
+func (a *failingWriteAdapter) WithWriteTx(context.Context, string, func(storage.WriteTx) error) error {
+	return a.err
+}
 
 // savepointCountingAdapter counts what a push batch spent on rewind machinery:
 // how many times the write closure ran, and how many savepoints it opened. A

@@ -2,7 +2,7 @@ import { create } from '@bufbuild/protobuf';
 import { Code, ConnectError, createRouterTransport, type Transport } from '@connectrpc/connect';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { CodeInternal, CodePoisonDropped } from '../../src/codes.js';
+import { CodeInternal, CodeMutationFailed, CodePoisonDropped } from '../../src/codes.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import {
@@ -26,6 +26,9 @@ import { pushApplied, pushedMutations, pushFailed, pushResults } from './pushfak
 
 /** The workspace these specs drive. */
 const WS = 'ws';
+
+/** The batch verdict the engine sends when a custom mutator returns a plain error. */
+const MUTATOR_FAILED = `workspace "${WS}": mutator "explode" failed on mutation 1`;
 
 // Drives the Coordinator's push path against a fake server to exercise the
 // poison-queue backstop: a mutation the server keeps failing — as an RPC error
@@ -306,12 +309,12 @@ describe('coordinator poison backstop', () => {
 	});
 
 	it('drops a head whose batch the server keeps failing the same way', async () => {
-		// A workspace-scoped batch failure is what a custom mutator returning a
-		// plain error instead of Reject(...) produces. It is not an RPC error, so
-		// nothing about it is deterministic on its face — but a head that fails
-		// alone with the same verdict every time is one nothing can drain.
+		// mutation_failed is what a custom mutator returning a plain error
+		// instead of Reject(...) produces. It is not an RPC error, so nothing
+		// about it is deterministic on its face — but a head that fails alone
+		// with the same verdict every time is one nothing can drain.
 		const coord = newCoordinator(
-			batchFailTransport(CodeInternal, () => 'workspace "ws": applying the batch failed'),
+			batchFailTransport(CodeMutationFailed, () => MUTATOR_FAILED),
 			3,
 		);
 
@@ -325,7 +328,7 @@ describe('coordinator poison backstop', () => {
 			expect.objectContaining({
 				mutationId: 1n,
 				errorCode: CodePoisonDropped,
-				errorMessage: 'workspace "ws": applying the batch failed',
+				errorMessage: MUTATOR_FAILED,
 			}),
 		]);
 		expect(await pendingIds()).toEqual([]);
@@ -334,12 +337,11 @@ describe('coordinator poison backstop', () => {
 	});
 
 	it('restarts the count when the batch failure changes', async () => {
-		// A batch failure that reads differently each time is the shape of an
-		// outage, not of a mutation nothing can apply: only a repeat of the same
-		// verdict is evidence that retrying cannot help.
+		// A mutator that fails differently each time may still succeed: only a
+		// repeat of the same verdict is evidence that retrying cannot help.
 		let attempt = 0;
 		const coord = newCoordinator(
-			batchFailTransport(CodeInternal, () => `attempt ${++attempt} lost its connection`),
+			batchFailTransport(CodeMutationFailed, () => `attempt ${++attempt} lost its connection`),
 			3,
 		);
 
@@ -349,6 +351,78 @@ describe('coordinator poison backstop', () => {
 		expect(await pendingIds()).toEqual([ 1n ]);
 
 		await coord.stop();
+	});
+
+	describe('during a server outage', () => {
+		// The engine words every infrastructure failure as a fixed phase and logs
+		// the cause, so an outage repeats one verdict for as long as it lasts.
+		for (
+			const [ name, message ] of [
+				[ 'storage', `workspace "${WS}": applying the batch failed` ],
+				[ 'permission hook', `workspace "${WS}": resolving access failed` ],
+			] as const
+		) {
+			it(`keeps the head through a ${name} outage and pushes it once the server recovers`, async () => {
+				let pushes = 0;
+				let watermark = 0n;
+				const applied: bigint[] = [];
+				const coord = newCoordinator(
+					createRouterTransport(({ service }) => {
+						service(SyncService, {
+							push(req) {
+								if (++pushes <= 5) return pushFailed(req, CodeInternal, message);
+								for (const m of pushedMutations(req)) {
+									applied.push(m.mutationId);
+									if (m.mutationId > watermark) watermark = m.mutationId;
+								}
+								return pushApplied(req);
+							},
+							pull() {
+								return {
+									patch: { changes: [], dropEntities: [] },
+									nextCursor: new Uint8Array([ 1 ]),
+									lastAckedMutationId: watermark,
+								};
+							},
+						});
+					}),
+					5,
+				);
+
+				for (let i = 0; i < 6; i++) await cycle(coord);
+
+				expect(rejections).toEqual([]);
+				expect(applied).toEqual([ 1n ]);
+				expect(await pendingIds()).toEqual([]);
+
+				await coord.stop();
+			});
+		}
+
+		it('restarts the count of a failing mutator', async () => {
+			// Two mutator failures, an outage, then two more: four in all, but
+			// never three in a row.
+			const verdicts = [ CodeMutationFailed, CodeMutationFailed, CodeInternal ];
+			let attempt = 0;
+			const coord = newCoordinator(
+				syncTransport((req) => {
+					const code = verdicts[attempt++] ?? CodeMutationFailed;
+					return pushFailed(req, code, code === CodeInternal ? 'outage' : MUTATOR_FAILED);
+				}),
+				3,
+			);
+
+			for (let i = 0; i < 5; i++) await cycle(coord);
+			expect(rejections).toHaveLength(0);
+			expect(await pendingIds()).toEqual([ 1n ]);
+
+			await cycle(coord);
+			expect(rejections).toEqual([
+				expect.objectContaining({ mutationId: 1n, errorCode: CodePoisonDropped }),
+			]);
+
+			await coord.stop();
+		});
 	});
 
 	it('never drops on transient (non-deterministic) errors', async () => {

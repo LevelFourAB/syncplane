@@ -299,13 +299,14 @@ export interface CoordinatorOptions {
 	/**
 	 * How many times the head mutation may fail the same way — an
 	 * invalid-argument push error, or a batch the server refuses as a whole with
-	 * an internal or unrecognized code — before the client gives up and drops it
-	 * to the dead-letter surface (onMutationRejected, code "poison_dropped").
-	 * Counted only while the verdict repeats unchanged, so an outage does not
-	 * accumulate toward it. A higher value tolerates longer windows in which the
+	 * "mutation_failed" or an unrecognized code — before the client gives up and
+	 * drops it to the dead-letter surface (onMutationRejected, code
+	 * "poison_dropped"). Counted only while the verdict repeats unchanged. An
+	 * "internal" batch failure (a storage or hook outage) never counts and
+	 * restarts the count. A higher value tolerates longer windows in which the
 	 * failure could still turn out to be transient (a rolling deploy, a failing
-	 * dependency) at the cost of staying wedged longer. Default 5; <= 0 disables
-	 * dropping (retry forever).
+	 * dependency a mutator calls) at the cost of staying wedged longer. Default
+	 * 5; <= 0 disables dropping (retry forever).
 	 */
 	poisonThreshold?: number;
 	/**
@@ -1588,15 +1589,22 @@ export class Coordinator {
 							this.markNoAccess(sent.workspaceId);
 							continue;
 						}
-						// Internal or unrecognized: presumed transient, so the cycle retries
-						// with backoff rather than draining a queue the server never took.
-						// A deterministic one would retry forever though — a custom mutator
-						// returning a plain error instead of Reject(...) fails its batch this
-						// way on every attempt — so the head runs the same isolation and
-						// dead-lettering as a deterministic RPC failure. Only a repeat of the
-						// identical verdict counts, which is what keeps an outage (whose
-						// batches fail for changing reasons) out of the backstop.
 						const failure = wsResult.errorMessage || wsResult.errorCode;
+						if (wsResult.errorCode === CodeInternal) {
+							// An outage: a store or a hook that could not answer. The engine
+							// words it as a fixed phase and logs the cause, so it repeats
+							// unchanged for as long as the outage lasts and cannot count toward
+							// the backstop. It says nothing about the head either, so the
+							// failures counted before it do not stand.
+							if (state) state.poison = undefined;
+							throw new Error(`push failed for workspace ${sent.workspaceId}: ${failure}`);
+						}
+						// A failing mutator, or a code this client does not know: the cycle
+						// retries with backoff rather than draining a queue the server never
+						// took. A mutator returning a plain error instead of Reject(...)
+						// fails its batch this way on every attempt though, so the head runs
+						// the same isolation and dead-lettering as a deterministic RPC
+						// failure. Only a repeat of the identical verdict counts.
 						const head = queues.get(sent.workspaceId)?.[0];
 						if (
 							state && head && sent.atHead && this.poisonThreshold > 0

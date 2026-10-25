@@ -161,8 +161,8 @@ func MutatorOptions(perms *Permissions) []server.Option {
 				return server.Reject(server.CodeConflict, "write_then_reject always rejects")
 			}, open),
 		// fail_internal returns a plain error where it should return a Reject,
-		// which is the app-code mistake that fails a whole batch as "internal"
-		// on every attempt. It exists so the TS suite can prove the client's
+		// which is the app-code mistake that fails a whole batch as
+		// "mutation_failed" on every attempt. It exists so the TS suite can prove the client's
 		// dead-letter backstop drains a queue no retry can.
 		server.WithMutator("fail_internal", nil,
 			func(context.Context, *server.EntityTx, proto.Message) error {

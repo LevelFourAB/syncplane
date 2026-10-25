@@ -256,8 +256,8 @@ describe('sync (poll-driven)', () => {
 
 	it('dead-letters a mutation whose mutator fails the batch on every attempt', async () => {
 		// fail_internal returns a plain error instead of a Reject, so the server
-		// fails the whole batch as "internal" — retryable by contract, but no
-		// retry can ever change the answer. Without the backstop the queue never
+		// fails the whole batch as "mutation_failed" — retryable by contract, but
+		// no retry can ever change the answer. Without the backstop the queue never
 		// drains and the app is told only that sync is failing.
 		const ws = freshWorkspace();
 		const rejections: RejectionInfo[] = [];
