@@ -157,6 +157,19 @@ func closureSetRows(cs *syncplanecursorv1.ClosureSet) closureRows {
 	return cr
 }
 
+// heldSet projects held plus added to the wire ClosureSet, in the same
+// deterministic form keySet emits.
+func heldSet(held map[closureKey]bool, added []closureKey) *syncplanecursorv1.ClosureSet {
+	cr := make(closureRows, len(held)+len(added))
+	for ck := range held {
+		cr[ck] = storage.Row{}
+	}
+	for _, ck := range added {
+		cr[ck] = storage.Row{}
+	}
+	return cr.keySet()
+}
+
 // ---- reference graph (server mirror of EntityRegistry.buildRefGraph) ----
 
 // forwardRefRel is one forward reference relation surfaced on the source

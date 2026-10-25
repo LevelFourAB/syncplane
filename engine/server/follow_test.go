@@ -248,6 +248,52 @@ var _ = Describe("Reference-following subscriptions", func() {
 		})
 	})
 
+	Describe("a page that truncates while the closure moves", func() {
+		// A truncated page classifies with the closure resolved for that page,
+		// but the membership diff waits for the page that ends at a clean
+		// boundary. A row that is a member only on the truncated page must
+		// still leave the client when the closure moves on before then.
+		It("removes a row that was a member only on the truncated page", func() {
+			sub := &syncplanev1.Subscription{
+				Entity:    "issue",
+				Predicate: idEq("i1"),
+				Follow:    &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}}, Depth: 1},
+			}
+			push(putMutation("c1", 1, "issue", "i1", issue("i1", "one", "")))
+			r1 := pull(nil, sub)
+			view := map[string][]byte{}
+			applyPatch(view, r1.GetPatch())
+			Expect(viewKeys(view)).To(Equal([]string{"issue/i1"}))
+
+			// A one-row page ships p as a closure member and truncates before
+			// i1, which points at it.
+			push(putMutation("c1", 2, "project", "p", &testdatav1.Project{Id: "p", Name: "proj"}))
+			push(putMutation("c1", 3, "issue", "i1", issue("i1", "one", "p")))
+			resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+				WorkspaceId: ws, Cursor: r1.GetNextCursor(), Subscriptions: []*syncplanev1.Subscription{sub}, Limit: 1,
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetHasMore()).To(BeTrue())
+			applyPatch(view, resp.Msg.GetPatch())
+			Expect(view).To(HaveKey("project/p"))
+
+			// i1 stops pointing at p before the next page.
+			push(putMutation("c1", 4, "issue", "i1", issue("i1", "one", "")))
+			cursor := resp.Msg.GetNextCursor()
+			for i := 0; ; i++ {
+				Expect(i).To(BeNumerically("<", 10), "pull did not settle")
+				r := pull(cursor, sub)
+				applyPatch(view, r.GetPatch())
+				cursor = r.GetNextCursor()
+				if !r.GetHasMore() {
+					break
+				}
+			}
+
+			Expect(viewKeys(view)).To(Equal([]string{"issue/i1"}))
+		})
+	})
+
 	Describe("forward depth", func() {
 		// blocked_by is a repeated self-reference: a dependency chain
 		// i1→i2→i3. Depth bounds how far the closure walks it.

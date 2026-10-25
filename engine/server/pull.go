@@ -68,7 +68,9 @@ type cursorState struct {
 	resynced bool
 	// window is the windowed membership as ONE set (Cursor.window), which is
 	// what cursors issued before windows were maintained per window carry.
-	// Populated only from such a cursor; this server issues windows instead.
+	// This server issues windows instead, except on a truncated page that
+	// delivered members its cursor did not name: the set it then carries is
+	// no single window's, and the next page resolves every window again.
 	window *syncplanecursorv1.ClosureSet
 	// windows is the windowed membership split per window (Cursor.windows),
 	// each with the position separating it from the rest of its ordering. That
@@ -1025,6 +1027,9 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	// scopes with no stored set — the fact that nothing created past its seq
 	// can ever have been delivered.
 	priorClosure := closureSetMembership(cur.closure)
+	// Members this page delivers that the cursor's sets do not name. A page
+	// that truncates must carry them on its cursor; see the HasMore branch.
+	var shippedWindow, shippedClosure []closureKey
 	// Scan one row past the limit: seeing it proves truncation without
 	// emitting it.
 	scanned := 0
@@ -1054,6 +1059,13 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 				return err
 			}
 			resp.Patch.Changes = append(resp.Patch.Changes, change)
+			ck := closureKey{entity: row.Entity, key: row.Key}
+			if emitter.windowMembers.has(ck.entity, ck.key) && !oldWindow[ck] {
+				shippedWindow = append(shippedWindow, ck)
+			}
+			if emitter.closure.has(ck.entity, ck.key) && !priorClosure[ck] {
+				shippedClosure = append(shippedClosure, ck)
+			}
 		case rowHidden:
 			// Revoke only what the client can hold. A row created past the
 			// cursor was never delivered under it, so a tombstone would only
@@ -1102,10 +1114,10 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	if resp.HasMore {
 		// Resume just past the last delivered row. The (entity, key)
 		// sub-position lets the next pull pick up the rest of a group
-		// sharing this version instead of skipping it. The closure work is
-		// deferred to a clean boundary, so carry the prior closure forward
-		// unchanged (the incremental scan already covered version>seq
-		// members above) — and with it the mark that says it cannot be
+		// sharing this version instead of skipping it. The membership diff is
+		// deferred to a clean boundary, so carry the prior sets forward
+		// (the incremental scan already covered version>seq members above)
+		// — and with them the mark that says the closure cannot be
 		// maintained, since the next page resolves the closure again.
 		next.seq = lastScanned.Version
 		next.partialEntity = lastScanned.Entity
@@ -1114,6 +1126,25 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		next.closureRebuild = cur.closureRebuild
 		next.window = cur.window
 		next.windows = cur.windows
+		// This page classified with sets resolved for it, not the cursor's.
+		// A row it delivered as a member is in neither the prior set nor, if
+		// the membership moves again before the clean boundary, the one that
+		// boundary resolves, so its diff would never remove the row. Carry
+		// the prior set plus those rows instead. That union is no window's
+		// or walk's membership, so it goes in the forms that are diffed but
+		// never maintained, and a closure seeded from such a window is
+		// walked again too.
+		if len(shippedClosure) > 0 {
+			next.closure = heldSet(priorClosure, shippedClosure)
+			next.closureRebuild = true
+		}
+		if len(shippedWindow) > 0 {
+			next.window = heldSet(oldWindow, shippedWindow)
+			next.windows = nil
+			if emitter.followEntities != nil {
+				next.closureRebuild = true
+			}
+		}
 		next.resynced = cur.resynced
 	} else {
 		next.seq = current

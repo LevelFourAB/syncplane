@@ -100,6 +100,8 @@ Resolving from scratch remains the fallback when incremental maintenance is not 
 - A follow path traverses multiple segments or runs deeper than one round
 - A forward relation hop cannot be answered by the reference index, such as a to-many reference, an unbuilt index, or a target whose fan-in exceeds `MaxIndexScanCandidates`
 
+A page that truncates defers the membership diff to the page that ends the catch-up at a clean version boundary. Each page classifies rows against sets it resolves for itself, so a page can deliver a row as a member that the cursor it read does not name. Its cursor then records the prior set plus those rows. If the membership moves again before the clean boundary, the diff there removes a row that was a member only on a middle page. Such a set is not the membership of any one window or walk, so the next page resolves the sets from scratch.
+
 Incremental maintenance and full resolution produce identical pages. Setting `Limits.DisableMembershipMaintenance` forces the fallback path so this equivalence can be tested.
 
 Initial resolution and the fallback path remain unbounded. Computing an `orderBy` window costs what the equivalent `Query` costs: a range read when a [secondary index](../reference/proto-options.md#secondary-indexes) serves the predicate and the ordering, or a full entity scan when no index serves them.

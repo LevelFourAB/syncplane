@@ -69,11 +69,13 @@ message Cursor {
 	// The next pull diffs its recomputed membership against this, so rows that
 	// fell off the tail are dropped precisely rather than lingering.
 	//
-	// Written only by servers that predate `windows`, and read only from such a
-	// cursor; a cursor carrying `windows` leaves this empty and the union is
-	// derived. Both forms diff identically — the split one additionally says
-	// which window holds what, which is what maintaining a window costs less
-	// than rebuilding it.
+	// Written by servers that predate `windows`, and by a page that truncates
+	// after delivering window members the cursor it read did not name: what
+	// the client then holds is no single window's membership. A cursor
+	// carrying `windows` leaves this empty and the union is derived. Both
+	// forms diff identically — the split one additionally says which window
+	// holds what, which is what maintaining a window costs less than
+	// rebuilding it, so the pull after this form resolves every window again.
 	ClosureSet window = 10;
 	// The windowed membership split per window, one entry per
 	// Subscription.window in `subscriptions` order. Absent on non-windowed
@@ -89,15 +91,17 @@ message Cursor {
 	// without a store, and entries too small to be worth a store round trip,
 	// keep inlining instead.
 	StateRef sets_ref = 12;
-	// Set when `closure` was produced under a subscription set other than
-	// `subscriptions`: a delta resync carries the old scope's closure onto the
-	// cursor it completes with, because the resync reconciles base scope only
-	// and leaves the closure to the pull that follows. The set still names
-	// exactly the rows the client holds via `follow`, so the diff against it
-	// stays exact, but it cannot be maintained from what changed since seq —
-	// the seeds and paths it was walked from are the old scope's. The next
-	// following pull walks the closure again from the new scope's seeds, and
-	// clears this once it stores the rebuilt set at a clean version boundary.
+	// Set when `closure` was not walked from the seeds of `subscriptions` as
+	// they stood at `seq`: a delta resync carries the old scope's closure onto
+	// the cursor it completes with, because the resync reconciles base scope
+	// only and leaves the closure to the pull that follows; and a page that
+	// truncates after delivering closure members, or window members that seed
+	// one, carries the members it delivered beside the set it read. The set
+	// still names exactly the rows the client holds via `follow`, so the diff
+	// against it stays exact, but it cannot be maintained from what changed
+	// since seq. The next following pull walks the closure again from the
+	// current seeds, and clears this once it stores the rebuilt set at a clean
+	// version boundary.
 	bool closure_rebuild = 13;
 	// Set on the cursor a delta resync completes with, and kept by the pages of
 	// the catch-up pull that follows it until one ends at a clean version
@@ -328,8 +332,9 @@ message StoredSets {
 	ClosureSet closure = 2;
 	// Cursor.windows.
 	repeated WindowState windows = 3;
-	// Cursor.window — carried only when adopting a cursor from a server that
-	// predates `windows`, so nothing is lost in the exchange.
+	// Cursor.window — carried when adopting a cursor from a server that
+	// predates `windows`, so nothing is lost in the exchange, and when a
+	// truncated page carries a union no single window holds.
 	ClosureSet window = 4;
 	// Random key that Cursor.epoch_tag is computed with. It never leaves the
 	// server, so a client cannot compute the tag of another position. Empty on

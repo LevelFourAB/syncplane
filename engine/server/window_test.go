@@ -284,6 +284,79 @@ var _ = Describe("Windowed subscriptions", func() {
 		})
 	})
 
+	// A truncated page classifies with the window resolved for that page, but
+	// the membership diff waits for the page that ends at a clean boundary. A
+	// row that is a member only on the truncated page must still leave the
+	// client when the window moves on before that boundary.
+	Describe("a page that truncates while the window moves", func() {
+		// catchUp pulls one row, which ships widget r as a window member and
+		// truncates, then lets moveOn push r out of the window, then pulls the
+		// rest. It returns the client's view and its cursor.
+		catchUp := func(sub *syncplanev1.Subscription, moveOn func()) (map[string][]byte, []byte) {
+			GinkgoHelper()
+			cursor, rows := bootstrap(sub)
+			view := map[string][]byte{}
+			applyPatch(view, &syncplanev1.Patch{Changes: rows})
+
+			putWidget("r", 30)
+			// An unrelated row past r is what makes a one-row page truncate
+			// right after it.
+			nextMut++
+			_, err := client.Push(ctx, connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+				putMutation("c1", nextMut, "todo", "u", &todov1.Todo{Id: "u"}),
+			})))
+			Expect(err).NotTo(HaveOccurred())
+
+			resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+				WorkspaceId: ws, ClientId: "c1", Cursor: cursor,
+				Subscriptions: []*syncplanev1.Subscription{sub}, Limit: 1,
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetHasMore()).To(BeTrue())
+			applyPatch(view, resp.Msg.GetPatch())
+			Expect(view).To(HaveKey("widget/r"))
+
+			moveOn()
+			cursor, changes := drain(resp.Msg.GetNextCursor(), sub)
+			applyPatch(view, &syncplanev1.Patch{Changes: changes})
+			return view, cursor
+		}
+
+		It("removes a row that was a member only on the truncated page", func() {
+			putWidget("a", 1)
+			putWidget("b", 2)
+			sub := recencySub(2)
+			view, _ := catchUp(sub, func() {
+				putWidget("s", 4)
+				putWidget("t", 5)
+			})
+
+			_, rows := bootstrap(sub)
+			Expect(valueKeys(rows)).To(ConsistOf("s", "t"))
+			Expect(viewKeys(view)).To(Equal([]string{"widget/s", "widget/t"}))
+		})
+
+		It("does not keep a stale copy of that row once it is edited outside the window", func() {
+			putWidget("a", 10)
+			putWidget("b", 20)
+			sub := windowSub(2, nil)
+			view, cursor := catchUp(sub, func() {
+				putWidget("s", 40)
+				putWidget("t", 50)
+			})
+
+			nextMut++
+			_, err := client.Push(ctx, connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+				patchMutation("c1", nextMut, "widget", "r", &testdatav1.Widget{Label: "edited"}, "label"),
+			})))
+			Expect(err).NotTo(HaveOccurred())
+			_, changes := drain(cursor, sub)
+			applyPatch(view, &syncplanev1.Patch{Changes: changes})
+
+			Expect(viewKeys(view)).To(Equal([]string{"widget/s", "widget/t"}))
+		})
+	})
+
 	Describe("by_recency", func() {
 		It("holds the most recently written rows with no order fields", func() {
 			putWidget("a", 1)
