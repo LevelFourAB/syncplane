@@ -226,7 +226,39 @@ var _ = Describe("Postgres migrations", func() {
 		}
 		rows.Close()
 		Expect(rows.Err()).NotTo(HaveOccurred())
-		Expect(applied).To(Equal([]int{1}), "every migration, each recorded exactly once")
+		Expect(applied).To(Equal([]int{1, 2}), "every migration, each recorded exactly once")
+	})
+
+	It("upgrades a baseline database to record sequence lineage", func() {
+		dsn := pgtest.DSN()
+		store, err := pgstore.Open(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			_, err := tx.NextSeq()
+			return err
+		})).To(Succeed())
+		Expect(store.Close()).To(Succeed())
+
+		// Back to the baseline shape, holding a sequence allocated before the
+		// lineage table existed.
+		conn, err := pgx.Connect(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = conn.Exec(ctx, `DROP TABLE seq_lineage; DELETE FROM schema_migrations WHERE version = 2`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(conn.Close(ctx)).To(Succeed())
+
+		store, err = pgstore.Open(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			_, err := tx.NextSeq()
+			return err
+		})).To(Succeed())
+		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+			Expect(tx.SeqLineage(1)).To(BeZero(), "a sequence from before the upgrade has no mark")
+			Expect(tx.SeqLineage(2)).NotTo(BeZero())
+			return nil
+		})).To(Succeed())
 	})
 
 	Describe("a ledger ahead of this binary", func() {

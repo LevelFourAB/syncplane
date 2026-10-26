@@ -106,7 +106,7 @@ layer. `reset_reason` has one of the following values:
 | Reason                               | Description                                                                                  |
 | ------------------------------------ | -------------------------------------------------------------------------------------------- |
 | `cursor_below_horizon`               | The client fell behind garbage collection. This value indicates `WithGC` tuning is required. |
-| `store_provenance_mismatch`          | The cursor originated from a different store, such as a restored backup.                     |
+| `store_provenance_mismatch`          | The cursor originated from a different store, or from history that a restored backup lost.   |
 | `resync_invalidated_by_scope_change` | A scope change occurred during resynchronization.                                            |
 | `old_visibility_unreconstructable`   | The previous scope could not be rebuilt.                                                     |
 | `cursor_state_evicted`               | The cursor-state store no longer holds the cursor sets.                                      |
@@ -212,7 +212,7 @@ contain collectable data. `outcome=skipped` indicates that another node held the
 workspace lease.
 
 `gc_kind` is one of `client_verdicts`, `idle_clients`, `idempotency_keys`,
-`history_records`, or `stranded_consumers`. `idle_clients` appears only with
+`history_records`, `lineage_records`, or `stranded_consumers`. `idle_clients` appears only with
 `WithClientRetention`. The value `stranded_consumers` indicates that an effect
 consumer collected below the horizon stopped processing writes and cannot
 recover missed data.

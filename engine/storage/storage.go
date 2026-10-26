@@ -90,6 +90,12 @@
 //     redelivered one. ListPendingWorkspaceIDs reads the same state from
 //     outside a workspace transaction, so that finding the workspaces a
 //     consumer owes work costs one query rather than one transaction each.
+//   - Sequence lineage (SeqLineage, PruneSeqLineage) is a mark per committed
+//     write transaction, minted by the adapter and stored with the
+//     transaction's writes. It must survive every way the store is copied —
+//     a backup restores the marks it was taken with — and a new write
+//     transaction must never reuse one, or a cursor from a lost history
+//     passes as one from the restored store.
 //   - Work queries (ListPendingWorkspaceIDs, ListCollectableWorkspaceIDs,
 //     ListStaleIndexWorkspaceIDs, ListCompactableWorkspaceIDs) answer "which
 //     workspaces owe this background pass work" from outside any workspace
@@ -468,8 +474,9 @@ type TextCompactMark struct {
 // their cutoff one at a time, on a transaction the caller has already opened;
 // this is the same set of thresholds asked across workspaces instead.
 type GCCutoffs struct {
-	// Tombstones bounds deleted rows, idle clients' recorded verdicts and idle
-	// effect consumers, which share one retention.
+	// Tombstones bounds deleted rows, idle clients' recorded verdicts, idle
+	// effect consumers and sequence lineage records (PruneSeqLineage), which
+	// share one retention.
 	Tombstones time.Time
 	// Clients bounds idle clients' watermark records as a whole
 	// (CollectIdleClients). Zero on a pass that keeps every watermark, which is
@@ -559,7 +566,26 @@ type ReadTx interface {
 	// watermark cannot catch when the foreign store's seq sits above the
 	// client's cursor. Inside a write transaction it is 0 until that
 	// transaction's own first write, and the minted epoch from then on.
+	//
+	// A restore of the same store keeps the epoch; SeqLineage is what tells
+	// that history apart.
 	StoreEpoch() (uint64, error)
+	// SeqLineage returns the lineage mark of the write transaction that
+	// allocated seq: a random non-zero value the adapter mints for each write
+	// transaction that commits at least one NextSeq allocation, shared by every
+	// sequence that transaction allocated. The mark is committed state, so a
+	// byte copy of the store reports the same marks, while a store restored
+	// from a backup and written again reports new marks for the sequences it
+	// wrote after the restore. Pull stamps the mark of a cursor's sequence into
+	// the cursor and resets a cursor whose mark the store does not report.
+	//
+	// It returns 0 when no mark covers seq: seq is 0 or above CurrentSeq, the
+	// sequence was allocated before the adapter recorded marks, or
+	// PruneSeqLineage removed its record. 0 is "unknown", never a mismatch.
+	// Inside a write transaction, a sequence the transaction allocated reports
+	// the transaction's own mark; an allocation a savepoint rolled back leaves
+	// no mark.
+	SeqLineage(seq uint64) (uint64, error)
 	// GetRow returns the row (or tombstone) for entity/key.
 	// Returns ErrNotFound if the row has never existed.
 	GetRow(entity, key string) (Row, error)
@@ -797,6 +823,12 @@ type WriteTx interface {
 	// advances the workspace's tombstone horizon to the highest version it
 	// deleted. The horizon never regresses. Returns the resulting horizon.
 	CollectTombstones(cutoff time.Time) (horizon uint64, err error)
+	// PruneSeqLineage deletes the lineage records (see ReadTx.SeqLineage) of
+	// write transactions committed before cutoff, together with every record
+	// of a lower sequence, and returns how many records it deleted. The
+	// sequences those records covered report 0 from SeqLineage afterwards. A
+	// zero cutoff deletes nothing.
+	PruneSeqLineage(cutoff time.Time) (int, error)
 	// PurgeEntityRows deletes rows of ONE entity — LIVE rows included — together
 	// with the secondary-index entries those rows occupied, and returns how many
 	// rows were removed and whether the selection may still hold more. It leaves

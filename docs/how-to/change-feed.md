@@ -81,7 +81,7 @@ Save the returned `next` cursor only after you successfully process the batch:
 saveCursor(next)                        // persist AFTER acting on the page
 ```
 
-Always persist the cursor whole, including the `Epoch` field.
+Always persist the cursor whole, including the `Epoch` and `Lineage` fields.
 
 ### 5. Handle expired cursors and resynchronize
 

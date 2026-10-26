@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
+	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
@@ -192,6 +193,26 @@ var _ = Describe("Garbage collection", func() {
 		Expect(resp.GetReset_()).To(BeFalse(), "young tombstones survive")
 		Expect(resp.GetPatch().GetChanges()).To(HaveLen(1))
 		Expect(resp.GetPatch().GetChanges()[0].GetTombstone()).To(BeTrue())
+	})
+
+	It("serves a cursor without the restore check once its lineage record is pruned", func() {
+		srv := newTestServer(server.WithGC(-time.Second, 0))
+		DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
+		start(srv)
+
+		push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+		var cur syncplanecursorv1.Cursor
+		Expect(proto.Unmarshal(pull(nil).GetNextCursor(), &cur)).To(Succeed())
+		cur.SeqLineage++
+		foreign, err := proto.Marshal(&cur)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(pull(foreign).GetReset_()).To(BeTrue(), "the record still names another write at this seq")
+
+		Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+		push(putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2"}))
+		resp := pull(foreign)
+		Expect(resp.GetReset_()).To(BeFalse(), "no record is left to compare the mark with")
+		Expect(resp.GetPatch().GetChanges()).To(HaveLen(1))
 	})
 
 	It("requires WithGC for manual collection", func() {

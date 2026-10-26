@@ -135,7 +135,11 @@ var _ = Describe("Prefixed adapters over one store", func() {
 	})
 
 	It("bounds the work queries to the partition", func() {
-		put(a, "ws1", "k", "v")
+		// A live row and no sequence: an allocation leaves a lineage record,
+		// which the cutoff below would collect in a as well.
+		write(a, "ws1", func(tx storage.WriteTx) {
+			Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
+		})
 		put(b, "ws1", "k", "v")
 		write(b, "ws1", func(tx storage.WriteTx) {
 			Expect(tx.DeleteRow("widget", "k", 2, storage.Actor{})).To(Succeed())

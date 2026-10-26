@@ -60,7 +60,7 @@ var _ = Describe("SQLite schema versioning", func() {
 	const baselineVersion = 1
 	// The version a database this binary creates or upgrades ends at: the
 	// baseline plus every migration since. Bump it with each migration added.
-	const latestVersion = 1
+	const latestVersion = 2
 
 	// foreign creates a database holding one table under the given stamps,
 	// standing in for whatever a binary other than this one left behind.
@@ -111,6 +111,39 @@ var _ = Describe("SQLite schema versioning", func() {
 		// A fresh database ends where an upgraded one does, so the two never
 		// differ in shape.
 		Expect(version).To(Equal(latestVersion))
+	})
+
+	It("upgrades a baseline database to record sequence lineage", func() {
+		ctx := context.Background()
+		path := filepath.Join(GinkgoT().TempDir(), "upgrade.db")
+		store, err := sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			_, err := tx.NextSeq()
+			return err
+		})).To(Succeed())
+		Expect(store.Close()).To(Succeed())
+
+		// Back to the baseline shape, holding a sequence allocated before the
+		// lineage table existed.
+		db, err := sql.Open("sqlite", path)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = db.Exec(fmt.Sprintf("DROP TABLE seq_lineage;\nPRAGMA user_version = %d;", baselineVersion))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(db.Close()).To(Succeed())
+
+		store, err = sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			_, err := tx.NextSeq()
+			return err
+		})).To(Succeed())
+		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+			Expect(tx.SeqLineage(1)).To(BeZero(), "a sequence from before the upgrade has no mark")
+			Expect(tx.SeqLineage(2)).NotTo(BeZero())
+			return nil
+		})).To(Succeed())
 	})
 
 	It("refuses a database from a schema lineage that predates the stamp", func() {

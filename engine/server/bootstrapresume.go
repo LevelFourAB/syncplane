@@ -85,8 +85,11 @@ func (r *bootstrapResume) acceptable(wantHash, epoch uint64) bool {
 // pull that is meant to heal the snapshot, and one from a foreign store
 // lineage describes rows this store never held. Either way the resumed
 // snapshot could not be completed, so the client is better served by a fresh
-// one it can finish.
-func (r *bootstrapResume) servable(horizon, current, storeEpoch uint64) bool {
+// one it can finish. foreignLineage is lineageForeign's verdict on the cursor.
+func (r *bootstrapResume) servable(horizon, current, storeEpoch uint64, foreignLineage bool) bool {
+	if foreignLineage {
+		return false
+	}
 	if belowHorizon(r.cur.seq, r.cur.partialEntity, horizon) || r.cur.seq > current {
 		return false
 	}

@@ -174,7 +174,16 @@ type Cursor struct {
 	// only rows at or below seq, and a client can edit both, so the resync
 	// trusts the two values only when the tag matches; otherwise the client
 	// resets. 0 when sets_ref is absent, and on cursors older than the field.
-	EpochTag      uint64 `protobuf:"fixed64,22,opt,name=epoch_tag,json=epochTag,proto3" json:"epoch_tag,omitempty"`
+	EpochTag uint64 `protobuf:"fixed64,22,opt,name=epoch_tag,json=epochTag,proto3" json:"epoch_tag,omitempty"`
+	// The lineage mark of the write transaction that allocated seq: a random
+	// value per committed write. The store epoch survives a restore from
+	// backup, so it cannot tell the restored history from the one the client
+	// followed; the mark can, because the restored store writes the
+	// sequences after the backup point again under new marks. Pull resets a
+	// cursor whose mark differs from the one the store holds for seq. 0 = no
+	// mark known (a cursor older than the field, a sequence written before the
+	// store recorded marks, or one whose record GC removed), always accepted.
+	SeqLineage    uint64 `protobuf:"fixed64,23,opt,name=seq_lineage,json=seqLineage,proto3" json:"seq_lineage,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -359,6 +368,13 @@ func (x *Cursor) GetAccessTag() uint64 {
 func (x *Cursor) GetEpochTag() uint64 {
 	if x != nil {
 		return x.EpochTag
+	}
+	return 0
+}
+
+func (x *Cursor) GetSeqLineage() uint64 {
+	if x != nil {
+		return x.SeqLineage
 	}
 	return 0
 }
@@ -1646,7 +1662,7 @@ var File_syncplane_cursor_v1_cursor_proto protoreflect.FileDescriptor
 
 const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\n" +
-	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\x1a\x18syncplane/v1/query.proto\"\xd7\a\n" +
+	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\x1a\x18syncplane/v1/query.proto\"\xf8\a\n" +
 	"\x06Cursor\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\bsub_hash\x18\x02 \x01(\x06R\asubHash\x12!\n" +
@@ -1675,7 +1691,9 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\x11caller_access_ref\x18\x14 \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\x0fcallerAccessRef\x12\x1d\n" +
 	"\n" +
 	"access_tag\x18\x15 \x01(\x06R\taccessTag\x12\x1b\n" +
-	"\tepoch_tag\x18\x16 \x01(\x06R\bepochTag\"\xd3\x02\n" +
+	"\tepoch_tag\x18\x16 \x01(\x06R\bepochTag\x12\x1f\n" +
+	"\vseq_lineage\x18\x17 \x01(\x06R\n" +
+	"seqLineage\"\xd3\x02\n" +
 	"\n" +
 	"AccessMove\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x10\n" +

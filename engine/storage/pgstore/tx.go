@@ -46,13 +46,22 @@ type pgTx struct {
 	seq          uint64
 	seqPersisted uint64
 	seqLoaded    bool
+	// seqStart is the first sequence this transaction allocated, meaningful
+	// while seqLoaded, and mark the lineage mark its sequences carry once it
+	// commits (see storage.ReadTx.SeqLineage). flush records the pair.
+	seqStart uint64
+	mark     uint64
 	// ws* memoize the workspaces row's three position scalars, which
-	// loadWorkspace reads together. wsLoaded false means "not read yet, or
-	// invalidated by a write of this transaction's own".
-	wsLoaded  bool
-	wsSeq     uint64
-	wsHorizon uint64
-	wsEpoch   uint64
+	// loadWorkspace reads together, and the newest committed lineage record
+	// (wsLineageStart 0 for none) read in the same statement. wsLoaded false
+	// means "not read yet, or invalidated by a write of this transaction's
+	// own".
+	wsLoaded       bool
+	wsSeq          uint64
+	wsHorizon      uint64
+	wsEpoch        uint64
+	wsLineageStart uint64
+	wsLineageMark  uint64
 	// indexStates memoizes every index_state row of the workspace (see
 	// IndexState). nil means "not read yet, or dropped by a savepoint rewind".
 	indexStates map[indexKey]indexState
@@ -130,16 +139,19 @@ func (t *pgTx) end() {
 	t.conn.Release()
 }
 
-// loadWorkspace reads last_seq, tombstone_horizon and store_epoch in one
-// statement and keeps them for the rest of the transaction. Every pull reads
-// all three, so the memo turns three round trips into one.
+// loadWorkspace reads last_seq, tombstone_horizon, store_epoch and the newest
+// lineage record in one statement and keeps them for the rest of the
+// transaction. Every pull reads all four, so the memo turns four round trips
+// into one.
 //
 // Holding them is exact rather than approximate. A read transaction is
 // REPEATABLE READ, so its snapshot cannot change under it; a write transaction
-// holds the workspace advisory lock, so nothing else writes the row while it
-// runs, and the three places where the transaction moves the row itself —
-// register minting the epoch, NextSeq claiming a sequence, CollectTombstones
-// raising the horizon — drop the memo or answer from their own state.
+// holds the workspace advisory lock, so nothing else writes them while it
+// runs, and the places where the transaction moves them itself — register
+// minting the epoch, NextSeq claiming a sequence, CollectTombstones raising
+// the horizon, PruneSeqLineage deleting records — drop the memo or answer from
+// their own state. The lineage record this transaction adds is written by
+// flush, after the last read.
 //
 // A workspace with no row yet reads as all zeroes, which is the value each
 // scalar has on the row register would create for it.
@@ -168,8 +180,18 @@ func (t *pgTx) loadState() error {
 	var reads []queuedStmt
 	if !t.wsLoaded {
 		reads = append(reads, queuedStmt{
-			sql: `SELECT last_seq, tombstone_horizon, store_epoch FROM workspaces
-			      WHERE workspace_id = $1`,
+			// The newest lineage record rides along because a pull asks for
+			// the mark of the head sequence on every cursor it issues, and that
+			// record is the one that answers it.
+			sql: `SELECT w.last_seq, w.tombstone_horizon, w.store_epoch,
+			             COALESCE(l.start_seq, 0), COALESCE(l.mark, 0)
+			      FROM workspaces w
+			      LEFT JOIN LATERAL (
+			        SELECT start_seq, mark FROM seq_lineage
+			        WHERE workspace_id = w.workspace_id
+			        ORDER BY start_seq DESC LIMIT 1
+			      ) l ON TRUE
+			      WHERE w.workspace_id = $1`,
 			args: []any{t.ws},
 		})
 	}
@@ -196,15 +218,16 @@ func (t *pgTx) decodeState(br pgx.BatchResults) error {
 		// store_epoch is stored as a signed BIGINT because Postgres has no
 		// unsigned one; reinterpret the bits. The value is opaque — only
 		// equality matters.
-		var seq, horizon, epoch int64
-		err := br.QueryRow().Scan(&seq, &horizon, &epoch)
+		var seq, horizon, epoch, lineageStart, lineageMark int64
+		err := br.QueryRow().Scan(&seq, &horizon, &epoch, &lineageStart, &lineageMark)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
-			seq, horizon, epoch = 0, 0, 0
+			seq, horizon, epoch, lineageStart, lineageMark = 0, 0, 0, 0, 0
 		case err != nil:
 			return err
 		}
 		t.wsSeq, t.wsHorizon, t.wsEpoch = uint64(seq), uint64(horizon), uint64(epoch)
+		t.wsLineageStart, t.wsLineageMark = uint64(lineageStart), uint64(lineageMark)
 		t.wsLoaded = true
 	}
 	if t.indexStates == nil {
@@ -282,6 +305,40 @@ func (t *pgTx) StoreEpoch() (uint64, error) {
 		return 0, err
 	}
 	return t.wsEpoch, nil
+}
+
+func (t *pgTx) SeqLineage(seq uint64) (uint64, error) {
+	if seq == 0 {
+		return 0, nil
+	}
+	current, err := t.CurrentSeq()
+	if err != nil || seq > current {
+		return 0, err
+	}
+	// This transaction's own allocations have no row until flush.
+	if t.seqLoaded && seq >= t.seqStart {
+		return t.mark, nil
+	}
+	if err := t.loadWorkspace(); err != nil {
+		return 0, err
+	}
+	switch {
+	case t.wsLineageStart == 0:
+		// No record at all, so none at or below seq either.
+		return 0, nil
+	case seq >= t.wsLineageStart:
+		return t.wsLineageMark, nil
+	}
+	var mark int64
+	err = t.queryRow(
+		`SELECT mark FROM seq_lineage WHERE workspace_id = $1 AND start_seq <= $2
+		 ORDER BY start_seq DESC LIMIT 1`,
+		t.ws, int64(seq),
+	).Scan(&mark)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	return uint64(mark), err
 }
 
 func (t *pgTx) TombstoneHorizon() (uint64, error) {
@@ -1232,24 +1289,38 @@ func (t *pgTx) NextSeq() (uint64, error) {
 		return 0, err
 	}
 	t.seq, t.seqPersisted, t.seqLoaded = uint64(seq), uint64(seq), true
+	t.seqStart = t.seq
+	if t.mark == 0 {
+		mark, err := newLineageMark()
+		if err != nil {
+			return 0, err
+		}
+		t.mark = uint64(mark)
+	}
 	return t.seq, nil
 }
 
-// flush writes back what NextSeq allocated in memory. The store calls it after
-// the write closure returns successfully and before COMMIT; it is a no-op for a
-// transaction that allocated at most one sequence.
+// flush writes back what NextSeq allocated in memory and records the lineage
+// mark of those sequences. The store calls it after the write closure returns
+// successfully and before COMMIT; it is a no-op for a transaction that
+// allocated nothing. Both statements are queued, so they travel with COMMIT.
 func (t *pgTx) flush() error {
-	if !t.seqLoaded || t.seq == t.seqPersisted {
+	if !t.seqLoaded {
 		return nil
 	}
-	if err := t.queue(
-		`UPDATE workspaces SET last_seq = $2 WHERE workspace_id = $1`,
-		t.ws, int64(t.seq),
-	); err != nil {
-		return err
+	if t.seq != t.seqPersisted {
+		if err := t.queue(
+			`UPDATE workspaces SET last_seq = $2 WHERE workspace_id = $1`,
+			t.ws, int64(t.seq),
+		); err != nil {
+			return err
+		}
+		t.seqPersisted = t.seq
 	}
-	t.seqPersisted = t.seq
-	return nil
+	return t.queue(
+		`INSERT INTO seq_lineage (workspace_id, start_seq, mark, written_at) VALUES ($1, $2, $3, $4)`,
+		t.ws, int64(t.seqStart), int64(t.mark), time.Now().UnixMilli(),
+	)
 }
 
 func (t *pgTx) PutRow(entity, key string, value []byte, version uint64, actor storage.Actor) error {
@@ -1433,6 +1504,27 @@ func (t *pgTx) InSavepoint(fn func() error) error {
 	}
 	t.spPending = name
 	return nil
+}
+
+func (t *pgTx) PruneSeqLineage(cutoff time.Time) (int, error) {
+	if cutoff.IsZero() {
+		return 0, nil
+	}
+	// By sequence rather than by age alone: a record that survived among
+	// pruned older ones would answer for their sequences too, since a lookup
+	// takes the greatest start_seq at or below the sequence it asks about.
+	tag, err := t.exec(
+		`DELETE FROM seq_lineage WHERE workspace_id = $1 AND start_seq <= (
+			SELECT MAX(start_seq) FROM seq_lineage WHERE workspace_id = $1 AND written_at < $2
+		)`,
+		t.ws, cutoff.UnixMilli(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	// The memo may name a record this just deleted.
+	t.wsLoaded = false
+	return int(tag.RowsAffected()), nil
 }
 
 func (t *pgTx) CollectTombstones(cutoff time.Time) (uint64, error) {

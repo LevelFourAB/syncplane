@@ -169,6 +169,184 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		// A lineage mark names the write transaction that allocated a
+		// sequence. The engine compares a cursor's mark with the store's, so
+		// the failures that matter are a mark that changes for history the
+		// store already holds (every client resets) and one that repeats for
+		// new history (a cursor from a lost history passes).
+		Describe("sequence lineage", func() {
+			lineage := func(tx storage.ReadTx, seq uint64) uint64 {
+				GinkgoHelper()
+				mark, err := tx.SeqLineage(seq)
+				Expect(err).NotTo(HaveOccurred())
+				return mark
+			}
+			allocate := func(ws string, n int) {
+				GinkgoHelper()
+				write(ws, func(tx storage.WriteTx) {
+					for range n {
+						_, err := tx.NextSeq()
+						Expect(err).NotTo(HaveOccurred())
+					}
+				})
+			}
+
+			It("reports no mark for an unwritten workspace or for sequence 0", func() {
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(lineage(tx, 0)).To(BeZero())
+					Expect(lineage(tx, 1)).To(BeZero())
+				})
+				allocate("ws1", 1)
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(lineage(tx, 0)).To(BeZero())
+				})
+			})
+
+			It("shares one mark across a transaction's sequences and mints a new one per transaction", func() {
+				allocate("ws1", 3)
+				allocate("ws1", 1)
+				allocate("ws2", 1)
+				read("ws1", func(tx storage.ReadTx) {
+					first := lineage(tx, 1)
+					Expect(first).NotTo(BeZero())
+					Expect(lineage(tx, 2)).To(Equal(first))
+					Expect(lineage(tx, 3)).To(Equal(first))
+					Expect(lineage(tx, 4)).NotTo(BeZero())
+					Expect(lineage(tx, 4)).NotTo(Equal(first))
+				})
+				read("ws2", func(tx storage.ReadTx) {
+					Expect(lineage(tx, 1)).NotTo(BeZero())
+				})
+			})
+
+			It("reports no mark above the current sequence", func() {
+				allocate("ws1", 2)
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(lineage(tx, 2)).NotTo(BeZero())
+					Expect(lineage(tx, 3)).To(BeZero())
+				})
+			})
+
+			It("keeps the mark of the last allocating transaction for a transaction that allocates nothing", func() {
+				allocate("ws1", 1)
+				var mark uint64
+				read("ws1", func(tx storage.ReadTx) { mark = lineage(tx, 1) })
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(lineage(tx, 1)).To(Equal(mark))
+				})
+			})
+
+			It("reports the transaction's own mark for the sequences it allocated", func() {
+				allocate("ws1", 1)
+				var before, own uint64
+				read("ws1", func(tx storage.ReadTx) { before = lineage(tx, 1) })
+				write("ws1", func(tx storage.WriteTx) {
+					seq, err := tx.NextSeq()
+					Expect(err).NotTo(HaveOccurred())
+					own = lineage(tx, seq)
+					Expect(own).NotTo(BeZero())
+					Expect(own).NotTo(Equal(before))
+					Expect(lineage(tx, 1)).To(Equal(before), "an earlier transaction's sequence keeps its mark")
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(lineage(tx, 2)).To(Equal(own), "the mark it reported is the mark it committed")
+				})
+			})
+
+			It("leaves no mark for an allocation a savepoint rolled back", func() {
+				rewind := errors.New("rewind")
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.InSavepoint(func() error {
+						_, err := tx.NextSeq()
+						Expect(err).NotTo(HaveOccurred())
+						return rewind
+					})).To(MatchError(rewind))
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(lineage(tx, 1)).To(BeZero())
+				})
+
+				var own uint64
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.InSavepoint(func() error {
+						_, err := tx.NextSeq()
+						Expect(err).NotTo(HaveOccurred())
+						return rewind
+					})).To(MatchError(rewind))
+					seq, err := tx.NextSeq()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(seq).To(BeEquivalentTo(1))
+					own = lineage(tx, seq)
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(lineage(tx, 1)).NotTo(BeZero())
+					Expect(lineage(tx, 1)).To(Equal(own))
+				})
+			})
+
+			It("does not reuse the mark of a transaction that rolled back", func() {
+				rollback := errors.New("rollback")
+				var abandoned uint64
+				Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+					seq, err := tx.NextSeq()
+					Expect(err).NotTo(HaveOccurred())
+					abandoned = lineage(tx, seq)
+					return rollback
+				})).To(MatchError(rollback))
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(lineage(tx, 1)).To(BeZero())
+				})
+				allocate("ws1", 1)
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(lineage(tx, 1)).NotTo(BeZero())
+					Expect(lineage(tx, 1)).NotTo(Equal(abandoned))
+				})
+			})
+
+			It("prunes the records of transactions committed before the cutoff", func() {
+				allocate("ws1", 2)
+				allocate("ws1", 1)
+				allocate("ws2", 1)
+				var marks [4]uint64
+				read("ws1", func(tx storage.ReadTx) {
+					for seq := range uint64(4) {
+						marks[seq] = lineage(tx, seq)
+					}
+				})
+
+				write("ws1", func(tx storage.WriteTx) {
+					n, err := tx.PruneSeqLineage(time.Time{})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeZero(), "a zero cutoff keeps every record")
+					n, err = tx.PruneSeqLineage(time.Now().Add(-time.Hour))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(BeZero())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					for seq := range uint64(4) {
+						Expect(lineage(tx, seq)).To(Equal(marks[seq]))
+					}
+				})
+
+				write("ws1", func(tx storage.WriteTx) {
+					n, err := tx.PruneSeqLineage(time.Now().Add(time.Hour))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(n).To(Equal(2))
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					for seq := range uint64(4) {
+						Expect(lineage(tx, seq)).To(BeZero())
+					}
+				})
+				read("ws2", func(tx storage.ReadTx) {
+					Expect(lineage(tx, 1)).NotTo(BeZero(), "pruning is per workspace")
+				})
+			})
+		})
+
 		It("reads back what the CURRENT transaction wrote", func() {
 			// An adapter may defer its writes — batch them, buffer them — but not
 			// past its own readers. The engine depends on this at every turn: a
@@ -1859,7 +2037,23 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				Entry("a live row of an aging entity", func(tx storage.WriteTx) {
 					Expect(tx.PutRow("audit", "a1", []byte("v"), 1, storage.Actor{})).To(Succeed())
 				}),
+				Entry("a sequence lineage record", func(tx storage.WriteTx) {
+					_, err := tx.NextSeq()
+					Expect(err).NotTo(HaveOccurred())
+				}),
 			)
+
+			It("leaves out a workspace whose lineage records were pruned", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					_, err := tx.NextSeq()
+					Expect(err).NotTo(HaveOccurred())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					_, err := tx.PruneSeqLineage(future())
+					Expect(err).NotTo(HaveOccurred())
+				})
+				Expect(collectable(storage.GCCutoffs{Tombstones: future()}, "", 10)).To(BeEmpty())
+			})
 
 			It("reports nothing for a store with no workspaces", func() {
 				Expect(collectable(all(), "", 10)).To(BeEmpty())

@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
+	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
@@ -274,6 +275,28 @@ var _ = Describe("Bootstrap resume", func() {
 			Resume: &syncplanev1.BootstrapResume{
 				Cursor: foreign.begin.GetCursor(),
 				Token:  foreign.token,
+			},
+		}, 0)
+		Expect(second.begin.GetResumed()).To(BeFalse())
+		Expect(keysOf(second.rows)).To(ConsistOf(
+			"todo/t1", "todo/t2", "todo/t3", "todo/t4", "todo/t5", "widget/w1"))
+	})
+
+	It("starts a fresh snapshot for a cursor whose lineage mark the store does not hold", func() {
+		first := run(&syncplanev1.BootstrapRequest{WorkspaceId: ws, ClientId: "c1"}, 1)
+		var cur syncplanecursorv1.Cursor
+		Expect(proto.Unmarshal(first.begin.GetCursor(), &cur)).To(Succeed())
+		Expect(cur.GetSeqLineage()).NotTo(BeZero())
+		cur.SeqLineage++
+		raw, err := proto.Marshal(&cur)
+		Expect(err).NotTo(HaveOccurred())
+
+		second := run(&syncplanev1.BootstrapRequest{
+			WorkspaceId: ws,
+			ClientId:    "c1",
+			Resume: &syncplanev1.BootstrapResume{
+				Cursor: raw,
+				Token:  first.token,
 			},
 		}, 0)
 		Expect(second.begin.GetResumed()).To(BeFalse())

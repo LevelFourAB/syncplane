@@ -496,6 +496,7 @@ func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []a
 		exists(scoped("rows") + " AND t.deleted AND t.updated_at < " + next(at))
 		exists(scoped("clients") + " AND t.updated_at < " + next(at) + " AND t.rejections IS NOT NULL")
 		exists(scoped("consumer_positions") + " AND t.updated_at < " + next(at))
+		exists(scoped("seq_lineage") + " AND t.written_at < " + next(at))
 	}
 	if !cutoffs.Clients.IsZero() {
 		exists(scoped("clients") + " AND t.updated_at < " + next(cutoffs.Clients.UnixMilli()))
@@ -748,16 +749,21 @@ func rangeWhere(col string, rng storage.Range, next func(any) string) string {
 }
 
 // newStoreEpoch mints the random identity a workspace's first write stamps on
-// itself (see storage.ReadTx.StoreEpoch). It is generated here rather than in
-// SQL because Postgres's random() is a float in [0,1) and cannot carry 64 bits;
-// the epoch is a full-width random value, not a counter.
-//
-// Zero reads back as "no epoch", so it is rejected and redrawn.
-func newStoreEpoch() (int64, error) {
+// itself (see storage.ReadTx.StoreEpoch).
+func newStoreEpoch() (int64, error) { return newRandomID("store epoch") }
+
+// newLineageMark mints the mark a write transaction's sequences carry (see
+// storage.ReadTx.SeqLineage).
+func newLineageMark() (int64, error) { return newRandomID("lineage mark") }
+
+// newRandomID returns a full-width random value, generated here rather than in
+// SQL because Postgres's random() is a float in [0,1) and cannot carry 64 bits.
+// Zero reads back as "none", so it is rejected and redrawn.
+func newRandomID(what string) (int64, error) {
 	for {
 		var b [8]byte
 		if _, err := rand.Read(b[:]); err != nil {
-			return 0, fmt.Errorf("pgstore: mint store epoch: %w", err)
+			return 0, fmt.Errorf("pgstore: mint %s: %w", what, err)
 		}
 		if v := binary.BigEndian.Uint64(b[:]); v != 0 {
 			return int64(v), nil

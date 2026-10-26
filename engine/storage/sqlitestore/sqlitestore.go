@@ -61,6 +61,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"runtime"
 	"strings"
 	"sync"
@@ -298,9 +299,21 @@ CREATE TABLE cursor_state (
 // bumped inside that transaction. A structural change appends here and leaves
 // schema alone, so a database in the field reaches the new shape by the same
 // steps a fresh one skips.
-//
-// Empty while the baseline above is the only shape this lineage has had.
-var migrations []string
+var migrations = []string{
+	// 2: sequence lineage — one row per committed write transaction that
+	// allocated sequences, naming the first of them and the mark every one of
+	// them carries (see ReadTx.SeqLineage). Lookups take the greatest
+	// start_seq at or below a sequence, a descent of the primary key; the _gc
+	// index serves PruneSeqLineage and the collectable probe.
+	`CREATE TABLE seq_lineage (
+	workspace_id TEXT NOT NULL,
+	start_seq    INTEGER NOT NULL,
+	mark         INTEGER NOT NULL,
+	written_at   INTEGER NOT NULL,
+	PRIMARY KEY (workspace_id, start_seq)
+);
+CREATE INDEX seq_lineage_gc ON seq_lineage (workspace_id, written_at);`,
+}
 
 // Store implements storage.Adapter. read and write are the same handle for an
 // in-memory database.
@@ -773,6 +786,9 @@ func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(sto
 	if err := fn(st); err != nil {
 		return err
 	}
+	if err := st.commitLineage(); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -797,10 +813,10 @@ func (s *Store) ListWorkspaceIDs(ctx context.Context, rng storage.Range) ([]stri
 
 // ListCollectableWorkspaceIDs answers "which workspaces hold something this
 // pass would reclaim" as a single query: the workspace scan is in primary-key
-// order, and each row probes the _gc indexes of the four collectable tables on
-// their own (workspace_id, updated_at) prefix. Each probe stops at
-// the first match, so a workspace with nothing collectable costs four index
-// descents and no transaction at all.
+// order, and each row probes the _gc index of each collectable table on its
+// own (workspace_id, timestamp) prefix. Each probe stops at the first match, so
+// a workspace with nothing collectable costs one index descent per table and no
+// transaction at all.
 //
 // The entity purges are the exception. Live rows of an aging entity are found
 // on rows_by_entity_version's (workspace_id, entity) prefix with
@@ -924,6 +940,7 @@ func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []a
 		exists(scoped("rows") + " AND t.deleted = 1 AND t.updated_at < " + next(at))
 		exists(scoped("clients") + " AND t.updated_at < " + next(at) + " AND t.rejections IS NOT NULL")
 		exists(scoped("consumer_positions") + " AND t.updated_at < " + next(at))
+		exists(scoped("seq_lineage") + " AND t.written_at < " + next(at))
 	}
 	if !cutoffs.Clients.IsZero() {
 		exists(scoped("clients") + " AND t.updated_at < " + next(cutoffs.Clients.UnixMilli()))
@@ -1077,6 +1094,16 @@ func (s *Store) DeleteCatalogEntry(ctx context.Context, id string) error {
 // bound is left out when the range has none rather than compared against a
 // sentinel, so a scan that owns the whole table plans as one that has no bound
 // at all.
+// newLineageMark mints a lineage mark (see storage.ReadTx.SeqLineage): a
+// random 64-bit value, redrawn on zero because zero reads back as "no mark".
+func newLineageMark() uint64 {
+	for {
+		if v := rand.Uint64(); v != 0 {
+			return v
+		}
+	}
+}
+
 func rangeWhere(col string, rng storage.Range) (string, []any) {
 	where := col + " > ?"
 	args := []any{rng.After}
@@ -1103,6 +1130,13 @@ type sqliteTx struct {
 	// registered memoizes register's INSERT so a write burst does not repeat
 	// it. Cleared on savepoint rollback, which may have undone that INSERT.
 	registered bool
+	// seqStart is the first sequence this transaction allocated, 0 for none,
+	// and mark the lineage mark its sequences carry once it commits (see
+	// ReadTx.SeqLineage). commitLineage records the pair just before COMMIT,
+	// which is the point where savepoint rewinds can no longer drop the
+	// allocation it names.
+	seqStart uint64
+	mark     uint64
 }
 
 // register creates the workspaces row, and is called by every mutating method
@@ -1150,6 +1184,66 @@ func (t *sqliteTx) StoreEpoch() (uint64, error) {
 		return 0, nil
 	}
 	return uint64(epoch), err
+}
+
+func (t *sqliteTx) SeqLineage(seq uint64) (uint64, error) {
+	if seq == 0 {
+		return 0, nil
+	}
+	current, err := t.CurrentSeq()
+	if err != nil || seq > current {
+		return 0, err
+	}
+	// This transaction's own allocations have no row until commitLineage.
+	if t.seqStart != 0 && seq >= t.seqStart {
+		return t.mark, nil
+	}
+	// Stored signed; reinterpret the bits as the unsigned mark, as StoreEpoch
+	// does.
+	var mark int64
+	err = t.queryRow(
+		`SELECT mark FROM seq_lineage WHERE workspace_id = ? AND start_seq <= ?
+		 ORDER BY start_seq DESC LIMIT 1`,
+		t.ws, seq,
+	).Scan(&mark)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return uint64(mark), err
+}
+
+// commitLineage records the lineage mark of the sequences this transaction
+// allocated. WithWriteTx calls it after the closure succeeds and before
+// COMMIT; a transaction that allocated nothing records nothing.
+func (t *sqliteTx) commitLineage() error {
+	if t.seqStart == 0 {
+		return nil
+	}
+	_, err := t.exec(
+		`INSERT INTO seq_lineage (workspace_id, start_seq, mark, written_at) VALUES (?, ?, ?, ?)`,
+		t.ws, t.seqStart, int64(t.mark), time.Now().UnixMilli(),
+	)
+	return err
+}
+
+func (t *sqliteTx) PruneSeqLineage(cutoff time.Time) (int, error) {
+	if cutoff.IsZero() {
+		return 0, nil
+	}
+	// By sequence rather than by age alone: a record that survived among
+	// pruned older ones would answer for their sequences too, since a lookup
+	// takes the greatest start_seq at or below the sequence it asks about.
+	res, err := t.exec(
+		`DELETE FROM seq_lineage WHERE workspace_id = ? AND start_seq <= (
+			SELECT MAX(start_seq) FROM seq_lineage WHERE workspace_id = ? AND written_at < ?
+		)`,
+		t.ws, t.ws, cutoff.UnixMilli(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
 }
 
 func (t *sqliteTx) TombstoneHorizon() (uint64, error) {
@@ -1957,12 +2051,20 @@ func (t *sqliteTx) NextSeq() (uint64, error) {
 	}
 	// UPDATE ... RETURNING ports directly to Postgres (with row locking).
 	var seq uint64
-	err := t.queryRow(
+	if err := t.queryRow(
 		`UPDATE workspaces SET last_seq = last_seq + 1
 		 WHERE workspace_id = ? RETURNING last_seq`,
 		t.ws,
-	).Scan(&seq)
-	return seq, err
+	).Scan(&seq); err != nil {
+		return 0, err
+	}
+	if t.seqStart == 0 {
+		t.seqStart = seq
+		if t.mark == 0 {
+			t.mark = newLineageMark()
+		}
+	}
+	return seq, nil
 }
 
 func (t *sqliteTx) PutRow(entity, key string, value []byte, version uint64, actor storage.Actor) error {
@@ -2055,7 +2157,11 @@ func (t *sqliteTx) InSavepoint(fn func() error) error {
 	if _, err := t.exec(`SAVEPOINT ` + name); err != nil {
 		return err
 	}
+	// The rewind undoes an allocation fn made, so it undoes fn's claim to be
+	// the transaction's first one too.
+	seqStart := t.seqStart
 	if err := fn(); err != nil {
+		t.seqStart = seqStart
 		// The rewind may undo register's INSERT (a rejected mutation that was
 		// this transaction's only write), so re-run it on the next write. When
 		// the INSERT predates the savepoint the extra statement is a harmless

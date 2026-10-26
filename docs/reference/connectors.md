@@ -190,4 +190,4 @@ The state store manages the following types:
 
 Implementations do not require cross-row transactions. The connector orders write operations so recovery from crashes occurs during redelivery or reconciliation.
 
-Store the egress `server.Cursor` value in full, including `Epoch` and across all 64 bits. The `Epoch` field identifies the engine store instance; see [Falling behind](../explanation/effects-and-the-change-feed.md#tombstone-horizons-and-falling-behind). A cursor value of `0` indicates an unknown lineage and skips validation.
+Store the egress `server.Cursor` value in full, including `Epoch` and `Lineage` across all 64 bits. The `Epoch` field identifies the engine store instance, and `Lineage` identifies the write at the cursor sequence; see [Falling behind](../explanation/effects-and-the-change-feed.md#tombstone-horizons-and-falling-behind). A value of `0` in either field means unknown and skips that check.

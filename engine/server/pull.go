@@ -34,6 +34,9 @@ type cursorState struct {
 	// storage.ReadTx.StoreEpoch). 0 on legacy/pre-write cursors; the server
 	// stamps the workspace's current epoch onto every cursor it issues.
 	storeEpoch uint64
+	// lineage is the mark of the write that allocated seq (see
+	// storage.ReadTx.SeqLineage and stampLineage). 0 when no mark is known.
+	lineage uint64
 	// partialEntity/partialKey mark a sub-position inside a same-version group
 	// when a pull page split one: seq names the split version and these name
 	// the last row delivered within it, in (entity, key) order. Empty on a
@@ -196,6 +199,7 @@ func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte, verdic
 		subHash:          c.GetSubHash(),
 		epoch:            c.GetFilterEpoch(),
 		storeEpoch:       c.GetStoreEpoch(),
+		lineage:          c.GetSeqLineage(),
 		partialEntity:    c.GetPartialEntity(),
 		partialKey:       c.GetPartialKey(),
 		subs:             c.GetSubscriptions(),
@@ -276,6 +280,7 @@ func (s *Server) encodeCursor(ctx context.Context, ws string, st *cursorState) [
 		SubHash:        st.subHash,
 		FilterEpoch:    st.epoch,
 		StoreEpoch:     st.storeEpoch,
+		SeqLineage:     st.lineage,
 		PartialEntity:  st.partialEntity,
 		PartialKey:     st.partialKey,
 		Resync:         st.resync,
@@ -765,8 +770,8 @@ func (s *Server) pullPreamble(tx storage.ReadTx, cur cursorState, ackKey string,
 	}
 	// Cursor provenance: a non-empty cursor that this store could not have
 	// issued means the URL now serves a different database (swapped,
-	// recreated empty, or restored from backup). Two impossible-by-
-	// construction signals, either of which forces a re-bootstrap instead
+	// recreated empty, or restored from backup). Three impossible-by-
+	// construction signals, any of which forces a re-bootstrap instead
 	// of a silent splice or a regressed cursor that wedges the client:
 	//
 	//  1. seq ahead of CurrentSeq — sequences are per-workspace monotonic,
@@ -777,6 +782,11 @@ func (s *Server) pullPreamble(tx storage.ReadTx, cur cursorState, ackKey string,
 	//     DIFFERENT lineage whose seq happens to sit at or above the
 	//     client's, where scanning from cur.seq would graft the foreign
 	//     store's rows onto the client's.
+	//  3. lineage mismatch — the case neither of those can see: the SAME
+	//     store restored from a backup taken before cur.seq and written back
+	//     past it. The epoch came back with the backup and the seq is in
+	//     range, but the write the store holds at cur.seq is not the one the
+	//     cursor was issued after. See lineageForeign.
 	//
 	// A legacy/pre-epoch cursor carries storeEpoch 0; it is accepted and
 	// stamped with the live epoch on the way out (every issued cursor
@@ -787,6 +797,13 @@ func (s *Server) pullPreamble(tx storage.ReadTx, cur cursorState, ackKey string,
 	if len(rawCursor) > 0 && (cur.seq > current || (cur.storeEpoch != 0 && cur.storeEpoch != storeEpoch)) {
 		return current, storeEpoch, resetProvenance, nil
 	}
+	foreign, err := lineageForeign(tx, cur)
+	if err != nil {
+		return 0, 0, resetNone, err
+	}
+	if foreign {
+		return current, storeEpoch, resetProvenance, nil
+	}
 	// The cursor referenced a state entry the store no longer holds, so the
 	// membership sets it was issued under are gone and nothing exact can be
 	// diffed against them. Judged after horizon and provenance: those reasons
@@ -795,6 +812,40 @@ func (s *Server) pullPreamble(tx storage.ReadTx, cur cursorState, ackKey string,
 		return current, storeEpoch, resetStateEvicted, nil
 	}
 	return current, storeEpoch, resetNone, nil
+}
+
+// lineageForeign reports whether the store holds cur.seq under another lineage
+// mark than the one the cursor carries, which means the history the cursor was
+// issued from is not this store's: the store was restored from a backup taken
+// before cur.seq and has written past it since.
+//
+// A zero mark on either side is "unknown" and passes. The cursor's is zero when
+// it predates the field; the store's when the sequence was written before it
+// recorded marks or GC has pruned the record (see storage.ReadTx.SeqLineage).
+// The check therefore covers cursors whose sequence was written within the GC
+// retention.
+func lineageForeign(tx storage.ReadTx, cur cursorState) (bool, error) {
+	if cur.lineage == 0 {
+		return false, nil
+	}
+	mark, err := tx.SeqLineage(cur.seq)
+	if err != nil {
+		return false, err
+	}
+	return mark != 0 && mark != cur.lineage, nil
+}
+
+// stampLineage records in st the lineage mark of st.seq, so the pull that
+// presents the cursor can run lineageForeign against it. Every path that
+// issues a cursor at a new position calls it; a cursor carried forward at the
+// position it came in at keeps the mark it came with.
+func stampLineage(tx storage.ReadTx, st *cursorState) error {
+	mark, err := tx.SeqLineage(st.seq)
+	if err != nil {
+		return err
+	}
+	st.lineage = mark
+	return nil
 }
 
 // sameFollowSpecs reports whether two subscription sets carry the same follow
@@ -943,6 +994,11 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		// exactly as it would on the normal path below.
 		next := cur
 		next.subHash, next.epoch, next.storeEpoch, next.subs = wantHash, epoch, storeEpoch, subs
+		// Restamped rather than carried: a cursor older than the field picks
+		// up the mark here, as it picks up the store epoch.
+		if err := stampLineage(tx, &next); err != nil {
+			return nil, cursorState{}, resetNone, err
+		}
 		emitter.stampAccess(&next, cur)
 		resp.CallerAccess, resp.CallerAccessDelta = emitter.callerAccessUpdate(cur, len(rawCursor) > 0, current)
 		resp.NextCursor = s.encodeCursor(emitter.ctx, emitter.ws, &next)
@@ -1178,6 +1234,9 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 			}
 			next.windows = emitter.windowStates()
 		}
+	}
+	if err := stampLineage(tx, &next); err != nil {
+		return nil, cursorState{}, resetNone, err
 	}
 	resp.CallerAccess, resp.CallerAccessDelta = emitter.callerAccessUpdate(cur, len(rawCursor) > 0, current)
 	resp.NextCursor = s.encodeCursor(emitter.ctx, emitter.ws, &next)

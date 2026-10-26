@@ -33,7 +33,28 @@ import (
 // per column that a later index turns into a bug.
 var migrations = []migration{
 	{additive: true, sql: baselineSchema},
+	{additive: true, sql: fixed(seqLineageDDL)},
 }
+
+// seqLineageDDL is migration 2: one row per committed write transaction that
+// allocated sequences, naming the first of them and the mark every one of them
+// carries (see storage.ReadTx.SeqLineage). Lookups take the greatest start_seq
+// at or below a sequence, a descent of the primary key; the _gc index serves
+// PruneSeqLineage and the collectable probe.
+//
+// Unpartitioned whatever the layout: GC keeps it to the write transactions of
+// one tombstone retention, and a step can only branch on whether the layout is
+// partitioned, not on the modulus a new partitioned table would need.
+const seqLineageDDL = `
+CREATE TABLE seq_lineage (
+	workspace_id TEXT COLLATE "C" NOT NULL,
+	start_seq    BIGINT NOT NULL,
+	mark         BIGINT NOT NULL,
+	written_at   BIGINT NOT NULL,
+	PRIMARY KEY (workspace_id, start_seq)
+);
+CREATE INDEX seq_lineage_gc ON seq_lineage (workspace_id, written_at);
+`
 
 // migration is one step of the ledger.
 type migration struct {

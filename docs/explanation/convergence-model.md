@@ -214,6 +214,43 @@ deleted is readmitted at its next pushed mutation ID. See
 [Limits and trade-offs](limits-and-trade-offs.md#deleting-idle-client-watermarks-can-apply-a-resend-twice)
 for the associated costs.
 
+## A restored store resets the clients ahead of it
+
+A store restored from a backup holds the history up to the backup point. It
+then writes new history at the same sequence numbers that the lost history
+used. A client cursor names a sequence, so the server must tell whether that
+sequence is the write the client saw.
+
+Each cursor carries two identities next to its sequence:
+
+- The **store epoch**, a random value that a workspace gets on its first write.
+  A different store has a different epoch. A backup keeps the epoch, so the
+  epoch does not detect a restore.
+- The **lineage mark** of the write that allocated the sequence. Each write
+  transaction gets a new random mark. A backup keeps the marks of the writes it
+  holds, and the writes after the restore get new marks.
+
+A pull resets the client when the cursor is ahead of the current sequence, when
+the epoch differs, or when the store holds a different mark for the cursor's
+sequence. After a restore, this gives these results:
+
+- A client at or behind the backup point keeps its cursor and pulls the new
+  writes incrementally.
+- A client ahead of the backup point re-bootstraps. Its confirmed rows become
+  the restored state, and its pending queue replays on top.
+- Writes that the server acknowledged after the backup point are lost. The
+  writing client removed them from its queue when the server acknowledged
+  them, so it cannot send them again, and they disappear from every client.
+  Mutations that were pushed but not acknowledged stay in the queue and apply
+  again.
+- The server's watermark for a writing client goes back to its value at the
+  backup point. The client's next push then gets a mutation-id gap, and the
+  client renumbers its queue from the watermark.
+
+Garbage collection deletes lineage marks on the tombstone retention. A cursor
+whose sequence is older than the retention has no mark to compare, and the
+server accepts it without this check.
+
 ## A bootstrap survives a dropped connection
 
 Snapshot bootstrapping streams in chunks. The client stores staged rows and an
@@ -238,7 +275,9 @@ conditions:
 
 - The subscription set changes.
 - The cursor falls behind the garbage collection horizon.
-- The target store does not match the store that issued the cursor.
+- The target store does not match the store that issued the cursor, or does
+  not hold the write the cursor names (see
+  [A restored store resets the clients ahead of it](#a-restored-store-resets-the-clients-ahead-of-it)).
 - More access moves come after the cursor than `Limits.MaxResyncScan`, so the
   pull after the snapshot would reset (see
   [the access model](access-model.md)).

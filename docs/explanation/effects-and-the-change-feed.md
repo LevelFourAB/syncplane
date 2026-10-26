@@ -43,8 +43,9 @@ When a consumer falls behind past the horizon or presents an invalid cursor, `Ch
 - The consumer was offline longer than the GC retention period, placing its cursor before the tombstone horizon.
 - The store was recreated empty or restored below the consumer position, placing the cursor above the current sequence.
 - The database was swapped or restored from a separately created store, placing the cursor in a different store lineage.
+- The store was restored from a backup taken before the consumer position and has since written past it, so the write at the cursor sequence is not the one the consumer read.
 
-Persisting cursors with their `Epoch` field allows store lineage checks. A value of `0` in `Epoch` represents an unknown lineage and bypasses the check. Consumer positions in the effects runtime reside inside the workspace store, so they transfer automatically during a swap or restore.
+Persisting cursors with their `Epoch` and `Lineage` fields allows these checks. `Epoch` names the store; `Lineage` names the write at the cursor sequence. A value of `0` in either field means unknown and bypasses that check. Garbage collection removes lineage marks on the tombstone retention, so a cursor older than the retention passes the `Lineage` check. Consumer positions in the effects runtime reside inside the workspace store, so they transfer automatically during a swap or restore.
 
 A consumer that falls behind past the horizon logs a warning, drops its shadow rows, and resumes at the current sequence number. Unread intermediate changes are permanently lost.
 

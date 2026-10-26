@@ -173,9 +173,11 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 			seq:     cur.seq,
 			subHash: wantHash,
 			epoch:   epoch,
-			// cur passed Pull's provenance guard, so its storeEpoch already
-			// equals this store's; carry it onto the completion cursor.
+			// cur passed Pull's provenance guard, so its storeEpoch and
+			// lineage already match this store's; carry them onto the
+			// completion cursor, which keeps cur's seq.
 			storeEpoch:    cur.storeEpoch,
+			lineage:       cur.lineage,
 			partialEntity: cur.partialEntity,
 			partialKey:    cur.partialKey,
 			subs:          subs,

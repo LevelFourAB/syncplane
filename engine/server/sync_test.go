@@ -657,6 +657,39 @@ var _ = Describe("SyncService", func() {
 			Expect(resp.GetReset_()).To(BeTrue())
 		})
 
+		It("stamps the lineage mark of the cursor's sequence and accepts the cursor back", func() {
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "x"}))
+			first := pull(nil)
+			mark := decodeCursor(first.GetNextCursor()).GetSeqLineage()
+			Expect(mark).NotTo(BeZero(), "an issued cursor carries the mark of its sequence")
+
+			push(putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "y"}))
+			again := pull(first.GetNextCursor())
+			Expect(again.GetReset_()).To(BeFalse())
+			next := decodeCursor(again.GetNextCursor()).GetSeqLineage()
+			Expect(next).NotTo(BeZero())
+			Expect(next).NotTo(Equal(mark), "a later write carries a mark of its own")
+		})
+
+		It("resets a cursor whose lineage mark differs from the store's (restored store)", func() {
+			// The same store, so the epoch matches and the seq is in range; only
+			// the mark says the write at this seq is not the one the cursor saw.
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "x"}))
+			cur := decodeCursor(pull(nil).GetNextCursor())
+			cur.SeqLineage = cur.GetSeqLineage() + 1
+			resp := pull(mustMarshal(cur))
+			Expect(resp.GetReset_()).To(BeTrue())
+		})
+
+		It("accepts a cursor without a lineage mark and stamps it going forward", func() {
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "x"}))
+			cur := decodeCursor(pull(nil).GetNextCursor())
+			cur.SeqLineage = 0
+			resp := pull(mustMarshal(cur))
+			Expect(resp.GetReset_()).To(BeFalse())
+			Expect(decodeCursor(resp.GetNextCursor()).GetSeqLineage()).NotTo(BeZero())
+		})
+
 		It("accepts a legacy epoch-less cursor and stamps it going forward", func() {
 			// Pre-upgrade cursors carry no store epoch (0). They are honored
 			// once — the seq guard still covers their empty/restore cases — and

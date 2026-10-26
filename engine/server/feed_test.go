@@ -229,7 +229,8 @@ var _ = Describe("Server.Changes", func() {
 	// egress cursor, any in-process consumer with its own bookkeeping) can
 	// present it to a store swapped or restored under the same address. The
 	// seq guard above only catches the case where the foreign store sits
-	// BELOW the cursor; the epoch is what catches the rest.
+	// BELOW the cursor; the epoch catches another store, and the lineage mark
+	// the same store restored and written past the cursor.
 	Describe("store lineage", func() {
 		BeforeEach(func() {
 			srv = newTestServer()
@@ -266,8 +267,40 @@ var _ = Describe("Server.Changes", func() {
 			Expect(err).To(MatchError(server.ErrCursorTooOld))
 			Expect(calls).To(BeZero(), "no rows spliced from a foreign lineage")
 			Expect(more).To(BeFalse())
-			Expect(resume).To(Equal(server.Cursor{Seq: 2, Epoch: next.Epoch}),
+			Expect(resume).To(Equal(server.Cursor{Seq: 2, Epoch: next.Epoch, Lineage: next.Lineage}),
 				"the resume cursor carries this store's lineage")
+		})
+
+		It("stamps the lineage mark of the cursor's sequence", func() {
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+			_, next, _ := drain(server.Cursor{}, 0)
+			Expect(next.Lineage).NotTo(BeZero())
+
+			push(putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2"}))
+			got, again, _ := drain(next, 0)
+			Expect(got).To(HaveLen(1))
+			Expect(again.Lineage).NotTo(BeZero())
+			Expect(again.Lineage).NotTo(Equal(next.Lineage), "a later write carries a mark of its own")
+		})
+
+		It("returns ErrCursorTooOld for a cursor naming a write the store does not hold (restore)", func() {
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+			_, next, _ := drain(server.Cursor{}, 0)
+			push(putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2"}))
+
+			// The same store, so the epoch matches and seq 1 is in range; only
+			// the mark says seq 1 is not the write the consumer read.
+			restored := next
+			restored.Lineage++
+			var calls int
+			resume, _, err := srv.Changes(ctx, ws, restored, 0, func(server.Change) error {
+				calls++
+				return nil
+			})
+			Expect(err).To(MatchError(server.ErrCursorTooOld))
+			Expect(calls).To(BeZero())
+			Expect(resume.Seq).To(BeEquivalentTo(2))
+			Expect(resume.Lineage).NotTo(BeZero())
 		})
 
 		It("accepts an epoch-less cursor and stamps it going forward", func() {

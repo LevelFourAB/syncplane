@@ -32,6 +32,14 @@ type Cursor struct {
 	// carry the field still works — without the check. The value is opaque and
 	// spans all 64 bits; whatever persists it must round-trip every one.
 	Epoch uint64
+	// Lineage names the write that allocated Seq (see
+	// storage.ReadTx.SeqLineage). Changes stamps it into every cursor it
+	// returns and answers one whose write the store does not hold with
+	// ErrCursorTooOld: the store was restored from a backup taken before Seq
+	// and written past it since, which Epoch cannot see because the backup
+	// carried it. 0 means unknown and is always accepted, as is a cursor whose
+	// Seq is older than the GC retention. Opaque and 64 bits wide, like Epoch.
+	Lineage uint64
 }
 
 // Change is one committed row change observed through the feed.
@@ -68,7 +76,8 @@ type Change struct {
 
 // ErrCursorTooOld reports a feed cursor that cannot be resumed against this
 // store: it sits below the workspace's tombstone horizon, above its current
-// sequence, or names a different store lineage (see Cursor.Epoch). A cursor
+// sequence, names a different store lineage (see Cursor.Epoch), or names a
+// write the store does not hold (see Cursor.Lineage). A cursor
 // AT the horizon that carries a sub-position (Entity/Key set) counts as below
 // it: the rows of that sequence after the sub-position were never delivered.
 // Deletions the consumer never saw may have been garbage-collected, and rows
@@ -94,13 +103,10 @@ var ErrCursorTooOld = errors.New("server: feed cursor cannot be resumed against 
 // read filters and subscription scoping do not apply.
 //
 // When the cursor cannot be resumed — below the tombstone horizon, above the
-// current sequence, or from another store lineage — Changes returns
-// ErrCursorTooOld along with a cursor at the workspace's current sequence:
-// resync against current state first, then resume from that cursor. The
-// lineage check does not cover a restore of the SAME store to an earlier point
-// that has since been written back past the consumer's position; seq and epoch
-// both match there, and the cursor alone cannot tell that history apart from
-// one the consumer has yet to read.
+// current sequence, from another store lineage, or from a history a restore
+// from backup discarded — Changes returns ErrCursorTooOld along with a cursor
+// at the workspace's current sequence: resync against current state first,
+// then resume from that cursor.
 func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, limit int, fn func(Change) error) (next Cursor, more bool, err error) {
 	if workspaceID == "" {
 		return Cursor{}, false, fmt.Errorf("server: workspace id is required")
@@ -114,7 +120,21 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 	// Floored at the cursor: the "cursor ahead of CurrentSeq" verdict below
 	// means a swapped store, and a replica snapshot from before the cursor was
 	// issued would reach the same verdict about a perfectly healthy consumer.
-	err = s.readTx(ctx, workspaceID, after.Seq, func(tx storage.ReadTx) error {
+	err = s.readTx(ctx, workspaceID, after.Seq, func(tx storage.ReadTx) (err error) {
+		// Every cursor this returns carries the mark of its seq, the one that
+		// comes with ErrCursorTooOld included: it is where the consumer
+		// resumes after its resync.
+		defer func() {
+			if err != nil && !errors.Is(err, ErrCursorTooOld) {
+				return
+			}
+			mark, lerr := tx.SeqLineage(next.Seq)
+			if lerr != nil {
+				err = lerr
+				return
+			}
+			next.Lineage = mark
+		}()
 		horizon, err := tx.TombstoneHorizon()
 		if err != nil {
 			return err
@@ -150,6 +170,15 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 		// catches an epoch-less cursor, and a lineage that never minted an
 		// epoch because nothing was ever written to it.
 		if after.Seq > current {
+			next = Cursor{Seq: current, Epoch: epoch}
+			return ErrCursorTooOld
+		}
+		// The same store restored from a backup taken before after.Seq and
+		// written past it: epoch and seq both pass, but the write at
+		// after.Seq is not the one the consumer read up to.
+		if foreign, err := lineageForeign(tx, cursorState{seq: after.Seq, lineage: after.Lineage}); err != nil {
+			return err
+		} else if foreign {
 			next = Cursor{Seq: current, Epoch: epoch}
 			return ErrCursorTooOld
 		}

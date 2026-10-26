@@ -158,6 +158,15 @@ message Cursor {
 	// trusts the two values only when the tag matches; otherwise the client
 	// resets. 0 when sets_ref is absent, and on cursors older than the field.
 	fixed64 epoch_tag = 22;
+	// The lineage mark of the write transaction that allocated seq: a random
+	// value per committed write. The store epoch survives a restore from
+	// backup, so it cannot tell the restored history from the one the client
+	// followed; the mark can, because the restored store writes the
+	// sequences after the backup point again under new marks. Pull resets a
+	// cursor whose mark differs from the one the store holds for seq. 0 = no
+	// mark known (a cursor older than the field, a sequence written before the
+	// store recorded marks, or one whose record GC removed), always accepted.
+	fixed64 seq_lineage = 23;
 }
 
 // AccessMove is one change of the access parent of a row that other rows sit

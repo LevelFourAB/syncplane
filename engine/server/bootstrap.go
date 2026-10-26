@@ -199,7 +199,11 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			if err != nil {
 				return err
 			}
-			if sameAccess && resume.servable(horizon, current, storeEpoch) && movesFit {
+			foreign, err := lineageForeign(tx, resume.cur)
+			if err != nil {
+				return err
+			}
+			if sameAccess && resume.servable(horizon, current, storeEpoch, foreign) && movesFit {
 				begin.Cursor = resume.rawCursor
 				begin.Seq = resume.cur.seq
 				begin.Resumed = true
@@ -225,6 +229,9 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 				subs:       msg.GetSubscriptions(),
 				closure:    closureSet,
 				windows:    emitter.windowStates(),
+			}
+			if err := stampLineage(tx, &st); err != nil {
+				return err
 			}
 			emitter.stampAccess(&st, cursorState{})
 			begin.Cursor = s.encodeCursor(ctx, msg.GetWorkspaceId(), &st)

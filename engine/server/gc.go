@@ -68,7 +68,10 @@ const defaultIdempotencyRetention = 24 * time.Hour
 // stranded below the horizon the pass just set — a consumer still keeping up
 // is never below it, however long it idles. The same pass also expires
 // field-history records (WithHistoryRetention), which it hard-deletes rather
-// than tombstones because nothing syncs them.
+// than tombstones because nothing syncs them. On the tombstone retention it
+// also deletes the sequence lineage records that let a pull detect a store
+// restored from backup: a cursor whose sequence is older than the retention is
+// served without that check.
 //
 // Idle clients' watermark records are kept whatever the retention: they are
 // what makes a resend idempotent, and a client's pending queue outlives any
@@ -362,13 +365,13 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 	historyCutoff, historyExpires := s.gc.historyCutoff(now)
 	clientCutoff, clientsPruned := s.gc.clientCutoff(now)
 	var horizon, deltaHorizon uint64
-	var verdictsExpired, idleRemoved, keysRemoved, consumersRemoved, historyRemoved int
+	var verdictsExpired, idleRemoved, keysRemoved, consumersRemoved, historyRemoved, lineageRemoved int
 	var historyMore bool
 	if err := s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
 		// Re-zero on retry: the closure may run more than once (see the
 		// storage.Adapter write-closure contract).
 		horizon, deltaHorizon, verdictsExpired, idleRemoved, keysRemoved, consumersRemoved = 0, 0, 0, 0, 0, 0
-		historyRemoved, historyMore = 0, false
+		historyRemoved, historyMore, lineageRemoved = 0, false, 0
 		h, err := tx.CollectTombstones(cutoff)
 		if err != nil {
 			return err
@@ -396,6 +399,12 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 		// resets on its owner's next pass either way. A caught-up consumer sits
 		// at the current sequence and is never below it, however long it idles.
 		if consumersRemoved, err = tx.CollectIdleConsumers(cutoff, horizon); err != nil {
+			return err
+		}
+		// On the tombstone retention because both bound the same thing: how
+		// long a cursor stays fully checked. A cursor whose sequence lost its
+		// lineage record is still served, without the restore check.
+		if lineageRemoved, err = tx.PruneSeqLineage(cutoff); err != nil {
 			return err
 		}
 		if keysRemoved, err = tx.CollectIdempotencyKeys(keyCutoff); err != nil {
@@ -446,6 +455,7 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 		{"idempotency_keys", keysRemoved},
 		{"history_records", historyRemoved},
 		{"stranded_consumers", consumersRemoved},
+		{"lineage_records", lineageRemoved},
 	} {
 		if c.n > 0 {
 			s.tel().gcCollected.Add(ctx, int64(c.n), metric.WithAttributes(telemetry.AttrGCKind.String(c.kind)))

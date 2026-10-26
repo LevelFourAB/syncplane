@@ -55,6 +55,10 @@ var migrations = []string{
 	// (server.Cursor.Epoch). 0 on rows written before it existed, which the
 	// feed reads as an unknown lineage and accepts.
 	`ALTER TABLE egress_cursors ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0;`,
+	// 3: the lineage mark of the write an egress cursor's seq names
+	// (server.Cursor.Lineage). 0 on rows written before it existed, which the
+	// feed reads as unknown and accepts.
+	`ALTER TABLE egress_cursors ADD COLUMN lineage INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // Store implements connect.State.
@@ -210,34 +214,35 @@ func (s *Store) ScanShadows(ctx context.Context, workspaceID string, fn func(ent
 
 func (s *Store) Cursor(ctx context.Context, workspaceID string) (server.Cursor, error) {
 	var (
-		c     server.Cursor
-		epoch int64
+		c              server.Cursor
+		epoch, lineage int64
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT seq, entity, key, epoch FROM egress_cursors WHERE workspace_id = ?`,
+		`SELECT seq, entity, key, epoch, lineage FROM egress_cursors WHERE workspace_id = ?`,
 		workspaceID,
-	).Scan(&c.Seq, &c.Entity, &c.Key, &epoch)
+	).Scan(&c.Seq, &c.Entity, &c.Key, &epoch, &lineage)
 	if err == sql.ErrNoRows {
 		return server.Cursor{}, nil
 	}
 	if err != nil {
 		return server.Cursor{}, err
 	}
-	c.Epoch = uint64(epoch)
+	c.Epoch, c.Lineage = uint64(epoch), uint64(lineage)
 	return c, nil
 }
 
 func (s *Store) SetCursor(ctx context.Context, workspaceID string, c server.Cursor) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO egress_cursors (workspace_id, seq, entity, key, epoch)
-		 VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO egress_cursors (workspace_id, seq, entity, key, epoch, lineage)
+		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (workspace_id) DO UPDATE SET
 		   seq = excluded.seq, entity = excluded.entity, key = excluded.key,
-		   epoch = excluded.epoch`,
-		// The epoch spans all 64 bits, which database/sql will not carry as a
-		// uint64; store the same bits as a signed INTEGER, the way the engine's
-		// own stores hold it. The value is opaque — only equality matters.
-		workspaceID, c.Seq, c.Entity, c.Key, int64(c.Epoch),
+		   epoch = excluded.epoch, lineage = excluded.lineage`,
+		// The epoch and the mark span all 64 bits, which database/sql will not
+		// carry as a uint64; store the same bits as a signed INTEGER, the way
+		// the engine's own stores hold them. Both are opaque — only equality
+		// matters.
+		workspaceID, c.Seq, c.Entity, c.Key, int64(c.Epoch), int64(c.Lineage),
 	)
 	return err
 }
