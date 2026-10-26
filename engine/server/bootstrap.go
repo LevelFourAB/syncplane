@@ -176,10 +176,12 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		}
 		// A resumed snapshot keeps the cursor it began with: that cursor is what
 		// the client's follow-up pull reconciles against, and re-minting it here
-		// would drop everything written between the two attempts. The membership
-		// sets above are still rebuilt against current data — they decide which
-		// rows the REMAINING scan ships — and where they have moved since, the
-		// pull's diff against the sets the cursor records is what settles it.
+		// would drop everything written between the two attempts. The remaining
+		// scan therefore ships the members of the sets that cursor records, not
+		// of the sets above: a row that is a member only of a rebuilt set is in
+		// neither set the pull's diff compares if the membership moves again
+		// before that pull, so nothing would ever remove it. Where the sets have
+		// moved since, the pull's diff against the cursor's sets settles it.
 		if resume != nil {
 			horizon, err := tx.TombstoneHorizon()
 			if err != nil {
@@ -200,6 +202,15 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 				begin.Cursor = resume.rawCursor
 				begin.Seq = resume.cur.seq
 				begin.Resumed = true
+				if len(emitter.windows) > 0 {
+					emitter.windowMembers = closureRows{}
+					for ck := range resume.cur.windowSet() {
+						emitter.windowMembers[ck] = storage.Row{}
+					}
+				}
+				if emitter.followEntities != nil {
+					emitter.closure = closureSetRows(resume.cur.closure)
+				}
 			} else {
 				resume = nil
 			}

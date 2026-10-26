@@ -193,6 +193,58 @@ var _ = Describe("Bootstrap resume", func() {
 		Expect(todo.GetTitle()).To(Equal("edited"))
 	})
 
+	It("ships the window its re-issued cursor records, so the pull removes what left it", func() {
+		push(ws,
+			putMutation("c1", 7, "widget", "a", &testdatav1.Widget{Id: "a"}),
+			putMutation("c1", 8, "widget", "b", &testdatav1.Widget{Id: "b"}),
+		)
+		subs := []*syncplanev1.Subscription{{Entity: "todo"}, recencySub(2)}
+		first := run(&syncplanev1.BootstrapRequest{WorkspaceId: ws, ClientId: "c1", Subscriptions: subs}, 1)
+		Expect(keysOf(first.rows)).To(ConsistOf("todo/t1", "todo/t2"))
+		view := map[string][]byte{}
+		applyPatch(view, &syncplanev1.Patch{Changes: first.rows})
+
+		// r enters the window between the attempts. The resumed attempt
+		// re-issues a cursor that records the window as a and b, so a row it
+		// shipped as a member of the current window would be in neither set
+		// the pull compares once r leaves again.
+		push(ws, putMutation("c1", 9, "widget", "r", &testdatav1.Widget{Id: "r"}))
+		second := run(&syncplanev1.BootstrapRequest{
+			WorkspaceId: ws, ClientId: "c1", Subscriptions: subs,
+			Resume: &syncplanev1.BootstrapResume{Cursor: first.begin.GetCursor(), Token: first.token},
+		}, 0)
+		Expect(second.begin.GetResumed()).To(BeTrue())
+		Expect(keysOf(second.rows)).To(ContainElements("widget/a", "widget/b"))
+		Expect(keysOf(second.rows)).NotTo(ContainElement("widget/r"))
+		applyPatch(view, &syncplanev1.Patch{Changes: second.rows})
+
+		push(ws,
+			putMutation("c1", 10, "widget", "s", &testdatav1.Widget{Id: "s"}),
+			putMutation("c1", 11, "widget", "t", &testdatav1.Widget{Id: "t"}),
+		)
+		cursor := second.begin.GetCursor()
+		for i := 0; ; i++ {
+			Expect(i).To(BeNumerically("<", 10), "pull did not settle")
+			resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+				WorkspaceId: ws, ClientId: "c1", Cursor: cursor, Subscriptions: subs,
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetReset_()).To(BeFalse())
+			applyPatch(view, resp.Msg.GetPatch())
+			cursor = resp.Msg.GetNextCursor()
+			if !resp.Msg.GetHasMore() {
+				break
+			}
+		}
+
+		fresh := map[string][]byte{}
+		applyPatch(fresh, &syncplanev1.Patch{Changes: run(&syncplanev1.BootstrapRequest{
+			WorkspaceId: ws, ClientId: "c2", Subscriptions: subs,
+		}, 0).rows})
+		Expect(viewKeys(fresh)).To(ContainElements("widget/s", "widget/t"))
+		Expect(viewKeys(view)).To(Equal(viewKeys(fresh)))
+	})
+
 	It("starts a fresh snapshot when the subscription set changed", func() {
 		first := run(&syncplanev1.BootstrapRequest{WorkspaceId: ws, ClientId: "c1"}, 1)
 
