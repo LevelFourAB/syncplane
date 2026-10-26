@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -242,6 +243,85 @@ var _ = Describe("Subscriptions and revocation", func() {
 			cursor, _ := bootstrap(subA, subB)
 			resp := pull(cursor, subB, subA)
 			Expect(resp.GetReset_()).To(BeFalse())
+		})
+	})
+
+	// The snapshot pages read after Begin, so a row can be created between
+	// the two. Whatever the pages saw, the snapshot plus the pull from its
+	// Begin cursor must hold what a fresh bootstrap holds.
+	Describe("Bootstrap followed by its first pull", func() {
+		var hooked *hookedReadStore
+
+		BeforeEach(func() {
+			hooked = &hookedReadStore{Adapter: newTestStore()}
+			start(mustNewServer(hooked, testEntities(), server.WithPermissions(perms), server.WithChunkSize(1)))
+		})
+
+		// latest holds the widgets the client holds after syncedKeys.
+		var latest map[string]*testdatav1.Widget
+
+		// syncedKeys bootstraps with created run right after Begin, runs
+		// between before the first pull, and returns the keys the client then
+		// holds.
+		syncedKeys := func(created, between func(), subs ...*syncplanev1.Subscription) []string {
+			GinkgoHelper()
+			hooked.mu.Lock()
+			hooked.afterBegin = created
+			hooked.mu.Unlock()
+			cursor, rows := bootstrap(subs...)
+			hooked.mu.Lock()
+			Expect(hooked.afterBegin).To(BeNil(), "nothing was created during the snapshot")
+			hooked.mu.Unlock()
+			between()
+			resp := pull(cursor, subs...)
+			Expect(resp.GetReset_()).To(BeFalse())
+			Expect(resp.GetHasMore()).To(BeFalse())
+			held := map[string]bool{}
+			latest = map[string]*testdatav1.Widget{}
+			for _, rc := range append(rows, resp.GetPatch().GetChanges()...) {
+				k := rc.GetEntity() + "/" + rc.GetKey()
+				held[k] = !rc.GetTombstone()
+				if rc.GetEntity() == "widget" && !rc.GetTombstone() {
+					w := &testdatav1.Widget{}
+					Expect(proto.Unmarshal(rc.GetValue(), w)).To(Succeed())
+					latest[k] = w
+				}
+			}
+			var out []string
+			for k, live := range held {
+				if live {
+					out = append(out, k)
+				}
+			}
+			sort.Strings(out)
+			return out
+		}
+
+		It("removes a row created after Begin that then left the predicate", func() {
+			push(putWidget(1, "a", 50))
+			keys := syncedKeys(
+				func() { push(putWidget(2, "x", 50)) },
+				func() { push(putWidget(3, "x", 5)) },
+				widgetSub(countGte(10)))
+			Expect(keys).To(Equal([]string{"widget/a"}))
+		})
+
+		It("removes a row created after Begin that the read filter then hides", func() {
+			push(putMutation("c1", 1, "todo", "a", &todov1.Todo{Id: "a", Title: "public"}))
+			keys := syncedKeys(
+				func() { push(putMutation("c1", 2, "todo", "x", &todov1.Todo{Id: "x", Title: "public"})) },
+				func() { push(putMutation("c1", 3, "todo", "x", &todov1.Todo{Id: "x", Title: "now secret"})) })
+			Expect(keys).To(Equal([]string{"todo/a"}))
+		})
+
+		It("delivers the latest value of a row created after Begin", func() {
+			push(putWidget(1, "a", 50))
+			keys := syncedKeys(
+				func() { push(putWidget(2, "x", 50)) },
+				func() { push(putWidget(3, "x", 60)) },
+				widgetSub(countGte(10)))
+			Expect(keys).To(Equal([]string{"widget/a", "widget/x"}))
+			Expect(latest["widget/x"].GetCount()).To(BeEquivalentTo(60))
 		})
 	})
 

@@ -26,7 +26,8 @@ import (
 // pull, overwriting whatever mixture of pages the bootstrap saw. A row
 // deleted mid-bootstrap either vanishes from a later page (then the pull's
 // tombstone is a no-op) or ships in an earlier page (then the pull's
-// tombstone removes it).
+// tombstone removes it). A row created after Begin never ships on a page;
+// that pull delivers it.
 //
 // Rows go out entity by entity, in the order Begin announces — priority
 // entities, then the subscription set, then the rest (see bootstrapEntities).
@@ -282,6 +283,13 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		}
 		var out []*syncplanev1.RowChange
 		for _, row := range page {
+			// The pull from the Begin cursor delivers a row created after
+			// Begin, and treats it as one the client never held: when the row
+			// is hidden by then, that pull sends no tombstone. Shipping it here
+			// would leave the client a copy nothing removes.
+			if row.CreatedVersion > begin.GetSeq() {
+				continue
+			}
 			class, err := emitter.classify(row)
 			if err != nil {
 				return nil, err

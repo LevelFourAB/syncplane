@@ -225,7 +225,9 @@ The resumed snapshot stream retains the cursor assigned during its initial
 attempt to ensure a consistent state across chunk boundaries. Because rows can
 span multiple workspace states across pages, the pull that follows the snapshot
 starts from that initial cursor to redeliver changes written since the snapshot
-began. For the same reason, the resumed attempt ships the window and follow
+began. A row created after the snapshot began is not in any chunk. That pull
+delivers it, or sends nothing when the row is out of scope or hidden by then.
+For the same reason, the resumed attempt ships the window and follow
 closure members that the initial cursor records, not the members of the
 current window or closure. The pull that follows then diffs from the
 membership that the client actually holds.
