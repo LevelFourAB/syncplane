@@ -1973,6 +1973,14 @@ describe('the pending queue', () => {
 		const kv = new MemoryKVStore();
 		const c = offlineClient(kv, entities);
 		const registry = new EntityRegistry(entities);
+		const queued = async (id: bigint) => {
+			const tx = await kv.read();
+			try {
+				return (await readPending(tx, WS)).find((m) => m.mutationId === id)!;
+			} finally {
+				tx.release();
+			}
+		};
 		/** The count the record gives, and the count of the queue itself. */
 		const counts = async () => {
 			const tx = await kv.read();
@@ -1996,7 +2004,9 @@ describe('the pending queue', () => {
 		expect((await compactPending(kv, registry, {}, WS, () => new Set<bigint>())).changed).toBe(true);
 		expect(await counts()).toEqual({ recorded: 2, queued: 2 });
 		// Drops the put of the task at the head, and renumbers the rest from 1.
-		expect((await dropAndResequencePending(kv, registry, {}, WS, 1n)).changed).toBe(true);
+		expect((await dropAndResequencePending(kv, registry, {}, WS, await queued(1n))).changed).toBe(
+			true,
+		);
 		expect(await counts()).toEqual({ recorded: 2, queued: 2 });
 		// The put of pm-a, renumbered to 1.
 		await rollbackRejected(kv, registry, {}, WS, [ 1n ]);
@@ -2006,7 +2016,9 @@ describe('the pending queue', () => {
 		await c.mutate.patch(TaskSchema, 't1', { title: 'c' });
 		expect(await counts()).toEqual({ recorded: 1, queued: 1 });
 		// The put of pm-b, at 2 behind the patch at 1, so nothing is renumbered.
-		expect((await dropAndResequencePending(kv, registry, {}, WS, 2n)).changed).toBe(false);
+		expect((await dropAndResequencePending(kv, registry, {}, WS, await queued(2n))).changed).toBe(
+			false,
+		);
 		expect(await counts()).toEqual({ recorded: 0, queued: 0 });
 		await c.close();
 	});

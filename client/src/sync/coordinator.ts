@@ -395,6 +395,11 @@ interface WorkspaceSync {
 	 */
 	poison?: { id: bigint; failures: number; signature: string };
 	/**
+	 * A head the poison backstop condemned, held until this cycle's pull reports
+	 * the server's watermark; see settleDeadLetter.
+	 */
+	deadLetter?: { mutation: Mutation; failure: string };
+	/**
 	 * The server said this client may no longer access the workspace. Permanent:
 	 * it is dropped from pushes, pulls, bootstraps and the stream scope set, and
 	 * nothing retries it. The local rows stay put — purging is the app's call
@@ -1493,7 +1498,7 @@ export class Coordinator {
 								state && head
 								&& this.countHeadFailure(state, head, `rpc\u0000${err.code}`, lone.count === 1)
 							) {
-								await this.deadLetter(lone.workspaceId, head, err.rawMessage);
+								state.deadLetter = { mutation: head, failure: err.rawMessage };
 								return false;
 							}
 							throw err; // retry; the next cycle isolates the head.
@@ -1615,10 +1620,9 @@ export class Coordinator {
 								sent.count === 1,
 							)
 						) {
-							await this.deadLetter(sent.workspaceId, head, failure);
-							// The drop renumbered whatever was queued behind it; the pull
-							// settles that queue against the server's watermark before any of
-							// it is pushed again.
+							state.deadLetter = { mutation: head, failure };
+							// The pull settles the drop against the server's watermark
+							// before anything behind the head is pushed again.
 							settled = true;
 							continue;
 						}
@@ -1629,6 +1633,7 @@ export class Coordinator {
 					// that the server took the ids as numbered.
 					if (state) {
 						state.poison = undefined;
+						state.deadLetter = undefined;
 						state.gapped = false;
 					}
 					let ackedSeq = 0n;
@@ -2227,11 +2232,32 @@ export class Coordinator {
 	}
 
 	/**
+	 * Dead-letters the head the poison backstop condemned during this cycle's
+	 * push, using the watermark the just-finished pull reported.
+	 *
+	 * The failed push proves only that this tab's request applied nothing. Every
+	 * tab that holds the workspace pushes the same queue, so a peer's push may
+	 * have applied the head since; dropping it then would report a write that
+	 * landed as lost, and the renumber would mint its id again for the next
+	 * write, which the server answers ALREADY_APPLIED. A watermark at or above
+	 * the head says the server took it: the pull's rebase has retired it, and
+	 * there is nothing to drop.
+	 */
+	private async settleDeadLetter(workspaceId: string, lastAcked: bigint): Promise<void> {
+		const state = this.workspaces.get(workspaceId);
+		const condemned = state?.deadLetter;
+		if (!state || !condemned) return;
+		state.deadLetter = undefined;
+		if (lastAcked >= condemned.mutation.mutationId) return;
+		await this.deadLetter(workspaceId, condemned.mutation, condemned.failure);
+	}
+
+	/**
 	 * Drops a mutation whose push the server keeps failing the same way: rolls it
 	 * back like a rejection, renumbers the queue onto the id it vacated, and
 	 * reports it through onMutationRejected with the client-side poison code, so
 	 * the app can observe (and re-issue) it instead of the queue staying wedged
-	 * forever.
+	 * forever. Does nothing when the queue no longer holds the mutation as given.
 	 *
 	 * All of it or none of it: a store that fails leaves the mutation queued and
 	 * the app unnotified, and the backstop counts up to the threshold again.
@@ -2241,10 +2267,9 @@ export class Coordinator {
 		m: Mutation,
 		failure: string,
 	): Promise<void> {
-		// Nothing was acked for this id — its push died as an RPC error, or the
-		// server refused the whole batch — so the watermark stops one below. Left
-		// where they are, the survivors would gap past that watermark and the
-		// workspace could never push again, which is why the drop and the renumber
+		// Nothing was acked for this id — the pull's watermark stops below it — so
+		// left where they are, the survivors would gap past that watermark and the
+		// workspace could never push again. That is why the drop and the renumber
 		// share one transaction: a failure between them would leave exactly that
 		// queue behind, and the renumber is also the only way back out of it.
 		const result = await this.opts.kvMutex.run(() =>
@@ -2253,9 +2278,10 @@ export class Coordinator {
 				this.opts.registry,
 				this.opts.mirrors,
 				workspaceId,
-				m.mutationId,
+				m,
 			)
 		);
+		if (!result.dropped) return;
 		this.afterResequence(workspaceId, m.mutationId, result);
 		await this.opts.notify(result.touched);
 		this.opts.onMutationRejected?.({
@@ -2332,6 +2358,7 @@ export class Coordinator {
 			repulled = true;
 		}
 		await this.recoverGap(workspaceId, lastAcked);
+		await this.settleDeadLetter(workspaceId, lastAcked);
 	}
 
 	/**

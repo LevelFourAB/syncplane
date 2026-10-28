@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { CodeInternal, CodeMutationFailed, CodePoisonDropped } from '../../src/codes.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
-import { MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
+import { type Mutation, MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import {
 	MutationStatus,
 	type PushRequest,
@@ -14,9 +14,9 @@ import { metaCursor, metaLastMutationId, metaPushedThrough, pendingKey } from '.
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { IndexEntry, KVWrite } from '../../src/kv/store.js';
 import { buildPut, EntityRegistry } from '../../src/mutations.js';
-import { createKvMutex } from '../../src/mutex.js';
+import { ChainMutex, createKvMutex } from '../../src/mutex.js';
 import { enqueuePending, readPending } from '../../src/optimistic/queue.js';
-import { applyMutationLocally } from '../../src/optimistic/rebase.js';
+import { applyMutationLocally, dropAndResequencePending } from '../../src/optimistic/rebase.js';
 import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator, type RejectionInfo } from '../../src/sync/coordinator.js';
 import { StatusTracker } from '../../src/sync/status.js';
@@ -36,7 +36,11 @@ const MUTATOR_FAILED = `workspace "${WS}": mutator "explode" failed on mutation 
 
 /** A SyncService transport with the given push(); pull/bootstrap are no-ops so
  * a seeded cursor keeps sync from bootstrapping. */
-function syncTransport(push: (req: PushRequest) => ReturnType<typeof pushResults>): Transport {
+function syncTransport(
+	push: (
+		req: PushRequest,
+	) => ReturnType<typeof pushResults> | Promise<ReturnType<typeof pushResults>>,
+): Transport {
 	return createRouterTransport(({ service }) => {
 		service(SyncService, {
 			push,
@@ -648,6 +652,185 @@ describe('coordinator poison backstop', () => {
 
 		await coord.stop();
 	});
+
+	describe('with a peer tab pushing the same queue', () => {
+		// Every tab that holds a workspace pushes the one shared queue, so a
+		// failed push in this tab proves nothing about a peer's push of the same
+		// head. Node has no shared lock manager: two coordinators over one store
+		// and one mutex stand in for the two tabs.
+		const kvMutex = new ChainMutex();
+
+		function tab(transport: Transport, onRejected: (info: RejectionInfo) => void): Coordinator {
+			return new Coordinator({
+				transport,
+				kv,
+				kvMutex,
+				storageNames: storageNames(DEFAULT_STORAGE_PREFIX, 'acct'),
+				scopes: new Map([ [ WS, [] ] ]),
+				clientId: 'c1',
+				registry,
+				mirrors: {},
+				notify: async () => {},
+				status: new StatusTracker(),
+				onMutationRejected: onRejected,
+				poisonThreshold: 2,
+				streamEnabled: false,
+				pollIntervalMs: 0,
+			});
+		}
+
+		/** A local write as SyncClient makes one: mint counter+1, enqueue, advance the counter. */
+		async function localWrite(title: string): Promise<bigint> {
+			const def = registry.bySchema(TodoSchema);
+			const tx = await kv.write();
+			const id = BigInt(((await tx.get(metaLastMutationId(WS))) as string | undefined) ?? '0') + 1n;
+			await enqueuePending(
+				tx,
+				WS,
+				create(MutationSchema, {
+					clientId: 'c1',
+					mutationId: id,
+					payload: {
+						case: 'crud',
+						value: buildPut(def, TodoSchema, create(TodoSchema, { id: title, title })),
+					},
+				}),
+			);
+			await tx.put(metaLastMutationId(WS), id.toString());
+			await tx.commit();
+			return id;
+		}
+
+		/**
+		 * A server with a per-client watermark that applies in order and records
+		 * what it applied. Its first two pushes fail like a failing mutator; the
+		 * second runs `meanwhile` first, the window in which a peer's push lands.
+		 */
+		function watermarkServer(meanwhile: (server: { landHead(): Promise<void> }) => Promise<void>) {
+			let watermark = 0n;
+			const applied = new Map<bigint, string>();
+			let pushNo = 0;
+			const apply = (m: Mutation) => {
+				if (m.mutationId <= watermark) {
+					return { mutationId: m.mutationId, status: MutationStatus.ALREADY_APPLIED };
+				}
+				watermark = m.mutationId;
+				applied.set(m.mutationId, (m.payload.value as { key: string }).key);
+				return { mutationId: m.mutationId, status: MutationStatus.APPLIED, seq: m.mutationId };
+			};
+			const server = {
+				/** Applies the queue head as a peer's request would. */
+				async landHead() {
+					apply((await readQueue())[0]!);
+				},
+			};
+			const transport = createRouterTransport(({ service }) => {
+				service(SyncService, {
+					async push(req) {
+						pushNo++;
+						if (pushNo === 1) return pushFailed(req, CodeMutationFailed, MUTATOR_FAILED);
+						if (pushNo === 2) {
+							await meanwhile(server);
+							return pushFailed(req, CodeMutationFailed, MUTATOR_FAILED);
+						}
+						return pushResults(req, pushedMutations(req).map(apply));
+					},
+					pull() {
+						return {
+							patch: { changes: [], dropEntities: [] },
+							nextCursor: new Uint8Array([ 1 ]),
+							lastAckedMutationId: watermark,
+						};
+					},
+				});
+			});
+			return { transport, applied };
+		}
+
+		it('keeps a head a peer tab pushed before the drop, and mints the next id above it', async () => {
+			let peer: Coordinator | undefined;
+			// The failure ends while this tab's isolated retry is in flight: the
+			// peer's whole cycle lands first, then the retry is answered with the
+			// failure it hit.
+			const { transport, applied } = watermarkServer(() => peer!.syncNow());
+			const coord = tab(transport, (info) => rejections.push(info));
+			peer = tab(transport, () => {});
+
+			await cycle(coord); // push 1 fails and counts
+			await cycle(coord); // push 2: the peer lands the head, then this tab's fails
+
+			expect(applied.get(1n)).toBe('t1');
+			expect(rejections).toHaveLength(0);
+
+			expect(await localWrite('second')).toBe(2n);
+			await cycle(coord);
+			expect(applied.get(2n)).toBe('second');
+
+			await coord.stop();
+			await peer.stop();
+		});
+
+		it('keeps a head a peer tab pushed but never pulled for', async () => {
+			// The queue still holds the head when this tab's push fails: only this
+			// tab's own pull can learn that the server took it.
+			const { transport, applied } = watermarkServer((server) => server.landHead());
+			const coord = tab(transport, (info) => rejections.push(info));
+
+			await cycle(coord);
+			await cycle(coord);
+
+			expect(applied.get(1n)).toBe('t1');
+			expect(rejections).toHaveLength(0);
+			expect(await readQueue()).toHaveLength(0);
+			expect(await localWrite('second')).toBe(2n);
+
+			await coord.stop();
+		});
+
+		it('leaves the queue alone when a peer tab already dropped the head and renumbered its tail', async () => {
+			await seedTail([ 2n ]);
+			let pushNo = 0;
+			const coord = tab(
+				syncTransport(async (req) => {
+					pushNo++;
+					if (pushNo === 2) {
+						// The peer dead-letters the same head first: id 1 now names
+						// the mutation that was queued at 2.
+						const head = (await readQueue())[0]!;
+						await kvMutex.run(() => dropAndResequencePending(kv, registry, {}, WS, head));
+					}
+					return pushFailed(req, CodeMutationFailed, MUTATOR_FAILED);
+				}),
+				(info) => rejections.push(info),
+			);
+
+			await cycle(coord); // push 1 fails and counts
+			await cycle(coord); // push 2 fails again; the peer dropped the head meanwhile
+
+			expect(rejections).toHaveLength(0);
+			const queue = await readQueue();
+			expect(queue.map((m) => [ m.mutationId, (m.payload.value as { key: string }).key ])).toEqual([
+				[ 1n, 't2' ],
+			]);
+			const tx = await kv.read();
+			try {
+				expect(await tx.get(metaLastMutationId(WS))).toBe('1');
+			} finally {
+				tx.release();
+			}
+
+			await coord.stop();
+		});
+	});
+
+	async function readQueue(): Promise<Mutation[]> {
+		const tx = await kv.read();
+		try {
+			return await readPending(tx, WS);
+		} finally {
+			tx.release();
+		}
+	}
 
 	async function pendingIds(): Promise<bigint[]> {
 		const tx = await kv.read();

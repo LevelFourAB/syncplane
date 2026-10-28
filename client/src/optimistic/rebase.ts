@@ -1,6 +1,7 @@
 import {
 	clone,
 	type DescMessage,
+	equals,
 	fromBinary,
 	type Message,
 	type MessageShape,
@@ -1431,11 +1432,25 @@ export async function resequencePending(
 	return runResequence(kv, registry, mirrors, workspaceId, undefined, firstId);
 }
 
+/** Outcome of dropAndResequencePending. */
+export interface DropResult extends ResequenceResult {
+	/**
+	 * False when the queue no longer held the mutation as given — a peer tab
+	 * acked, dropped or renumbered it first. Nothing was written then.
+	 */
+	dropped: boolean;
+}
+
 /**
- * Drops the pending mutation `dropId` of a workspace and renumbers what
- * survives it down onto that id, in ONE transaction. Everything
- * resequencePending documents applies, and the caller owes the same proof: the
- * server has taken nothing from `dropId` on.
+ * Drops the pending mutation `drop` of a workspace and renumbers what survives
+ * it down onto its id, in ONE transaction. Everything resequencePending
+ * documents applies, and the caller owes the same proof: the server has taken
+ * nothing from that id on.
+ *
+ * The queue is shared by every tab, so the id alone may name another mutation
+ * by now. The drop applies only while the queue holds `drop` itself at its id;
+ * otherwise the result reports `dropped: false` and the queue and both marks
+ * stay as they were.
  *
  * The two halves are inseparable because either alone leaves the queue
  * unpushable — the drop makes a hole no ack can ever fill, and only the
@@ -1454,9 +1469,9 @@ export async function dropAndResequencePending(
 	registry: EntityRegistry,
 	mirrors: MirrorMap,
 	workspaceId: string,
-	dropId: bigint,
-): Promise<ResequenceResult> {
-	return runResequence(kv, registry, mirrors, workspaceId, dropId, dropId);
+	drop: Mutation,
+): Promise<DropResult> {
+	return runResequence(kv, registry, mirrors, workspaceId, drop, drop.mutationId);
 }
 
 async function runResequence(
@@ -1464,17 +1479,32 @@ async function runResequence(
 	registry: EntityRegistry,
 	mirrors: MirrorMap,
 	workspaceId: string,
-	dropId: bigint | undefined,
+	drop: Mutation | undefined,
 	firstId: bigint,
-): Promise<ResequenceResult> {
+): Promise<DropResult> {
 	const touched = new TouchSet();
 	const tx = await kv.write();
 	try {
 		const pending = await readPending(tx, workspaceId);
+		if (drop !== undefined) {
+			const queued = pending.find((m) => m.mutationId === drop.mutationId);
+			if (queued === undefined || !equals(MutationSchema, queued, drop)) {
+				// Without the drop there is no hole to close, and a renumber would
+				// pull the counter down onto ids a peer tab may have pushed already.
+				tx.release();
+				return {
+					touched,
+					pendingCount: pending.length,
+					remap: new Map(),
+					changed: false,
+					dropped: false,
+				};
+			}
+		}
 		const survivors: Mutation[] = [];
 		let dropped = false;
 		for (const m of pending) {
-			if (m.mutationId === dropId) {
+			if (m.mutationId === drop?.mutationId) {
 				await tx.del(pendingKey(workspaceId, m.mutationId));
 				touchPendingAccess(touched, registry, workspaceId, [ m ]);
 				dropped = true;
@@ -1494,7 +1524,7 @@ async function runResequence(
 			} else {
 				tx.release();
 			}
-			return { touched, pendingCount: survivors.length, remap: new Map(), changed: false };
+			return { touched, pendingCount: survivors.length, remap: new Map(), changed: false, dropped };
 		}
 		// Every old key goes before any new one is written: the ranges overlap
 		// whenever the queue is longer than the hole, and a write-then-delete
@@ -1526,6 +1556,7 @@ async function runResequence(
 			pendingCount: renumbered.length,
 			remap,
 			changed: renumbered.length > 0,
+			dropped,
 		};
 	} catch (err) {
 		tx.release();
