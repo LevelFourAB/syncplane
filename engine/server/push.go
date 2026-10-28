@@ -1109,7 +1109,7 @@ func (s *Server) applyCrud(
 		if err != nil {
 			return err
 		}
-		if err := info.checkTextCounterSteps(prevText, msg.ProtoReflect()); err != nil {
+		if err := info.checkTextWrites(prevText, msg.ProtoReflect()); err != nil {
 			return err
 		}
 		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, msg.ProtoReflect(), seq); err != nil {
@@ -1256,7 +1256,7 @@ func (s *Server) applyCrud(
 		if err != nil {
 			return err
 		}
-		if err := info.checkTextCounterSteps(prevText, base.ProtoReflect()); err != nil {
+		if err := info.checkTextWrites(prevText, base.ProtoReflect()); err != nil {
 			return err
 		}
 		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, base.ProtoReflect(), seq); err != nil {

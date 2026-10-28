@@ -952,7 +952,9 @@ type WriteTx interface {
 	// that leave the field byte-identical record nothing.
 	//
 	// Entries are per (entity, key, field, seq) and overwrite on conflict, so a
-	// retried write closure is idempotent.
+	// retried write closure is idempotent. The engine writes a field path only
+	// when it is valid UTF-8 without U+0000, so an adapter may keep it in a
+	// text column; the same holds for PutTextFloor.
 	PutFieldDelta(entity, key, field string, seq uint64, frag []byte) error
 	// PruneFieldDeltas deletes delta-log entries written before cutoff and
 	// advances the workspace's field-delta horizon to the highest sequence it

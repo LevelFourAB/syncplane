@@ -15,7 +15,10 @@ import (
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
+	"github.com/levelfourab/syncplane/engine/internal/pgtest"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
+	"github.com/levelfourab/syncplane/engine/storage/pgstore"
 	"github.com/levelfourab/syncplane/engine/text"
 )
 
@@ -944,4 +947,102 @@ var _ = Describe("Text fields", func() {
 			Expect(err).To(MatchError(ContainSubstring("has no text field")))
 		})
 	})
+})
+
+// An element key is app data that nothing validates the way a row key is
+// validated, yet it becomes part of the instance path the delta log and the
+// floors store a document under ("notes.<key>.body"). Postgres keeps those
+// paths in TEXT columns, which hold no U+0000. A deterministic failure must be
+// a per-mutation rejection, the same on every adapter: an RPC error makes the
+// client retry the batch forever, and every mutation queued behind it waits.
+var _ = Describe("Text documents under an element key that holds \\u0000", func() {
+	const wsID = "ws-textpath"
+
+	stores := map[string]func() storage.Adapter{
+		"sqlite": newTestStore,
+		"postgres": func() storage.Adapter {
+			GinkgoHelper()
+			store, err := pgstore.Open(GinkgoT().Context(), pgtest.DSN())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+			return store
+		},
+	}
+
+	for name, open := range stores {
+		Context("on "+name, func() {
+			var (
+				ctx    context.Context
+				srv    *server.Server
+				client syncplanev1connect.SyncServiceClient
+			)
+
+			BeforeEach(func() {
+				ctx = context.Background()
+				srv = mustNewServer(open(), server.WithEntities(&testdatav1.MapTextEntity{}, &testdatav1.KeyedTextEntity{}))
+				path, handler := srv.Handler()
+				mux := http.NewServeMux()
+				mux.Handle(path, handler)
+				ts := httptest.NewServer(mux)
+				DeferCleanup(ts.Close)
+				client = syncplanev1connect.NewSyncServiceClient(ts.Client(), ts.URL)
+			})
+
+			It("rejects a PUT whose map key holds \\u0000 with invalid_argument, not an RPC error", func() {
+				row := &testdatav1.MapTextEntity{
+					Id:    "m1",
+					Notes: map[string]*testdatav1.TextHolder{"a\u0000b": {Body: bodyDoc("p1", "hello")}},
+				}
+				resp, err := client.Push(ctx, connect.NewRequest(pushOf(wsID, []*syncplanev1.Mutation{
+					putMutation("c1", 1, "map_text", "m1", row),
+				})))
+				Expect(err).NotTo(HaveOccurred())
+				results := pushResults(resp.Msg)
+				Expect(results).To(HaveLen(1))
+				Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+				Expect(results[0].GetErrorCode()).To(Equal("invalid_argument"))
+			})
+
+			It("applies the next mutation of the batch", func() {
+				bad := &testdatav1.MapTextEntity{
+					Id:    "m1",
+					Notes: map[string]*testdatav1.TextHolder{"a\u0000b": {Body: bodyDoc("p1", "x")}},
+				}
+				good := &testdatav1.MapTextEntity{
+					Id:    "m2",
+					Notes: map[string]*testdatav1.TextHolder{"plain": {Body: bodyDoc("p1", "kept")}},
+				}
+				_, err := client.Push(ctx, connect.NewRequest(pushOf(wsID, []*syncplanev1.Mutation{
+					putMutation("c1", 1, "map_text", "m1", bad),
+					putMutation("c1", 2, "map_text", "m2", good),
+				})))
+				Expect(err).NotTo(HaveOccurred())
+
+				pull, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: wsID}))
+				Expect(err).NotTo(HaveOccurred())
+				var got *testdatav1.MapTextEntity
+				for _, rc := range pull.Msg.GetPatch().GetChanges() {
+					Expect(rc.GetKey()).NotTo(Equal("m1"))
+					if rc.GetKey() == "m2" && !rc.GetTombstone() {
+						got = &testdatav1.MapTextEntity{}
+						Expect(proto.Unmarshal(rc.GetValue(), got)).To(Succeed())
+					}
+				}
+				Expect(got).NotTo(BeNil())
+				Expect(plainBody(got.GetNotes()["plain"].GetBody())).To(Equal("kept"))
+			})
+
+			It("rejects a trusted write whose keyed-list element key holds \\u0000", func() {
+				err := srv.Mutate(ctx, wsID, func(tx *server.EntityTx) error {
+					return tx.Put(&testdatav1.KeyedTextEntity{
+						Id:    "k1",
+						Notes: []*testdatav1.KeyedNote{{Id: "a\u0000b", Body: bodyDoc("p1", "hello")}},
+					})
+				})
+				rej, ok := server.AsRejection(err)
+				Expect(ok).To(BeTrue(), "got %v", err)
+				Expect(rej.Code).To(Equal("invalid_argument"))
+			})
+		})
+	}
 })

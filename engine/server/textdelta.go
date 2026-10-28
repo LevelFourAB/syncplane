@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -120,18 +121,28 @@ func (info *entityInfo) recordTextDeltas(
 // ceiling take millions of writes rather than one.
 const maxTextCounterStep = 1 << 32
 
-// checkTextCounterSteps refuses a write that moves the highest counter of any
-// text document of next more than maxTextCounterStep above the same document in
-// prev (zero for a document prev does not hold). next holds the documents about
-// to be stored, which every write path has decoded and encoded again, so their
-// headers are exact.
-func (info *entityInfo) checkTextCounterSteps(prev map[string][]byte, next protoreflect.Message) error {
+// checkTextWrites refuses a write that stores a text document of next the store
+// cannot keep beside it, or that moves the highest counter of one more than
+// maxTextCounterStep above the same document in prev (zero for a document prev
+// does not hold). next holds the documents about to be stored, which every write
+// path has decoded and encoded again, so their headers are exact.
+func (info *entityInfo) checkTextWrites(prev map[string][]byte, next protoreflect.Message) error {
 	for _, tf := range info.textFields {
 		for _, ti := range tf.instances(next) {
 			after := ti.bytes()
 			before := prev[ti.path]
 			if len(after) == 0 || bytes.Equal(before, after) {
 				continue
+			}
+			// The instance path keys the delta log and the floors, and an
+			// element key in it is app data nothing else validates. A TEXT
+			// column on Postgres holds neither U+0000 nor invalid UTF-8, and
+			// the failed statement would abort the whole batch. Refused on
+			// every adapter, so a write does not depend on the store.
+			if strings.ContainsRune(ti.path, 0) || !utf8.ValidString(ti.path) {
+				return Reject(CodeInvalidArgument, fmt.Sprintf(
+					"entity %q text field %q: an element key on the path holds \\u0000 or invalid UTF-8",
+					info.name, ti.path))
 			}
 			hi, err := text.MaxCounter(after)
 			if err != nil {
