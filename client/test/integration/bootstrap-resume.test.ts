@@ -13,22 +13,32 @@ interface Truncating {
 	transport: Transport;
 	/** Rows the server delivered, per Bootstrap attempt. */
 	delivered: number[];
+	/** Lets the Bootstrap attempts after the first one start. */
+	release: () => void;
 }
 
 /**
  * A transport that hangs up on the FIRST Bootstrap after one chunk, the way a
- * connection drops mid-snapshot, and lets every later attempt run to End. It
- * also counts the rows each attempt delivered, which is how the specs tell a
- * resumed snapshot from one downloaded again.
+ * connection drops mid-snapshot, and lets every later attempt run to End once
+ * the spec calls release. It also counts the rows each attempt delivered, which
+ * is how the specs tell a resumed snapshot from one downloaded again.
  */
 function truncatingTransport(): Truncating {
 	const base = createConnectTransport({ baseUrl: inject('serverUrl'), httpVersion: '1.1' });
 	const delivered: number[] = [];
+	let release!: () => void;
+	const released = new Promise<void>((resolve) => (release = resolve));
+	let started = 0;
 	async function stream(
 		...args: Parameters<Transport['stream']>
 	): Promise<StreamResponse<DescMessage, DescMessage>> {
+		if (args[0].name !== 'Bootstrap') return base.stream(...args);
+		// The coordinator retries the dropped attempt on its own after a backoff
+		// that can be close to zero. Without the gate, that retry can finish
+		// before the spec sees the first attempt end, and a spec cannot put a
+		// write between the two attempts.
+		if (started++ > 0) await released;
 		const res = await base.stream(...args);
-		if (args[0].name !== 'Bootstrap') return res;
 		const attempt = delivered.push(0);
 		const inner = res.message;
 		async function* counted(): AsyncIterable<never> {
@@ -52,7 +62,7 @@ function truncatingTransport(): Truncating {
 		unary: base.unary.bind(base),
 		stream: stream as Transport['stream'],
 	};
-	return { transport, delivered };
+	return { transport, delivered, release };
 }
 
 describe('bootstrap resume (against the real server)', () => {
@@ -64,7 +74,7 @@ describe('bootstrap resume (against the real server)', () => {
 		for (const id of ids) await writer.mutate.put(TodoSchema, { id, title: id });
 		await writer.syncNow();
 
-		const { transport, delivered } = truncatingTransport();
+		const { transport, delivered, release } = truncatingTransport();
 		const reader = newClient(ws, { transport });
 		await reader.start();
 
@@ -74,6 +84,7 @@ describe('bootstrap resume (against the real server)', () => {
 
 		// The next one resumes: it downloads the rest of the same snapshot rather
 		// than the whole thing again.
+		release();
 		await reader.syncNow();
 		expect(delivered).toEqual([ CHUNK, ids.length - CHUNK ]);
 
@@ -96,7 +107,7 @@ describe('bootstrap resume (against the real server)', () => {
 		for (const id of ids) await writer.mutate.put(TodoSchema, { id, title: id });
 		await writer.syncNow();
 
-		const { transport, delivered } = truncatingTransport();
+		const { transport, delivered, release } = truncatingTransport();
 		const reader = newClient(ws, { transport });
 		await reader.start();
 		await eventually(async () => delivered[0] === CHUNK);
@@ -106,6 +117,7 @@ describe('bootstrap resume (against the real server)', () => {
 		await elsewhere.mutate.custom('bump_epoch');
 		await elsewhere.syncNow();
 
+		release();
 		await reader.syncNow();
 		expect(delivered).toEqual([ CHUNK, ids.length - CHUNK ]);
 
@@ -125,7 +137,7 @@ describe('bootstrap resume (against the real server)', () => {
 		for (const id of ids) await writer.mutate.put(TodoSchema, { id, title: 'before' });
 		await writer.syncNow();
 
-		const { transport, delivered } = truncatingTransport();
+		const { transport, delivered, release } = truncatingTransport();
 		const reader = newClient(ws, { transport });
 		await reader.start();
 		await eventually(async () => delivered.length === 1);
@@ -134,6 +146,7 @@ describe('bootstrap resume (against the real server)', () => {
 		await writer.mutate.patch(TodoSchema, ids[0]!, { title: 'after' });
 		await writer.syncNow();
 
+		release();
 		await reader.syncNow();
 		expect((await reader.get(TodoSchema, ids[0]!))?.title).toBe('after');
 		expect((await reader.scan(TodoSchema)).map((r) => r.key).sort()).toEqual(ids);
