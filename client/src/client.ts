@@ -87,7 +87,7 @@ import {
 	WindowSchema,
 } from './gen/syncplane/v1/patch_pb.js';
 import { AggregateOp, type QueryFacet } from './gen/syncplane/v1/query_pb.js';
-import { SyncService } from './gen/syncplane/v1/service_pb.js';
+import { MutationStatus, SyncService } from './gen/syncplane/v1/service_pb.js';
 import {
 	accessGeneration,
 	accessGenerationFor,
@@ -4474,6 +4474,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * "format_upgraded"; in that case the clientId
 	 * and counters go too, since the server's watermarks no longer line up
 	 * with the local counters and a fresh identity avoids a mutation-id gap.
+	 * Mutations the salvage push carried and the server rejected are reported
+	 * through onMutationRejected with the server's code and message.
 	 */
 	private async ensureFormatVersion(transport: Transport): Promise<void> {
 		const kv = await this.kv();
@@ -4530,6 +4532,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// are not among them: nothing decoded them, so there is nothing to report
 		// beyond the total.
 		const lost: DiscardedMutation[] = [];
+		// Mutations the server refused. A rejection is an ack, so these are not
+		// lost to the upgrade and leave the identity alone, but the wipe takes
+		// their optimistic state like any other, and the app must hear why.
+		const refused: RejectionInfo[] = [];
 		let undecodable = snapshot.undecodable;
 		// Workspaces whose salvage stopped at a failed chunk. A later round must
 		// not push past that gap either.
@@ -4561,6 +4567,17 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						if (resp.results[0]?.errorCode) {
 							abandon();
 							break;
+						}
+						for (const r of resp.results[0]?.results ?? []) {
+							if (r.status !== MutationStatus.REJECTED) continue;
+							const m = chunk.find((c) => c.mutationId === r.mutationId);
+							refused.push({
+								workspaceId,
+								mutationId: r.mutationId,
+								errorCode: r.errorCode,
+								errorMessage: r.errorMessage,
+								...(m ? describeMutation(m) : { targets: [] }),
+							});
 						}
 						sent += chunk.length;
 					} catch {
@@ -4633,6 +4650,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				});
 			}
 		}
+		for (const info of refused) this.reportRejection(info);
 	}
 
 	/**

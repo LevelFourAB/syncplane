@@ -78,6 +78,7 @@ function stubServer(
 		failPushAttempt = 0,
 		watermark = 0n,
 		onPush,
+		reject,
 	}: {
 		failPush?: boolean;
 		failFirstPush?: boolean;
@@ -85,6 +86,8 @@ function stubServer(
 		watermark?: bigint;
 		/** Runs before the push is answered, to interleave another tab's work. */
 		onPush?: () => Promise<void> | void;
+		/** Mutations the server refuses; a refused id still moves the watermark. */
+		reject?: (m: Mutation) => boolean;
 	} = {},
 ): StubServer {
 	const pushedBatches: Mutation[][] = [];
@@ -109,6 +112,14 @@ function stubServer(
 							return { mutationId: m.mutationId, status: MutationStatus.ALREADY_APPLIED };
 						}
 						acked.set(m.clientId, m.mutationId);
+						if (reject?.(m)) {
+							return {
+								mutationId: m.mutationId,
+								status: MutationStatus.REJECTED,
+								errorCode: 'invalid',
+								errorMessage: 'refused by hook',
+							};
+						}
 						return { mutationId: m.mutationId, status: MutationStatus.APPLIED, seq: m.mutationId };
 					}),
 				);
@@ -211,6 +222,32 @@ describe('format version upgrade', () => {
 		expect(all.has(confirmedKey('todo', WS, 'old'))).toBe(false);
 		expect(await client.pendingCount()).toBe(0);
 		// Everything was salvaged: no format_upgraded error surfaced.
+		expect(statuses.some((s) => s.lastError?.code === CodeFormatUpgraded)).toBe(false);
+		await client.close();
+	});
+
+	it('reports what the server rejected in the salvage push, with its verdict', async () => {
+		// A rejection is an ack: the server moved its watermark past the id, so
+		// the identity stays, and nothing counts as dropped by the upgrade. The
+		// wipe still takes the refused write, and the app must hear of it.
+		const kv = await seedOldFormatStore();
+		const { transport } = stubServer({ reject: (m) => m.mutationId === 2n });
+		const statuses: SyncStatus[] = [];
+		const rejections: RejectionInfo[] = [];
+		const client = newUpgradingClient(kv, transport, statuses, undefined, rejections);
+		await client.start();
+		await client.syncNow();
+
+		expect(rejections).toHaveLength(1);
+		expect(rejections[0]).toMatchObject({
+			workspaceId: WS,
+			mutationId: 2n,
+			errorCode: 'invalid',
+			errorMessage: 'refused by hook',
+		});
+		expect(rejections[0]?.targets.map((t) => t.key)).toEqual([ 'p2' ]);
+		const all = await dump(kv);
+		expect(all.get(META_CLIENT_ID)).toBe('seeded-client');
 		expect(statuses.some((s) => s.lastError?.code === CodeFormatUpgraded)).toBe(false);
 		await client.close();
 	});
