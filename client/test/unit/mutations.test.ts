@@ -1,4 +1,22 @@
-import { create, fromBinary } from '@bufbuild/protobuf';
+import {
+	create,
+	createFileRegistry,
+	type DescMessage,
+	fromBinary,
+	setExtension,
+	toBinary,
+} from '@bufbuild/protobuf';
+import {
+	DescriptorProtoSchema,
+	FieldDescriptorProto_Label,
+	FieldDescriptorProto_Type,
+	FieldDescriptorProtoSchema,
+	FieldOptions_JSType,
+	FieldOptionsSchema,
+	file_google_protobuf_descriptor,
+	FileDescriptorProtoSchema,
+	MessageOptionsSchema,
+} from '@bufbuild/protobuf/wkt';
 import { describe, expect, it } from 'vitest';
 
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
@@ -8,6 +26,11 @@ import {
 	type Widget,
 	WidgetSchema,
 } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import {
+	entity,
+	EntityOptionsSchema,
+	file_syncplane_v1_options,
+} from '../../src/gen/syncplane/v1/options_pb.js';
 import {
 	buildPatch,
 	buildPut,
@@ -307,5 +330,91 @@ describe('keyOf', () => {
 
 	it('escapes the escape character itself', () => {
 		expect(keyOf(pair, create(PairSchema, { ns: 'a\\', id: 'b' }))).toBe('a\\\\/b');
+	});
+
+	// protobuf-es holds a 64-bit field declared `jstype = JS_STRING` as the
+	// app's string and parses it only when encoding. The server renders the
+	// decoded number, so the key must come from the parsed value.
+	describe('64-bit key fields held as JS strings', () => {
+		// `message Thing { <type> id = 1 [jstype = JS_STRING]; }`, declared as
+		// the entity "thing" keyed by id.
+		function thingSchema(type: FieldDescriptorProto_Type): DescMessage {
+			const msgOpts = create(MessageOptionsSchema);
+			setExtension(
+				msgOpts,
+				entity,
+				create(EntityOptionsSchema, { name: 'thing', keyFields: [ 'id' ] }),
+			);
+			const file = create(FileDescriptorProtoSchema, {
+				name: 'keystring/thing.proto',
+				package: 'keystring.v1',
+				syntax: 'proto3',
+				dependency: [ 'syncplane/v1/options.proto', 'google/protobuf/descriptor.proto' ],
+				messageType: [
+					create(DescriptorProtoSchema, {
+						name: 'Thing',
+						options: msgOpts,
+						field: [
+							create(FieldDescriptorProtoSchema, {
+								name: 'id',
+								number: 1,
+								type,
+								label: FieldDescriptorProto_Label.OPTIONAL,
+								jsonName: 'id',
+								options: create(FieldOptionsSchema, { jstype: FieldOptions_JSType.JS_STRING }),
+							}),
+						],
+					}),
+				],
+			});
+			const registry = createFileRegistry(file, (name) => {
+				if (name === 'syncplane/v1/options.proto') return file_syncplane_v1_options;
+				if (name === 'google/protobuf/descriptor.proto') return file_google_protobuf_descriptor;
+				return undefined;
+			});
+			const schema = registry.getMessage('keystring.v1.Thing');
+			if (!schema) throw new Error('Thing not registered');
+			return schema;
+		}
+
+		// The key the server derives is the one keyOf gives for the decoded
+		// message, whose value is canonical.
+		function clientAndServerKeys(type: FieldDescriptorProto_Type, id: string) {
+			const schema = thingSchema(type);
+			const def = entityDefOf(schema);
+			const msg = create(schema, { id } as never);
+			const onWire = fromBinary(schema, toBinary(schema, msg));
+			return { client: keyOf(def, msg), server: keyOf(def, onWire) };
+		}
+
+		it.each([
+			[ '007', '7' ],
+			[ '+7', '7' ],
+			[ ' 7', '7' ],
+			[ '0x10', '16' ],
+			[ '-9223372036854775808', '-9223372036854775808' ],
+		])('derives the server key for int64 id %j', (id, want) => {
+			expect(clientAndServerKeys(FieldDescriptorProto_Type.INT64, id)).toEqual({
+				client: want,
+				server: want,
+			});
+		});
+
+		it.each([
+			[ '007', '7' ],
+			[ '18446744073709551615', '18446744073709551615' ],
+		])('derives the server key for uint64 id %j', (id, want) => {
+			expect(clientAndServerKeys(FieldDescriptorProto_Type.UINT64, id)).toEqual({
+				client: want,
+				server: want,
+			});
+		});
+
+		it('refuses an id the write could not encode', () => {
+			const schema = thingSchema(FieldDescriptorProto_Type.UINT64);
+			const msg = create(schema, { id: '-1' } as never);
+			expect(() => toBinary(schema, msg)).toThrow('invalid uint64');
+			expect(() => keyOf(entityDefOf(schema), msg)).toThrow('invalid uint64');
+		});
 	});
 });

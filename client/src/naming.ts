@@ -23,7 +23,7 @@
  * change token.
  */
 
-import { type DescField, ScalarType } from '@bufbuild/protobuf';
+import { type DescField, protoInt64, ScalarType } from '@bufbuild/protobuf';
 
 /**
  * Caps an entity name. Names are hand-written schema identifiers, so the cap
@@ -319,6 +319,18 @@ export function scalarKeyString(
 			return value as string;
 		case ScalarType.BOOL:
 			return value ? 'true' : 'false';
+		// A field declared `jstype = JS_STRING` holds the app's string as given,
+		// and the encoder parses it with BigInt only on the way out. The server
+		// renders the decoded number, so render the parsed value too: "007",
+		// " 7" and "0x10" must give "7", "7" and "16". The parse also throws the
+		// encoder's own error for a value the write could not encode.
+		case ScalarType.INT64:
+		case ScalarType.SINT64:
+		case ScalarType.SFIXED64:
+			return String(protoInt64.parse(value as string | number | bigint));
+		case ScalarType.UINT64:
+		case ScalarType.FIXED64:
+			return String(protoInt64.uParse(value as string | number | bigint));
 		default:
 			return String(value); // numbers and bigints render base-10
 	}
