@@ -584,4 +584,28 @@ var _ = Describe("Push mutation ids", func() {
 		Expect(res.GetErrorCode()).To(BeEmpty(), "message: %s", res.GetErrorMessage())
 		Expect(res.GetResults()[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
 	})
+
+	// Adoption sets the watermark at the first id it sees, and every id at or
+	// below a watermark is acked ALREADY_APPLIED, which the client drops as
+	// landed. A lower id later in the same batch was never applied.
+	It("refuses as a gap a new client's first batch that carries an id below the one it adopts", func() {
+		resp, err := srv.Push(context.Background(), connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+			putMutation("fresh", 2, "todo", "t2", &todov1.Todo{Id: "t2"}),
+			putMutation("fresh", 1, "todo", "t1", &todov1.Todo{Id: "t1"}),
+		})))
+		Expect(err).NotTo(HaveOccurred())
+		res := resp.Msg.GetResults()[0]
+		Expect(res.GetErrorCode()).To(Equal(server.CodeMutationIDGap), "message: %s", res.GetErrorMessage())
+		Expect(res.GetResults()).To(BeEmpty())
+
+		By("the resend in order applies both")
+		resp, err = srv.Push(context.Background(), connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+			putMutation("fresh", 1, "todo", "t1", &todov1.Todo{Id: "t1"}),
+			putMutation("fresh", 2, "todo", "t2", &todov1.Todo{Id: "t2"}),
+		})))
+		Expect(err).NotTo(HaveOccurred())
+		res = resp.Msg.GetResults()[0]
+		Expect(res.GetErrorCode()).To(BeEmpty(), "message: %s", res.GetErrorMessage())
+		Expect(res.GetResults()).To(HaveEach(HaveField("Status", syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED)))
+	})
 })

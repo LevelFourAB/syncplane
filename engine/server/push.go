@@ -196,6 +196,9 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// driven by.
 		watermarks := map[string]uint64{}
 		bumped := map[string]bool{}
+		// The id each client was adopted at in this attempt. The watermark
+		// then covers the ids below it too, but none of them was applied.
+		adoptedAt := map[string]uint64{}
 		// Recorded verdicts per client, loaded lazily by rejectionsOf, and how
 		// many of them this batch added. Reset with the rest: a retried attempt
 		// must re-read rather than build on what an abandoned one collected.
@@ -245,6 +248,13 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			}
 
 			switch {
+			case m.GetMutationId() < adoptedAt[key]:
+				// The adopted watermark covers this id, but nothing applied it,
+				// and an ack would tell the client it landed. Refuse the batch
+				// so the client resends it in order.
+				gap = fmt.Sprintf("mutation id gap: got %d after adopting %d", m.GetMutationId(), adoptedAt[key])
+				results = nil
+				return errAbortBatch
 			case m.GetMutationId() <= last:
 				// The watermark already covers this id, so nothing is applied
 				// either way — but if it was covered by a REJECTION, the client
@@ -275,6 +285,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 				// resend of mutations it already had applied; that hazard, and
 				// the buggy NEW client starting above 1 that is accepted
 				// silently, are documented on WithClientRetention.
+				adoptedAt[key] = m.GetMutationId()
 				if m.GetMutationId() > 1 {
 					// A first-seen mutation_id above 1 is the noteworthy case: a
 					// returning pruned client (or, less benignly, a buggy one).
