@@ -39,6 +39,7 @@ import {
 	metaIndexPrefix,
 	metaLastMutationId,
 	metaServerSeq,
+	metaUnresolvedPush,
 	overlayKey,
 	type OverlayRecord,
 	overlayTextKey,
@@ -85,6 +86,7 @@ import {
 	dropAcked,
 	enqueuePending,
 	readPending,
+	readUnresolvedPush,
 	recountPendingAccess,
 	writePushedThrough,
 } from './queue.js';
@@ -1013,10 +1015,8 @@ export interface FinalizeInput {
 	 * page (`!has_more`); replaying still-queued mutations on top of their own
 	 * confirmed writes is idempotent, so holding them a few pages longer is safe.
 	 *
-	 * Also used, by a pull or a bootstrap swap, while a push of the workspace is
-	 * unanswered: the server's watermark then covers mutations whose verdicts
-	 * only a re-push can collect, and dropping a rejected one would lose its
-	 * rejection.
+	 * The rebase also keeps them, whatever this says, while the queue holds an
+	 * id of an unanswered push (metaUnresolvedPush).
 	 */
 	deferAcked?: boolean;
 	/**
@@ -1102,7 +1102,8 @@ export async function clearOverlayAndReplay(
 /**
  * Finishes a rebase of one workspace after its server changes are in:
  *  1. persist the new cursor
- *  2. drop pending mutations the server has acked (unless deferAcked)
+ *  2. drop pending mutations the server has acked (unless deferAcked, or an
+ *     unanswered push still has ids queued)
  *  3. clear the optimistic overlay
  *  4. replay surviving pending mutations on the new base
  *
@@ -1159,9 +1160,23 @@ export async function finalizeRebase(
 		touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 	}
 
+	// Read in this transaction, not passed in by the caller: the push that went
+	// unanswered may be another tab's, and the watermark of this page covers
+	// mutations whose verdicts only that re-push can collect. Dropping a
+	// rejected one here would retire its rejection unseen.
+	let defer = input.deferAcked === true;
+	let pending: Mutation[] | undefined;
+	const unresolved = await readUnresolvedPush(tx, workspaceId);
+	if (unresolved !== undefined) {
+		pending = await readPending(tx, workspaceId);
+		const head = pending[0];
+		if (head !== undefined && head.mutationId <= unresolved) defer = true;
+		// No id that push carried is queued any more, so nothing waits on it.
+		else await tx.del(metaUnresolvedPush(workspaceId));
+	}
 	let remaining: Mutation[];
-	if (input.deferAcked) {
-		remaining = await readPending(tx, workspaceId);
+	if (defer) {
+		remaining = pending ?? await readPending(tx, workspaceId);
 	} else {
 		const acked = await dropAcked(tx, workspaceId, input.lastAckedMutationId);
 		touchPendingAccess(touched, registry, workspaceId, acked.dropped);
@@ -1558,6 +1573,10 @@ async function runResequence(
 		await tx.put(metaLastMutationId(workspaceId), (nextId - 1n).toString());
 		await recountPendingAccess(tx, registry, workspaceId, renumbered, nextId - 1n);
 		await writePushedThrough(tx, workspaceId, firstId - 1n);
+		// Every renumbered id is above the watermark, so the server applied none
+		// of them, and an unanswered-push mark would hold acked mutations for a
+		// push that can tell nothing about these ids.
+		await tx.del(metaUnresolvedPush(workspaceId));
 		if (dropped || renumbered.length > 0) {
 			await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, renumbered, touched);
 		}

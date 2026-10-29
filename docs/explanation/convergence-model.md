@@ -161,7 +161,11 @@ the original error code and message instead of returning `ALREADY_APPLIED`.
 On the client, a queue with an unacknowledged push retains its mutations across
 rebases rather than retiring them based on watermark progress alone. The client
 resends the push to retrieve the rejected verdict before firing
-`onMutationRejected`, one synchronization cycle later.
+`onMutationRejected`, one synchronization cycle later. The client records the
+unanswered push in the local store, next to the queue. Thus every tab that
+shares the store retains the mutations, also the tab that applies the live
+stream, and the record stays across a reload. `onMutationRejected` fires in the
+tab whose push retrieves the verdict.
 
 The server retains rejection verdicts within the following limits:
 

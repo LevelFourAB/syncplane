@@ -12,9 +12,11 @@ import {
 import {
 	BootstrapResponseSchema,
 	MutationStatus,
+	type PullResponse,
+	PullResponseSchema,
 	SyncService,
 } from '../../src/gen/syncplane/v1/service_pb.js';
-import { metaCursor, metaLastMutationId } from '../../src/keys.js';
+import { metaCursor, metaLastMutationId, metaUnresolvedPush } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { createKvMutex } from '../../src/mutex.js';
@@ -395,6 +397,106 @@ describe('coordinator push: compaction + chunking', () => {
 		expect(pushes).toHaveLength(2);
 		expect(rejections.map((r) => r.errorCode)).toEqual([ 'conflict' ]);
 		expect(await pendingIds()).toEqual([]);
+
+		await coord.stop();
+	});
+
+	/**
+	 * Answers the first push with a lost response and every later one with
+	 * `status`; every pull reports the watermark past the pushed ids.
+	 */
+	function lostOnceTransport(status: MutationStatus): Transport {
+		let watermark = 0n;
+		let seen = 0;
+		return createRouterTransport(({ service }) => {
+			service(SyncService, {
+				push(req) {
+					pushes.push(pushedMutations(req));
+					const results = pushedMutations(req).map((m) => {
+						if (m.mutationId > watermark) watermark = m.mutationId;
+						return status === MutationStatus.REJECTED
+							? { mutationId: m.mutationId, status, errorCode: 'conflict', errorMessage: 'stale version' }
+							: { mutationId: m.mutationId, status, seq: m.mutationId };
+					});
+					if (seen++ === 0) throw new Error('push response lost');
+					return pushResults(req, results);
+				},
+				pull() {
+					return {
+						patch: { changes: [], dropEntities: [] },
+						nextCursor: new Uint8Array([ 1 ]),
+						lastAckedMutationId: watermark,
+						reset: false,
+						hasMore: false,
+						seq: 0n,
+					};
+				},
+				// eslint-disable-next-line require-yield
+				async *bootstrap() {
+					throw new Error('bootstrap should not run with a seeded cursor');
+				},
+				query() {
+					return { rows: [] };
+				},
+			});
+		});
+	}
+
+	it("keeps an unanswered push queued past a peer tab's page that acks it", async () => {
+		// Tab A's push response is lost. Tab B — the stream leader, which applies
+		// live pages through applyServerPage — rebases a page whose watermark
+		// covers the mutation before tab A re-pushes. Tab B never pushed, so only
+		// the store can tell it to keep the mutation for tab A's re-push.
+		await seed([ put(1n, 't1') ]);
+		const kvMutex = createKvMutex('test');
+		const transport = lostOnceTransport(MutationStatus.REJECTED);
+		const rejections: RejectionInfo[] = [];
+		const onMutationRejected = (info: RejectionInfo) => rejections.push(info);
+		const tabA = newCoordinator(transport, { kvMutex, onMutationRejected });
+		const tabB = newCoordinator(transport, { kvMutex, onMutationRejected });
+
+		await expect(tabA.syncNow()).rejects.toThrow();
+		expect(await pendingIds()).toEqual([ 1n ]);
+
+		// Node declines stream leadership, so the page goes in through the
+		// method the stream loop calls.
+		const page = create(PullResponseSchema, {
+			patch: { changes: [] },
+			nextCursor: new Uint8Array([ 2 ]),
+			lastAckedMutationId: 1n,
+			seq: 5n,
+		});
+		await (tabB as unknown as {
+			applyServerPage(ws: string, p: PullResponse, subs: never[]): Promise<unknown>;
+		}).applyServerPage(WS, page, []);
+		expect(await pendingIds()).toEqual([ 1n ]);
+
+		await tabA.syncNow();
+		expect(rejections.map((r) => r.mutationId)).toEqual([ 1n ]);
+		expect(await pendingIds()).toEqual([]);
+
+		await tabA.stop();
+		await tabB.stop();
+	});
+
+	it('drops the mutations of an unanswered push once a re-push answers for them', async () => {
+		// The hold must end: once the re-push collects the verdicts, the next
+		// rebase drops what the watermark covers, and the mark is gone.
+		await seed([ put(1n, 't1'), put(2n, 't2') ]);
+		const coord = newCoordinator(lostOnceTransport(MutationStatus.APPLIED));
+
+		await expect(coord.syncNow()).rejects.toThrow();
+		expect(await pendingIds()).toEqual([ 1n, 2n ]);
+
+		await coord.syncNow();
+		expect(pushes.map((p) => p.map((m) => m.mutationId))).toEqual([ [ 1n, 2n ], [ 1n, 2n ] ]);
+		expect(await pendingIds()).toEqual([]);
+		const tx = await kv.read();
+		try {
+			expect(await tx.get(metaUnresolvedPush(WS))).toBeUndefined();
+		} finally {
+			tx.release();
+		}
 
 		await coord.stop();
 	});

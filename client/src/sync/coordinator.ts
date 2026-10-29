@@ -42,6 +42,7 @@ import {
 	metaPushedThrough,
 	metaSnapshotGen,
 	metaTextRestores,
+	metaUnresolvedPush,
 	stagingPrefix,
 	stagingWsRoot,
 } from '../keys.js';
@@ -54,8 +55,10 @@ import type { IndexCache } from '../optimistic/index-maintain.js';
 import {
 	enqueuePending,
 	notePendingAppended,
+	raiseUnresolvedPush,
 	readPending,
 	readPushedThrough,
+	readUnresolvedPush,
 	writePushedThrough,
 } from '../optimistic/queue.js';
 import {
@@ -562,14 +565,13 @@ export class Coordinator {
 	 */
 	private splitPush = false;
 	/**
-	 * Workspaces whose last push shipped mutations the server never answered for
-	 * — a response lost after the write, so what became of them is unknown here.
-	 * Their queues hold on to acked mutations (rebase's deferAcked) until the
-	 * next push says what happened: the server's watermark already covers those
-	 * ids, so dropping them on that alone would retire a rejection nobody ever
-	 * saw. Cleared when that push starts.
+	 * The unanswered-push mark (metaUnresolvedPush) of each workspace, as this
+	 * tab last read or wrote it. A hint only, so that an answered push opens a
+	 * write transaction just when there is a mark to delete: a mark a peer tab
+	 * wrote since stays stored until a later push or rebase of this tab or
+	 * another reaches past it.
 	 */
-	private unresolvedPush = new Set<string>();
+	private unresolvedPush = new Map<string, bigint>();
 	/**
 	 * Rows (fullStateKey) whose collaborative-text writes must ship whole
 	 * documents because the server refused a delta-state fragment for them. In
@@ -1288,8 +1290,6 @@ export class Coordinator {
 		// safely write against, so hold the queues (they keep growing locally) until
 		// the revisions line up and the skew clears.
 		if (this.pushBlocked) return;
-		// Whatever the last cycle could not resolve, this one is about to re-ship.
-		this.unresolvedPush.clear();
 		// Seed the watermark of any workspace added since start() before reading it
 		// below: absent parses as 0, and compaction against 0 would renumber an
 		// inherited queue the server may already have applied.
@@ -1469,6 +1469,8 @@ export class Coordinator {
 		const remaining = new Map<string, { pending: Mutation[]; atHead: boolean }>();
 		for (const [ ws, pending ] of queues) remaining.set(ws, { pending, atHead: queuesAtHead });
 		const rejections: RejectionInfo[] = [];
+		/** Highest id per workspace that the server answered for. */
+		const answered = new Map<string, bigint>();
 		/** Set by an outcome only the pull can settle, which ends the push cycle. */
 		let settled = false;
 		try {
@@ -1538,10 +1540,13 @@ export class Coordinator {
 					}
 					// The batch may well have committed — a response can be lost after
 					// the write — so these mutations must be re-pushed to learn what
-					// became of them. Until then their queues keep acked ids rather
-					// than rebasing them away against a watermark that has already
-					// moved past a verdict this client never received.
-					for (const s of shipped) this.unresolvedPush.add(s.workspaceId);
+					// became of them. Until then every tab's rebase keeps acked ids
+					// queued rather than dropping them against a watermark that has
+					// already moved past a verdict no tab received. The mark is in the
+					// store because the tab that pulls next may not be this one.
+					await this.markUnresolvedPush(batches).catch((markErr: unknown) =>
+						reportError('push could not record that its response was lost', markErr)
+					);
 					throw err; // network / unknown: retry the whole cycle with backoff.
 				}
 
@@ -1675,6 +1680,7 @@ export class Coordinator {
 					}
 					// Rejections carry seq 0, so a rejected-only batch records nothing.
 					if (ackedSeq > 0n) await this.recordAckedSeq(sent.workspaceId, ackedSeq);
+					answered.set(sent.workspaceId, entry.pending[sent.count - 1]!.mutationId);
 					entry.pending = entry.pending.slice(sent.count);
 					entry.atHead = false;
 					if (entry.pending.length === 0) remaining.delete(sent.workspaceId);
@@ -1731,8 +1737,67 @@ export class Coordinator {
 					this.opts.onMutationRejected?.(info);
 				}
 			}
+			// After the rollback, so no rebase can drop a rejected mutation before
+			// it is rolled back. A mark left in place only holds acked mutations
+			// until a later push answers for them, so a failed delete is not worth
+			// failing the push over.
+			await this.resolveUnresolvedPush(answered).catch(() => undefined);
 		}
 		return !settled;
+	}
+
+	/**
+	 * Raises the unanswered-push mark of each batch's workspace to the batch's
+	 * last id; see metaUnresolvedPush.
+	 */
+	private async markUnresolvedPush(
+		batches: { workspaceId: string; mutations: Mutation[] }[],
+	): Promise<void> {
+		await this.opts.kvMutex.run(async () => {
+			const tx = await this.opts.kv.write();
+			try {
+				for (const b of batches) {
+					const last = b.mutations[b.mutations.length - 1];
+					if (!last) continue;
+					this.unresolvedPush.set(
+						b.workspaceId,
+						await raiseUnresolvedPush(tx, b.workspaceId, last.mutationId),
+					);
+				}
+				await tx.commit();
+			} catch (err) {
+				tx.release();
+				throw err;
+			}
+		});
+	}
+
+	/**
+	 * Deletes the unanswered-push mark of each workspace whose answered ids
+	 * reach it: the answer carried every verdict the lost response held.
+	 */
+	private async resolveUnresolvedPush(answered: Map<string, bigint>): Promise<void> {
+		const reached = [ ...answered ].filter(([ ws, through ]) => {
+			const mark = this.unresolvedPush.get(ws);
+			return mark !== undefined && mark <= through;
+		});
+		if (reached.length === 0) return;
+		await this.opts.kvMutex.run(async () => {
+			const tx = await this.opts.kv.write();
+			try {
+				for (const [ ws, through ] of reached) {
+					// Read again: a peer tab's lost push may have raised the mark past
+					// what this answer reaches.
+					const mark = await readUnresolvedPush(tx, ws);
+					if (mark !== undefined && mark <= through) await tx.del(metaUnresolvedPush(ws));
+					this.unresolvedPush.delete(ws);
+				}
+				await tx.commit();
+			} catch (err) {
+				tx.release();
+				throw err;
+			}
+		});
 	}
 
 	/**
@@ -1886,6 +1951,9 @@ export class Coordinator {
 				let dirty = false;
 				for (const ws of workspaceIds) {
 					const pending = await readPending(tx, ws);
+					const unresolved = await readUnresolvedPush(tx, ws);
+					if (unresolved === undefined) this.unresolvedPush.delete(ws);
+					else this.unresolvedPush.set(ws, unresolved);
 					const head = pending[0];
 					if (!head) continue;
 					queues.set(ws, pending);
@@ -2535,14 +2603,9 @@ export class Coordinator {
 				// Hold acked mutations queued until the last page: a dropped
 				// mutation's confirmed change may land in a later page, and dropping
 				// mid-drain would transiently regress its row for direct get/scan
-				// calls (and persist that regression across a crash).
-				//
-				// Held for the same reason while a push of this workspace went
-				// unanswered — this path also runs off the live stream, which does
-				// not wait for the cycle — because the server's watermark covers
-				// mutations whose verdicts the re-push has yet to collect, and a
-				// rejection among them would leave with them.
-				deferAcked: page.hasMore || this.unresolvedPush.has(workspaceId),
+				// calls (and persist that regression across a crash). The rebase
+				// holds them past the last page too while a push is unanswered.
+				deferAcked: page.hasMore,
 				// Gates the page against the workspace's stored seq inside the rebase
 				// transaction: a stale page (a concurrent tab already pulled past
 				// it) is dropped whole — rows AND cursor — instead of regressing
@@ -3102,9 +3165,6 @@ export class Coordinator {
 							lastAckedMutationId: lastAcked,
 							serverSeq: snapshotSeq,
 							baseline: true,
-							// The snapshot's watermark covers an unanswered push as a
-							// pull's does (see rebaseTx), so the same hold applies.
-							deferAcked: this.unresolvedPush.has(workspaceId),
 							...(storedAccess === undefined ? {} : { callerAccess: storedAccess }),
 						},
 						touched,

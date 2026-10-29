@@ -6,6 +6,7 @@ import {
 	metaLastMutationId,
 	metaPendingAccess,
 	metaPushedThrough,
+	metaUnresolvedPush,
 	pendingKey,
 	pendingPrefix,
 } from '../keys.js';
@@ -55,6 +56,33 @@ export async function writePushedThrough(
 	id: bigint,
 ): Promise<void> {
 	await tx.put(metaPushedThrough(workspaceId), id.toString());
+}
+
+/**
+ * Reads the highest id of a workspace's unanswered push (metaUnresolvedPush).
+ * Undefined when no push is unresolved.
+ */
+export async function readUnresolvedPush(
+	tx: KVRead,
+	workspaceId: string,
+): Promise<bigint | undefined> {
+	const raw = (await tx.get(metaUnresolvedPush(workspaceId))) as string | undefined;
+	return raw ? BigInt(raw) : undefined;
+}
+
+/**
+ * Raises a workspace's unanswered-push mark to `id`, and returns the mark it
+ * stored. Never lowers it: a peer tab's lost push may reach further.
+ */
+export async function raiseUnresolvedPush(
+	tx: KVWrite,
+	workspaceId: string,
+	id: bigint,
+): Promise<bigint> {
+	const stored = await readUnresolvedPush(tx, workspaceId);
+	if (stored !== undefined && stored >= id) return stored;
+	await tx.put(metaUnresolvedPush(workspaceId), id.toString());
+	return id;
 }
 
 /**

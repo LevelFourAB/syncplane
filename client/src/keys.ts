@@ -123,6 +123,18 @@ export const metaLastMutationId = (workspaceId: string): string =>
 export const metaPushedThrough = (workspaceId: string): string =>
 	`${metaWsPrefix(workspaceId)}pushedThrough`;
 /**
+ * Highest mutation id of a push the server never answered for this workspace
+ * (decimal string): the response was lost, so the batch may have committed
+ * and its verdicts are known only to the server. While the queue still holds
+ * an id at or below it, every tab's rebase keeps acked mutations queued, so
+ * a rejection among them stays for the re-push to collect. Written when the
+ * push fails, deleted by an answered push that reaches it, and deleted by a
+ * rebase or a renumber that leaves no queued id at or below it. See
+ * finalizeRebase.
+ */
+export const metaUnresolvedPush = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}unresolvedPush`;
+/**
  * Text documents of writes the server refused as `text_state_stale`, waiting
  * for a re-bootstrap to make them applicable again: an array of
  * `{ entity, key, fields: { path, value }[] }`. Written in the transaction
