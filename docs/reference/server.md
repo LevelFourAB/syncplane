@@ -293,6 +293,7 @@ Idempotency keys are scoped per workspace and per caller. Each principal has an 
 
 Key semantics:
 
+- A key is 1 to 256 bytes (`MaxIdempotencyKeyBytes`) of valid UTF-8 without U+0000. Any other key fails the call before the write runs, on every storage adapter. Hash or encode a key that comes from raw bytes, such as an HTTP header value.
 - A successful call claims the key even if the closure wrote nothing. Replays return the empty result and register the workspace.
 - Keys expire according to `WithIdempotencyRetention` (default 24 hours). Set retention above the longest retry window that callers use. A retry that arrives after key expiration executes as a new write.
 - Idempotency keys use a ledger separate from client watermarks. Client watermarks require contiguous sequence numbers and are pruned when clients go idle.

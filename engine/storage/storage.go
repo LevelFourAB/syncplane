@@ -895,6 +895,9 @@ type WriteTx interface {
 	// The claim is only as durable as this transaction: a closure that rolls back
 	// leaves the key unclaimed and the write retryable, which is the intended
 	// coupling — the ledger must never record an outcome the store did not keep.
+	//
+	// The engine passes only a key that is valid UTF-8 without U+0000, so an
+	// adapter may keep it in a text column.
 	PutIdempotencyRecord(key string, rec IdempotencyRecord) error
 	// CollectIdempotencyKeys deletes the workspace's idempotency records last
 	// written before cutoff and returns how many were removed. Unlike tombstones,

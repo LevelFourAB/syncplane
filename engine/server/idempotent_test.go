@@ -214,6 +214,21 @@ var _ = Describe("Server.MutateIdempotent", func() {
 		Expect(err).To(MatchError(ContainSubstring("over the")))
 	})
 
+	// A key often comes from an HTTP header, which may carry any byte from
+	// 0x80 up. Postgres cannot keep such a key in its TEXT column, so the
+	// engine refuses it on every adapter instead of letting the adapters differ.
+	DescribeTable("rejects a key that is not valid UTF-8 or holds \\u0000, and applies nothing",
+		func(key string) {
+			_, err := srv.MutateIdempotent(ctx, ws, key, put("t1", "one"))
+			Expect(err).To(MatchError(ContainSubstring("idempotency key holds")))
+			Expect(runs).To(BeZero())
+			Expect(titleOf("t1")).To(BeEmpty())
+		},
+		Entry("invalid UTF-8", string([]byte{'k', 0xff, 0xfe})),
+		Entry("a truncated sequence", "k\xe2\x82"),
+		Entry("U+0000", "k\u0000"),
+	)
+
 	It("rejects a result over the value limit and applies nothing", func() {
 		srv = mustNewServer(store,
 			server.WithEntities(&todov1.Todo{}),

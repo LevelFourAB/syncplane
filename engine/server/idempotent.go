@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"google.golang.org/protobuf/proto"
 
@@ -15,6 +16,10 @@ import (
 // caller-supplied string from becoming unbounded storage. It is generous
 // against everything real keys are made of — a UUID, a change-feed sequence, a
 // provider's event id.
+//
+// A key must also be valid UTF-8 without U+0000; MutateIdempotent,
+// InvokeIdempotent and ApplyIdempotent refuse any other key before they run
+// the write.
 const MaxIdempotencyKeyBytes = 256
 
 // WriteOutcome reports what an idempotent trusted write did.
@@ -256,12 +261,22 @@ func ledgerKey(p Principal, enforced bool, key string) string {
 // validateIdempotencyKey rejects keys the ledger cannot store meaningfully. An
 // empty key is always a caller bug — it would collapse every write that forgot
 // to supply one into a single claim, silently swallowing the second.
+//
+// Invalid UTF-8 and U+0000 are refused here rather than in the adapter that
+// cannot store them, so a key a Postgres TEXT column would refuse fails the
+// same way on every adapter, and before the write runs.
 func validateIdempotencyKey(key string) error {
 	if key == "" {
 		return fmt.Errorf("server: idempotency key is required")
 	}
 	if len(key) > MaxIdempotencyKeyBytes {
 		return fmt.Errorf("server: idempotency key is %d bytes, over the %d byte limit", len(key), MaxIdempotencyKeyBytes)
+	}
+	if !utf8.ValidString(key) {
+		return fmt.Errorf("server: idempotency key holds invalid UTF-8")
+	}
+	if i := strings.IndexByte(key, 0); i >= 0 {
+		return fmt.Errorf("server: idempotency key holds \\u0000 at byte %d", i)
 	}
 	return nil
 }
