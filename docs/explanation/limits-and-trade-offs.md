@@ -160,6 +160,16 @@ If an older client or server binary deserializes data into an outdated message d
 
 The [schema-revision handshake](../how-to/handle-failures.md#steps) detects version skew during rolling deployments, but does not replace the need for additive schema changes.
 
+## The TypeScript client writes `-0` as `+0`
+
+A `double` or `float` field without explicit presence loses the sign of zero when the TypeScript client writes it. The Protobuf encoder the client uses treats `-0` as the zero value and leaves the field off the wire, so the server stores `+0`. The overlay stores the same encoded bytes, so the writer and every other replica read `+0`, and the replicas stay converged.
+
+The Go server keeps the sign. A row that a Go writer stores with `-0` reads as `-0` on every client until a TypeScript client replaces that field, for example with a whole-row `PUT`.
+
+An update from `0` to `-0` does not change the row. The two values compare as equal, so the client sends no write.
+
+If the sign of zero matters, declare the field `optional` or put it in a `oneof`. A field with explicit presence goes on the wire when it holds any value, `-0` included.
+
 ## The default posture is open
 
 The `workspace_id` identifier is self-asserted, and `CanAccessWorkspace` defines the authorization boundary. The engine checks this hook before executing workspace-scoped operations, but the default implementation (`AllowAll`) permits all requests. A shared deployment that does not override `CanAccessWorkspace` provides no cross-tenant isolation.
