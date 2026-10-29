@@ -196,11 +196,11 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// driven by.
 		watermarks := map[string]uint64{}
 		bumped := map[string]bool{}
-		// Recorded verdicts per client, loaded lazily by rejectionsOf and marked
-		// dirty when this batch adds one. Reset with the rest: a retried attempt
+		// Recorded verdicts per client, loaded lazily by rejectionsOf, and how
+		// many of them this batch added. Reset with the rest: a retried attempt
 		// must re-read rather than build on what an abandoned one collected.
 		verdicts := map[string][]storage.ClientRejection{}
-		dirty := map[string]bool{}
+		added := map[string]int{}
 		// Fresh per attempt: a retried closure must re-read rather than serve
 		// what an abandoned one fetched.
 		rows := &batchRows{tx: tx, owners: owners, fetched: map[string]map[string]storage.Row{}}
@@ -341,7 +341,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 					Code:       r.Code,
 					Message:    r.Message,
 				})
-				dirty[key] = true
+				added[key]++
 			default:
 				return applyErr
 			}
@@ -364,8 +364,8 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		}
 		// One write per client, after the loop: a batch that rejects several of
 		// one client's mutations records them together.
-		for key := range dirty {
-			if err := tx.SetClientRejections(key, trimRejections(verdicts[key])); err != nil {
+		for key, n := range added {
+			if err := tx.SetClientRejections(key, trimRejections(verdicts[key], n)); err != nil {
 				return err
 			}
 		}
@@ -450,9 +450,9 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 // recorded verdicts may cost, because both are written by the rejecting hook
 // and a client can provoke as many rejections per push as the batch limit
 // allows. Verdicts past the bound are dropped oldest-first and their ids fall
-// back to a bare ALREADY_APPLIED ack — the behaviour of a client that has
-// pushed tens of thousands of refused mutations without ever reading a
-// response, which no working client does.
+// back to a bare ALREADY_APPLIED ack. The verdicts of the latest batch are
+// never dropped (see trimRejections), so only a client that pushes again
+// without reading a response can lose one.
 const maxRejectionRecordBytes = 64 << 10
 
 // findRejection looks a mutation id up among a client's recorded verdicts.
@@ -466,15 +466,17 @@ func findRejection(recs []storage.ClientRejection, mutationID uint64) (storage.C
 }
 
 // trimRejections drops the oldest verdicts from an ascending list until it fits
-// maxRejectionRecordBytes, keeping the newest one whatever it costs: a verdict
-// too large to record at all is the only case where a resend would learn
-// nothing, and it is the case where the client is still waiting for an answer.
-func trimRejections(recs []storage.ClientRejection) []storage.ClientRejection {
+// maxRejectionRecordBytes, keeping the newest keep verdicts whatever they cost.
+// Those are the verdicts of the batch being written, and the client resends
+// that batch whole when its response is lost: a verdict dropped there turns a
+// rejection into a silent ALREADY_APPLIED. What they cost is bounded by the
+// response that carries them.
+func trimRejections(recs []storage.ClientRejection, keep int) []storage.ClientRejection {
 	budget := maxRejectionRecordBytes
 	for i := len(recs) - 1; i >= 0; i-- {
 		budget -= len(recs[i].Code) + len(recs[i].Message)
 		if budget < 0 {
-			return recs[min(i+1, len(recs)-1):]
+			return recs[min(i+1, max(len(recs)-keep, 0)):]
 		}
 	}
 	return recs

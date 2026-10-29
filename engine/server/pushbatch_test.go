@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 
 	"connectrpc.com/connect"
@@ -411,6 +412,23 @@ var _ = Describe("Push batches", func() {
 			Expect(statuses(replay)).To(Equal([]syncplanev1.MutationStatus{already, refused, already}))
 			Expect(replay[1].GetErrorCode()).To(Equal(server.CodeConflict))
 			Expect(pullAs("reader").GetSeq()).To(Equal(seq), "a resend applies nothing a second time")
+		})
+
+		It("replays every verdict of a resent batch whose verdicts outgrow the record bound", func() {
+			// Each conflict message names its key, and a key may be 512 bytes,
+			// so 200 of them cost more than the record bound.
+			batch := make([]*syncplanev1.Mutation, 200)
+			for i := range batch {
+				key := fmt.Sprintf("%03d-%s", i, strings.Repeat("k", 480))
+				batch[i] = staleCAS("c1", uint64(i+1), key, 7)
+			}
+			for _, status := range statuses(push(batch...)) {
+				Expect(status).To(Equal(refused))
+			}
+
+			for i, status := range statuses(push(batch...)) {
+				Expect(status).To(Equal(refused), "mutation %d of the resend", i+1)
+			}
 		})
 	})
 

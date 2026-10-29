@@ -158,7 +158,8 @@ resends the push to retrieve the rejected verdict before firing
 The server retains rejection verdicts within the following limits:
 
 - The server drops verdicts oldest-first when stored codes and messages exceed
-  64 KiB per client.
+  64 KiB per client. It keeps every verdict of the client's latest push,
+  whatever they cost, so a resend of that push always gets them back.
 - Garbage collection (`WithGC`) clears the verdicts of a client that has not
   pushed within the tombstone retention. The watermark stays. A later resend
   returns `ALREADY_APPLIED` and the server does not apply the mutation.
