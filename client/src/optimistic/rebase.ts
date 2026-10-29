@@ -87,6 +87,7 @@ import {
 	recountPendingAccess,
 	writePushedThrough,
 } from './queue.js';
+import { captureTextLogs, keepStrandedTextEdits } from './textlog-keep.js';
 
 /**
  * Typed storage facade custom-mutation mirrors run against. Reads resolve
@@ -1302,8 +1303,12 @@ export async function rebase(
 				return { touched, pendingCount: 0, skipped: true };
 			}
 		}
+		// The rows a dropped entity loses get no new base, so only the changed
+		// rows can strand a queued text edit.
+		const logged = await captureTextLogs(tx, registry, workspaceId, input.changes);
 		await dropConfirmedEntities(tx, workspaceId, input.dropEntities ?? [], touched, indexes);
 		await applyServerChanges(tx, registry, workspaceId, input.changes, touched, indexes);
+		await keepStrandedTextEdits(tx, registry, workspaceId, logged);
 		let callerAccess = input.callerAccess;
 		let accessStale = false;
 		if (input.callerAccessDelta !== undefined) {

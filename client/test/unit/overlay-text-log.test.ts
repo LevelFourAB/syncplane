@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { CrudOp, type Mutation, MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
+import { RowChangeSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
 import {
 	confirmedKey,
 	type ConfirmedRecord,
@@ -15,14 +16,22 @@ import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { KVWrite } from '../../src/kv/store.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { compactPending } from '../../src/optimistic/compact.js';
-import { enqueuePending } from '../../src/optimistic/queue.js';
+import { enqueuePending, readPending } from '../../src/optimistic/queue.js';
 import {
 	applyMutationLocally,
 	clearOverlayAndReplay,
 	type MirrorMap,
+	rebase,
 } from '../../src/optimistic/rebase.js';
 import { readMergedRow, scanMergedRows } from '../../src/read.js';
-import { decodeTextDoc, encodeFragmentFrom, encodeTextDoc, TextDoc } from '../../src/text/index.js';
+import {
+	compactDoc,
+	decodeTextDoc,
+	encodeFragmentFrom,
+	encodeTextDoc,
+	isFragment,
+	TextDoc,
+} from '../../src/text/index.js';
 import { TouchSet } from '../../src/touch.js';
 
 /**
@@ -474,6 +483,97 @@ describe('optimistic text log', () => {
 
 			expect(await textOf(tx, 'a/b')).toBe('B typed');
 			tx.release();
+		});
+	});
+
+	describe('a pull that replaces the base with a compacted document', () => {
+		/**
+		 * "hello" after " world" was deleted, as the client last read it, and the
+		 * same document with those tombstones purged, as the server sends it after
+		 * a compaction.
+		 */
+		function compactedPair() {
+			const d = new TextDoc('seed');
+			d.insert(0, 'hello world');
+			d.delete(5, 6);
+			const old = encodeTextDoc(d);
+			const purged = decodeTextDoc(old, '');
+			compactDoc(purged);
+			return { old, purged: encodeTextDoc(purged) };
+		}
+
+		/** Queues `mutation` and applies it, as the client's enqueue does. */
+		async function queue(kv: MemoryKVStore, mutation: Mutation): Promise<void> {
+			const tx = await kv.write();
+			await enqueuePending(tx, WS, mutation);
+			await applyMutationLocally(tx, registry, noMirrors, WS, mutation, new TouchSet());
+			await tx.commit();
+		}
+
+		function pull(body: Uint8Array) {
+			return {
+				changes: [
+					create(RowChangeSchema, {
+						entity: 'widget',
+						key: 'w1',
+						version: 2n,
+						body: { case: 'value', value: widgetRow(body) },
+					}),
+				],
+				nextCursor: new Uint8Array([ 1 ]),
+				lastAckedMutationId: 0n,
+			};
+		}
+
+		async function queuedBody(kv: MemoryKVStore): Promise<Uint8Array> {
+			const tx = await kv.read();
+			const [ m ] = await readPending(tx, WS);
+			tx.release();
+			if (m?.payload.case !== 'crud') throw new Error('no queued crud');
+			return fromBinary(WidgetSchema, m.payload.value.value).body;
+		}
+
+		it('keeps a queued edit whose fragment names a purged parent', async () => {
+			const { old, purged } = compactedPair();
+			const kv = new MemoryKVStore();
+			const seed = await kv.write();
+			await seedConfirmed(seed, old);
+			await seed.commit();
+			// Typed where the deleted run starts, so the fragment's item hangs off a
+			// tombstone the compaction purges.
+			const edit = typeInto(old, 'p1', 5, '!');
+			await queue(kv, bodyPatch(1n, edit.fragment));
+
+			await rebase(kv, registry, noMirrors, WS, pull(purged));
+
+			const tx = await kv.write();
+			expect(await mergedText(tx)).toBe('hello!');
+			tx.release();
+			// The queue carries the whole folded document, so the push still
+			// sends the edit.
+			const body = await queuedBody(kv);
+			expect(isFragment(body)).toBe(false);
+			expect(decodeTextDoc(body, '').plainText()).toBe('hello!');
+		});
+
+		it('leaves a fragment that still folds onto the new base alone', async () => {
+			const { old } = compactedPair();
+			const kv = new MemoryKVStore();
+			const seed = await kv.write();
+			await seedConfirmed(seed, old);
+			await seed.commit();
+			const edit = typeInto(old, 'p1', 0, '>');
+			await queue(kv, bodyPatch(1n, edit.fragment));
+
+			// A peer's edit, not a compaction: every item the fragment names is
+			// still there.
+			const theirs = typeInto(old, 'p2', 5, '?');
+			await rebase(kv, registry, noMirrors, WS, pull(theirs.state));
+
+			const tx = await kv.write();
+			expect(await mergedText(tx)).toBe('>hello?');
+			tx.release();
+			expect(await queuedBody(kv)).toEqual(edit.fragment);
 		});
 	});
 });

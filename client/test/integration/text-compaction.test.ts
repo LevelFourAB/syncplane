@@ -7,6 +7,7 @@
 // the test controls the moment; the testserver runs with a retention short
 // enough that a write made a moment ago is already quiet.
 
+import { createConnectTransport } from '@connectrpc/connect-node';
 import { inject } from 'vitest';
 import { describe, expect, it } from 'vitest';
 
@@ -251,5 +252,85 @@ describe('collaborative-text compaction', () => {
 
 		await observer.close();
 		await reopened.close();
+	});
+
+	it("keeps a closed handle's offline typing when the row is compacted before the push", async () => {
+		const ws = freshWorkspace();
+		const alice = newClient(ws);
+		await alice.start();
+
+		const d = new TextDoc('seed');
+		d.insert(0, 'hello world');
+		await alice.mutate.put(WidgetSchema, { id: 'w1', body: encodeTextDoc(d) });
+		await alice.syncNow();
+		d.delete(5, 6);
+		await alice.mutate.patch(WidgetSchema, 'w1', { body: encodeTextDoc(d) });
+		await alice.syncNow();
+
+		// Offline, alice types "!" through a live handle and closes it, so the edit
+		// is only a fragment in her queue.
+		const h = await alice.text(WidgetSchema, 'w1', 'body');
+		await h.insert(5, '!');
+		await h.close();
+		expect(plainTextOf((await alice.get(WidgetSchema, 'w1'))?.body)).toBe('hello!');
+
+		await collectGarbage(ws);
+
+		for (let i = 0; i < 4; i++) await alice.syncNow();
+
+		const observer = newClient(ws);
+		await observer.start();
+		await observer.syncNow();
+		expect(plainTextOf((await observer.get(WidgetSchema, 'w1'))?.body)).toBe('hello!');
+		expect(plainTextOf((await alice.get(WidgetSchema, 'w1'))?.body)).toBe('hello!');
+
+		await observer.close();
+		await alice.close();
+	});
+
+	it("keeps a closed handle's typing when the compacted row is pulled before the push", async () => {
+		const ws = freshWorkspace();
+		// Pushes can be made to fail, so one cycle pulls without having pushed: a
+		// flaky network, or a stream that delivers before the push.
+		let failPush = false;
+		const transport = createConnectTransport({
+			baseUrl: inject('serverUrl'),
+			httpVersion: '1.1',
+			interceptors: [ (next) => (req) => {
+				if (failPush && req.method.name === 'Push') throw new Error('push offline');
+				return next(req);
+			} ],
+		});
+		const alice = newClient(ws, { transport });
+		await alice.start();
+
+		const d = new TextDoc('seed');
+		d.insert(0, 'hello world');
+		await alice.mutate.put(WidgetSchema, { id: 'w1', body: encodeTextDoc(d) });
+		await alice.syncNow();
+		d.delete(5, 6);
+		await alice.mutate.patch(WidgetSchema, 'w1', { body: encodeTextDoc(d) });
+		await alice.syncNow();
+
+		// Typed where the deleted run starts, so the queued fragment hangs off a
+		// tombstone the compaction purges.
+		const h = await alice.text(WidgetSchema, 'w1', 'body');
+		await h.insert(5, '!');
+		await h.close();
+		await collectGarbage(ws);
+
+		failPush = true;
+		await alice.syncNow().catch(() => {});
+		failPush = false;
+		expect(plainTextOf((await alice.get(WidgetSchema, 'w1'))?.body)).toBe('hello!');
+
+		for (let i = 0; i < 4; i++) await alice.syncNow();
+		const observer = newClient(ws);
+		await observer.start();
+		await observer.syncNow();
+		expect(plainTextOf((await observer.get(WidgetSchema, 'w1'))?.body)).toBe('hello!');
+
+		await observer.close();
+		await alice.close();
 	});
 });

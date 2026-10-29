@@ -76,6 +76,7 @@ import {
 	wipeConfirmedState,
 	withAccessDelta,
 } from '../optimistic/rebase.js';
+import { captureTextLogs, keepStrandedTextEdits } from '../optimistic/textlog-keep.js';
 import { readMergedRow } from '../read.js';
 import { reportError, safeCall } from '../report.js';
 import type { StorageNames } from '../storagenames.js';
@@ -3051,6 +3052,9 @@ export class Coordinator {
 						return false;
 					}
 					if (!direct) {
+						// A snapshot can carry a compacted document a queued text edit no
+						// longer folds onto; see textlog-keep.ts.
+						const logged = await captureTextLogs(tx, this.opts.registry, workspaceId);
 						await wipeConfirmedState(tx, this.opts.registry, workspaceId, touched);
 						// Rows only: the staged snapshot is NOT indexed inside this
 						// transaction. A staged record carries no positions, so giving it
@@ -3061,6 +3065,7 @@ export class Coordinator {
 						// scans until a marker reappears, and onIndexesStale below is
 						// what makes one reappear.
 						await promoteStaged(tx, workspaceId, snapshotGen, touched);
+						await keepStrandedTextEdits(tx, this.opts.registry, workspaceId, logged);
 					} else if (claimIndexes) {
 						// Every c/ row of this workspace was written by THIS attempt,
 						// carrying the positions its current specs encode to: the claim
