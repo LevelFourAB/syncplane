@@ -333,4 +333,38 @@ describe('collaborative-text compaction', () => {
 		await observer.close();
 		await alice.close();
 	});
+
+	it('accepts new text typed into the field after a PATCH cleared it', async () => {
+		const ws = freshWorkspace();
+		const alice = newClient(ws);
+		await alice.start();
+
+		// Alice's leased peer typed and deleted, so the floor covers its counters.
+		await alice.mutate.put(WidgetSchema, { id: 'w1' });
+		await alice.syncNow();
+		let h = await alice.text(WidgetSchema, 'w1', 'body');
+		await h.insert(0, 'hello world');
+		await h.delete(5, 6);
+		await h.close();
+		await alice.syncNow();
+		await collectGarbage(ws);
+		await alice.syncNow();
+
+		await alice.mutate.patch(WidgetSchema, 'w1', { body: new Uint8Array() });
+		await alice.syncNow();
+		expect(plainTextOf((await alice.get(WidgetSchema, 'w1'))?.body)).toBe('');
+
+		h = await alice.text(WidgetSchema, 'w1', 'body');
+		await h.insert(0, 'new');
+		await h.close();
+		for (let i = 0; i < 3; i++) await alice.syncNow();
+
+		const observer = newClient(ws);
+		await observer.start();
+		await observer.syncNow();
+		expect(plainTextOf((await observer.get(WidgetSchema, 'w1'))?.body)).toBe('new');
+
+		await observer.close();
+		await alice.close();
+	});
 });

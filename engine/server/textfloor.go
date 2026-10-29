@@ -188,6 +188,39 @@ func (info *entityInfo) clearTextFloors(tx storage.WriteTx, key string, paths []
 	return nil
 }
 
+// keepClearedTextVersions replaces every document this write cleared with an
+// empty document that keeps the cleared one's version vector. prev is the
+// snapshot taken before the merge; next is the merged message, edited in place.
+//
+// A clear does not end the document: the field (or the element that still
+// holds it) can be written again, and its floor stays. A writer that builds on
+// a field with no value allocates counters from 1, which the floor covers, so
+// every such write would be refused as stale, and no re-read could fix it. The
+// version vector makes a writer that reads the cleared field allocate past it.
+// It also keeps the ids of the cleared text distinct from new text on a field
+// that was never compacted.
+func (info *entityInfo) keepClearedTextVersions(prev map[string][]byte, next protoreflect.Message) error {
+	if len(prev) == 0 {
+		return nil
+	}
+	for _, tf := range info.textFields {
+		for _, ti := range tf.instances(next) {
+			before := prev[ti.path]
+			if len(before) == 0 || len(ti.bytes()) > 0 {
+				continue
+			}
+			d, err := text.Decode(before, "")
+			if err != nil {
+				return fmt.Errorf("server: entity %q text field %q: stored document: %w", info.name, ti.path, err)
+			}
+			empty := text.New("")
+			empty.ObserveVersion(d.VersionVector())
+			ti.set(empty.Encode())
+		}
+	}
+	return nil
+}
+
 // dropRemovedTextInstances clears the floor and cache entry of every NESTED
 // document prev holds and next does not: the element was dropped, and the
 // document's lifecycle ends with the element's (a same-key element created

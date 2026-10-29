@@ -305,6 +305,38 @@ var _ = Describe("Collaborative-text compaction", func() {
 			Expect(plainText(storedBody("w1"))).To(Equal("hello again"))
 		})
 
+		It("accepts new text typed into the field after a PATCH cleared it", func() {
+			seedTyped()
+			collect()
+			push(patchMutation("c1", 3, "widget", "w1", &testdatav1.Widget{}, "body"))
+			cleared := storedBody("w1")
+			Expect(plainText(cleared)).To(BeEmpty())
+
+			// The writer that typed the purged text types again, building on the
+			// cleared field as a reader sees it.
+			typed := editBody(cleared, "seed", func(d *text.Doc) {
+				Expect(d.Insert(0, "new")).To(Succeed())
+			})
+			push(patchMutation("c1", 4, "widget", "w1", &testdatav1.Widget{Body: typed}, "body"))
+			Expect(plainText(storedBody("w1"))).To(Equal("new"))
+		})
+
+		It("still refuses purged text after a PATCH cleared the field", func() {
+			full := bodyDoc("seed", "hello world")
+			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: full}))
+			trimmed := editBody(full, "seed", func(d *text.Doc) {
+				Expect(d.Delete(5, 6)).To(Succeed())
+			})
+			push(patchMutation("c1", 2, "widget", "w1", &testdatav1.Widget{Body: trimmed}, "body"))
+			collect()
+			push(patchMutation("c1", 3, "widget", "w1", &testdatav1.Widget{}, "body"))
+
+			results := pushRaw(patchMutation("c1", 4, "widget", "w1", &testdatav1.Widget{Body: full}, "body"))
+			Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(results[0].GetErrorCode()).To(Equal(server.CodeTextStateStale))
+			Expect(plainText(storedBody("w1"))).To(BeEmpty())
+		})
+
 		It("drops the floor with the row, so a re-created row starts clean", func() {
 			seedTyped()
 			collect()
@@ -476,5 +508,19 @@ var _ = Describe("Collaborative-text compaction", func() {
 		Expect(ok).To(BeTrue(), "expected a rejection, got %v", err)
 		Expect(rej.Code).To(Equal(server.CodeTextStateStale))
 		Expect(plainText(storedBody("w1"))).To(Equal("hello"))
+	})
+
+	It("accepts new text in a field a trusted EntityTx.Patch cleared after the compaction", func() {
+		seedTyped()
+		collect()
+		Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+			return tx.Patch(&testdatav1.Widget{Id: "w1"}, []string{"body"}, nil)
+		})).To(Succeed())
+
+		typed := editBody(storedBody("w1"), "seed", func(d *text.Doc) {
+			Expect(d.Insert(0, "new")).To(Succeed())
+		})
+		push(patchMutation("c1", 3, "widget", "w1", &testdatav1.Widget{Body: typed}, "body"))
+		Expect(plainText(storedBody("w1"))).To(Equal("new"))
 	})
 })

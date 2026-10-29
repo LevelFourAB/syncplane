@@ -1227,6 +1227,9 @@ func (s *Server) applyCrud(
 			return Reject(CodeConflict,
 				fmt.Sprintf("entity %q: PATCH of %q targets a deleted or missing row", info.name, crud.GetKey()))
 		}
+		if err := info.keepClearedTextVersions(prevText, base.ProtoReflect()); err != nil {
+			return err
+		}
 		// A row's identity lives in both its storage key and its embedded key
 		// fields; the two must agree. A mask may name a key field, so the merge
 		// above can drift the embedded identity away from crud.key. Re-derive

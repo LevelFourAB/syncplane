@@ -886,6 +886,9 @@ func (e *EntityTx) patch(msg proto.Message, mask []string, expected *uint64, opt
 		return Reject(CodeConflict,
 			fmt.Sprintf("entity %q: PATCH of %q targets a deleted or missing row", info.name, key))
 	}
+	if err := info.keepClearedTextVersions(prevText, base.ProtoReflect()); err != nil {
+		return err
+	}
 	// A row's identity lives in both its storage key and its embedded key fields;
 	// a mask that named a key field could drift them apart. Re-derive and reject
 	// any change — mirrors the PUT/push checks.
