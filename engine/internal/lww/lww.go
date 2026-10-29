@@ -963,6 +963,103 @@ func KeyFieldsFor(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescripto
 	return keyFieldsFor(fd)
 }
 
+// DuplicateItemKey finds a keyed message list in msg that holds one key on
+// more than one element. It returns the instance path of the second such
+// element, in mask form ("members.u1"), and true; or "" and false when every
+// keyed list holds each key once.
+//
+// Merge addresses an element by its key, so a key held twice cannot be
+// merged: a mask that removes the key leaves a copy behind. Only lists a mask
+// path can reach are checked. The walk does not enter an opaque or text
+// field, a reference message, a oneof member, or an element of a message list
+// without key fields, because Merge replaces each of these whole. A list of
+// references is not checked: it may name one row twice.
+func DuplicateItemKey(msg protoreflect.Message) (string, bool) {
+	return duplicateItemKey(msg, "")
+}
+
+func duplicateItemKey(msg protoreflect.Message, prefix string) (path string, found bool) {
+	msg.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		keyFields, sub := itemKeyWalk(fd)
+		if sub == nil {
+			return true
+		}
+		inst := prefix + string(fd.Name()) + "."
+		switch {
+		case fd.IsMap():
+			v.Map().Range(func(mk protoreflect.MapKey, mv protoreflect.Value) bool {
+				path, found = duplicateItemKey(mv.Message(), inst+EncodeMapKeySegment(fd, mk)+".")
+				return !found
+			})
+		case fd.IsList():
+			l := v.List()
+			seen := make(map[string]bool, l.Len())
+			for i := 0; i < l.Len() && !found; i++ {
+				elem := l.Get(i).Message()
+				key := encodeItemKey(elem, keyFields)
+				if seen[key] {
+					path, found = inst+key, true
+					break
+				}
+				seen[key] = true
+				path, found = duplicateItemKey(elem, inst+key+".")
+			}
+		default:
+			path, found = duplicateItemKey(v.Message(), inst)
+		}
+		return !found
+	})
+	return path, found
+}
+
+// HoldsKeyedList reports whether a message of type md can hold a keyed list
+// that DuplicateItemKey checks. When it reports false, DuplicateItemKey never
+// finds a duplicate in such a message.
+func HoldsKeyedList(md protoreflect.MessageDescriptor) bool {
+	return holdsKeyedList(md, map[protoreflect.FullName]bool{})
+}
+
+func holdsKeyedList(md protoreflect.MessageDescriptor, seen map[protoreflect.FullName]bool) bool {
+	if seen[md.FullName()] {
+		return false
+	}
+	seen[md.FullName()] = true
+	fields := md.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		keyFields, sub := itemKeyWalk(fields.Get(i))
+		if len(keyFields) > 0 || (sub != nil && holdsKeyedList(sub, seen)) {
+			return true
+		}
+	}
+	return false
+}
+
+// itemKeyWalk classifies fd for DuplicateItemKey and HoldsKeyedList: the
+// message type a mask path can descend into through fd, or nil, and the key
+// fields when fd is a keyed message list.
+func itemKeyWalk(fd protoreflect.FieldDescriptor) (keyFields []protoreflect.FieldDescriptor, sub protoreflect.MessageDescriptor) {
+	if ReplacedWhole(fd) || OneofOf(fd) != nil {
+		return nil, nil
+	}
+	switch {
+	case fd.IsMap():
+		if fd.MapValue().Kind() == protoreflect.MessageKind {
+			return nil, fd.MapValue().Message()
+		}
+	case fd.IsList():
+		// A list of references names rows, and one row may be named twice.
+		if fd.Kind() != protoreflect.MessageKind || IsRef(fd) {
+			return nil, nil
+		}
+		if keyFields = keyFieldsFor(fd); len(keyFields) > 0 {
+			return keyFields, fd.Message()
+		}
+	case fd.Kind() == protoreflect.MessageKind:
+		return nil, fd.Message()
+	}
+	return nil, nil
+}
+
 // encodeItemKey renders a message-list element's identity as a mask segment. A
 // single key field escapes "\" and "." (matching string map keys); a composite
 // key escapes "\", ".", and "/" per part and joins them with "/".

@@ -1122,6 +1122,9 @@ func (s *Server) applyCrud(
 		if err != nil {
 			return err
 		}
+		if err := info.checkItemKeys(msg.ProtoReflect()); err != nil {
+			return err
+		}
 		if err := info.checkTextWrites(prevText, msg.ProtoReflect()); err != nil {
 			return err
 		}
@@ -1270,6 +1273,9 @@ func (s *Server) applyCrud(
 		}
 		value, err := proto.Marshal(base)
 		if err != nil {
+			return err
+		}
+		if err := info.checkItemKeys(base.ProtoReflect()); err != nil {
 			return err
 		}
 		if err := info.checkTextWrites(prevText, base.ProtoReflect()); err != nil {

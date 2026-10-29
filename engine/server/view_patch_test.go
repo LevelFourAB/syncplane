@@ -159,6 +159,29 @@ var _ = Describe("EntityTx.Patch", func() {
 		Expect(byUID).To(HaveKeyWithValue("u2", "Bob"), "the patched member is added by key")
 	})
 
+	It("refuses a Put or Patch that stores a keyed-list key twice", func() {
+		twice := []*testdatav1.Member{{Uid: "u1", Name: "first"}, {Uid: "u1", Name: "second"}}
+		err := srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+			return tx.Put(&testdatav1.Widget{Id: "w1", Members: twice})
+		})
+		rejection, ok := server.AsRejection(err)
+		Expect(ok).To(BeTrue(), "err: %v", err)
+		Expect(rejection.Code).To(Equal(server.CodeInvalidArgument))
+
+		Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+			return tx.Put(&testdatav1.Widget{Id: "w1", Members: twice[:1]})
+		})).To(Succeed())
+		err = srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+			return tx.Patch(&testdatav1.Widget{Id: "w1", Members: twice}, []string{"members"}, nil)
+		})
+		rejection, ok = server.AsRejection(err)
+		Expect(ok).To(BeTrue(), "err: %v", err)
+		Expect(rejection.Code).To(Equal(server.CodeInvalidArgument))
+
+		w, _, _ := get("w1")
+		Expect(w.GetMembers()).To(HaveLen(1), "the refused Patch left the row as it was")
+	})
+
 	It("rejects a patch of a missing row as a conflict (delete-wins, not upsert)", func() {
 		err := srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
 			return tx.Patch(&testdatav1.Widget{Id: "ghost", Label: "x"}, []string{"label"}, nil)

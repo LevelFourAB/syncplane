@@ -703,6 +703,9 @@ func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 	if err != nil {
 		return err
 	}
+	if err := info.checkItemKeys(msg.ProtoReflect()); err != nil {
+		return err
+	}
 	if err := info.checkTextWrites(prevText, msg.ProtoReflect()); err != nil {
 		return err
 	}
@@ -920,6 +923,9 @@ func (e *EntityTx) patch(msg proto.Message, mask []string, expected *uint64, opt
 	}
 	seq, err := e.writeSeq()
 	if err != nil {
+		return err
+	}
+	if err := info.checkItemKeys(base.ProtoReflect()); err != nil {
 		return err
 	}
 	if err := info.checkTextWrites(prevText, base.ProtoReflect()); err != nil {

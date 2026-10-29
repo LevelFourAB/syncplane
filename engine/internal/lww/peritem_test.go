@@ -107,6 +107,50 @@ var _ = Describe("Per-item merge", func() {
 			Expect(dst.GetRefs()).To(HaveLen(2))
 			Expect(dst.GetRefs()[1].GetId()).To(Equal("2"))
 		})
+
+		Describe("DuplicateItemKey", func() {
+			It("finds a key held by two elements, by its instance path", func() {
+				w := &testdatav1.Widget{Members: []*testdatav1.Member{
+					{Uid: "u1", Name: "first"}, {Uid: "u2"}, {Uid: "u1", Name: "second"},
+				}}
+				path, found := lww.DuplicateItemKey(w.ProtoReflect())
+				Expect(found).To(BeTrue())
+				Expect(path).To(Equal("members.u1"))
+			})
+
+			It("finds a key held twice by elements that differ in other fields", func() {
+				w := &testdatav1.Widget{Items: []*testdatav1.Item{{Id: "a", Pos: "1"}, {Id: "a", Pos: "2"}}}
+				path, found := lww.DuplicateItemKey(w.ProtoReflect())
+				Expect(found).To(BeTrue())
+				Expect(path).To(Equal("items.a"))
+			})
+
+			It("ignores a list of references that names one row twice", func() {
+				w := &testdatav1.Widget{Refs: []*testdatav1.Pair{{Ns: "n", Id: "1"}, {Ns: "n", Id: "1"}}}
+				_, found := lww.DuplicateItemKey(w.ProtoReflect())
+				Expect(found).To(BeFalse())
+			})
+
+			It("accepts keyed lists that hold each key once", func() {
+				w := &testdatav1.Widget{
+					Members: []*testdatav1.Member{{Uid: "u1"}, {Uid: "u2"}, {Uid: ""}},
+					Items:   []*testdatav1.Item{{Id: "a"}, {Id: "b"}},
+				}
+				_, found := lww.DuplicateItemKey(w.ProtoReflect())
+				Expect(found).To(BeFalse())
+			})
+
+			It("ignores repeated values in lists a mask cannot address per element", func() {
+				w := &testdatav1.Widget{Tags: []string{"a", "a"}, AtomicTags: []string{"b", "b"}}
+				_, found := lww.DuplicateItemKey(w.ProtoReflect())
+				Expect(found).To(BeFalse())
+			})
+
+			It("reports that the widget can hold a keyed list", func() {
+				Expect(lww.HoldsKeyedList((&testdatav1.Widget{}).ProtoReflect().Descriptor())).To(BeTrue())
+				Expect(lww.HoldsKeyedList((&testdatav1.Member{}).ProtoReflect().Descriptor())).To(BeFalse())
+			})
+		})
 	})
 
 	Describe("scalar set lists", func() {

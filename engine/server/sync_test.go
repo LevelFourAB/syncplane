@@ -244,6 +244,34 @@ var _ = Describe("SyncService", func() {
 			})
 		})
 
+		// A mask addresses a keyed-list element by its key, so a removal of a
+		// key held twice would leave the second copy behind.
+		Describe("a keyed list that holds one key twice", func() {
+			It("refuses a PUT that carries the key twice", func() {
+				r := push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{
+					Id: "w1",
+					Members: []*testdatav1.Member{
+						{Uid: "u1", Name: "first"}, {Uid: "u2", Name: "other"}, {Uid: "u1", Name: "second"},
+					},
+				}))[0]
+				Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+				Expect(r.GetErrorCode()).To(Equal(server.CodeInvalidArgument))
+				Expect(r.GetErrorMessage()).To(ContainSubstring("members.u1"))
+				Expect(pull(nil).GetPatch().GetChanges()).To(BeEmpty(), "no row written")
+			})
+
+			It("refuses a PATCH whose mask copies a list that carries the key twice", func() {
+				push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{
+					Id: "w1", Members: []*testdatav1.Member{{Uid: "u1", Name: "first"}},
+				}))
+				r := push(patchMutation("c1", 2, "widget", "w1", &testdatav1.Widget{
+					Members: []*testdatav1.Member{{Uid: "u1", Name: "first"}, {Uid: "u1", Name: "second"}},
+				}, "members"))[0]
+				Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+				Expect(r.GetErrorCode()).To(Equal(server.CodeInvalidArgument))
+			})
+		})
+
 		It("merges interleaved patches from two clients per field, last writer wins", func() {
 			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "original", Completed: false}))
 			// c2 sets completed, then c1 renames: both must survive.

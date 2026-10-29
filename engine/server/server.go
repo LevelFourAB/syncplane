@@ -47,6 +47,9 @@ type entityInfo struct {
 	// auto-installed in mergers, and EntityTx.Put merges them read-modify-
 	// write instead of replacing.
 	textFields []textField
+	// keyedLists reports whether a row can hold a keyed list, which is what
+	// puts checkItemKeys on the write path.
+	keyedLists bool
 	// indexes are the entity's secondary indexes, derived at registration.
 	// Every row write refreshes all of them together (updateRowIndexes), so
 	// this is the ONE list that decides an entity's index write cost.
@@ -1561,6 +1564,7 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	if err := collectTextFields(desc, "", "", "", nil, &info.textFields); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
+	info.keyedLists = lww.HoldsKeyedList(desc)
 	if len(info.textFields) > 0 {
 		info.mergers = lww.Mergers{}
 		for _, tf := range info.textFields {
@@ -2238,6 +2242,20 @@ func (info *entityInfo) keyOf(msg protoreflect.Message) string {
 func (info *entityInfo) checkKey(key string) error {
 	if err := naming.ValidateRowKey(key); err != nil {
 		return Reject(CodeInvalidArgument, fmt.Sprintf("entity %q: %v", info.name, err))
+	}
+	return nil
+}
+
+// checkItemKeys refuses a row that holds one key on two elements of a keyed
+// list. A mask addresses an element by its key, so a merge into such a row
+// could not reach the second element, and a removal would leave it behind.
+func (info *entityInfo) checkItemKeys(next protoreflect.Message) error {
+	if !info.keyedLists {
+		return nil
+	}
+	if path, ok := lww.DuplicateItemKey(next); ok {
+		return Reject(CodeInvalidArgument, fmt.Sprintf(
+			"entity %q: keyed list element %q appears more than once; a key names one element", info.name, path))
 	}
 	return nil
 }
