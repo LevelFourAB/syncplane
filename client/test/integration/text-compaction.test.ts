@@ -11,6 +11,7 @@ import { inject } from 'vitest';
 import { describe, expect, it } from 'vitest';
 
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import { MemoryKVStore } from '../../src/kv/memory.js';
 import {
 	compactDoc,
 	decodeTextDoc,
@@ -175,5 +176,80 @@ describe('collaborative-text compaction', () => {
 		await observer.close();
 		await bob.close();
 		await stale.close();
+	});
+
+	it('keeps a refused edit when the tab closes before it is re-applied', async () => {
+		const ws = freshWorkspace();
+		const store = new MemoryKVStore();
+		const stale = newClient(ws, { kvStore: store });
+		await stale.start();
+
+		const d = new TextDoc('seed');
+		d.insert(0, 'hello world');
+		await stale.mutate.put(WidgetSchema, { id: 'w1', body: encodeTextDoc(d) });
+		await stale.syncNow();
+		d.delete(5, 6);
+		await stale.mutate.patch(WidgetSchema, 'w1', { body: encodeTextDoc(d) });
+		await stale.syncNow();
+		await collectGarbage(ws);
+
+		const local = decodeTextDoc((await stale.get(WidgetSchema, 'w1'))?.body, 'stale');
+		local.insert(local.length, ' again');
+		await stale.mutate.patch(WidgetSchema, 'w1', { body: encodeTextDoc(local) });
+
+		// Sync until the refused edit is rolled back and not yet re-applied.
+		let rolledBack = false;
+		for (let i = 0; i < 4 && !rolledBack; i++) {
+			await stale.syncNow();
+			rolledBack = !plainTextOf((await stale.get(WidgetSchema, 'w1'))?.body).includes('again');
+		}
+		expect(rolledBack, 'reached the window between rollback and re-apply').toBe(true);
+
+		// The tab dies there, without close(), and the app opens the same store.
+		const reopened = newClient(ws, { kvStore: store });
+		await reopened.start();
+		for (let i = 0; i < 4; i++) await reopened.syncNow();
+
+		const observer = newClient(ws);
+		await observer.start();
+		await observer.syncNow();
+		expect(plainTextOf((await observer.get(WidgetSchema, 'w1'))?.body)).toBe('hello again');
+
+		await observer.close();
+		await reopened.close();
+	});
+
+	it('re-applies a refused edit once, even when the store is opened again', async () => {
+		const ws = freshWorkspace();
+		const store = new MemoryKVStore();
+		const stale = newClient(ws, { kvStore: store });
+		await stale.start();
+
+		const d = new TextDoc('seed');
+		d.insert(0, 'hello world');
+		await stale.mutate.put(WidgetSchema, { id: 'w1', body: encodeTextDoc(d) });
+		await stale.syncNow();
+		d.delete(5, 6);
+		await stale.mutate.patch(WidgetSchema, 'w1', { body: encodeTextDoc(d) });
+		await stale.syncNow();
+		await collectGarbage(ws);
+
+		const local = decodeTextDoc((await stale.get(WidgetSchema, 'w1'))?.body, 'stale');
+		local.insert(local.length, ' again');
+		await stale.mutate.patch(WidgetSchema, 'w1', { body: encodeTextDoc(local) });
+		for (let i = 0; i < 4; i++) await stale.syncNow();
+		await stale.close();
+
+		const reopened = newClient(ws, { kvStore: store });
+		await reopened.start();
+		for (let i = 0; i < 4; i++) await reopened.syncNow();
+
+		const observer = newClient(ws);
+		await observer.start();
+		await observer.syncNow();
+		expect(plainTextOf((await observer.get(WidgetSchema, 'w1'))?.body)).toBe('hello again');
+
+		await observer.close();
+		await reopened.close();
 	});
 });

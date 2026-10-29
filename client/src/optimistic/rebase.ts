@@ -1175,6 +1175,8 @@ export async function finalizeRebase(
  * Immediately rolls rejected mutations back without waiting for a pull: one
  * KV transaction drops the rejected pending entries of `workspaceId` and
  * replays the rest on the current confirmed state. Run under the kv mutex.
+ * `beforeCommit` writes more state into the same transaction, so that state
+ * commits with the rollback or not at all.
  */
 export async function rollbackRejected(
 	kv: KVStore,
@@ -1182,6 +1184,7 @@ export async function rollbackRejected(
 	mirrors: MirrorMap,
 	workspaceId: string,
 	rejectedIds: bigint[],
+	beforeCommit?: (tx: KVWrite) => Promise<void>,
 ): Promise<RebaseResult> {
 	const rejected = new Set(rejectedIds);
 	const touched = new TouchSet();
@@ -1200,6 +1203,7 @@ export async function rollbackRejected(
 		touchPendingAccess(touched, registry, workspaceId, dropped);
 		if (dropped.length > 0) await recountPendingAccess(tx, registry, workspaceId, remaining);
 		await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched);
+		await beforeCommit?.(tx);
 		await tx.commit();
 		return { touched, pendingCount: remaining.length };
 	} catch (err) {

@@ -123,6 +123,16 @@ export const metaLastMutationId = (workspaceId: string): string =>
 export const metaPushedThrough = (workspaceId: string): string =>
 	`${metaWsPrefix(workspaceId)}pushedThrough`;
 /**
+ * Text documents of writes the server refused as `text_state_stale`, waiting
+ * for a re-bootstrap to make them applicable again: an array of
+ * `{ entity, key, fields: { path, value }[] }`. Written in the transaction
+ * that rolls the refused writes back and deleted in the one that re-queues
+ * them, so the edit is in the store at every moment between the two. See
+ * Coordinator.applyTextRestores.
+ */
+export const metaTextRestores = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}textRestores`;
+/**
  * Monotonic bootstrap generation for one workspace. A bootstrap bumps it before
  * streaming and stages under that generation; at swap time a mismatch means
  * another bootstrap superseded this one. See Coordinator.doBootstrap.

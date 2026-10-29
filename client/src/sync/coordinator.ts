@@ -41,10 +41,11 @@ import {
 	metaPendingAccess,
 	metaPushedThrough,
 	metaSnapshotGen,
+	metaTextRestores,
 	stagingPrefix,
 	stagingWsRoot,
 } from '../keys.js';
-import { CountingWrite, type KVRead, type KVStore } from '../kv/store.js';
+import { CountingWrite, type KVRead, type KVStore, type KVWrite } from '../kv/store.js';
 import { type EntityRegistry, setTextFieldBytes, textFieldBytes } from '../mutations.js';
 import type { Mutex } from '../mutex.js';
 import { compactPending } from '../optimistic/compact.js';
@@ -576,12 +577,18 @@ export class Coordinator {
 	 */
 	private textFullState = new Set<string>();
 	/**
-	 * Text captured from `text_state_stale` rejections, waiting for the
-	 * re-bootstrap that makes it applicable again (see applyTextRestores). Keyed
-	 * by workspace. Re-applying before the bootstrap would diff against the same
-	 * stale row and be refused all over again.
+	 * Workspaces whose store holds text captured from `text_state_stale`
+	 * rejections (metaTextRestores), for this coordinator to re-apply after the
+	 * re-bootstrap it armed (see applyTextRestores). Re-applying before the
+	 * bootstrap would diff against the same stale row and be refused all over
+	 * again.
 	 */
-	private textRestores = new Map<string, TextRestoreRow[]>();
+	private textRestores = new Set<string>();
+	/**
+	 * Workspaces whose store this coordinator has not yet checked for text
+	 * restores a closed tab left behind; see loadTextRestores.
+	 */
+	private restoresUnchecked = new Set<string>();
 	/**
 	 * Writer identities for the restore path, created on first use. Slots are
 	 * held for the length of one restore batch and coordinate with the client's
@@ -614,6 +621,7 @@ export class Coordinator {
 		this.rpc = createClient(SyncService, opts.transport);
 		for (const [ ws, subs ] of opts.scopes) {
 			this.workspaces.set(ws, { subscriptions: subs, scopeGen: 0, serverSeq: 0n, revoked: false });
+			this.restoresUnchecked.add(ws);
 		}
 		this.forceResync = opts.forceResync ?? false;
 		this.poisonThreshold = opts.poisonThreshold ?? DEFAULT_POISON_THRESHOLD;
@@ -670,6 +678,7 @@ export class Coordinator {
 		// so it needs the same watermark seed before anything compacts it. Deferred
 		// to the push path (this method is synchronous) — see initPushedThrough.
 		this.unseeded.add(workspaceId);
+		this.restoresUnchecked.add(workspaceId);
 		this.publishScopes();
 	}
 
@@ -677,6 +686,9 @@ export class Coordinator {
 	removeWorkspace(workspaceId: string): void {
 		clearTimeout(this.workspaces.get(workspaceId)?.noAccess?.timer);
 		if (!this.workspaces.delete(workspaceId)) return;
+		// A stored restore stays in the store; re-adding the workspace finds it.
+		this.textRestores.delete(workspaceId);
+		this.restoresUnchecked.delete(workspaceId);
 		// Nobody is going to finish that snapshot now. Dropped rather than left
 		// standing: the status entry goes with the workspace, and a re-added
 		// workspace bootstraps (and re-seeds) from scratch.
@@ -970,6 +982,13 @@ export class Coordinator {
 			// rethrown at the end to drive the usual backoff.
 			const errors: unknown[] = [];
 			const syncable: [string, Subscription[]][] = [];
+			// Before the bootstrap step, because a restore found here arms the
+			// resync it needs.
+			try {
+				await this.loadTextRestores(active.map(([ ws ]) => ws));
+			} catch (err) {
+				errors.push(err);
+			}
 			for (const [ ws, subs ] of active) {
 				try {
 					if (await this.ensureBase(ws, subs)) syncable.push([ ws, subs ]);
@@ -983,7 +1002,8 @@ export class Coordinator {
 			// Text saved from a compaction rejection can be re-applied now that the
 			// workspace has re-read the row, and before the push below so it ships
 			// in this same cycle. A failure here must not cost the cycle: the
-			// restore stays dropped rather than replaying against a moving row.
+			// restore waits in the store for the next start, which re-bootstraps
+			// before it tries again.
 			for (const [ ws ] of syncable) {
 				if (this.textRestores.has(ws)) {
 					try {
@@ -1678,8 +1698,8 @@ export class Coordinator {
 				// visible text is captured here and re-applied once the workspace has
 				// re-bootstrapped onto the state the server actually holds.
 				const restored = await this.captureTextStale(rejections, queues)
-					.catch(() => new Set<string>());
-				for (const key of restored) recovered.handled.add(key);
+					.catch(() => ({ rows: new Map<string, TextRestoreRow[]>(), handled: new Set<string>() }));
+				for (const key of restored.handled) recovered.handled.add(key);
 				// Roll the rejected mutations back immediately — a rejection is an ack,
 				// so waiting for the next pull would leave doomed optimistic state
 				// visible in the meantime. Callbacks fire after the rollback so apps
@@ -1690,7 +1710,9 @@ export class Coordinator {
 					list.push(r.mutationId);
 					byWorkspace.set(r.workspaceId, list);
 				}
-				for (const [ ws, ids ] of byWorkspace) await this.rollbackPending(ws, ids);
+				for (const [ ws, ids ] of byWorkspace) {
+					await this.rollbackPending(ws, ids, restored.rows.get(ws));
+				}
 				for (const [ ws, rows ] of recovered.rows) {
 					try {
 						await this.resendTextFullState(ws, rows);
@@ -1953,17 +1975,19 @@ export class Coordinator {
 	 * re-applied onto whatever the row holds once this client has read it again.
 	 * Formatting the stale side applied does not survive that.
 	 *
-	 * Returns the rejections it took ownership of, all-or-nothing per mutation
-	 * for the same reason captureTextFullState is: half a recovered batch reads
-	 * as recovered while silently losing the rest.
+	 * Returns the captured rows by workspace, for rollbackPending to store, and
+	 * the rejections it took ownership of, all-or-nothing per mutation for the
+	 * same reason captureTextFullState is: half a recovered batch reads as
+	 * recovered while silently losing the rest.
 	 */
 	private async captureTextStale(
 		rejections: readonly RejectionInfo[],
 		queues: Map<string, Mutation[]>,
-	): Promise<Set<string>> {
+	): Promise<{ rows: Map<string, TextRestoreRow[]>; handled: Set<string> }> {
+		const rows = new Map<string, TextRestoreRow[]>();
 		const handled = new Set<string>();
 		const targets = rejections.filter((r) => r.errorCode === CodeTextStateStale);
-		if (targets.length === 0) return handled;
+		if (targets.length === 0) return { rows, handled };
 		for (const r of targets) {
 			const m = queues.get(r.workspaceId)?.find((q) => q.mutationId === r.mutationId);
 			const cruds = m?.payload.case === 'crud'
@@ -1992,9 +2016,9 @@ export class Coordinator {
 				});
 			}
 			if (!complete || staged.length === 0) continue;
-			const list = this.textRestores.get(r.workspaceId) ?? [];
+			const list = rows.get(r.workspaceId) ?? [];
 			list.push(...staged);
-			this.textRestores.set(r.workspaceId, list);
+			rows.set(r.workspaceId, list);
 			handled.add(`${r.workspaceId} ${r.mutationId}`);
 		}
 		if (handled.size > 0) {
@@ -2002,7 +2026,7 @@ export class Coordinator {
 			// holds — that row is what the server refused. Re-read first.
 			this.forceResync = true;
 		}
-		return handled;
+		return { rows, handled };
 	}
 
 	/**
@@ -2016,10 +2040,15 @@ export class Coordinator {
 	 * pushes nothing onto an undo stack. A restore that cannot be applied (the
 	 * row is gone) is dropped rather than retried forever — the row it belonged
 	 * to no longer exists.
+	 *
+	 * The rows come out of the store in the transaction that queues their
+	 * PATCHes, and leave it there: a tab that closes before the commit leaves
+	 * them for the next start, and of two tabs that both hold them, only the
+	 * first re-applies them.
 	 */
 	private async applyTextRestores(workspaceId: string): Promise<void> {
-		const rows = this.textRestores.get(workspaceId);
-		if (rows === undefined || rows.length === 0) return;
+		// Off the set before the attempt: a failure leaves the rows in the store,
+		// and retrying every cycle would re-bootstrap every cycle.
 		this.textRestores.delete(workspaceId);
 		// One lease for the whole batch: every document is read and rewritten
 		// inside the transaction below, which is exactly the serialized
@@ -2033,10 +2062,15 @@ export class Coordinator {
 			await this.opts.kvMutex.run(async () => {
 				const tx = await this.opts.kv.write();
 				try {
-					const [ lastRaw, pendingRecord ] = await tx.getMany([
+					const [ lastRaw, pendingRecord, rows ] = await tx.getMany([
 						metaLastMutationId(workspaceId),
 						metaPendingAccess(workspaceId),
-					]) as [string | undefined, unknown];
+						metaTextRestores(workspaceId),
+					]) as [string | undefined, unknown, TextRestoreRow[] | undefined];
+					if (rows === undefined) {
+						tx.release();
+						return;
+					}
 					let mutationId = lastRaw ? BigInt(lastRaw) : 0n;
 					const appended: Mutation[] = [];
 					for (const row of rows) {
@@ -2089,6 +2123,7 @@ export class Coordinator {
 						mutationId,
 					);
 					await tx.put(metaLastMutationId(workspaceId), mutationId.toString());
+					await tx.del(metaTextRestores(workspaceId));
 					await tx.commit();
 				} catch (err) {
 					tx.release();
@@ -2099,6 +2134,31 @@ export class Coordinator {
 			lease.release();
 		}
 		await this.opts.notify(touched);
+	}
+
+	/**
+	 * Looks for text restores in the store of each given workspace not checked
+	 * yet, and arms the re-bootstrap that applyTextRestores needs for any it
+	 * finds. A tab that closed between storing a restore and re-applying it
+	 * leaves it there.
+	 */
+	private async loadTextRestores(workspaceIds: readonly string[]): Promise<void> {
+		const unchecked = workspaceIds.filter((ws) => this.restoresUnchecked.has(ws));
+		if (unchecked.length === 0) return;
+		const stored = await this.opts.kvMutex.runShared(async () => {
+			const tx = await this.opts.kv.read();
+			try {
+				return await tx.getMany(unchecked.map((ws) => metaTextRestores(ws)));
+			} finally {
+				tx.release();
+			}
+		});
+		unchecked.forEach((ws, i) => {
+			this.restoresUnchecked.delete(ws);
+			if (stored[i] === undefined) return;
+			this.textRestores.add(ws);
+			this.forceResync = true;
+		});
 	}
 
 	/** Reads the named text fields out of a row's current merged local state. */
@@ -2193,11 +2253,33 @@ export class Coordinator {
 		this.syncSoon();
 	}
 
-	/** Drops the given pending mutations of a workspace and replays the rest. */
-	private async rollbackPending(workspaceId: string, ids: bigint[]): Promise<void> {
+	/**
+	 * Drops the given pending mutations of a workspace and replays the rest.
+	 * `restores` go into the store in the same transaction, for
+	 * applyTextRestores to re-apply.
+	 */
+	private async rollbackPending(
+		workspaceId: string,
+		ids: bigint[],
+		restores?: readonly TextRestoreRow[],
+	): Promise<void> {
+		const store = restores && restores.length > 0
+			? async (tx: KVWrite) => {
+				const prior = (await tx.get(metaTextRestores(workspaceId))) as TextRestoreRow[] | undefined;
+				await tx.put(metaTextRestores(workspaceId), [ ...(prior ?? []), ...restores ]);
+			}
+			: undefined;
 		const { touched, pendingCount } = await this.opts.kvMutex.run(() =>
-			rollbackRejected(this.opts.kv, this.opts.registry, this.opts.mirrors, workspaceId, ids)
+			rollbackRejected(
+				this.opts.kv,
+				this.opts.registry,
+				this.opts.mirrors,
+				workspaceId,
+				ids,
+				store,
+			)
 		);
+		if (store) this.textRestores.add(workspaceId);
 		this.opts.status.setPendingCount(workspaceId, pendingCount);
 		await this.opts.notify(touched);
 	}
