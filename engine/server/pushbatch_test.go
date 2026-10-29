@@ -23,6 +23,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage"
+	"github.com/levelfourab/syncplane/engine/text"
 )
 
 // What a batch of mutations owes each of its members. One push batch is one
@@ -429,6 +430,83 @@ var _ = Describe("Push batches", func() {
 			for i, status := range statuses(push(batch...)) {
 				Expect(status).To(Equal(refused), "mutation %d of the resend", i+1)
 			}
+		})
+	})
+
+	// The storage contract lets an adapter run a write closure more than once,
+	// and a rejection makes the push run its own closure again under
+	// savepoints. Both re-runs together must still give one outcome per
+	// mutation and a text delta log that matches the row.
+	Describe("a batch under a retrying adapter", func() {
+		BeforeEach(func() {
+			start(mustNewServer(&retryingAdapter{Adapter: newTestStore()}, testEntities()))
+		})
+
+		pull := func(cursor []byte) *syncplanev1.PullResponse {
+			GinkgoHelper()
+			resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: ws, Cursor: cursor}))
+			Expect(err).NotTo(HaveOccurred())
+			return resp.Msg
+		}
+		widgetChange := func(resp *syncplanev1.PullResponse, key string) *syncplanev1.RowChange {
+			GinkgoHelper()
+			for _, rc := range resp.GetPatch().GetChanges() {
+				if rc.GetEntity() == "widget" && rc.GetKey() == key {
+					return rc
+				}
+			}
+			Fail("no change for widget " + key)
+			return nil
+		}
+
+		It("applies each mutation once, keeps every verdict and answers a resend the same", func() {
+			long := "the quick brown fox jumps over the lazy dog " + strings.Repeat("0123456789", 14)
+			base := bodyDoc("seed", long)
+			Expect(statuses(push(putMutation("c0", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base})))).
+				To(Equal([]syncplanev1.MutationStatus{applied}))
+			first := pull(nil)
+			held := widgetChange(first, "w1").GetValue()
+
+			edited := editBody(base, "alice", func(d *text.Doc) {
+				Expect(d.Insert(0, ">> ")).To(Succeed())
+			})
+			batch := []*syncplanev1.Mutation{
+				patchMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Body: edited, Count: 1}, "body", "count"),
+				withExpectedVersion(patchMutation("c1", 2, "widget", "w1", &testdatav1.Widget{Label: "x"}, "label"), 99),
+				// The same id again inside one batch: the watermark covers it now.
+				patchMutation("c1", 2, "widget", "w1", &testdatav1.Widget{Label: "y"}, "label"),
+				patchMutation("c1", 3, "widget", "w1", &testdatav1.Widget{Count: 2}, "count"),
+			}
+			results := push(batch...)
+			Expect(statuses(results)).To(Equal([]syncplanev1.MutationStatus{applied, refused, refused, applied}),
+				"the duplicate of a rejected id replays the verdict")
+			Expect(results[3].GetSeq()).To(Equal(results[0].GetSeq()+1), "a rejection consumes no sequence")
+
+			var w testdatav1.Widget
+			rc := widgetChange(pull(first.GetNextCursor()), "w1")
+			Expect(rc.GetVersion()).To(Equal(results[3].GetSeq()))
+			Expect(proto.Unmarshal(rc.GetValue(), &w)).To(Succeed())
+			Expect(w.GetCount()).To(Equal(int32(2)))
+			Expect(w.GetLabel()).To(BeEmpty())
+
+			// Folding the delta log onto the row the reader held gives the stored text.
+			var full testdatav1.Widget
+			Expect(proto.Unmarshal(widgetChange(pull(nil), "w1").GetValue(), &full)).To(Succeed())
+			got := w.GetBody()
+			for _, fd := range rc.GetTextDeltas() {
+				var prev testdatav1.Widget
+				Expect(proto.Unmarshal(held, &prev)).To(Succeed())
+				merged, err := text.ApplyFragmentBytes(prev.GetBody(), fd.GetFragment())
+				Expect(err).NotTo(HaveOccurred())
+				got = merged
+			}
+			Expect(plainBody(got)).To(Equal(plainBody(full.GetBody())))
+			Expect(plainBody(full.GetBody())).To(Equal(">> " + long))
+
+			again := push(batch...)
+			Expect(statuses(again)).To(Equal([]syncplanev1.MutationStatus{already, refused, refused, already}))
+			Expect(again[1].GetErrorCode()).To(Equal(results[1].GetErrorCode()))
+			Expect(widgetChange(pull(nil), "w1").GetVersion()).To(Equal(results[3].GetSeq()), "the resend wrote nothing")
 		})
 	})
 

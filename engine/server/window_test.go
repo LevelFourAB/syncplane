@@ -282,6 +282,44 @@ var _ = Describe("Windowed subscriptions", func() {
 			_, changes := drain(cursor, sub)
 			Expect(changes).To(BeEmpty())
 		})
+
+		It("brings back the edit a row got while it was outside the window", func() {
+			putWidget("a", 10)
+			putWidget("b", 20)
+			putWidget("c", 5)
+			sub := windowSub(2, nil)
+			cursor, rows := bootstrap(sub)
+			view := map[string][]byte{}
+			applyPatch(view, &syncplanev1.Patch{Changes: rows})
+
+			putWidget("x", 30) // pushes "a" off the tail
+			cursor, changes := drain(cursor, sub)
+			applyPatch(view, &syncplanev1.Patch{Changes: changes})
+			Expect(viewKeys(view)).To(Equal([]string{"widget/b", "widget/x"}))
+
+			nextMut++
+			_, err := client.Push(ctx, connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+				patchMutation("c1", nextMut, "widget", "a", &testdatav1.Widget{Label: "edited"}, "label"),
+			})))
+			Expect(err).NotTo(HaveOccurred())
+			cursor, changes = drain(cursor, sub)
+			applyPatch(view, &syncplanev1.Patch{Changes: changes})
+			Expect(viewKeys(view)).To(Equal([]string{"widget/b", "widget/x"}))
+
+			// "x" sinks, so "a" rises back by rank without a write of its own.
+			nextMut++
+			_, err = client.Push(ctx, connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+				patchMutation("c1", nextMut, "widget", "x", &testdatav1.Widget{Count: 1}, "count"),
+			})))
+			Expect(err).NotTo(HaveOccurred())
+			_, changes = drain(cursor, sub)
+			applyPatch(view, &syncplanev1.Patch{Changes: changes})
+
+			Expect(viewKeys(view)).To(Equal([]string{"widget/a", "widget/b"}))
+			var a testdatav1.Widget
+			Expect(proto.Unmarshal(view["widget/a"], &a)).To(Succeed())
+			Expect(a.GetLabel()).To(Equal("edited"))
+		})
 	})
 
 	// A truncated page classifies with the window resolved for that page, but

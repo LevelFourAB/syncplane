@@ -112,7 +112,7 @@ Three directories serve as contracts between the Go and TypeScript implementatio
 
 - `testdata/queryeval/`: Query-evaluation vectors.
 - `testdata/indexkey/`: Index-entry encoding (`encodeCases` pin the bytes), entry-vs-comparator agreement (`orderCases`), and query planner decisions (`probeCases`). A planner that chooses differently still returns the correct rows, but at a different cost.
-- `testdata/text/`: Text CRDT vectors. The `encodedHex` checks pin the canonical encoding byte for byte. Any change to `engine/text` or `client/src/text` must update the other implementation and the vectors together.
+- `testdata/text/`: Text CRDT vectors. The `encodedHex` checks pin the canonical encoding byte for byte. Any change to `engine/text` or `client/src/text` must update the other implementation and the vectors together. `vectors.json` is written by hand. The Go suite generates `histories.json` (random edit histories) and `damaged.json` (corrupt documents); run `go test ./engine/text -update` to rewrite them after an encoding change.
 
 ## Fixing a bug
 

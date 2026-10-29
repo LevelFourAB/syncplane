@@ -104,6 +104,10 @@
 		// regeneration.
 		"client/src/gen",
 		"engine/gen",
+		// Written by `go test ./engine/text -update`. They escape astral code
+		// points as surrogate pairs, which the JSON plugin refuses to parse.
+		"testdata/text/histories.json",
+		"testdata/text/damaged.json",
 		// Vendored third party — keep it byte-identical to upstream so an
 		// upgrade is a clean replacement rather than a reformat diff.
 		"internal/admin/static/htmx.min.js"

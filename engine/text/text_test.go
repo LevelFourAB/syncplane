@@ -2,6 +2,7 @@ package text_test
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 	"math/rand"
 	"runtime"
@@ -242,6 +243,39 @@ func converge(a, b *text.Doc) *text.Doc {
 	return d
 }
 
+// mergeInOrder merges the encodings of docs in the given order and returns the
+// text.
+func mergeInOrder(docs []*text.Doc, order []int) string {
+	GinkgoHelper()
+	acc := docs[order[0]].Encode()
+	for _, i := range order[1:] {
+		var err error
+		acc, err = text.Merge(acc, docs[i].Encode())
+		Expect(err).NotTo(HaveOccurred())
+	}
+	d, err := text.Decode(acc, "")
+	Expect(err).NotTo(HaveOccurred())
+	return d.PlainText()
+}
+
+// typeRun types word into d at index, one code point per edit, either forward
+// (each next character after the previous) or backward (each next character
+// typed at the same index, before the previous) — the two shapes Fugue has to
+// keep contiguous.
+func typeRun(d *text.Doc, index int, word string, backward bool) {
+	GinkgoHelper()
+	rs := []rune(word)
+	if backward {
+		for i := len(rs) - 1; i >= 0; i-- {
+			Expect(d.Insert(index, string(rs[i]))).To(Succeed())
+		}
+		return
+	}
+	for i, r := range rs {
+		Expect(d.Insert(index+i, string(r))).To(Succeed())
+	}
+}
+
 var _ = Describe("Merge", func() {
 	It("merges concurrent inserts at different positions", func() {
 		a := text.New("a")
@@ -279,6 +313,39 @@ var _ = Describe("Merge", func() {
 		Expect(got).To(SatisfyAny(
 			Equal("alicebob"), Equal("bobalice"),
 		), "sequences must stay contiguous, got %q", got)
+	})
+
+	It("keeps every peer's run contiguous with up to six peers, in any merge order", func() {
+		rng := rand.New(rand.NewSource(424242))
+		for round := 0; round < 200; round++ {
+			base := text.New("seed")
+			Expect(base.Insert(0, "[]")).To(Succeed())
+			n := 2 + rng.Intn(5)
+			docs := make([]*text.Doc, n)
+			words := make([]string, n)
+			for i := range docs {
+				docs[i] = fork(base, fmt.Sprintf("p%d", rng.Intn(1000)*10+i))
+				// One letter per peer, plus an emoji, so any interleaving shows.
+				words[i] = strings.Repeat(string(rune('a'+i)), 1+rng.Intn(4)) + string(rune(0x1F600+i))
+				typeRun(docs[i], 1, words[i], rng.Intn(2) == 0)
+			}
+			got := mergeInOrder(docs, rng.Perm(n))
+			Expect(mergeInOrder(docs, rng.Perm(n))).To(Equal(got), "round %d: merge order changed the text", round)
+			Expect(got).To(HavePrefix("["))
+			Expect(got).To(HaveSuffix("]"))
+			rest := strings.TrimSuffix(strings.TrimPrefix(got, "["), "]")
+			for len(rest) > 0 {
+				matched := false
+				for _, w := range words {
+					if strings.HasPrefix(rest, w) {
+						rest = rest[len(w):]
+						matched = true
+						break
+					}
+				}
+				Expect(matched).To(BeTrue(), "round %d: runs interleaved: %q from words %q", round, got, words)
+			}
+		}
 	})
 
 	It("is idempotent", func() {
