@@ -1683,6 +1683,12 @@ function mergeRefSetItem(
 type MapField = Extract<DescField, { fieldKind: 'map' }>;
 type MessageListField = Extract<DescField, { listKind: 'message' }>;
 
+/**
+ * Applies one keyed map entry: src has the key => set/recurse, src lacks it =>
+ * clear it on dst (clear-on-absent). A path into an entry src lacks clears only
+ * the field it names, as a path into a singular message does: the entry stays
+ * on dst, and is not created when dst lacks it. Mirror of lww.go mergeMapItem.
+ */
 function mergeMapItem(
 	dst: Rec,
 	src: Rec,
@@ -1709,11 +1715,33 @@ function mergeMapItem(
 		mergePath(field.message, dm[jsKey] as Rec, srcMap[jsKey] as Rec, rest, prefix, mergers);
 		return;
 	}
-	// src lacks the key → clear it on dst (clear-on-absent).
 	const dm = dst[field.localName] as Rec | undefined;
+	if (rest !== '') {
+		if (field.mapKind !== 'message') {
+			throw new Error(`map "${field.name}" value does not support sub-paths`);
+		}
+		if (dm === undefined || !Object.hasOwn(dm, jsKey)) return;
+		mergePath(
+			field.message,
+			dm[jsKey] as Rec,
+			create(field.message) as unknown as Rec,
+			rest,
+			prefix,
+			mergers,
+		);
+		return;
+	}
+	// src lacks the key → clear it on dst (clear-on-absent).
 	if (dm !== undefined) delete dm[jsKey];
 }
 
+/**
+ * Applies one addressed element of a keyed message list, matching by encoded
+ * identity. Existing dst elements keep their index. A path into an element src
+ * lacks clears only the field it names, as a path into a singular message does:
+ * the element stays on dst with its key, and is not created when dst lacks it.
+ * Mirror of lww.go mergeKeyedListItem.
+ */
 function mergeKeyedListItem(
 	dst: Rec,
 	src: Rec,
@@ -1730,8 +1758,18 @@ function mergeKeyedListItem(
 	const dstIdx = dstList.findIndex((e) => encodeItemKey(e, keyFields) === itemKey);
 
 	if (srcIdx === -1) {
-		// src dropped the element: remove it from dst (clear-on-absent).
-		if (dstIdx !== -1) dstList.splice(dstIdx, 1);
+		if (dstIdx === -1) return;
+		if (rest === '') {
+			// src dropped the element: remove it from dst (clear-on-absent).
+			dstList.splice(dstIdx, 1);
+			return;
+		}
+		// The zero element carries dst's key, so a path that names a key field
+		// leaves the identity as it is.
+		const dstElem = dstList[dstIdx] as unknown as Rec;
+		const zero = create(field.message) as unknown as Rec;
+		for (const kf of keyFields) zero[kf.localName] = dstElem[kf.localName];
+		mergePath(field.message, dstElem, zero, rest, prefix, mergers);
 		return;
 	}
 	const srcElem = srcList[srcIdx]!;

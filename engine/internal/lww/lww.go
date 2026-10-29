@@ -218,7 +218,9 @@ func mergeItem(
 }
 
 // mergeMapItem applies one keyed map entry: src has the key => set/recurse,
-// src lacks it => clear it on dst (clear-on-absent, mirroring the singular case).
+// src lacks it => clear it on dst (clear-on-absent). A path into an entry src
+// lacks clears only the field it names, as a path into a singular message does:
+// the entry stays on dst, and is not created when dst lacks it.
 func mergeMapItem(
 	dst, src protoreflect.Message,
 	fd protoreflect.FieldDescriptor,
@@ -241,6 +243,16 @@ func mergeMapItem(
 		dstVal := dst.Mutable(fd).Map().Mutable(mk).Message()
 		return mergePath(dstVal, sm.Get(mk).Message(), rest, prefix, instPrefix, m)
 	}
+	if rest != "" {
+		if fd.MapValue().Kind() != protoreflect.MessageKind {
+			return fmt.Errorf("map %q value does not support sub-paths", fd.Name())
+		}
+		if !dst.Has(fd) || !dst.Get(fd).Map().Has(mk) {
+			return nil
+		}
+		dstVal := dst.Mutable(fd).Map().Mutable(mk).Message()
+		return mergePath(dstVal, dstVal.New(), rest, prefix, instPrefix, m)
+	}
 	if dst.Has(fd) {
 		dst.Mutable(fd).Map().Clear(mk)
 	}
@@ -248,7 +260,10 @@ func mergeMapItem(
 }
 
 // mergeKeyedListItem applies one addressed element of a keyed message list,
-// matching by encoded identity. Existing dst elements keep their index.
+// matching by encoded identity. Existing dst elements keep their index. A path
+// into an element src lacks clears only the field it names, as a path into a
+// singular message does: the element stays on dst with its key, and is not
+// created when dst lacks it.
 func mergeKeyedListItem(
 	dst, src protoreflect.Message,
 	fd protoreflect.FieldDescriptor,
@@ -274,9 +289,20 @@ func mergeKeyedListItem(
 	}
 
 	if srcIdx == -1 {
-		// src dropped the element: remove it from dst (clear-on-absent).
-		if dstIdx != -1 {
+		switch {
+		case dstIdx == -1:
+		case rest == "":
+			// src dropped the element: remove it from dst (clear-on-absent).
 			listRemoveAt(dl, dstIdx)
+		default:
+			// The zero element carries dst's key, so a path that names a key
+			// field leaves the identity as it is.
+			dstElem := dl.Get(dstIdx).Message()
+			zero := dstElem.New()
+			for _, kf := range keyFields {
+				zero.Set(kf, dstElem.Get(kf))
+			}
+			return mergePath(dstElem, zero, rest, prefix, instPrefix, m)
 		}
 		return nil
 	}

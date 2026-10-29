@@ -59,6 +59,14 @@ Writing `settings: {}` and then patching `settings.color` to unset drops
 absent container identically. To preserve container presence, include an
 explicit field.
 
+A mask path into a map entry or a keyed-list element also names one field.
+`members.u1.role` changes only `role` of element `u1`, even when the writer's
+value does not hold `u1`: the element keeps its key and its other fields. A
+write does not remove an entry or element that it leaves empty, and does not
+create one that neither the writer's value nor the stored row holds. To remove
+an element, mask the element itself (`members.u1`) with a value that does not
+hold it.
+
 ### A oneof is one field
 
 A field mask names the entire **oneof group**, not an individual member (for

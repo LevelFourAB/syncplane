@@ -33,6 +33,25 @@ var _ = Describe("Per-item merge", func() {
 			Expect(dst.GetAttrs()).To(Equal(map[string]string{"b": "2"}))
 		})
 
+		// A path into the entry names one of its fields, as "settings.color"
+		// names one field of a singular message.
+		It("keeps an entry the source lacks when the mask names a field inside it", func() {
+			dst := &testdatav1.Widget{Custom: map[string]*testdatav1.FieldValue{
+				"k": {Kind: &testdatav1.FieldValue_Text{Text: "v"}},
+				"j": {Kind: &testdatav1.FieldValue_Number{Number: 1}},
+			}}
+			Expect(lww.Merge(dst, &testdatav1.Widget{}, []string{"custom.k.kind"})).To(Succeed())
+			Expect(dst.GetCustom()).To(HaveKey("k"))
+			Expect(dst.GetCustom()["k"].GetKind()).To(BeNil(), "the named field is cleared")
+			Expect(dst.GetCustom()["j"].GetNumber()).To(Equal(1.0))
+		})
+
+		It("does not create an entry that neither side holds for a mask into it", func() {
+			dst := &testdatav1.Widget{}
+			Expect(lww.Merge(dst, &testdatav1.Widget{}, []string{"custom.k.kind"})).To(Succeed())
+			Expect(dst.GetCustom()).To(BeEmpty())
+		})
+
 		It("handles non-string (int64) map keys", func() {
 			dst := &testdatav1.Widget{ById: map[int64]string{1: "one"}}
 			src := &testdatav1.Widget{ById: map[int64]string{2: "two"}}
@@ -88,6 +107,28 @@ var _ = Describe("Per-item merge", func() {
 			Expect(lww.Merge(dst, src, []string{"members.u1.name"})).To(Succeed())
 			Expect(dst.GetMembers()[0].GetName()).To(Equal("renamed"))
 			Expect(dst.GetMembers()[0].GetRole()).To(BeEquivalentTo(1), "unmasked sub-field survives")
+		})
+
+		It("keeps an element the source lacks when the mask names a field inside it", func() {
+			dst := &testdatav1.Widget{Members: []*testdatav1.Member{{Uid: "u1", Name: "Ann", Role: 2}}}
+			Expect(lww.Merge(dst, &testdatav1.Widget{}, []string{"members.u1.role"})).To(Succeed())
+			Expect(dst.GetMembers()).To(HaveLen(1))
+			Expect(dst.GetMembers()[0].GetUid()).To(Equal("u1"))
+			Expect(dst.GetMembers()[0].GetName()).To(Equal("Ann"), "unmasked sub-field survives")
+			Expect(dst.GetMembers()[0].GetRole()).To(BeZero(), "the named field is cleared")
+		})
+
+		It("keeps the element's key when the mask names its key field and the source lacks it", func() {
+			dst := &testdatav1.Widget{Members: []*testdatav1.Member{{Uid: "u1", Name: "Ann"}}}
+			Expect(lww.Merge(dst, &testdatav1.Widget{}, []string{"members.u1.uid"})).To(Succeed())
+			Expect(dst.GetMembers()).To(HaveLen(1))
+			Expect(dst.GetMembers()[0].GetUid()).To(Equal("u1"))
+		})
+
+		It("does not create an element that neither side holds for a mask into it", func() {
+			dst := &testdatav1.Widget{}
+			Expect(lww.Merge(dst, &testdatav1.Widget{}, []string{"members.u1.role"})).To(Succeed())
+			Expect(dst.GetMembers()).To(BeEmpty())
 		})
 
 		It("creates + seeds the key field when descending into an absent element", func() {

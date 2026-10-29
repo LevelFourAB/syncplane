@@ -292,6 +292,27 @@ describe('mergeMask per-item', () => {
 			expect(dst.attrs).toEqual({ b: '2' });
 		});
 
+		// A path into the entry names one of its fields, as 'settings.color'
+		// names one field of a singular message.
+		it('keeps an entry the source lacks when the mask names a field inside it', () => {
+			const dst = w({
+				custom: {
+					k: { kind: { case: 'text', value: 'v' } },
+					j: { kind: { case: 'number', value: 1 } },
+				},
+			});
+			merge(dst, w({}), [ 'custom.k.kind' ]);
+			expect(Object.keys(dst.custom)).toEqual([ 'k', 'j' ]);
+			expect(dst.custom['k']!.kind.case).toBeUndefined();
+			expect(dst.custom['j']!.kind).toEqual({ case: 'number', value: 1 });
+		});
+
+		it('does not create an entry that neither side holds for a mask into it', () => {
+			const dst = w({});
+			merge(dst, w({}), [ 'custom.k.kind' ]);
+			expect(dst.custom).toEqual({});
+		});
+
 		it('handles non-string (int64) keys', () => {
 			const dst = w({ byId: { '1': 'one' } });
 			merge(dst, w({ byId: { '2': 'two' } }), [ 'by_id.2' ]);
@@ -330,6 +351,25 @@ describe('mergeMask per-item', () => {
 			const dst = w({ members: [ { uid: 'u1', name: 'A', role: 1 } ] });
 			merge(dst, w({ members: [ { uid: 'u1', name: 'renamed' } ] }), [ 'members.u1.name' ]);
 			expect(dst.members[0]).toMatchObject({ name: 'renamed', role: 1 });
+		});
+
+		it('keeps an element the source lacks when the mask names a field inside it', () => {
+			const dst = w({ members: [ { uid: 'u1', name: 'Ann', role: 2 } ] });
+			merge(dst, w({}), [ 'members.u1.role' ]);
+			expect(dst.members).toHaveLength(1);
+			expect(dst.members[0]).toMatchObject({ uid: 'u1', name: 'Ann', role: 0 });
+		});
+
+		it('keeps the element key when the mask names its key field and the source lacks it', () => {
+			const dst = w({ members: [ { uid: 'u1', name: 'Ann' } ] });
+			merge(dst, w({}), [ 'members.u1.uid' ]);
+			expect(dst.members.map((m) => m.uid)).toEqual([ 'u1' ]);
+		});
+
+		it('does not create an element that neither side holds for a mask into it', () => {
+			const dst = w({});
+			merge(dst, w({}), [ 'members.u1.role' ]);
+			expect(dst.members).toEqual([]);
 		});
 
 		it('creates + seeds the key field for an absent element', () => {
