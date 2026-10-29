@@ -1,6 +1,6 @@
 {
   "name": "syncplane",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local-read/local-write sync client with optimistic rebase (ESM-only)",
   "license": "MIT",
   "repository": {

@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.3.0](https://github.com/LevelFourAB/syncplane/compare/v0.2.0...v0.3.0) (2026-10-29)
+
+
+### Features
+
+* **engine:** Add typed, iterator-based reads and mutators ([35a5f79](https://github.com/LevelFourAB/syncplane/commit/35a5f79152fce6c83b1a7801db19c1c21941e80a))
+* **engine:** Detect restored stores and reset clients ahead of the backup ([81a60cf](https://github.com/LevelFourAB/syncplane/commit/81a60cf49f58334715120c22221b8e99072dc7d1))
+
+
+### Bug Fixes
+
+* **client:** Keep a write another tab already pushed instead of dropping it as poison ([a35d502](https://github.com/LevelFourAB/syncplane/commit/a35d50204baa2a9748d99ce41751e70e00b0a320))
+* **client:** Keep a write made during a format upgrade instead of wiping it ([41db80c](https://github.com/LevelFourAB/syncplane/commit/41db80c04b21b0ee5c2d88413917a9dca79947d1))
+* **client:** Keep new text typed right after clearing a compacted text field ([1bc3956](https://github.com/LevelFourAB/syncplane/commit/1bc39565e978f7b678eeb5aaa7440db68063ee0e))
+* **client:** No longer lose queued text edits when a pull brings a compacted document ([29c3dd9](https://github.com/LevelFourAB/syncplane/commit/29c3dd953f08a97c27454d2542b8352f8c8abbee))
+* **client:** Report a rejected edit when another tab syncs before the lost push is re-sent ([df280ff](https://github.com/LevelFourAB/syncplane/commit/df280ff493500ec19f29556dbfb8a4f6513ee810))
+* **client:** Report writes the server rejects during a local format upgrade ([deca49f](https://github.com/LevelFourAB/syncplane/commit/deca49fd30cd8dbf56b4ff254c658a4cfb0307eb))
+* **client:** Stop compaction recovery from deleting text typed by other users ([93e73e2](https://github.com/LevelFourAB/syncplane/commit/93e73e2f938b8f9c7f558b06fbe73b72d53c4382))
+* **client:** Stop path-style row keys from sharing optimistic text edits ([f94b1b9](https://github.com/LevelFourAB/syncplane/commit/f94b1b9a25cde03cc61347042a43deab59af2f26))
+* **client:** Store recovered text edits until they are re-applied ([9fc6e5e](https://github.com/LevelFourAB/syncplane/commit/9fc6e5e1138de4b406a61c4db7dc29da46284519))
+* **client:** Sync rows whose int64 id is written as a string like "007" or "0x10" ([68aa054](https://github.com/LevelFourAB/syncplane/commit/68aa0546254b04e78f80921ff39ca3b0cf993fac))
+* **client:** Undo of a mark no longer removes formatting a peer applied on top of it ([c156a1e](https://github.com/LevelFourAB/syncplane/commit/c156a1e7363c4e78c906934a075e6252916cf845))
+* **engine:** Accept new text typed into a compacted text field after it was cleared ([386abb4](https://github.com/LevelFourAB/syncplane/commit/386abb494641444ef27678736e0367d8e44d1f70))
+* **engine:** Always keep the rejections of a client's latest push ([43ab390](https://github.com/LevelFourAB/syncplane/commit/43ab390ae53a63b6a3e7d560388f0123d27afbb3))
+* **engine:** Keep a push batch going when a text document sits under a \u0000 key ([ef91e4f](https://github.com/LevelFourAB/syncplane/commit/ef91e4f460e8d61c8f6a0414dba7bdd106d665db))
+* **engine:** Keep an interrupted bootstrap from leaving rows outside the window or closure ([364ef14](https://github.com/LevelFourAB/syncplane/commit/364ef14f6ff2978f06637b2875dbc9919b4fdc92))
+* **engine:** Keep indexed queries finding rows after a PATCH into an opaque field or reference ([eaaad05](https://github.com/LevelFourAB/syncplane/commit/eaaad05395c05b85b2a28cf9b3fd56a9120c99c5))
+* **engine:** Keep refused in-process writes from leaking text into readers copies ([0a0dd53](https://github.com/LevelFourAB/syncplane/commit/0a0dd5352ff339aa7954eda6ec1ecc8a86e3178e))
+* **engine:** Keep rows hidden by the read filter off clients that bootstrap during a write ([cc669e1](https://github.com/LevelFourAB/syncplane/commit/cc669e14a636775bf7990231d37294fd70db6ce3))
+* **engine:** Keep windowed rows in sync when a scope change follows a window move ([9c73083](https://github.com/LevelFourAB/syncplane/commit/9c7308396656f47b1558b6dca6ed65291c9f8a41))
+* **engine:** No longer drop a write when a new client's first push sends ids out of order ([c32eed4](https://github.com/LevelFourAB/syncplane/commit/c32eed4094e0b1fb9a4d3a18ea44341dcb6f4f7f))
+* **engine:** Refuse idempotency keys that are not valid UTF-8 or hold \u0000 on every store ([515b802](https://github.com/LevelFourAB/syncplane/commit/515b8027d2ba20f221ad952f8c8ebef21f26112f))
+* **engine:** Reject duplicate keyed-list keys with invalid_argument instead of storing them ([8fb974a](https://github.com/LevelFourAB/syncplane/commit/8fb974ad07b4e81ff5c741db0c4bfbe6792407e6))
+* **engine:** Stop paginated pulls from leaving stale rows outside a window or closure ([be447a6](https://github.com/LevelFourAB/syncplane/commit/be447a6bf1dc55ac40160c60ed153fba4c85e4b2))
+* **engine:** Stop the change feed from skipping writes after an access move ([a4de84a](https://github.com/LevelFourAB/syncplane/commit/a4de84ad885309e82dc02b2bc112e923b720cef2))
+* Keep a list element or map entry when a patch clears one of its fields ([d3a6ce6](https://github.com/LevelFourAB/syncplane/commit/d3a6ce6acf2a8af34938b5fbb9e3747f2693e4c5))
+* Keep queued writes through a server outage instead of dropping them as poison ([eb51312](https://github.com/LevelFourAB/syncplane/commit/eb51312ca06bd894056d6ab925b7724f4dac1332))
+* Keep stored text on PUTs without a document ([e6fae74](https://github.com/LevelFourAB/syncplane/commit/e6fae744235092661a7fd3873379f0de6c383ce9))
+* Merge text in either order to the same bytes when a peer entry has counter 0 ([704969c](https://github.com/LevelFourAB/syncplane/commit/704969cac34ef745204b84e20b6ad1d16fd35fe2))
+
 ## [0.2.0](https://github.com/LevelFourAB/syncplane/compare/v0.1.0...v0.2.0) (2026-10-24)
 
 
