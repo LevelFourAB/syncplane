@@ -368,6 +368,90 @@ describe('format version upgrade', () => {
 		await client.close();
 	});
 
+	it('salvages a write the app made while the salvage push was in flight', async () => {
+		const kv = await seedOldFormatStore();
+		let client!: SyncClient;
+		let wrote = false;
+		const { transport, pushedBatches } = stubServer({
+			onPush: async () => {
+				if (wrote) return;
+				wrote = true;
+				// Writes are accepted before start() resolves, and the salvage push
+				// runs outside the lock.
+				await client.mutate.put(TodoSchema, { id: 'mid', title: 'written during upgrade' });
+			},
+		});
+		const statuses: SyncStatus[] = [];
+		const rejections: RejectionInfo[] = [];
+		client = newUpgradingClient(kv, transport, statuses, undefined, rejections);
+		await client.start();
+		await client.syncNow();
+
+		expect(pushedBatches.map((b) => b.map((m) => m.mutationId))).toEqual([ [ 1n, 2n ], [ 3n ] ]);
+		const late = pushedBatches[1]?.[0]?.payload;
+		expect(late?.case === 'crud' ? late.value.key : undefined).toBe('mid');
+		const all = await dump(kv);
+		// Every minted id reached the server, so the identity and counter stay.
+		expect(all.get(META_CLIENT_ID)).toBe('seeded-client');
+		expect(all.get(metaLastMutationId(WS))).toBe('3');
+		expect(all.get(metaPushedThrough(WS))).toBe('3');
+		expect(rejections).toEqual([]);
+		expect(statuses.some((s) => s.lastError?.code === CodeFormatUpgraded)).toBe(false);
+		await client.close();
+	});
+
+	it('reports a write made during a failed salvage instead of wiping it silently', async () => {
+		const kv = await seedOldFormatStore();
+		let client!: SyncClient;
+		let wrote = false;
+		const { transport } = stubServer({
+			failPush: true,
+			onPush: async () => {
+				if (wrote) return;
+				wrote = true;
+				await client.mutate.put(TodoSchema, { id: 'mid', title: 'written during upgrade' });
+			},
+		});
+		const rejections: RejectionInfo[] = [];
+		client = newUpgradingClient(kv, transport, [], undefined, rejections);
+		await client.start();
+		await client.syncNow();
+
+		expect(rejections.map((r) => r.mutationId)).toEqual([ 1n, 2n, 3n ]);
+		expect(rejections.at(-1)?.targets.map((t) => t.key)).toEqual([ 'mid' ]);
+		expect(rejections.every((r) => r.errorCode === CodeFormatUpgraded)).toBe(true);
+		await client.close();
+	});
+
+	it('reports the writes that still arrive after the last salvage round', async () => {
+		const kv = await seedOldFormatStore();
+		let client!: SyncClient;
+		let upgrading = true;
+		let n = 0;
+		const { transport, pushedBatches } = stubServer({
+			// Every salvage push brings one more write, so the queue never drains.
+			onPush: async () => {
+				if (!upgrading) return;
+				n++;
+				await client.mutate.put(TodoSchema, { id: `w${n}`, title: 'typing' });
+			},
+		});
+		const rejections: RejectionInfo[] = [];
+		client = newUpgradingClient(kv, transport, [], undefined, rejections);
+		await client.start();
+		upgrading = false;
+
+		const salvaged = pushedBatches.flat().map((m) => m.mutationId);
+		const reported = rejections.map((r) => r.mutationId);
+		expect(reported).toHaveLength(1);
+		expect(rejections[0]?.errorCode).toBe(CodeFormatUpgraded);
+		// Each minted id was either pushed or reported, never both.
+		expect([ ...salvaged, ...reported ].sort()).toEqual(
+			Array.from({ length: n + 2 }, (_, i) => BigInt(i + 1)),
+		);
+		await client.close();
+	});
+
 	it('chunks a salvage queue larger than maxMutationsPerPush into within-limit pushes', async () => {
 		const kv = await seedOldFormatStore(5);
 		const { transport, pushedBatches } = stubServer();

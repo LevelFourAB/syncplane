@@ -124,6 +124,7 @@ import {
 	type GenerationTracking,
 	type KVRead,
 	type KVStore,
+	type KVWrite,
 	tracksGenerations,
 } from './kv/store.js';
 import {
@@ -356,6 +357,57 @@ export type {
  * the unsent remainder is simply dropped and reported.
  */
 const SALVAGE_PUSH_TIMEOUT_MS = 30_000;
+
+/**
+ * How many salvage pushes the format upgrade makes before it wipes. The push
+ * runs outside the lock, so writes can join the queue while it is in flight;
+ * each extra round pushes those. Writes that still arrive after the last round
+ * are dropped and reported.
+ */
+const SALVAGE_MAX_ROUNDS = 3;
+
+/**
+ * Reads the pending queues a format-upgrade salvage pushes, by workspace in
+ * key order, skipping keys in `seen` and adding the rest to it. Entries this
+ * build cannot decode are counted, not returned.
+ */
+async function readSalvageQueue(
+	tx: KVRead,
+	seen: Set<string>,
+): Promise<{ pending: Map<string, Mutation[]>; undecodable: number; total: number }> {
+	// Queues are per workspace, and the workspace of a queued mutation is only
+	// recoverable from its key — the Mutation envelope does not carry one. A
+	// store written by a layout that predates the per-workspace queue has keys
+	// this parse does not recognize; those mutations count as undecodable and
+	// are reported as dropped rather than pushed into the wrong partition.
+	const pending = new Map<string, Mutation[]>();
+	let undecodable = 0;
+	let total = 0;
+	for await (const [ k, v ] of tx.scan(PENDING_ROOT)) {
+		if (seen.has(k)) continue;
+		seen.add(k);
+		let workspaceId: string;
+		try {
+			workspaceId = workspaceOfPendingKey(k);
+		} catch {
+			undecodable++;
+			continue;
+		}
+		if (!workspaceId) {
+			undecodable++;
+			continue;
+		}
+		try {
+			const list = pending.get(workspaceId) ?? [];
+			list.push(fromBinary(MutationSchema, v as Uint8Array));
+			pending.set(workspaceId, list);
+			total++;
+		} catch {
+			undecodable++; // undecodable under this build — part of why we wipe
+		}
+	}
+	return { pending, undecodable, total };
+}
 
 /**
  * Field reference a SubscriptionSpec's `where` receives. Bound to the schema
@@ -4411,8 +4463,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	/**
 	 * Verifies the local KV layout version before sync starts. A mismatch
 	 * (this build expects a different layout than the store carries) salvages
-	 * the pending queues with one best-effort push, then wipes everything
-	 * except the clientId and the per-workspace mutation-id counters (whose
+	 * the pending queues with a best-effort push, pushes again what was written
+	 * while that push was in flight (up to SALVAGE_MAX_ROUNDS pushes), then
+	 * wipes everything except the clientId and the per-workspace mutation-id
+	 * counters (whose
 	 * pushed-through marks are restamped to match) and stamps the new version —
 	 * the missing cursors make the first sync re-bootstrap.
 	 * Mutations that could not be pushed are dropped and reported both as a count
@@ -4423,6 +4477,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 */
 	private async ensureFormatVersion(transport: Transport): Promise<void> {
 		const kv = await this.kv();
+		// Every queue key a salvage round has read, so the wipe can tell the
+		// writes that joined the queue while a push was in flight.
+		const seen = new Set<string>();
 
 		// Phase 1 — under the cross-tab lock, decide what to do and snapshot the
 		// queues. The fast paths (version already matches, or a fresh/pre-versioning
@@ -4450,38 +4507,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					return null;
 				}
 
-				// Queues are per workspace, and the workspace of a queued mutation is
-				// only recoverable from its key — the Mutation envelope does not carry
-				// one. A store written by a layout that predates the per-workspace
-				// queue has keys this parse does not recognize; those mutations count
-				// as undecodable and are reported as dropped rather than pushed into
-				// the wrong partition.
-				const pending = new Map<string, Mutation[]>();
-				let undecodable = 0;
-				let total = 0;
-				for await (const [ k, v ] of tx.scan(PENDING_ROOT)) {
-					let workspaceId: string;
-					try {
-						workspaceId = workspaceOfPendingKey(k);
-					} catch {
-						undecodable++;
-						continue;
-					}
-					if (!workspaceId) {
-						undecodable++;
-						continue;
-					}
-					try {
-						const list = pending.get(workspaceId) ?? [];
-						list.push(fromBinary(MutationSchema, v as Uint8Array));
-						pending.set(workspaceId, list);
-						total++;
-					} catch {
-						undecodable++; // undecodable under this build — part of why we wipe
-					}
-				}
+				const queue = await readSalvageQueue(tx, seen);
 				tx.release(); // read-only so far; the wipe runs in its own transaction.
-				return { pending, undecodable, total };
+				return queue;
 			} catch (err) {
 				tx.release();
 				throw err;
@@ -4502,16 +4530,25 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// are not among them: nothing decoded them, so there is nothing to report
 		// beyond the total.
 		const lost: DiscardedMutation[] = [];
-		if (snapshot.total > 0) {
-			const rpc = createClient(SyncService, transport);
-			const cap = Math.max(1, this.opts.maxMutationsPerPush ?? DEFAULT_MAX_MUTATIONS_PER_PUSH);
-			for (const [ workspaceId, mutations ] of snapshot.pending) {
+		let undecodable = snapshot.undecodable;
+		// Workspaces whose salvage stopped at a failed chunk. A later round must
+		// not push past that gap either.
+		const stopped = new Set<string>();
+		const rpc = createClient(SyncService, transport);
+		const cap = Math.max(1, this.opts.maxMutationsPerPush ?? DEFAULT_MAX_MUTATIONS_PER_PUSH);
+		const salvage = async (pending: Map<string, Mutation[]>) => {
+			for (const [ workspaceId, mutations ] of pending) {
 				let sent = 0;
 				const abandon = () => {
+					stopped.add(workspaceId);
 					for (const m of mutations.slice(sent)) {
 						lost.push({ workspaceId, mutationId: m.mutationId, mutation: m });
 					}
 				};
+				if (stopped.has(workspaceId)) {
+					abandon();
+					continue;
+				}
 				for (const chunk of chunkBySize(mutations, cap)) {
 					try {
 						const resp = await rpc.push(
@@ -4532,70 +4569,50 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					}
 				}
 			}
-		}
-		const dropped = snapshot.undecodable + lost.length;
+		};
 
 		// Phase 3 — under the lock again, wipe everything but (when the salvage was
 		// clean) the identity, and stamp the new version. Another tab may have
 		// completed the same upgrade while we were pushing; if the version is
-		// already current, leave its result untouched.
-		await this.kvMutex.run(async () => {
-			const tx = await kv.write();
-			try {
-				const now = (await tx.get(META_FORMAT_VERSION)) as number | undefined;
-				if (now === FORMAT_VERSION) {
-					tx.release();
-					// Their salvage, not ours, decided whether the identity survived,
-					// so our memo of it is no longer evidence of anything.
-					this.clientIdPromise = undefined;
-					return;
-				}
+		// already current, leave its result untouched. Writes are accepted before
+		// start() resolves, from this tab and from others, so the queue can hold
+		// entries the push did not carry: those go back to phase 2 rather than
+		// into the wipe.
+		let pending: Map<string, Mutation[]> | undefined = snapshot.pending;
+		for (let round = 1; pending !== undefined; round++) {
+			if (pending.size > 0) await salvage(pending);
+			pending = await this.kvMutex.run(async () => {
+				const tx = await kv.write();
+				try {
+					const now = (await tx.get(META_FORMAT_VERSION)) as number | undefined;
+					if (now === FORMAT_VERSION) {
+						tx.release();
+						// Their salvage, not ours, decided whether the identity survived,
+						// so our memo of it is no longer evidence of anything.
+						this.clientIdPromise = undefined;
+						return undefined;
+					}
 
-				// The mutation-id counters must survive with the clientId: the
-				// server's per-(workspace, client) watermarks do not reset on a local
-				// format upgrade, and minting ids below them would get fresh mutations
-				// dropped as already-acked. That only holds when the salvage was
-				// clean — a dropped mutation leaves a watermark behind its counter,
-				// and new ids would gap past it (the server rejects gapped pushes), so
-				// in that case start over as a fresh client.
-				const keepIdentity = dropped === 0;
-				const doomed: string[] = [];
-				// Counter value per surviving workspace, to restamp its pushed-through
-				// mark below.
-				const counters = new Map<string, string>();
-				for await (const [ k, v ] of tx.scan('')) {
-					if (keepIdentity) {
-						if (k === META_CLIENT_ID) continue;
-						const ws = workspaceOfMutationCounterKey(k);
-						if (ws !== undefined) {
-							counters.set(ws, v as string);
-							continue;
+					const late = await readSalvageQueue(tx, seen);
+					undecodable += late.undecodable;
+					if (late.total > 0 && round < SALVAGE_MAX_ROUNDS) {
+						tx.release();
+						return late.pending;
+					}
+					for (const [ workspaceId, mutations ] of late.pending) {
+						for (const m of mutations) {
+							lost.push({ workspaceId, mutationId: m.mutationId, mutation: m });
 						}
 					}
-					doomed.push(k);
+					await this.wipeForFormat(tx, undecodable + lost.length === 0);
+					return undefined;
+				} catch (err) {
+					tx.release();
+					throw err;
 				}
-				for (const k of doomed) await tx.del(k);
-				// A counter without its pushed-through mark is half an invariant:
-				// compaction may only renumber ids strictly above the mark, and the
-				// wipe empties the queue the coordinator would otherwise re-seed the
-				// mark from — leaving it at 0 while the counter still reads 42, so the
-				// first burst that folds renumbers from 1 and every mutation up to the
-				// watermark is dropped as already applied. Every id the counter has
-				// minted is now either acked or salvaged (that is what dropped == 0
-				// means), so the server's watermark IS the counter.
-				for (const [ ws, id ] of counters) await tx.put(metaPushedThrough(ws), id);
-				await tx.put(META_FORMAT_VERSION, FORMAT_VERSION);
-				await tx.commit();
-				// The stored identity is gone, so the memo of it must go too —
-				// a mutation issued before start() has already taken the old id,
-				// and keeping it cached would hand the rest of the session the
-				// very identity whose watermarks this wipe exists to escape.
-				if (!keepIdentity) this.clientIdPromise = undefined;
-			} catch (err) {
-				tx.release();
-				throw err;
-			}
-		});
+			});
+		}
+		const dropped = undecodable + lost.length;
 		if (dropped > 0) {
 			this.statusTracker.update({
 				lastError: {
@@ -4616,6 +4633,53 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				});
 			}
 		}
+	}
+
+	/**
+	 * Phase 3 of ensureFormatVersion: deletes everything but (with
+	 * `keepIdentity`) the clientId and the mutation-id counters, stamps the new
+	 * version, and commits `tx`.
+	 */
+	private async wipeForFormat(tx: KVWrite, keepIdentity: boolean): Promise<void> {
+		// The mutation-id counters must survive with the clientId: the
+		// server's per-(workspace, client) watermarks do not reset on a local
+		// format upgrade, and minting ids below them would get fresh mutations
+		// dropped as already-acked. That only holds when the salvage was
+		// clean — a dropped mutation leaves a watermark behind its counter,
+		// and new ids would gap past it (the server rejects gapped pushes), so
+		// in that case start over as a fresh client.
+		const doomed: string[] = [];
+		// Counter value per surviving workspace, to restamp its pushed-through
+		// mark below.
+		const counters = new Map<string, string>();
+		for await (const [ k, v ] of tx.scan('')) {
+			if (keepIdentity) {
+				if (k === META_CLIENT_ID) continue;
+				const ws = workspaceOfMutationCounterKey(k);
+				if (ws !== undefined) {
+					counters.set(ws, v as string);
+					continue;
+				}
+			}
+			doomed.push(k);
+		}
+		for (const k of doomed) await tx.del(k);
+		// A counter without its pushed-through mark is half an invariant:
+		// compaction may only renumber ids strictly above the mark, and the
+		// wipe empties the queue the coordinator would otherwise re-seed the
+		// mark from — leaving it at 0 while the counter still reads 42, so the
+		// first burst that folds renumbers from 1 and every mutation up to the
+		// watermark is dropped as already applied. Every id the counter has
+		// minted is now either acked or salvaged (that is what keepIdentity
+		// means), so the server's watermark IS the counter.
+		for (const [ ws, id ] of counters) await tx.put(metaPushedThrough(ws), id);
+		await tx.put(META_FORMAT_VERSION, FORMAT_VERSION);
+		await tx.commit();
+		// The stored identity is gone, so the memo of it must go too —
+		// a mutation issued before start() has already taken the old id,
+		// and keeping it cached would hand the rest of the session the
+		// very identity whose watermarks this wipe exists to escape.
+		if (!keepIdentity) this.clientIdPromise = undefined;
 	}
 
 	/**
