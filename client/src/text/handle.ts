@@ -568,7 +568,7 @@ function buildHandle(deps: TextHandleDeps, initial: Uint8Array, lease: PeerLease
 			const cpStart = utf16ToCodePoint(text, start);
 			const cpEnd = utf16ToCodePoint(text, end);
 			// Capture what this op overwrites BEFORE applying it.
-			const inverse = recordMarkInverse(doc, cpStart, cpEnd, key);
+			const inverse = recordMarkInverse(doc, cpStart, cpEnd, key, value);
 			const id = doc.mark(cpStart, cpEnd, key, value, expand);
 			emit({ ops: [], marksChanged: true }, text);
 			// Only the op itself: its anchors name items the receiver already has,
@@ -583,7 +583,7 @@ function buildHandle(deps: TextHandleDeps, initial: Uint8Array, lease: PeerLease
 			const text = doc.plainText();
 			const cpStart = utf16ToCodePoint(text, start);
 			const cpEnd = utf16ToCodePoint(text, end);
-			const inverse = recordMarkInverse(doc, cpStart, cpEnd, key);
+			const inverse = recordMarkInverse(doc, cpStart, cpEnd, key, null);
 			const id = doc.unmark(cpStart, cpEnd, key, expand);
 			emit({ ops: [], marksChanged: true }, text);
 			await push({ items: [], marks: [ id ] }, [ inverse ]);

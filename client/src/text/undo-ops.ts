@@ -8,8 +8,10 @@
 //   - inverse of a delete re-inserts the content as NEW items anchored
 //     between the surviving neighbours, and re-applies the marks that covered
 //     it at delete time;
-//   - inverse of a mark/unmark removes the key over the op's range and
-//     re-applies the previously-resolved values.
+//   - inverse of a mark/unmark re-applies the previously-resolved values,
+//     but only over the characters that still hold the value the op set. A
+//     character a later op changed keeps that op's value, so a peer's
+//     formatting on top of the local mark survives the undo.
 //
 // Because every recorded op names only items this client authored (or
 // content this client removed), undo touches local edits alone and leaves
@@ -28,22 +30,45 @@
 //   - The original expand policy is not recorded; marks come back as
 //     ExpandNone, so text later typed at a restored boundary does not join
 //     the mark even if it would have before.
+//
+// A marks inverse matches what the op set by VALUE, not by op id. An undo or
+// redo writes its values through new ops, so the op a later record names may
+// no longer be the one that wins; the value it set is still there to compare.
+// The cost: a later op that set the same value is reverted along with it.
 
 import {
 	type Anchor,
 	AnchorAfter,
 	AnchorBefore,
 	ExpandNone,
+	type MarkValue,
 	type PriorSpan,
 	type SegmentMark,
 	type TextDoc,
 } from './doc.js';
 
+/** A value one mark step wrote over an anchored range; null for a removal. */
+export interface SetSpan {
+	start: Anchor;
+	end: Anchor;
+	value: MarkValue;
+}
+
 /** One symbolic step of a text inverse (see the module comment). */
 export type TextInverseOp =
 	| { type: 'deleteItems'; peer: string; start: number; count: number }
 	| { type: 'reinsert'; content: string; at: Anchor; marks?: SegmentMark[] }
-	| { type: 'marks'; key: string; start: Anchor; end: Anchor; prior: PriorSpan[] };
+	| {
+		type: 'marks';
+		key: string;
+		start: Anchor;
+		end: Anchor;
+		/** The values to restore. */
+		prior: PriorSpan[];
+		/** What the step being inverted wrote. Only a character that still
+		 * resolves to the value written there is restored. */
+		set: SetSpan[];
+	};
 
 /** Builds the reinsert inverse of one deleted segment, carrying its marks
  * only when there are any (an unmarked document records no extra state). */
@@ -89,25 +114,92 @@ export function applyTextInverse(doc: TextDoc, ops: TextInverseOp[]): TextInvers
 				const start = doc.resolveAnchor(op.start);
 				const end = doc.resolveAnchor(op.end);
 				if (start >= end) break; // the whole range was deleted meanwhile
+				const runs = stillSet(doc, start, end, op.key, op.set);
+				if (runs.length === 0) break; // later ops wrote over all of it
+				const prior = doc.priorSpans(start, end, op.key);
+				// Clear each run, then restore what the original op overwrote
+				// there. Outside the runs the later ops' values stay.
+				for (const [ s, e ] of runs) {
+					doc.unmark(s, e, op.key, ExpandNone);
+					for (const span of op.prior) {
+						const ps = Math.max(doc.resolveAnchor(span.start), s);
+						const pe = Math.min(doc.resolveAnchor(span.end), e);
+						if (ps < pe) doc.mark(ps, pe, op.key, span.value, ExpandNone);
+					}
+				}
 				redo.push({
 					type: 'marks',
 					key: op.key,
 					start: op.start,
 					end: op.end,
-					prior: doc.priorSpans(start, end, op.key),
+					prior,
+					set: written(doc, runs, op.key),
 				});
-				// Clear the range, then restore what the original op overwrote.
-				doc.unmark(start, end, op.key, ExpandNone);
-				for (const span of op.prior) {
-					const s = doc.resolveAnchor(span.start);
-					const e = doc.resolveAnchor(span.end);
-					if (s < e) doc.mark(s, e, op.key, span.value, ExpandNone);
-				}
 				break;
 			}
 		}
 	}
 	return redo;
+}
+
+/**
+ * The resolved value of key at each visible code point in [start, end), null
+ * where the key is absent.
+ */
+function valuesOf(doc: TextDoc, start: number, end: number, key: string): MarkValue[] {
+	const out = new Array<MarkValue>(end - start).fill(null);
+	for (const span of doc.resolveMarks()) {
+		if (span.key !== key) continue;
+		const s = Math.max(span.start, start);
+		const e = Math.min(span.end, end);
+		for (let i = s; i < e; i++) out[i - start] = span.value;
+	}
+	return out;
+}
+
+/** The maximal runs inside [start, end) whose resolved value of key is still
+ * the value set wrote there. */
+function stillSet(
+	doc: TextDoc,
+	start: number,
+	end: number,
+	key: string,
+	set: SetSpan[],
+): [number, number][] {
+	const want = new Array<MarkValue | undefined>(end - start).fill(undefined);
+	for (const span of set) {
+		const s = Math.max(doc.resolveAnchor(span.start), start);
+		const e = Math.min(doc.resolveAnchor(span.end), end);
+		for (let i = s; i < e; i++) want[i - start] = span.value;
+	}
+	const have = valuesOf(doc, start, end, key);
+	const runs: [number, number][] = [];
+	for (let i = 0; i < want.length; i++) {
+		if (want[i] === undefined || want[i] !== have[i]) continue;
+		const last = runs[runs.length - 1];
+		if (last !== undefined && last[1] === start + i) last[1]++;
+		else runs.push([ start + i, start + i + 1 ]);
+	}
+	return runs;
+}
+
+/** What the runs resolve to now, as the set of the step that wrote them. */
+function written(doc: TextDoc, runs: [number, number][], key: string): SetSpan[] {
+	const out: SetSpan[] = [];
+	for (const [ s, e ] of runs) {
+		const values = valuesOf(doc, s, e, key);
+		let runStart = s;
+		for (let i = s + 1; i <= e; i++) {
+			if (i < e && values[i - s] === values[runStart - s]) continue;
+			out.push({
+				start: doc.anchorAt(runStart, AnchorBefore),
+				end: doc.anchorAt(i, AnchorAfter),
+				value: values[runStart - s]!,
+			});
+			runStart = i;
+		}
+	}
+	return out;
 }
 
 /**
@@ -149,19 +241,24 @@ function restoreMarks(
 	}
 }
 
-/** Builds the marks-inverse record for a mark/unmark over [start, end) code
- * points: capture the prior values, anchor the range. Call BEFORE the op. */
+/** Builds the marks-inverse record for a mark (or, with a null value, an
+ * unmark) over [start, end) code points: capture the prior values, anchor the
+ * range. Call BEFORE the op. */
 export function recordMarkInverse(
 	doc: TextDoc,
 	start: number,
 	end: number,
 	key: string,
+	value: MarkValue,
 ): TextInverseOp {
+	const startAnchor = doc.anchorAt(start, AnchorBefore);
+	const endAnchor = doc.anchorAt(end, AnchorAfter);
 	return {
 		type: 'marks',
 		key,
-		start: doc.anchorAt(start, AnchorBefore),
-		end: doc.anchorAt(end, AnchorAfter),
+		start: startAnchor,
+		end: endAnchor,
 		prior: doc.priorSpans(start, end, key),
+		set: [ { start: startAnchor, end: endAnchor, value } ],
 	};
 }

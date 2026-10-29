@@ -14,8 +14,14 @@ import {
 	decodeTextDoc,
 	encodeTextDoc,
 	ExpandNone,
+	mergeInto,
 	TextDoc,
 } from '../../src/text/index.js';
+import {
+	applyTextInverse,
+	recordMarkInverse,
+	type TextInverseOp,
+} from '../../src/text/undo-ops.js';
 
 function newClient() {
 	return new SyncClient({
@@ -43,6 +49,11 @@ function bodyDoc(peer: string, s: string): Uint8Array {
 	const d = new TextDoc(peer);
 	d.insert(0, s);
 	return encodeTextDoc(d);
+}
+
+/** A replica of d that writes as peer. */
+function fork(d: TextDoc, peer: string): TextDoc {
+	return decodeTextDoc(encodeTextDoc(d), peer);
 }
 
 describe('text undo', () => {
@@ -107,6 +118,36 @@ describe('text undo', () => {
 		expect(await client.undo()).toBe(true);
 		await vi.waitFor(() => {
 			expect(handle.value).toBe('>> hello world');
+		});
+
+		handle.close();
+		await client.close();
+	});
+
+	it('undoing a mark keeps the mark a peer applied over part of it afterwards', async () => {
+		const client = newClient();
+		const base = bodyDoc('seed', 'hello world');
+		await client.db.widget.mutate.put({ id: 'w1', body: base });
+		const handle = await client.db.widget.text('w1', 'body');
+
+		await handle.mark(0, 11, 'color', 'red');
+		// bob has seen the red: his blue has the higher id.
+		const remote = decodeTextDoc((await client.db.widget.get('w1'))!.body, 'bob');
+		remote.mark(6, 11, 'color', 'blue', ExpandNone);
+		await client.db.widget.mutate.patch('w1', { body: encodeTextDoc(remote) });
+		await vi.waitFor(() => {
+			expect(handle.marks()).toEqual([
+				{ start: 0, end: 6, key: 'color', value: 'red' },
+				{ start: 6, end: 11, key: 'color', value: 'blue' },
+			]);
+		});
+
+		// The remote-merge patch's snapshot inverse is a no-op union; the
+		// second step undoes the red.
+		expect(await client.undo()).toBe(true);
+		expect(await client.undo()).toBe(true);
+		await vi.waitFor(() => {
+			expect(handle.marks()).toEqual([ { start: 6, end: 11, key: 'color', value: 'blue' } ]);
 		});
 
 		handle.close();
@@ -349,5 +390,77 @@ describe('text undo', () => {
 		expect(await client.db.annotation.get('a1')).toBeUndefined();
 
 		await client.close();
+	});
+});
+
+describe('text inverses after a peer edited on top of the local edit', () => {
+	it('keeps text a peer typed inside the run being undone', () => {
+		const alice = new TextDoc('alice');
+		const range = alice.insert(0, 'hello');
+		const inverse: TextInverseOp[] = [
+			{ type: 'deleteItems', peer: range.peer, start: range.start, count: range.count },
+		];
+		const bob = fork(alice, 'bob');
+		bob.insert(2, 'XX');
+		mergeInto(alice, bob);
+		expect(alice.plainText()).toBe('heXXllo');
+
+		applyTextInverse(alice, inverse);
+
+		expect(alice.plainText()).toBe('XX');
+	});
+
+	it('keeps a mark a peer applied over part of the range after the local mark', () => {
+		const alice = new TextDoc('alice');
+		alice.insert(0, 'hello world');
+		const inverse = [ recordMarkInverse(alice, 0, 11, 'color', 'red') ];
+		alice.mark(0, 11, 'color', 'red', ExpandNone);
+		const bob = fork(alice, 'bob');
+		bob.mark(6, 11, 'color', 'blue', ExpandNone);
+		mergeInto(alice, bob);
+		expect(alice.resolveMarks()).toEqual([
+			{ start: 0, end: 6, key: 'color', value: 'red' },
+			{ start: 6, end: 11, key: 'color', value: 'blue' },
+		]);
+
+		applyTextInverse(alice, inverse);
+
+		expect(alice.resolveMarks()).toEqual([ { start: 6, end: 11, key: 'color', value: 'blue' } ]);
+	});
+
+	it('redoes the local mark only where the undo cleared it', () => {
+		const alice = new TextDoc('alice');
+		alice.insert(0, 'hello world');
+		const inverse = [ recordMarkInverse(alice, 0, 11, 'color', 'red') ];
+		alice.mark(0, 11, 'color', 'red', ExpandNone);
+		const bob = fork(alice, 'bob');
+		bob.mark(6, 11, 'color', 'blue', ExpandNone);
+		mergeInto(alice, bob);
+
+		const redo = applyTextInverse(alice, inverse);
+		applyTextInverse(alice, redo);
+
+		expect(alice.resolveMarks()).toEqual([
+			{ start: 0, end: 6, key: 'color', value: 'red' },
+			{ start: 6, end: 11, key: 'color', value: 'blue' },
+		]);
+	});
+
+	it('keeps a mark a peer applied after the local unmark', () => {
+		const alice = new TextDoc('alice');
+		alice.insert(0, 'hello world');
+		alice.mark(0, 11, 'bold', true, ExpandNone);
+		const inverse = [ recordMarkInverse(alice, 0, 11, 'bold', null) ];
+		alice.unmark(0, 11, 'bold', ExpandNone);
+		const bob = fork(alice, 'bob');
+		bob.mark(0, 5, 'bold', false, ExpandNone);
+		mergeInto(alice, bob);
+
+		applyTextInverse(alice, inverse);
+
+		expect(alice.resolveMarks()).toEqual([
+			{ start: 0, end: 5, key: 'bold', value: false },
+			{ start: 5, end: 11, key: 'bold', value: true },
+		]);
 	});
 });
