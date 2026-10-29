@@ -311,7 +311,11 @@ export function decodeTextDoc(data: Uint8Array | undefined, peer: string): TextD
 	const peers: string[] = [];
 	for (let i = 0; i < peerCount; i++) peers.push(r.str());
 	for (let i = 0; i < peerCount; i++) {
-		doc.vv.set(peers[i]!, r.uvarint());
+		// A counter of 0 says the peer wrote nothing, as an absent entry does.
+		// bumpVV never adds one, so keeping it would put the peer in the table
+		// of one merge order and not the other.
+		const c = r.uvarint();
+		if (c > 0) doc.vv.set(peers[i]!, c);
 	}
 	const peerAt = (idx: number): string => {
 		const p = peers[idx];

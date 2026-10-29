@@ -81,6 +81,9 @@ type vectorStep struct {
 	Purged int     `json:"purged"`
 	// PurgedMarks is the mark-op half of a compact step's reclaim.
 	PurgedMarks int `json:"purgedMarks"`
+	// Hex is the raw bytes a load, loadFragment or mergeHex step reads. They
+	// are used as given, so a case can feed a decoder bytes no encoder makes.
+	Hex string `json:"hex"`
 }
 
 type vectorCheck struct {
@@ -206,6 +209,32 @@ var _ = Describe("shared vectors", func() {
 					d, err := text.Decode(docs[step.From].Encode(), peer)
 					Expect(err).NotTo(HaveOccurred())
 					docs[step.Doc] = d
+				case "load":
+					raw, err := hex.DecodeString(step.Hex)
+					Expect(err).NotTo(HaveOccurred())
+					peer := ""
+					if step.Peer != nil {
+						peer = *step.Peer
+					}
+					d, err := text.Decode(raw, peer)
+					Expect(err).NotTo(HaveOccurred())
+					docs[step.Doc] = d
+				case "mergeHex":
+					raw, err := hex.DecodeString(step.Hex)
+					Expect(err).NotTo(HaveOccurred())
+					target := docs[step.Doc]
+					ab, err := text.Merge(target.Encode(), raw)
+					Expect(err).NotTo(HaveOccurred())
+					ba, err := text.Merge(raw, target.Encode())
+					Expect(err).NotTo(HaveOccurred())
+					Expect(ab).To(Equal(ba), "merge must be commutative")
+					merged, err := text.Decode(ab, target.Peer())
+					Expect(err).NotTo(HaveOccurred())
+					docs[step.Doc] = merged
+				case "loadFragment":
+					raw, err := hex.DecodeString(step.Hex)
+					Expect(err).NotTo(HaveOccurred())
+					frags[step.As] = raw
 				case "insert":
 					Expect(docs[step.Doc].Insert(step.Index, step.Text)).To(Succeed())
 				case "delete":

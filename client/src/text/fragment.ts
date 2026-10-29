@@ -340,7 +340,9 @@ export function decodeFragment(data: Uint8Array): TextFragment {
 	const peers: string[] = [];
 	for (let i = 0; i < peerCount; i++) peers.push(r.str());
 	for (let i = 0; i < peerCount; i++) {
-		f.vv.set(peers[i]!, r.uvarint());
+		// Dropped for the reason decodeTextDoc drops it.
+		const c = r.uvarint();
+		if (c > 0) f.vv.set(peers[i]!, c);
 	}
 	const peerAt = (idx: number): string => {
 		const p = peers[idx];

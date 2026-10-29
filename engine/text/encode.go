@@ -407,7 +407,12 @@ func Decode(data []byte, peer string) (*Doc, error) {
 		if err != nil {
 			return nil, err
 		}
-		d.vv[peers[i]] = c
+		// A counter of 0 says the peer wrote nothing, as an absent entry does.
+		// bumpVV never adds one, so keeping it would put the peer in the
+		// table of one merge order and not the other.
+		if c > 0 {
+			d.vv[peers[i]] = c
+		}
 	}
 	peerAt := func(idx uint64) (string, error) {
 		if idx >= peerCount {

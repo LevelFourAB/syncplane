@@ -3617,6 +3617,114 @@
 					"value": "010105616c6963650d01000105060568656c6c6f00"
 				}
 			]
+		},
+		{
+			"name": "a version-vector entry with counter 0 decodes as absent",
+			"steps": [
+				{
+					"op": "load",
+					"doc": "z",
+					"hex": "01010178000000",
+					"peer": ""
+				}
+			],
+			"checks": [
+				{
+					"check": "vv",
+					"doc": "z",
+					"value": {}
+				},
+				{
+					"check": "encodedHex",
+					"doc": "z",
+					"value": "01000000"
+				}
+			]
+		},
+		{
+			"name": "merging a document whose version vector holds a 0 gives the same bytes in either order",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hi"
+				},
+				{
+					"op": "new",
+					"doc": "b",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "b",
+					"index": 0,
+					"text": "hi"
+				},
+				{
+					"op": "mergeHex",
+					"doc": "a",
+					"hex": "01010178000000"
+				}
+			],
+			"checks": [
+				{
+					"check": "sameEncoding",
+					"doc": "a",
+					"other": "b"
+				},
+				{
+					"check": "vv",
+					"doc": "a",
+					"value": {
+						"alice": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "fragment: merging one whose version vector holds a 0 gives the same bytes in either order",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hi"
+				},
+				{
+					"op": "fragment",
+					"of": "a",
+					"as": "fa"
+				},
+				{
+					"op": "loadFragment",
+					"as": "fz",
+					"hex": "02010178000000"
+				},
+				{
+					"op": "mergeFragments",
+					"a": "fa",
+					"b": "fz",
+					"as": "m"
+				}
+			],
+			"checks": [
+				{
+					"check": "fragmentHex",
+					"frag": "m",
+					"value": "020105616c69636502010001020602686900"
+				}
+			]
 		}
 	],
 	"rejects": [
@@ -3949,7 +4057,7 @@
 		},
 		{
 			"name": "leading U+FEFF",
-			"text": "\ufeffx",
+			"text": "﻿x",
 			"hex": "03efbbbf78"
 		}
 	]

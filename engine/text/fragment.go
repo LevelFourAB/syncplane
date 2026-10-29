@@ -374,7 +374,10 @@ func decodeFragment(data []byte) (*Fragment, error) {
 		if err != nil {
 			return nil, err
 		}
-		f.vv[peers[i]] = c
+		// Dropped for the reason Decode drops it.
+		if c > 0 {
+			f.vv[peers[i]] = c
+		}
 	}
 	peerAt := func(idx uint64) (string, error) {
 		if idx >= peerCount {

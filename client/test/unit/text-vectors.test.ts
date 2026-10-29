@@ -61,6 +61,9 @@ interface VectorStep {
 	b?: string;
 	purged?: number;
 	purgedMarks?: number;
+	/** The raw bytes a load, loadFragment or mergeHex step reads. They are used
+	 * as given, so a case can feed a decoder bytes no encoder makes. */
+	hex?: string;
 }
 
 interface VectorCheck {
@@ -174,6 +177,21 @@ describe('shared text vectors', () => {
 						break;
 					case 'fork':
 						docs.set(step.doc, decodeTextDoc(encodeTextDoc(doc(step.from!)), step.peer ?? ''));
+						break;
+					case 'load':
+						docs.set(step.doc, decodeTextDoc(fromHex(step.hex!), step.peer ?? ''));
+						break;
+					case 'mergeHex': {
+						const target = doc(step.doc);
+						const raw = fromHex(step.hex!);
+						const ab = mergeText(encodeTextDoc(target), raw);
+						const ba = mergeText(raw, encodeTextDoc(target));
+						expect(toHex(ab), 'merge must be commutative').toBe(toHex(ba));
+						docs.set(step.doc, decodeTextDoc(ab, target.peer));
+						break;
+					}
+					case 'loadFragment':
+						frags.set(step.as!, fromHex(step.hex!));
 						break;
 					case 'insert':
 						doc(step.doc).insert(step.index!, step.text!);
