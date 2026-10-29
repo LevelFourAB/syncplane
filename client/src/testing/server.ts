@@ -51,6 +51,7 @@ import {
 import {
 	type EntityDef,
 	EntityRegistry,
+	keepClearedTextVersions,
 	keyOf,
 	mergeMask,
 	type MergerSpec,
@@ -942,6 +943,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 					}
 					throw new Rejection(CodeInvalidArgument, `${crud.entity} "${crud.key}": ${detail}`);
 				}
+				keepClearedTextVersions(def.schema, this.registry.textPathsOf(def.name), current.value, dst);
 				staging.set(crud.entity, crud.key, { version: seq, value: toBinary(def.schema, dst) });
 				return;
 			}

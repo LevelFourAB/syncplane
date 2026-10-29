@@ -59,6 +59,7 @@ import {
 	type EntityDef,
 	type EntityMergers,
 	type EntityRegistry,
+	keepClearedTextVersions,
 	keyOf,
 	mergeMask,
 	mergeTextFieldsInto,
@@ -275,6 +276,7 @@ export async function applyCrudLocally(
 			} catch (err) {
 				merged = withoutUnapplicableText(def, registry, baseBytes, src, paths, mergers, err);
 			}
+			keepClearedTextVersions(def.schema, registry.textPathsOf(def.name), baseBytes, merged);
 			const bytes = toBinary(def.schema, merged);
 			const record: OverlayRecord = { v: bytes };
 			await tx.put(overlayKey(def.name, workspaceId, crud.key), record);

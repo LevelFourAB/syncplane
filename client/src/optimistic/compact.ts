@@ -296,6 +296,16 @@ function foldCrud(
 			// accepts alone would go down with one it refuses. Two patches that
 			// reach the same guards get the same verdict from the guards.
 			if (!sameGuards(def, base, incoming)) return 'barrier';
+			// A PATCH carrying text unions it with the stored document, so text
+			// folded onto an earlier clear would bring the cleared text back.
+			const textPaths = registry.textPathsOf(def.name);
+			if (
+				textPaths.length > 0
+				&& patchReachesText(textPaths, incoming)
+				&& clearsText(def, textPaths, base, fromBinary(def.schema, base.value))
+			) {
+				return 'barrier';
+			}
 			const merged = fromBinary(def.schema, base.value);
 			const src = fromBinary(def.schema, incoming.value);
 			if (!tryMergeMask(def, merged, src, incoming, mergers)) return 'barrier';

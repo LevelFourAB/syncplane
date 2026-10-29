@@ -808,6 +808,48 @@ describe('text field compaction', () => {
 		});
 	});
 
+	// A PATCH that clears a text document replaces it, while a PATCH that
+	// carries text unions with what is stored. The overlay keeps the cleared
+	// document's version vector, as the server does, so text typed afterwards
+	// gets ids the cleared text did not use.
+	describe('a PATCH that clears the document', () => {
+		const confirmedDoc = new TextDoc('c1');
+		confirmedDoc.insert(0, 'old');
+		const confirmed = {
+			[confirmedKey('widget', WS, 'w1')]: {
+				v: toBinary(
+					WidgetSchema,
+					create(WidgetSchema, { id: 'w1', body: encodeTextDoc(confirmedDoc) }),
+				),
+				ver: '3',
+			},
+		};
+		const clear = widgetBodyPatch(1n, 'w1', new Uint8Array());
+
+		async function overlayBody(mutations: Mutation[]): Promise<Uint8Array | undefined> {
+			const overlay = await overlayAfterReplay(widgetRegistry, mutations, confirmed);
+			const record = overlay.get(overlayKey('widget', WS, 'w1')) as { v: Uint8Array } | undefined;
+			expect(record).toBeDefined();
+			return fromBinary(WidgetSchema, record!.v).body;
+		}
+
+		it('keeps the version vector of the text it cleared', async () => {
+			const body = await overlayBody([ clear ]);
+			expect(plainTextOf(body)).toBe('');
+			expect(decodeTextDoc(body, '').versionVector()).toEqual(confirmedDoc.versionVector());
+		});
+
+		it('stays apart from a text PATCH queued after it', async () => {
+			const typed = decodeTextDoc(await overlayBody([ clear ]), 'c1');
+			typed.insert(0, 'new');
+			const original = [ clear, widgetBodyPatch(2n, 'w1', encodeTextDoc(typed)) ];
+
+			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED);
+			expect(plan.mutations).toHaveLength(2);
+			expect(plainTextOf(await overlayBody(plan.mutations))).toBe('new');
+		});
+	});
+
 	it('folds divergent text states into their union', async () => {
 		// A remote state merged in between two local patches: the fold must
 		// keep both sides' items.

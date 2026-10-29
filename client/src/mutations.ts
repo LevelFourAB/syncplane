@@ -55,6 +55,7 @@ import {
 	isPlainString,
 	mergeText,
 	plainString,
+	TextDoc,
 } from './text/index.js';
 
 // Descriptor-derived facts are memoized per descriptor below. getOption decodes
@@ -2470,6 +2471,34 @@ export function mergeTextFieldsInto(
 				steps,
 				nextBytes === undefined ? baseBytes : mergeText(baseBytes, nextBytes),
 			);
+		}
+	}
+}
+
+/**
+ * Gives every text document that `prev` carries and `next` does not an empty
+ * document that keeps the cleared one's version vector, in place — the client
+ * mirror of the server's PATCH clear. A writer that types into the cleared
+ * field allocates ids past every one the cleared text used. An element `next`
+ * dropped is not a position of `next`, and its document goes with it.
+ */
+export function keepClearedTextVersions(
+	schema: DescMessage,
+	textPaths: readonly string[],
+	prev: Uint8Array,
+	next: Message,
+): void {
+	let prevMsg: Message | undefined;
+	for (const schemaPath of textPaths) {
+		for (const path of textInstancePaths(schema, schemaPath, next)) {
+			const steps = textFieldSteps(schema, path);
+			if (getBytesAt(next as unknown as Rec, steps) !== undefined) continue;
+			prevMsg ??= fromBinary(schema, prev);
+			const before = getBytesAt(prevMsg as unknown as Rec, steps);
+			if (before === undefined) continue;
+			const empty = new TextDoc('');
+			empty.observeVersion(decodeTextDoc(before, '').versionVector());
+			setBytesAt(next as unknown as Rec, steps, encodeTextDoc(empty));
 		}
 	}
 }

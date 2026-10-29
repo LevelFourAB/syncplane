@@ -367,4 +367,67 @@ describe('collaborative-text compaction', () => {
 		await observer.close();
 		await alice.close();
 	});
+
+	it('keeps a clear and the text typed after it when neither was pushed yet', async () => {
+		const ws = freshWorkspace();
+		const alice = newClient(ws);
+		await alice.start();
+
+		await alice.mutate.put(WidgetSchema, { id: 'w1' });
+		await alice.syncNow();
+		let h = await alice.text(WidgetSchema, 'w1', 'body');
+		await h.insert(0, 'hello world');
+		await h.delete(5, 6);
+		await h.close();
+		await alice.syncNow();
+
+		await alice.mutate.patch(WidgetSchema, 'w1', { body: new Uint8Array() });
+		h = await alice.text(WidgetSchema, 'w1', 'body');
+		await h.insert(0, 'new');
+		await h.close();
+		expect(plainTextOf((await alice.get(WidgetSchema, 'w1'))?.body)).toBe('new');
+		for (let i = 0; i < 3; i++) await alice.syncNow();
+
+		const observer = newClient(ws);
+		await observer.start();
+		await observer.syncNow();
+		expect(plainTextOf((await observer.get(WidgetSchema, 'w1'))?.body)).toBe('new');
+		expect(plainTextOf((await alice.get(WidgetSchema, 'w1'))?.body)).toBe('new');
+
+		await observer.close();
+		await alice.close();
+	});
+
+	it('accepts text typed into a compacted field right after a local clear', async () => {
+		const ws = freshWorkspace();
+		const alice = newClient(ws);
+		await alice.start();
+
+		await alice.mutate.put(WidgetSchema, { id: 'w1' });
+		await alice.syncNow();
+		let h = await alice.text(WidgetSchema, 'w1', 'body');
+		await h.insert(0, 'hello world');
+		await h.delete(5, 6);
+		await h.close();
+		await alice.syncNow();
+		await collectGarbage(ws);
+		await alice.syncNow();
+
+		// The clear and the typing reach the server in one push, so the typing
+		// is built on the local clear, not on the one the server stored.
+		await alice.mutate.patch(WidgetSchema, 'w1', { body: new Uint8Array() });
+		h = await alice.text(WidgetSchema, 'w1', 'body');
+		await h.insert(0, 'new');
+		await h.close();
+		for (let i = 0; i < 3; i++) await alice.syncNow();
+
+		const observer = newClient(ws);
+		await observer.start();
+		await observer.syncNow();
+		expect(plainTextOf((await observer.get(WidgetSchema, 'w1'))?.body)).toBe('new');
+		expect(plainTextOf((await alice.get(WidgetSchema, 'w1'))?.body)).toBe('new');
+
+		await observer.close();
+		await alice.close();
+	});
 });
