@@ -40,7 +40,13 @@
 //     savepoints (InSavepoint) nest within it.
 //   - Lazy workspace registration: a write tx whose closure writes nothing
 //     must leave no trace — above all no entry for ListWorkspaceIDs, which
-//     nothing ever removes (see WithWriteTx).
+//     only DeleteWorkspace removes (see WithWriteTx).
+//   - Workspace deletion (DeleteWorkspace, RestoreWorkspace, WorkspaceDeleted)
+//     removes everything a workspace holds and leaves a mark that refuses the
+//     id. The mark is checked under the workspace's write exclusion: a write
+//     transaction that would register a marked workspace fails with
+//     ErrWorkspaceDeleted and commits nothing, so a write that races the
+//     deletion cannot bring the workspace back.
 //   - Actor round-trip: the Actor handed to PutRow/DeleteRow is stored with the
 //     row and returned by EVERY read that yields a Row (GetRow, GetRows, both
 //     entity scans, ScanChanges). Uniform because a Row whose Actor is populated on
@@ -127,6 +133,11 @@ import (
 
 // ErrNotFound is returned by lookups that reference a missing row.
 var ErrNotFound = errors.New("storage: not found")
+
+// ErrWorkspaceDeleted is returned by a write transaction that would register a
+// workspace DeleteWorkspace marked as deleted (see Adapter.DeleteWorkspace).
+// The transaction commits nothing.
+var ErrWorkspaceDeleted = errors.New("storage: workspace deleted")
 
 // ErrCatalogConflict is returned by Catalog.SwapCatalogEntry when the stored
 // revision of the entry is not the one the caller expected.
@@ -345,9 +356,44 @@ type Adapter interface {
 	// eager registration lets any caller mint permanent workspaces that every
 	// background pass then iterates forever.
 	WithWriteTx(ctx context.Context, workspaceID string, fn func(WriteTx) error) error
+	// DeleteWorkspace removes every piece of state the workspace holds and
+	// marks the id as deleted, in one transaction. The state is the rows and
+	// tombstones, client watermarks and verdicts, the text delta log and
+	// compaction floors, index entries and build state, idempotency records,
+	// effect-consumer positions and shadows, sequence lineage, the adapter's
+	// own cursor-state entries (see cursorstate.Provider), and the
+	// workspace's sequence, horizons, epoch and marks.
+	//
+	// It holds the workspace's write exclusion (see WithWriteTx), so it waits
+	// for a write transaction in flight, and none starts until it ends. After
+	// it returns:
+	//
+	//   - ListWorkspaceIDs and the work queries do not return the id.
+	//   - WorkspaceDeleted reports true.
+	//   - A write transaction whose writes would register the workspace fails
+	//     with ErrWorkspaceDeleted and commits nothing.
+	//   - A read, in a read transaction or a write transaction, sees a
+	//     workspace that was never written: sequence 0, epoch 0, no rows.
+	//
+	// Deleting a workspace that holds no state still marks it. Deleting a
+	// marked workspace changes nothing. Neither is an error.
+	DeleteWorkspace(ctx context.Context, workspaceID string) error
+	// RestoreWorkspace removes the mark DeleteWorkspace left, so that the next
+	// write registers the workspace again as a new one, with sequence 0 and a
+	// new store epoch. It restores no data. Restoring a workspace that is not
+	// marked is not an error.
+	RestoreWorkspace(ctx context.Context, workspaceID string) error
+	// WorkspaceDeleted reports whether DeleteWorkspace marked the workspace
+	// and RestoreWorkspace has not removed the mark since.
+	//
+	// The engine calls it once per request it admits to a workspace, so an
+	// adapter must answer it with one indexed lookup. It must read the primary,
+	// never a bounded-staleness view: a stale answer admits a client to a
+	// workspace that is gone.
+	WorkspaceDeleted(ctx context.Context, workspaceID string) (bool, error)
 	// ListWorkspaceIDs returns the ids of the workspaces in rng that hold
 	// persisted state, i.e. those some write transaction has actually written
-	// to.
+	// to and DeleteWorkspace has not deleted since.
 	//
 	// Unpaged, and therefore for enumeration rather than for finding work: a
 	// background pass asks one of the work queries below instead, so that its

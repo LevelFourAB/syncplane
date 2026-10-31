@@ -96,6 +96,21 @@ func (s *store) WithWriteTx(ctx context.Context, workspaceID string, fn func(sto
 	return s.inner.WithWriteTx(ctx, s.prefix+workspaceID, fn)
 }
 
+// DeleteWorkspace deletes the prefixed workspace.
+func (s *store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
+	return s.inner.DeleteWorkspace(ctx, s.prefix+workspaceID)
+}
+
+// RestoreWorkspace lifts the deletion mark of the prefixed workspace.
+func (s *store) RestoreWorkspace(ctx context.Context, workspaceID string) error {
+	return s.inner.RestoreWorkspace(ctx, s.prefix+workspaceID)
+}
+
+// WorkspaceDeleted reports the deletion mark of the prefixed workspace.
+func (s *store) WorkspaceDeleted(ctx context.Context, workspaceID string) (bool, error) {
+	return s.inner.WorkspaceDeleted(ctx, s.prefix+workspaceID)
+}
+
 // ListWorkspaceIDs enumerates the workspaces inside the prefix.
 func (s *store) ListWorkspaceIDs(ctx context.Context, rng storage.Range) ([]string, error) {
 	ids, err := s.inner.ListWorkspaceIDs(ctx, s.scope(rng))

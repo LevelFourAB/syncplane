@@ -46,7 +46,7 @@ Failure reporting channels operate with different lifecycles:
 Workspace access has these values:
 
 - Unset: The server has not refused the workspace.
-- `'revoked'`: Terminal. The application's `CanAccessWorkspace` denied the caller (`workspace_access_revoked` on the wire). The client stops syncing the workspace and keeps its local rows.
+- `'revoked'`: Terminal. The application's `CanAccessWorkspace` denied the caller, or the server deleted the workspace with `Server.DeleteWorkspace` (`workspace_access_revoked` on the wire). The client stops syncing the workspace and keeps its local rows.
 - `'none'`: Not terminal. The caller holds no permission in the workspace's access model (`workspace_no_access` on the wire). The client keeps the local rows and the queue. It retries with backoff, 1 to 30 seconds apart, and immediately on `syncNow()`. When the caller loses its last permission, the pull before this response removes the read rows of the access model. `can()` then answers from an empty summary.
 - `'granted'`: The server admitted the caller after `'none'`. The client syncs the workspace again, including queued writes.
 

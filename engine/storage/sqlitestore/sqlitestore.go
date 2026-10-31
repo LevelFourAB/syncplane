@@ -313,6 +313,34 @@ var migrations = []string{
 	PRIMARY KEY (workspace_id, start_seq)
 );
 CREATE INDEX seq_lineage_gc ON seq_lineage (workspace_id, written_at);`,
+	// 3: deletion marks — one row per workspace DeleteWorkspace removed and
+	// RestoreWorkspace has not lifted since (see storage.Adapter). Read by
+	// register on a workspace's first write and by WorkspaceDeleted.
+	`CREATE TABLE deleted_workspaces (
+	workspace_id TEXT NOT NULL,
+	deleted_at   INTEGER NOT NULL,
+	PRIMARY KEY (workspace_id)
+);`,
+}
+
+// workspaceTables names every table that holds state of one workspace, keyed
+// by its workspace_id column. DeleteWorkspace empties each of them for the
+// workspace it deletes, so a table added by a migration must be added here
+// too; deleted_workspaces is the one table with that column left out, because
+// it holds the mark DeleteWorkspace leaves.
+var workspaceTables = []string{
+	"workspaces",
+	"rows",
+	"clients",
+	"field_deltas",
+	"text_floors",
+	"idempotency",
+	"index_entries",
+	"index_state",
+	"consumer_positions",
+	"consumer_shadows",
+	"cursor_state",
+	"seq_lineage",
 }
 
 // Store implements storage.Adapter. read and write are the same handle for an
@@ -792,6 +820,42 @@ func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(sto
 	return tx.Commit()
 }
 
+// DeleteWorkspace empties every table in workspaceTables for the workspace
+// and records its mark, in one write transaction.
+func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
+	return s.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+		t := tx.(*sqliteTx)
+		for _, table := range workspaceTables {
+			if _, err := t.exec(`DELETE FROM `+table+` WHERE workspace_id = ?`, workspaceID); err != nil {
+				return fmt.Errorf("sqlitestore: delete workspace %q from %s: %w", workspaceID, table, err)
+			}
+		}
+		_, err := t.exec(
+			`INSERT INTO deleted_workspaces (workspace_id, deleted_at) VALUES (?, ?) ON CONFLICT DO NOTHING`,
+			workspaceID, time.Now().UnixMilli(),
+		)
+		return err
+	})
+}
+
+// RestoreWorkspace removes the workspace's deletion mark. It runs on the
+// writer connection, like every write, so it cannot land halfway through a
+// write transaction.
+func (s *Store) RestoreWorkspace(ctx context.Context, workspaceID string) error {
+	return s.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+		_, err := tx.(*sqliteTx).exec(`DELETE FROM deleted_workspaces WHERE workspace_id = ?`, workspaceID)
+		return err
+	})
+}
+
+func (s *Store) WorkspaceDeleted(ctx context.Context, workspaceID string) (bool, error) {
+	var deleted bool
+	err := s.read.QueryRowContext(ctx,
+		`SELECT EXISTS (SELECT 1 FROM deleted_workspaces WHERE workspace_id = ?)`, workspaceID,
+	).Scan(&deleted)
+	return deleted, err
+}
+
 func (s *Store) ListWorkspaceIDs(ctx context.Context, rng storage.Range) ([]string, error) {
 	where, args := rangeWhere("workspace_id", rng)
 	rows, err := s.read.QueryContext(ctx,
@@ -1148,15 +1212,35 @@ type sqliteTx struct {
 // It mints the store epoch here and never touches it again (ON CONFLICT DO
 // NOTHING): the epoch must stay stable for the workspace's lifetime so cursors
 // keep matching across restarts. random() is SQLite's 64-bit PRNG.
+//
+// It refuses a workspace DeleteWorkspace marked with storage.ErrWorkspaceDeleted.
 func (t *sqliteTx) register() error {
 	if t.registered {
 		return nil
 	}
-	if _, err := t.exec(
+	res, err := t.exec(
 		`INSERT INTO workspaces (workspace_id, store_epoch) VALUES (?, random()) ON CONFLICT DO NOTHING`,
 		t.ws,
-	); err != nil {
+	)
+	if err != nil {
 		return err
+	}
+	// Only a new row can belong to a marked workspace: DeleteWorkspace removes
+	// the row in the transaction that writes the mark, and nothing registers
+	// it while the mark stands. So a workspace that already has its row skips
+	// the lookup, which keeps it off every write but a workspace's first.
+	if n, err := res.RowsAffected(); err != nil {
+		return err
+	} else if n > 0 {
+		var deleted bool
+		if err := t.queryRow(
+			`SELECT EXISTS (SELECT 1 FROM deleted_workspaces WHERE workspace_id = ?)`, t.ws,
+		).Scan(&deleted); err != nil {
+			return err
+		}
+		if deleted {
+			return fmt.Errorf("sqlitestore: workspace %q: %w", t.ws, storage.ErrWorkspaceDeleted)
+		}
 	}
 	t.registered = true
 	return nil

@@ -17,6 +17,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/levelfourab/syncplane/engine/cursorstate"
 	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
@@ -4078,6 +4079,274 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					Expect(got.Version).To(BeEquivalentTo(1))
 					Expect(got.Actor).To(Equal(actor))
 				})
+			})
+		})
+		// Deletion is the one way a workspace's state leaves the store as a
+		// whole, so the failure that matters is a table it forgot: whatever
+		// it leaves behind is data the operator was told is gone, and any of
+		// it can resurface in the workspace that later reuses the id.
+		Describe("workspace deletion", func() {
+			// populate writes one of every kind of state a workspace holds.
+			populate := func(ws string) {
+				GinkgoHelper()
+				write(ws, func(tx storage.WriteTx) {
+					seq, err := tx.NextSeq()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(tx.PutRow("widget", "live", []byte("v"), seq, storage.Actor{Subject: "s"})).To(Succeed())
+					Expect(tx.DeleteRow("widget", "dead", seq, storage.Actor{})).To(Succeed())
+					Expect(tx.SetClientLastMutationID("c1", 3)).To(Succeed())
+					Expect(tx.SetClientRejections("c1", []storage.ClientRejection{{MutationID: 2, Code: "conflict"}})).To(Succeed())
+					Expect(tx.PutFieldDelta("widget", "live", "body", seq, []byte("frag"))).To(Succeed())
+					Expect(tx.PutTextFloor("widget", "live", "body", []byte("vv"))).To(Succeed())
+					Expect(tx.PutIdempotencyRecord("key", storage.IdempotencyRecord{Seq: seq})).To(Succeed())
+					Expect(tx.PutIndexEntries("widget", "live", []storage.IndexEntry{{Index: "by_x", Key: []byte("x\x00live")}})).To(Succeed())
+					Expect(tx.SetIndexState("widget", "by_x", "spec", true)).To(Succeed())
+					Expect(tx.SetConsumerPosition("indexer", storage.ConsumerPosition{Seq: seq})).To(Succeed())
+					Expect(tx.PutConsumerShadow("indexer", "widget", "live", []byte("shadow"))).To(Succeed())
+				})
+				write(ws, func(tx storage.WriteTx) {
+					Expect(tx.SetIndexBuildMark("mark")).To(Succeed())
+					Expect(tx.SetTextCompactMark(storage.TextCompactMark{Seq: 1, MinPurged: 1})).To(Succeed())
+				})
+			}
+
+			// expectEmpty asserts that ws reads as a workspace nothing ever
+			// wrote to.
+			expectEmpty := func(ws string) {
+				GinkgoHelper()
+				read(ws, func(tx storage.ReadTx) {
+					Expect(tx.CurrentSeq()).To(BeZero())
+					Expect(tx.StoreEpoch()).To(BeZero())
+					Expect(tx.TombstoneHorizon()).To(BeZero())
+					Expect(tx.SeqLineage(1)).To(BeZero())
+					_, err := tx.GetRow("widget", "live")
+					Expect(err).To(MatchError(storage.ErrNotFound))
+					_, err = tx.GetRow("widget", "dead")
+					Expect(err).To(MatchError(storage.ErrNotFound), "the tombstone goes too")
+					Expect(tx.ScanChanges(0, "", "", 0, func(storage.Row) error {
+						return errors.New("a deleted workspace has no changes")
+					})).To(Succeed())
+					Expect(tx.ClientLastMutationID("c1")).To(BeZero())
+					Expect(tx.ClientRejections("c1")).To(BeEmpty())
+					frags, complete, err := tx.FieldDeltas("widget", "live", "body", 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(frags).To(BeEmpty())
+					Expect(complete).To(BeTrue())
+					Expect(tx.FieldDeltaHorizon()).To(BeZero())
+					Expect(tx.TextFloor("widget", "live", "body")).To(BeNil())
+					_, found, err := tx.IdempotencyRecord("key")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(found).To(BeFalse())
+					Expect(tx.ScanIndex("widget", "by_x", nil, nil, 0, storage.ScanAsc, func([]byte, string) error {
+						return errors.New("a deleted workspace has no index entries")
+					})).To(Succeed())
+					hash, ready, err := tx.IndexState("widget", "by_x")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(hash).To(BeEmpty())
+					Expect(ready).To(BeFalse())
+					_, found, err = tx.ConsumerPosition("indexer")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(found).To(BeFalse())
+					Expect(tx.ListConsumerPositions()).To(BeEmpty())
+					Expect(tx.ConsumerShadow("indexer", "widget", "live")).To(BeNil())
+					Expect(tx.TextCompactMark()).To(BeZero())
+				})
+			}
+
+			It("removes every kind of state the workspace holds and nothing of another one", func() {
+				populate("ws1")
+				populate("ws2")
+
+				Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
+
+				expectEmpty("ws1")
+				read("ws2", func(tx storage.ReadTx) {
+					Expect(tx.CurrentSeq()).To(BeEquivalentTo(1))
+					_, err := tx.GetRow("widget", "live")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(tx.ClientLastMutationID("c1")).To(BeEquivalentTo(3))
+					Expect(tx.TextFloor("widget", "live", "body")).NotTo(BeNil())
+					_, found, err := tx.ConsumerPosition("indexer")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(found).To(BeTrue())
+				})
+			})
+
+			It("drops the workspace from the enumeration and from every work query", func() {
+				populate("ws1")
+				populate("ws2")
+				// Something for each work query to select both workspaces for.
+				write("ws1", func(tx storage.WriteTx) {
+					seq, err := tx.NextSeq()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(tx.PutRow("widget", "more", []byte("v"), seq, storage.Actor{})).To(Succeed())
+				})
+				write("ws2", func(tx storage.WriteTx) {
+					seq, err := tx.NextSeq()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(tx.PutRow("widget", "more", []byte("v"), seq, storage.Actor{})).To(Succeed())
+				})
+				all := storage.GCCutoffs{Tombstones: time.Now().Add(time.Hour)}
+				Expect(store.ListCollectableWorkspaceIDs(ctx, all, storage.Range{}, 10)).To(ConsistOf("ws1", "ws2"))
+
+				Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
+
+				Expect(store.ListWorkspaceIDs(ctx, storage.Range{})).To(ConsistOf("ws2"))
+				Expect(store.ListPendingWorkspaceIDs(ctx, "indexer", storage.Range{}, 10)).To(ConsistOf("ws2"))
+				Expect(store.ListPendingWorkspaceIDs(ctx, "other", storage.Range{}, 10)).To(ConsistOf("ws2"))
+				Expect(store.ListCollectableWorkspaceIDs(ctx, all, storage.Range{}, 10)).To(ConsistOf("ws2"))
+				Expect(store.ListStaleIndexWorkspaceIDs(ctx, "other-mark", storage.Range{}, 10)).To(ConsistOf("ws2"))
+			})
+
+			It("refuses a write to the deleted workspace and commits none of it", func() {
+				populate("ws1")
+				Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
+
+				err := store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+					seq, err := tx.NextSeq()
+					if err != nil {
+						return err
+					}
+					if err := tx.SetClientLastMutationID("c2", 1); err != nil {
+						return err
+					}
+					return tx.PutRow("widget", "back", []byte("v"), seq, storage.Actor{})
+				})
+				Expect(err).To(MatchError(storage.ErrWorkspaceDeleted))
+
+				// Each kind of first write on its own, since an adapter may check
+				// the mark at any of them.
+				firsts := map[string]func(storage.WriteTx) error{
+					"watermark":   func(tx storage.WriteTx) error { return tx.SetClientLastMutationID("c3", 1) },
+					"verdicts":    func(tx storage.WriteTx) error { return tx.SetClientRejections("c3", nil) },
+					"idempotency": func(tx storage.WriteTx) error { return tx.PutIdempotencyRecord("k2", storage.IdempotencyRecord{}) },
+					"consumer":    func(tx storage.WriteTx) error { return tx.SetConsumerPosition("fx", storage.ConsumerPosition{}) },
+					"index":       func(tx storage.WriteTx) error { return tx.SetIndexState("widget", "by_y", "spec", false) },
+				}
+				for name, first := range firsts {
+					Expect(store.WithWriteTx(ctx, "ws1", first)).To(MatchError(storage.ErrWorkspaceDeleted), name)
+				}
+
+				expectEmpty("ws1")
+				Expect(store.ListWorkspaceIDs(ctx, storage.Range{})).To(BeEmpty())
+				Expect(store.WorkspaceDeleted(ctx, "ws1")).To(BeTrue(), "a refused write leaves the mark")
+			})
+
+			It("lets a write transaction that only reads the deleted workspace succeed", func() {
+				populate("ws1")
+				Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.CurrentSeq()).To(BeZero())
+					Expect(tx.ClientLastMutationID("c1")).To(BeZero())
+				})
+			})
+
+			It("marks the id, including one that never held state, and is idempotent", func() {
+				Expect(store.WorkspaceDeleted(ctx, "ws1")).To(BeFalse())
+				Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
+				Expect(store.WorkspaceDeleted(ctx, "ws1")).To(BeTrue())
+				Expect(store.WorkspaceDeleted(ctx, "ws2")).To(BeFalse(), "the mark is per workspace")
+				Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
+				Expect(store.WorkspaceDeleted(ctx, "ws1")).To(BeTrue())
+
+				err := store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+					return tx.SetClientLastMutationID("c1", 1)
+				})
+				Expect(err).To(MatchError(storage.ErrWorkspaceDeleted))
+				Expect(store.ListWorkspaceIDs(ctx, storage.Range{})).To(BeEmpty())
+			})
+
+			It("starts a new workspace under the id once the mark is lifted", func() {
+				populate("ws1")
+				var oldEpoch uint64
+				read("ws1", func(tx storage.ReadTx) {
+					var err error
+					oldEpoch, err = tx.StoreEpoch()
+					Expect(err).NotTo(HaveOccurred())
+				})
+				Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
+
+				Expect(store.RestoreWorkspace(ctx, "ws1")).To(Succeed())
+				Expect(store.WorkspaceDeleted(ctx, "ws1")).To(BeFalse())
+				expectEmpty("ws1")
+
+				write("ws1", func(tx storage.WriteTx) {
+					seq, err := tx.NextSeq()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(seq).To(BeEquivalentTo(1), "the sequence starts over")
+					Expect(tx.PutRow("widget", "new", []byte("v"), seq, storage.Actor{})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					epoch, err := tx.StoreEpoch()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(epoch).NotTo(BeZero())
+					Expect(epoch).NotTo(Equal(oldEpoch), "a cursor of the deleted workspace must not match the new one")
+					row, err := tx.GetRow("widget", "new")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(row.CreatedVersion).To(BeEquivalentTo(1))
+					_, err = tx.GetRow("widget", "live")
+					Expect(err).To(MatchError(storage.ErrNotFound), "restoring brings back no data")
+				})
+				Expect(store.ListWorkspaceIDs(ctx, storage.Range{})).To(ConsistOf("ws1"))
+
+				Expect(store.RestoreWorkspace(ctx, "ws2")).To(Succeed(), "restoring an unmarked id is not an error")
+			})
+
+			It("waits for a write transaction in flight and deletes what it committed", func() {
+				inside := make(chan struct{})
+				release := make(chan struct{})
+				committed := make(chan error, 1)
+				go func() {
+					defer GinkgoRecover()
+					committed <- store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+						seq, err := tx.NextSeq()
+						if err != nil {
+							return err
+						}
+						if err := tx.PutRow("widget", "racing", []byte("v"), seq, storage.Actor{}); err != nil {
+							return err
+						}
+						// Once only: an adapter may run the closure again.
+						select {
+						case <-inside:
+						default:
+							close(inside)
+						}
+						<-release
+						return nil
+					})
+				}()
+				Eventually(inside).Should(BeClosed())
+
+				deleted := make(chan error, 1)
+				go func() {
+					defer GinkgoRecover()
+					deleted <- store.DeleteWorkspace(ctx, "ws1")
+				}()
+				Consistently(deleted, 100*time.Millisecond).ShouldNot(Receive(), "the deletion waits for the write lock")
+
+				close(release)
+				Eventually(committed).Should(Receive(BeNil()))
+				Eventually(deleted).Should(Receive(BeNil()))
+				expectEmpty("ws1")
+				Expect(store.ListWorkspaceIDs(ctx, storage.Range{})).To(BeEmpty())
+			})
+
+			It("removes the adapter's own cursor-state entries", func() {
+				p, ok := storage.As[cursorstate.Provider](store)
+				if !ok || p.CursorStateStore() == nil {
+					Skip("the adapter keeps no cursor state")
+				}
+				cs := p.CursorStateStore()
+				ref := cursorstate.Ref{ID: 1, Gen: 1}
+				Expect(cs.Put(ctx, "ws1", ref, []byte("state"))).To(Succeed())
+				Expect(cs.Put(ctx, "ws2", ref, []byte("state"))).To(Succeed())
+
+				Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
+
+				_, err := cs.Get(ctx, "ws1", ref)
+				Expect(err).To(MatchError(cursorstate.ErrNotFound))
+				Expect(cs.Get(ctx, "ws2", ref)).To(Equal([]byte("state")))
 			})
 		})
 	})

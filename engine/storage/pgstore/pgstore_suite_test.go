@@ -226,7 +226,7 @@ var _ = Describe("Postgres migrations", func() {
 		}
 		rows.Close()
 		Expect(rows.Err()).NotTo(HaveOccurred())
-		Expect(applied).To(Equal([]int{1, 2}), "every migration, each recorded exactly once")
+		Expect(applied).To(Equal([]int{1, 2, 3}), "every migration, each recorded exactly once")
 	})
 
 	It("upgrades a baseline database to record sequence lineage", func() {
@@ -243,7 +243,7 @@ var _ = Describe("Postgres migrations", func() {
 		// lineage table existed.
 		conn, err := pgx.Connect(ctx, dsn)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = conn.Exec(ctx, `DROP TABLE seq_lineage; DELETE FROM schema_migrations WHERE version = 2`)
+		_, err = conn.Exec(ctx, `DROP TABLE seq_lineage, deleted_workspaces; DELETE FROM schema_migrations WHERE version >= 2`)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(conn.Close(ctx)).To(Succeed())
 

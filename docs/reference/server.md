@@ -186,6 +186,30 @@ Compaction behavior includes:
 
 The `minPurged` argument specifies the minimum number of reclaimable items required to rewrite a row. Lowering `minPurged` causes subsequent sweeps to re-evaluate all workspaces from the beginning. Raising `minPurged` does not trigger a full re-sweep. See [the collaborative text explanation](../explanation/collaborative-text.md).
 
+## Deleting a workspace
+
+`srv.DeleteWorkspace(ctx, workspaceID)` removes every piece of state the workspace holds and refuses the ID until `srv.RestoreWorkspace(ctx, workspaceID)`:
+
+```go
+if err := srv.DeleteWorkspace(ctx, graphID); err != nil {
+	return err
+}
+```
+
+- **Removed:** rows and tombstones, client watermarks and rejection verdicts, the text delta log and compaction floors, index entries, idempotency keys, effect-consumer positions and shadows, and the workspace sequence and store epoch. The removal is one storage transaction. It waits for a write in flight to commit.
+- **Sync clients:** every request receives `permission_denied` with `workspace_access_revoked`, and the client stops syncing the workspace. An open `Subscribe` stream drops the workspace with a reset; the client's next bootstrap receives the denial.
+- **In-process calls:** `Apply`, `Mutate`, `Invoke`, and `View` return an error that matches `server.ErrWorkspaceDeleted` with `errors.Is` and `server.AsWorkspaceDenial`. A `Trusted` call skips the check: its writes fail with an error that matches `server.ErrWorkspaceDeleted`, and its reads see an empty workspace.
+- **Enumeration:** `WorkspaceIDs` omits the workspace, and background passes do not visit it.
+- **Repeat calls:** deleting a workspace that holds no state refuses the ID. Deleting a deleted workspace changes nothing.
+
+`RestoreWorkspace` restores no data. The next write starts a new workspace under the ID with a new store epoch, so a client holding a cursor of the deleted workspace re-bootstraps.
+
+Neither call runs a permission hook. Expose them only to callers your application authorized. Both return an error when called from inside a mutator or write transaction.
+
+Each admitted request reads the deletion mark: one indexed lookup. On `pgstore` this is one extra round trip per request.
+
+State outside the storage adapter remains: a custom `WithCursorStateStore` keeps its entries until it evicts them, and presence rooms keep sessions until they end.
+
 ## Registration
 
 Static schemas and handlers are registered at server construction:

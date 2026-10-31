@@ -51,9 +51,16 @@ type WorkspaceDenial struct {
 	// detail the caller has not earned — "not a member of this workspace" is
 	// better than naming who is.
 	Message string
+	// cause is what errors.Is and errors.As find past the denial, nil for a
+	// denial DenyWorkspace built.
+	cause error
 }
 
 func (d *WorkspaceDenial) Error() string { return "workspace access denied: " + d.Message }
+
+// Unwrap returns the error the engine denied the workspace for, such as
+// ErrWorkspaceDeleted. It is nil for a denial DenyWorkspace built.
+func (d *WorkspaceDenial) Unwrap() error { return d.cause }
 
 // DenyWorkspace builds the permanent denial CanAccessWorkspace returns when the
 // caller is not (or is no longer) entitled to the workspace.

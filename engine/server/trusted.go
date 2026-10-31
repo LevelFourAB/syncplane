@@ -99,6 +99,9 @@ func (s *Server) gateTo(ctx context.Context, workspaceID string, leaveGrants boo
 	if err := s.perms.CanAccessWorkspace(ctx, adm.principal, workspaceID); err != nil {
 		return adm, true, fmt.Errorf("server: workspace %q: %w", workspaceID, err)
 	}
+	if err := s.refuseDeleted(ctx, workspaceID); err != nil {
+		return adm, true, fmt.Errorf("server: workspace %q: %w", workspaceID, err)
+	}
 	if model == nil {
 		if adm.creator, err = s.creatorOf(ctx, adm.principal, workspaceID); err != nil {
 			return adm, true, err

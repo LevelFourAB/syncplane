@@ -400,6 +400,10 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 	if gerr := adm.verdict.refusal(ctx, err); gerr != nil {
 		return refused(gerr)
 	}
+	if errors.Is(err, ErrWorkspaceDeleted) {
+		// DeleteWorkspace landed between the gate and the transaction.
+		return refused(errWorkspaceDeletedDenial)
+	}
 	switch {
 	case gap != "":
 		// errAbortBatch only exists to roll the transaction back; the verdict

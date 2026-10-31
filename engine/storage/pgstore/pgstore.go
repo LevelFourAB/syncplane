@@ -378,9 +378,20 @@ func (s *Store) writeOnce(ctx context.Context, workspaceID string, fn func(stora
 	// pgTx defers some of its bookkeeping to the end of the transaction (see
 	// pgTx.flush); COMMIT must not be the first thing that follows fn.
 	if err := t.flush(); err != nil {
-		return err
+		return deletedGuardError(workspaceID, err)
 	}
-	return t.commit()
+	return deletedGuardError(workspaceID, t.commit())
+}
+
+// deletedGuardError turns the failure of the deletion guard flush queues (see
+// pgTx.flush) into storage.ErrWorkspaceDeleted, and returns any other err
+// unchanged.
+func deletedGuardError(workspaceID string, err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "deleted_workspaces_pkey" {
+		return fmt.Errorf("pgstore: workspace %q: %w", workspaceID, storage.ErrWorkspaceDeleted)
+	}
+	return err
 }
 
 // isRetryable reports whether err is a transient conflict WithWriteTx may
@@ -398,6 +409,43 @@ func isRetryable(err error) bool {
 		return true
 	}
 	return false
+}
+
+// DeleteWorkspace empties every table in workspaceTables for the workspace and
+// records its mark, in one write transaction under the workspace lock. The
+// statements are queued, so they travel with COMMIT as one batch.
+func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
+	return s.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+		t := tx.(*pgTx)
+		for _, table := range workspaceTables {
+			if err := t.queue(`DELETE FROM `+table+` WHERE workspace_id = $1`, workspaceID); err != nil {
+				return err
+			}
+		}
+		return t.queue(
+			`INSERT INTO deleted_workspaces (workspace_id, deleted_at) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			workspaceID, time.Now().UnixMilli(),
+		)
+	})
+}
+
+// RestoreWorkspace removes the workspace's deletion mark, under the workspace
+// lock so that it cannot land halfway through a write transaction.
+func (s *Store) RestoreWorkspace(ctx context.Context, workspaceID string) error {
+	return s.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+		return tx.(*pgTx).queue(`DELETE FROM deleted_workspaces WHERE workspace_id = $1`, workspaceID)
+	})
+}
+
+// WorkspaceDeleted reads the mark from the primary. The replica is never asked:
+// one that has not replayed a deletion would admit clients to a workspace that
+// is gone.
+func (s *Store) WorkspaceDeleted(ctx context.Context, workspaceID string) (bool, error) {
+	var deleted bool
+	err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM deleted_workspaces WHERE workspace_id = $1)`, workspaceID,
+	).Scan(&deleted)
+	return deleted, err
 }
 
 func (s *Store) ListWorkspaceIDs(ctx context.Context, rng storage.Range) ([]string, error) {

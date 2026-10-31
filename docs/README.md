@@ -37,6 +37,7 @@ Task-oriented guides. Each guide assumes you already have a running app.
 - [Declare roles and permissions (access model)](how-to/declare-roles-and-permissions.md)
 - [Share a project with the whole workspace or with chosen teams](how-to/share-with-the-workspace-or-chosen-teams.md)
 - [Create a workspace and invite people](how-to/create-a-workspace-and-invite-people.md)
+- [Delete a workspace](how-to/delete-a-workspace.md)
 - [Write from server-side code](how-to/server-side-writes.md)
 - [Query from server-side code](how-to/server-side-queries.md)
 - [React to changes (server-side effects)](how-to/react-to-changes.md)

@@ -148,6 +148,9 @@ func main() {
 	// One garbage-collection pass on demand, so suites can decide when
 	// collaborative-text compaction happens.
 	mux.Handle("/debug/gc", gcHandler(srv))
+	// Workspace deletion on demand, so suites can watch a syncing client meet
+	// the denial a deleted workspace answers with.
+	mux.Handle("/debug/delete-workspace", deleteWorkspaceHandler(srv))
 	if *access {
 		mux.Handle("/debug/trusted", trustedWriteHandler(srv))
 	}

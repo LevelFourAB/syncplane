@@ -41,7 +41,8 @@ const (
 	// CodeWorkspaceAccessRevoked reports that the caller may not access the
 	// workspace and that this is PERMANENT — the answer will not change by
 	// retrying. Unlike the codes above it never rides on a MutationResult: it
-	// denies a whole workspace (see DenyWorkspace), so it arrives as an RPC
+	// denies a whole workspace (see DenyWorkspace, and DeleteWorkspace, which
+	// refuses every request to the workspace it deletes), so it arrives as an RPC
 	// error on the single-workspace RPCs, as a WorkspaceResults.error_code on
 	// Push, and as a WorkspaceDropped frame on Subscribe. A client seeing it
 	// should stop syncing that workspace and discard its local copy rather than

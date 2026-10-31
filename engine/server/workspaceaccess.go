@@ -28,6 +28,10 @@ import (
 // revocation. Errors already carrying a Connect code (a policy that built one
 // itself) pass through untouched.
 //
+// A workspace DeleteWorkspace deleted is refused as revoked, after the
+// application's hook admitted the caller, so a caller the hook refuses does
+// not learn that the workspace existed.
+//
 // A schema that breaks a rule of the access model fails every request here
 // with failed_precondition, before the application's hook runs. In a schema
 // that uses the model, the gate then resolves the caller's subjects and global
@@ -64,6 +68,9 @@ func (s *Server) admitTo(ctx context.Context, workspaceID string, leaveGrants bo
 		return adm, err
 	}
 	if err := s.perms.CanAccessWorkspace(ctx, adm.principal, workspaceID); err != nil {
+		return adm, workspaceAccessError(err)
+	}
+	if err := s.refuseDeleted(ctx, workspaceID); err != nil {
 		return adm, workspaceAccessError(err)
 	}
 	if model == nil {

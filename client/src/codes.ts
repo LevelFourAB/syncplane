@@ -91,6 +91,10 @@ export const CodeTextStateStale = 'text_state_stale';
  * failing those requests outright would deny the client every other workspace
  * in the same call.
  *
+ * The server sends it when the application's `CanAccessWorkspace` hook
+ * refuses the caller, and for every request to a workspace the server deleted
+ * (`Server.DeleteWorkspace`).
+ *
  * A client seeing it stops syncing that workspace and surfaces
  * `status().workspaces[id].access === 'revoked'` rather than backing off
  * against a verdict that will never change. It does not delete the local copy

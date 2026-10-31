@@ -1302,9 +1302,28 @@ func (t *pgTx) NextSeq() (uint64, error) {
 
 // flush writes back what NextSeq allocated in memory and records the lineage
 // mark of those sequences. The store calls it after the write closure returns
-// successfully and before COMMIT; it is a no-op for a transaction that
-// allocated nothing. Both statements are queued, so they travel with COMMIT.
+// successfully and before COMMIT. Every statement is queued, so they travel
+// with COMMIT.
+//
+// A transaction that registered the workspace also gets the deletion guard: a
+// statement that fails with a unique violation on deleted_workspaces_pkey when
+// the workspace carries a deletion mark, by inserting a copy of the mark's own
+// row, and inserts nothing otherwise. The failure aborts the transaction, so
+// nothing it wrote commits, and deletedGuardError reports it as
+// storage.ErrWorkspaceDeleted. A plain SELECT of the mark would cost a round
+// trip of its own; the guard rides in the batch COMMIT sends anyway. It sees
+// every mark that matters: the workspace lock, taken before anything else in
+// the transaction, is also what DeleteWorkspace holds.
 func (t *pgTx) flush() error {
+	if t.registered {
+		if err := t.queue(
+			`INSERT INTO deleted_workspaces (workspace_id, deleted_at)
+			 SELECT workspace_id, deleted_at FROM deleted_workspaces WHERE workspace_id = $1`,
+			t.ws,
+		); err != nil {
+			return err
+		}
+	}
 	if !t.seqLoaded {
 		return nil
 	}

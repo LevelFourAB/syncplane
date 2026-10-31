@@ -298,6 +298,34 @@ func gcHandler(srv *server.Server) http.Handler {
 	})
 }
 
+// deleteWorkspaceHandler deletes a workspace on demand, or with restore set
+// lifts the deletion, so suites can watch a syncing client meet the denial.
+func deleteWorkspaceHandler(srv *server.Server) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Workspace string `json:"workspace"`
+			Restore   bool   `json:"restore"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		op := srv.DeleteWorkspace
+		if req.Restore {
+			op = srv.RestoreWorkspace
+		}
+		if err := op(r.Context(), req.Workspace); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
+}
+
 func (s *rpcStats) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	snapshot := struct {

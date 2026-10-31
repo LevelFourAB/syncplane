@@ -34,6 +34,42 @@ import (
 var migrations = []migration{
 	{additive: true, sql: baselineSchema},
 	{additive: true, sql: fixed(seqLineageDDL)},
+	{additive: true, sql: fixed(deletedWorkspacesDDL)},
+}
+
+// deletedWorkspacesDDL is migration 3: one row per workspace DeleteWorkspace
+// removed and RestoreWorkspace has not lifted since (see storage.Adapter).
+// Read by WorkspaceDeleted, and by the guard every registering write
+// transaction sends with its COMMIT (see pgTx.flush).
+//
+// Unpartitioned whatever the layout, for the reason seq_lineage is, and
+// because it holds one small row per deleted workspace.
+const deletedWorkspacesDDL = `
+CREATE TABLE deleted_workspaces (
+	workspace_id TEXT COLLATE "C" NOT NULL,
+	deleted_at   BIGINT NOT NULL,
+	CONSTRAINT deleted_workspaces_pkey PRIMARY KEY (workspace_id)
+);
+`
+
+// workspaceTables names every table that holds state of one workspace, keyed
+// by its workspace_id column. DeleteWorkspace empties each of them for the
+// workspace it deletes, so a table added by a migration must be added here
+// too; deleted_workspaces is the one table with that column left out, because
+// it holds the mark DeleteWorkspace leaves.
+var workspaceTables = []string{
+	"workspaces",
+	"rows",
+	"clients",
+	"field_deltas",
+	"text_floors",
+	"idempotency",
+	"index_entries",
+	"index_state",
+	"consumer_positions",
+	"consumer_shadows",
+	"cursor_state",
+	"seq_lineage",
 }
 
 // seqLineageDDL is migration 2: one row per committed write transaction that

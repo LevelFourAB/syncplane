@@ -29,6 +29,12 @@ func (f *fakeGCStore) ListWorkspaceIDs(context.Context, storage.Range) ([]string
 }
 func (f *fakeGCStore) Close() error { return nil }
 
+func (f *fakeGCStore) DeleteWorkspace(context.Context, string) error  { return nil }
+func (f *fakeGCStore) RestoreWorkspace(context.Context, string) error { return nil }
+func (f *fakeGCStore) WorkspaceDeleted(context.Context, string) (bool, error) {
+	return false, nil
+}
+
 // The background passes reach every workspace this fake holds, so both work
 // queries answer the whole list. Paging it for real is what lets a test assert
 // that a pass covers more workspaces than one page carries.
