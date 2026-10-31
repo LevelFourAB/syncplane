@@ -263,6 +263,69 @@ var _ = Describe("PlanQuery", func() {
 		})
 	})
 
+	Describe("over a sparse index", func() {
+		// A sparse index holds no entry whose leading component is missing, so
+		// it may only serve a plan whose every range lies inside the present
+		// ranks of that component.
+		sparseIndex := func(name string, paths ...string) query.Index {
+			GinkgoHelper()
+			dense := index(name, paths...)
+			enc, err := query.NewSparseIndexEncoder(dense.Encoder.Components())
+			Expect(err).NotTo(HaveOccurred())
+			return query.Index{Name: name, Encoder: enc}
+		}
+		sparseMaybe := sparseIndex("sparse_maybe", "maybe")
+		sparseMaybeLabel := sparseIndex("sparse_maybe_label", "maybe", "label")
+		sparseTags := sparseIndex("sparse_tags", "tags")
+		denseMaybe := index("dense_maybe", "maybe")
+
+		DescribeTable("serves a range inside the present ranks",
+			func(idx query.Index, pred *syncplanev1.Condition) {
+				p := query.PlanQuery([]query.Index{idx}, compile(pred), nil)
+				Expect(p).NotTo(BeNil())
+				Expect(p.Index).To(Equal(idx.Name))
+			},
+			Entry("equality", sparseMaybe, query.Eq("maybe", "a")),
+			Entry("in", sparseMaybe, query.In("maybe", "a", "b")),
+			Entry("an inequality", sparseMaybe, query.Gt("maybe", "a")),
+			Entry("startsWith", sparseMaybe, query.StartsWith("maybe", "a")),
+			Entry("isSet", sparseMaybe, query.IsSet("maybe")),
+			Entry("membership over a list", sparseTags, query.Has("tags", "a")),
+		)
+
+		It("serves an ordering after a pinned leading component", func() {
+			p := query.PlanQuery([]query.Index{sparseMaybeLabel},
+				compile(query.Eq("maybe", "a")), order(query.Asc("label")))
+			Expect(p).NotTo(BeNil())
+			Expect(p.Ordered).To(BeTrue())
+		})
+
+		DescribeTable("declines a plan that reaches rows the index leaves out",
+			func(idx query.Index, pred *syncplanev1.Condition, keys ...*syncplanev1.OrderKey) {
+				var o *query.Order
+				if len(keys) > 0 {
+					o = order(keys...)
+				}
+				Expect(query.PlanQuery([]query.Index{idx}, compile(pred), o)).To(BeNil())
+			},
+			Entry("isNotSet, which is the missing rank", sparseMaybe, query.IsNotSet("maybe")),
+			Entry("an ordering with no predicate", sparseMaybe, nil, query.Asc("maybe")),
+			Entry("an ordering the predicate does not pin", sparseMaybeLabel,
+				query.Eq("label", "a"), query.Asc("maybe")),
+			Entry("isNotSet ahead of an ordering", sparseMaybeLabel,
+				query.IsNotSet("maybe"), query.Asc("label")),
+			Entry("a union with a branch in the missing rank", sparseMaybe,
+				query.Or(query.Eq("maybe", "a"), query.IsNotSet("maybe"))),
+		)
+
+		It("leaves the plan to a dense index the sparse one cannot serve", func() {
+			p := query.PlanQuery([]query.Index{sparseMaybe, denseMaybe},
+				compile(query.IsNotSet("maybe")), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Index).To(Equal("dense_maybe"))
+		})
+	})
+
 	It("declines when there are no candidates", func() {
 		Expect(query.PlanQuery(nil, compile(query.Eq("label", "a")), nil)).To(BeNil())
 	})

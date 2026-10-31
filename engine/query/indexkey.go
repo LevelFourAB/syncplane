@@ -80,8 +80,11 @@ import (
 //     product either: the second fan lives inside one position of the first.
 //   - A row whose collection is empty or unset still writes exactly one entry,
 //     with the missing tag at each fan-out component. Every live row occupies at
-//     least one position in every index, which is what lets a range that does
-//     NOT constrain the fan-out component still see every row.
+//     least one position in every dense index, which is what lets a range that
+//     does NOT constrain the fan-out component still see every row. A SPARSE
+//     index (NewSparseIndexEncoder) drops each entry whose leading component is
+//     missing, and the planner only reads one inside the present ranks of that
+//     component — the region where both forms hold the same entries.
 //   - Duplicate positions collapse: they would produce identical bytes, and an
 //     entry is a position, not a count.
 //
@@ -498,6 +501,8 @@ type IndexEncoder struct {
 	// `custom.*.labels.values` — and each level lives inside one position of the
 	// level above it, so nothing is crossed with anything.
 	fan []fanLevel
+	// sparse drops every entry whose leading component is missing.
+	sparse bool
 }
 
 // NewIndexEncoder builds an encoder over already-compiled components. An
@@ -528,6 +533,42 @@ func NewIndexEncoder(comps []IndexComponent) (*IndexEncoder, error) {
 		}
 	}
 	return &IndexEncoder{comps: comps, fan: fan}, nil
+}
+
+// NewSparseIndexEncoder builds an encoder like NewIndexEncoder, except that
+// Encode leaves out every entry whose leading component is missing: a row
+// with that component unset, or a position of an empty collection. Every
+// entry it keeps is byte for byte the entry the dense encoder writes.
+//
+// A sparse index holds fewer rows than its entity, so PlanQuery and PlanGroup
+// use one only for a range inside the present ranks of the leading component.
+// It fails as NewIndexEncoder does, and also for an empty component list,
+// which has no leading component to leave rows out by.
+func NewSparseIndexEncoder(comps []IndexComponent) (*IndexEncoder, error) {
+	if len(comps) == 0 {
+		return nil, fmt.Errorf("a sparse index needs at least one component")
+	}
+	e, err := NewIndexEncoder(comps)
+	if err != nil {
+		return nil, err
+	}
+	e.sparse = true
+	return e, nil
+}
+
+// Sparse reports whether the encoder was built by NewSparseIndexEncoder.
+func (e *IndexEncoder) Sparse() bool { return e.sparse }
+
+// SpecHash fingerprints what the stored entries of this index depend on. For
+// a dense encoder it equals SpecHash over the same components; a sparse
+// encoder fingerprints differently, so entries stored under one form are
+// stale under the other and rebuild.
+func (e *IndexEncoder) SpecHash() string {
+	h := SpecHash(e.comps)
+	if e.sparse {
+		return fingerprint(h + ":sparse")
+	}
+	return h
 }
 
 // compatibleFan reports whether two chains describe the same nesting, one being
@@ -599,15 +640,20 @@ type posLevel struct {
 // row's storage key, which terminates every entry so that entries are unique and
 // tie exactly the way Order.Compare does.
 //
-// The result is never empty: a row whose collection is empty or unset still
-// takes one position, with the missing tag at each fan-out component, so every
-// live row is reachable through every index.
+// For a dense encoder the result is never empty: a row whose collection is
+// empty or unset still takes one position, with the missing tag at each fan-out
+// component, so every live row is reachable through the index. A sparse encoder
+// leaves out each entry whose leading component is missing, and returns no
+// entries when that is all of them.
 func (e *IndexEncoder) Encode(msg protoreflect.Message, rowKey string) [][]byte {
 	positions := e.positions(msg)
 	out := make([][]byte, 0, len(positions))
 	seen := make(map[string]struct{}, len(positions))
 	for _, p := range positions {
 		entry := e.encodeAt(msg, rowKey, p)
+		if e.sparse && entry[0] == tagMissing {
+			continue
+		}
 		// Two positions can encode identically — duplicate list elements, or two
 		// map entries no component distinguishes. An entry is a position, not a
 		// count, so the second one would be a no-op write in one adapter and a

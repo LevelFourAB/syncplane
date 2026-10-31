@@ -129,7 +129,8 @@ type searchIndex struct {
 //
 //   - refIndexPrefix, one per reference field, so a reverse lookup ("every
 //     issue whose project is p1") is a range probe rather than a scan of the
-//     whole holder entity. Derived, never declared.
+//     whole holder entity. Derived, never declared, and sparse: a row whose
+//     reference is unset has no entry.
 //   - fieldIndexPrefix, one per field carrying (field_behavior).indexed. The
 //     name is derived rather than authored so two schemas marking the same
 //     field agree on it.

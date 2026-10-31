@@ -194,4 +194,15 @@ var _ = Describe("index storage size", func() {
 		Expect(r.entries).To(BeNumerically(">", 0))
 		Expect(float64(r.indexBytes)/float64(r.entries)).To(BeNumerically("<=", bytesPerEntryCeiling), r.String())
 	})
+
+	It("stores no reference entry for a row whose reference is unset", func() {
+		r := measureIndexSize()
+		for idx, missing := range r.missingLead {
+			if strings.HasPrefix(idx, "__ref_") {
+				Expect(missing).To(BeZero(), "index %s", idx)
+			}
+		}
+		Expect(r.perIndex["__ref_blocked_by"]).To(BeNumerically("==", indexSizeIssues/40-1),
+			"one entry per blocked issue, none for the rest")
+	})
 })

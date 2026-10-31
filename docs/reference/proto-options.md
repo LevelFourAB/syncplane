@@ -161,7 +161,7 @@ Rules for every reference:
 
 - The target must be a registered entity whose key fields sit outside any oneof.
 - A query path may descend through a reference into its key fields only. A comparison on the reference itself compares its key (single-key targets only); `matches()` crosses to the live target row.
-- The engine maintains one secondary index per reference field, named `__ref_<field>`, over the stored target key.
+- The engine maintains one secondary index per reference field, named `__ref_<field>`, over the stored target key. The index is sparse: a row whose reference is unset, or whose to-many list is empty, has no entry. A query that bounds the reference to set values (`eq`, `in`, `has`, `isSet`) can use the index. A query for `isNotSet`, or an ordering by the reference with no such bound, scans the entity.
 - A reference may be a member of a oneof; the oneof is then a [polymorphic reference](#polymorphic-references).
 - The reference adds a [reverse relation](#reverse-relations) to its target entity.
 

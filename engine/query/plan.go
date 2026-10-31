@@ -56,15 +56,21 @@ import (
 //   - `not` and `match`. Both become residual.
 //
 // Presence DOES plan, against a component whose path is exactly the term's and
-// that does not fan out: the encoder writes every row into every index, with a
-// rank tag ahead of the payload (real < NaN < missing), and both the encoder's
-// "missing" and the evaluator's isNotSet come from the same resolution rule.
-// So isNotSet pins the component to the missing rank — an equality in all but
-// name, and the components after it still pin, range and order — while isSet
-// bounds the next free component to the two set ranks. A fan-out component is
-// excluded from both: an empty collection encodes as missing while presence
-// on the collection itself reads as set, so the ranks and the evaluator
-// disagree exactly there.
+// that does not fan out: the encoder writes every row into every dense index,
+// with a rank tag ahead of the payload (real < NaN < missing), and both the
+// encoder's "missing" and the evaluator's isNotSet come from the same
+// resolution rule. So isNotSet pins the component to the missing rank — an
+// equality in all but name, and the components after it still pin, range and
+// order — while isSet bounds the next free component to the two set ranks. A
+// fan-out component is excluded from both: an empty collection encodes as
+// missing while presence on the collection itself reads as set, so the ranks
+// and the evaluator disagree exactly there.
+//
+// A SPARSE index holds no entry whose leading component is missing, so it is
+// a candidate only for a plan whose every range lies inside the present ranks
+// of that component (see insidePresentRanks). isNotSet on it, and any walk
+// that does not bound the leading component, decline to the next candidate or
+// to the scan.
 //
 // Repeated fields DO plan, through the multi-entry indexes indexkey.go
 // describes: `has` over a repeated scalar and `any` over a repeated message
@@ -517,6 +523,9 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 	if len(ranges) > 1 && order != nil && len(order.keys) > 0 {
 		ordered = false
 	}
+	if idx.Encoder.Sparse() && !insidePresentRanks(ranges) {
+		return nil, 0
+	}
 	var prefix []byte
 	if len(w.prefixes) == 1 {
 		prefix = w.prefixes[0]
@@ -533,6 +542,25 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 		Prefix:          prefix,
 		OrderSpansIndex: spans,
 	}, w.pinned
+}
+
+// insidePresentRanks reports whether every range lies in [tagPresent,
+// tagMissing) on the leading component. A sparse index leaves out exactly the
+// entries that start with tagMissing, so inside that region it holds the same
+// entries as the dense index, and outside it a range would miss rows. The check
+// runs on the bytes the plan reads rather than on the terms that built them, so
+// it holds for every way the planner reaches a range — isNotSet, an unbounded
+// ordering walk, a union branch — without a rule per term.
+func insidePresentRanks(ranges []Range) bool {
+	for _, r := range ranges {
+		if r.Lo == nil || bytes.Compare(r.Lo, []byte{tagPresent}) < 0 {
+			return false
+		}
+		if r.Hi == nil || bytes.Compare(r.Hi, []byte{tagMissing}) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // maxIndexProbes bounds the fan-out of an `in` over a leading component. Past

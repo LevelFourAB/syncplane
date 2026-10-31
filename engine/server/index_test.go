@@ -434,10 +434,14 @@ var _ = Describe("Secondary indexes", func() {
 			query.Spec{Where: query.IsSet("state")},
 			[]string{"i1", "i2", "i3", "i4", "i5", "i6"})
 
-		same("isNotSet reads the missing rank of the derived ref index",
-			// No row here sets `project`, so every one encodes the missing rank
-			// in the reference's index — the range presence pins to.
+		same("isNotSet over a reference finds the rows its sparse index leaves out",
+			// No row here sets `project`, so the reference's index holds none of
+			// them, and the planner must not answer from it.
 			query.Spec{Where: query.IsNotSet("project.id")},
+			[]string{"i1", "i2", "i3", "i4", "i5", "i6"})
+
+		same("an ordering by a reference does not walk its sparse index",
+			query.Spec{OrderBy: []*syncplanev1.OrderKey{query.Asc("project.id")}},
 			[]string{"i1", "i2", "i3", "i4", "i5", "i6"})
 
 		same("isSet over an unset reference matches nothing",
@@ -943,13 +947,64 @@ var _ = Describe("Secondary indexes", func() {
 				"entries exist for live rows only")
 		})
 
-		It("indexes a row whose reference is unset, under the missing tag", func() {
-			// Every live row occupies a position in every index of its entity,
-			// including rows the index cannot say anything useful about. That
-			// is what lets an ordered scan of the index BE the ordered scan of
+		It("leaves a row whose reference is unset out of the reference's index", func() {
+			// A reference index is sparse: its readers probe for one target, and
+			// a row pointing nowhere is never the answer to that.
+			push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{Id: "i1"}))
+			Expect(entriesOf(store, "issue", "__ref_project")).To(BeEmpty())
+		})
+
+		It("leaves a row with an empty to-many reference out of its index", func() {
+			push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{Id: "i1"}))
+			Expect(entriesOf(store, "issue", "__ref_blocked_by")).To(BeEmpty())
+		})
+
+		It("drops the entry when a PATCH clears the reference", func() {
+			push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{
+				Id: "i1", Project: &testdatav1.Project{Id: "p1"},
+			}))
+			push(patchMutation("c1", 2, "issue", "i1", &testdatav1.Issue{Id: "i1"}, "project"))
+			Expect(entriesOf(store, "issue", "__ref_project")).To(BeEmpty())
+		})
+
+		It("reclaims the missing-tag entries a dense reference index stored, once rebuilt", func() {
+			// A store written before reference indexes were sparse holds one
+			// entry per row and a ready state under the dense fingerprint.
+			push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{Id: "i1"}))
+			comp, err := query.CompileIndexComponent(
+				(&testdatav1.Issue{}).ProtoReflect().Descriptor(), []string{"project", "id"}, false)
+			Expect(err).NotTo(HaveOccurred())
+			dense, err := query.NewIndexEncoder([]query.IndexComponent{comp})
+			Expect(err).NotTo(HaveOccurred())
+			planted := dense.Encode((&testdatav1.Issue{Id: "i1"}).ProtoReflect(), "i1")
+			Expect(planted).To(HaveLen(1))
+			Expect(store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
+				if err := tx.PutIndexEntries("issue", "i1", []storage.IndexEntry{
+					{Index: "__ref_project", Key: planted[0]},
+				}); err != nil {
+					return err
+				}
+				return tx.SetIndexState("issue", "__ref_project", dense.SpecHash(), true)
+			})).To(Succeed())
+			Expect(entriesOf(store, "issue", "__ref_project")).To(Equal([]string{"i1"}))
+
+			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			Expect(entriesOf(store, "issue", "__ref_project")).To(BeEmpty())
+			Expect(store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
+				hash, ready, err := tx.IndexState("issue", "__ref_project")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(ready).To(BeTrue())
+				Expect(hash).NotTo(Equal(dense.SpecHash()), "the index is stored under its sparse fingerprint")
+				return nil
+			})).To(Succeed())
+		})
+
+		It("still indexes a row with an empty list in a declared index, under the missing tag", func() {
+			// A declared index is dense: every live row takes a position, which
+			// is what lets an ordered walk of the index BE the ordered walk of
 			// the entity, missing values and all.
 			push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{Id: "i1"}))
-			Expect(entriesOf(store, "issue", "__ref_project")).To(Equal([]string{"i1"}))
+			Expect(entriesOf(store, "issue", "by_label_rank")).To(Equal([]string{"i1"}))
 		})
 
 		It("marks an index ready only once the build has walked the entity", func() {

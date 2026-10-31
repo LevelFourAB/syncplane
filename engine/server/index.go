@@ -42,7 +42,9 @@ import (
 // read speed with.
 //
 // Entries exist for LIVE rows only. A delete clears them, which is what keeps
-// a range scan from having to re-check whether each hit is a tombstone.
+// a range scan from having to re-check whether each hit is a tombstone. A
+// declared index holds every live row; a reference index is sparse and holds
+// only the rows that point somewhere (see buildRefIndexes).
 
 // buildRefIndexes derives one index per reference field of the entity, keyed
 // by the target key the row stores.
@@ -63,6 +65,14 @@ import (
 // A polymorphic reference gets one index per case, keyed by that case's target
 // key: a reverse hop asks about one target entity, and the case pointing at
 // it is the only one whose entries can answer.
+//
+// Every reference index is SPARSE: a row whose reference is unset, or whose
+// to-many list is empty, has no entry. Each reverse hop probes for one target
+// key, and a row that points nowhere is never in that range, so storing it
+// costs an entry per row for nothing. In an entity where most rows leave a
+// reference empty, that is most of the index. The planner still reads the
+// index for a query that bounds the reference to set values, and scans for
+// one that does not (isNotSet, or an ordering by the reference alone).
 func buildRefIndexes(info *entityInfo) error {
 	desc := info.msgType.Descriptor()
 	for _, rf := range info.refFields {
@@ -78,13 +88,13 @@ func buildRefIndexes(info *entityInfo) error {
 			}
 			comps = append(comps, c)
 		}
-		enc, err := query.NewIndexEncoder(comps)
+		enc, err := query.NewSparseIndexEncoder(comps)
 		if err != nil {
 			return fmt.Errorf("reference field %q: %w", rf.fd.Name(), err)
 		}
 		info.indexes = append(info.indexes, compiledIndex{
 			name:     refIndexName(rf.ref),
-			specHash: query.SpecHash(comps),
+			specHash: enc.SpecHash(),
 			encoder:  enc,
 		})
 	}

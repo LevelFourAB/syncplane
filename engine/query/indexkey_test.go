@@ -554,6 +554,79 @@ var _ = Describe("Encoding a row that fans out", func() {
 	})
 })
 
+var _ = Describe("Encoding a row into a sparse index", func() {
+	widget := (&testdatav1.Widget{}).ProtoReflect().Descriptor()
+
+	encoders := func(paths ...[]string) (dense, sparse *query.IndexEncoder) {
+		GinkgoHelper()
+		comps := make([]query.IndexComponent, 0, len(paths))
+		for _, p := range paths {
+			c, err := query.CompileIndexComponent(widget, p, false)
+			Expect(err).NotTo(HaveOccurred())
+			comps = append(comps, c)
+		}
+		dense, err := query.NewIndexEncoder(comps)
+		Expect(err).NotTo(HaveOccurred())
+		sparse, err = query.NewSparseIndexEncoder(comps)
+		Expect(err).NotTo(HaveOccurred())
+		return dense, sparse
+	}
+
+	It("leaves out a row whose leading component is missing", func() {
+		_, sparse := encoders([]string{"maybe"})
+		Expect(sparse.Sparse()).To(BeTrue())
+		Expect(sparse.Encode((&testdatav1.Widget{}).ProtoReflect(), "w1")).To(BeEmpty())
+	})
+
+	It("leaves out the position of an empty list", func() {
+		_, sparse := encoders([]string{"tags"})
+		Expect(sparse.Encode((&testdatav1.Widget{}).ProtoReflect(), "w1")).To(BeEmpty())
+	})
+
+	It("keeps a row whose leading component is set while a later one is missing", func() {
+		dense, sparse := encoders([]string{"label"}, []string{"maybe"})
+		msg := (&testdatav1.Widget{Label: "L"}).ProtoReflect()
+		Expect(sparse.Encode(msg, "w1")).To(Equal(dense.Encode(msg, "w1")))
+		Expect(sparse.Encode(msg, "w1")).To(HaveLen(1))
+	})
+
+	It("holds exactly the dense entries that do not start with the missing tag", func() {
+		maybe := func(s string) *string { return &s }
+		for _, paths := range [][][]string{
+			{{"maybe"}, {"label"}},
+			{{"tags"}, {"label"}},
+		} {
+			dense, sparse := encoders(paths...)
+			for _, w := range []*testdatav1.Widget{
+				{},
+				{Label: "L"},
+				{Maybe: maybe("m")},
+				{Maybe: maybe(""), Label: "L"},
+				{Tags: []string{"a", "b"}},
+				{Tags: []string{"a"}, Label: "L"},
+			} {
+				msg := w.ProtoReflect()
+				want := [][]byte{}
+				for _, e := range dense.Encode(msg, "w1") {
+					if e[0] != 0xff {
+						want = append(want, e)
+					}
+				}
+				Expect(sparse.Encode(msg, "w1")).To(Equal(want), "%v over %v", paths, w)
+			}
+		}
+	})
+
+	It("fingerprints apart from the dense index over the same components", func() {
+		dense, sparse := encoders([]string{"maybe"})
+		Expect(dense.Sparse()).To(BeFalse())
+		Expect(dense.SpecHash()).To(Equal(query.SpecHash(dense.Components())),
+			"a dense index keeps the fingerprint it already stores under")
+		Expect(sparse.SpecHash()).NotTo(Equal(dense.SpecHash()),
+			"entries stored dense must not be read as sparse, or the other way round")
+	})
+})
+
 var _ = Describe("SpecHash", func() {
 	widget := (&testdatav1.Widget{}).ProtoReflect().Descriptor()
 

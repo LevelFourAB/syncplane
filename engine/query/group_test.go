@@ -118,6 +118,30 @@ var _ = Describe("PlanGroup", func() {
 	byLabelDesc := index("by_label_desc", "-label")
 	byTags := index("by_tags", "tags")
 
+	Describe("over a sparse index", func() {
+		sparseIndex := func(name string, paths ...string) query.Index {
+			GinkgoHelper()
+			dense := index(name, paths...)
+			enc, err := query.NewSparseIndexEncoder(dense.Encoder.Components())
+			Expect(err).NotTo(HaveOccurred())
+			return query.Index{Name: name, Encoder: enc}
+		}
+
+		It("declines to partition on the leading component, whose missing group it leaves out", func() {
+			Expect(query.PlanGroup([]query.Index{sparseIndex("sparse_maybe", "maybe")},
+				nil, group("maybe"))).To(BeNil())
+			Expect(query.PlanGroup([]query.Index{index("dense_maybe", "maybe")},
+				nil, group("maybe"))).NotTo(BeNil(), "the dense index holds every group")
+		})
+
+		It("partitions after a leading component pinned to a present value", func() {
+			p := query.PlanGroup([]query.Index{sparseIndex("sparse_label_count", "label", "count")},
+				compile(query.Eq("label", "a")), group("count"))
+			Expect(p).NotTo(BeNil())
+			Expect(p.Index).To(Equal("sparse_label_count"))
+		})
+	})
+
 	It("partitions on a leading component with no predicate", func() {
 		p := query.PlanGroup([]query.Index{byLabel}, nil, group("label"))
 		Expect(p).NotTo(BeNil())
