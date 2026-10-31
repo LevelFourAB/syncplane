@@ -296,7 +296,7 @@ async function buildEntity(
 							entity,
 							workspaceId,
 							key,
-							searchPositions(search, entity, workspaceId, key, value, def.schema),
+							searchPositions(search, entity, workspaceId, value, def.schema),
 						);
 					}
 				}

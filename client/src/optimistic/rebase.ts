@@ -705,7 +705,6 @@ export async function applyServerChanges(
 						search,
 						change.entity,
 						workspaceId,
-						change.key,
 						decoded,
 						def.schema,
 					);
@@ -836,7 +835,6 @@ async function writeSnapshotRows(
 							search,
 							change.entity,
 							index!.workspaceId,
-							change.key,
 							decoded,
 							def.schema,
 						),

@@ -2,11 +2,16 @@
 // declaration. Counterpart of engine/query/searchindex.go — the analysis, the
 // per-row term cap and the overflow rule must agree, since each side maintains
 // its own copy of the index over the same rows and both must find the same
-// candidates. The entry bytes are local to each side: these entries end with
-// the row key, and the server's do not.
+// candidates. The entry bytes are local to each side.
 //
-// 	entry := 0x01 term rowKey     one per distinct term
-// 	      |  0x02 rowKey          the overflow marker, alone
+// 	entry := 0x01 term     one per distinct term
+// 	      |  0x02          the overflow marker, alone
+//
+// An entry does not end with the row key, as a value-index entry does: every
+// search read takes the row key from the `x/` record that holds the position,
+// never from the position itself. The rows that hold one term therefore all
+// hold the same position, and the store orders such a tie by record key, so
+// the rows of one term still come out in row-key order.
 //
 // A row whose distinct terms exceed SEARCH_TERMS_PER_ROW stores the single
 // overflow marker instead, and every term probe unions the overflow rows into
@@ -27,7 +32,7 @@ import type { SearchDecl } from './match.js';
  * change, or an analyzer change that moves existing terms — invalidates every
  * stored search index, which then rebuilds.
  */
-const SEARCH_INDEX_ENCODING_VERSION = 1;
+const SEARCH_INDEX_ENCODING_VERSION = 2;
 
 /**
  * Caps the distinct terms one row stores postings for; past it the row stores
@@ -49,12 +54,7 @@ const OVERFLOW_TAG = 0x02;
  * marker alone past the cap. A row whose fields analyze to nothing occupies
  * no entries.
  */
-export function searchEntries(
-	decl: SearchDecl,
-	value: unknown,
-	key: string,
-	schema: DescMessage,
-): string[] {
+export function searchEntries(decl: SearchDecl, value: unknown, schema: DescMessage): string[] {
 	const seen = new Set<string>();
 	const terms: string[] = [];
 	for (const f of decl.fields) {
@@ -62,11 +62,7 @@ export function searchEntries(
 		if (!r.found || typeof r.value !== 'string') continue;
 		for (const t of analyze(r.value, decl.options)) {
 			if (seen.has(t)) continue;
-			if (seen.size === SEARCH_TERMS_PER_ROW) {
-				const out: number[] = [ OVERFLOW_TAG ];
-				appendIndexString(out, key);
-				return [ bytesToKey(out) ];
-			}
+			if (seen.size === SEARCH_TERMS_PER_ROW) return [ String.fromCharCode(OVERFLOW_TAG) ];
 			seen.add(t);
 			terms.push(t);
 		}
@@ -74,7 +70,6 @@ export function searchEntries(
 	return terms.map((t) => {
 		const out: number[] = [ TERM_TAG ];
 		appendIndexString(out, t);
-		appendIndexString(out, key);
 		return bytesToKey(out);
 	});
 }
@@ -112,7 +107,8 @@ export function searchTermRange(t: QueryTerm): { lo: string; hi: string | undefi
  *
  * Two entries carry the same term exactly when this is equal, which is how a
  * prefix probe tells a range holding one stored term from one holding several:
- * entries of one term sort by row key, entries of several by term first.
+ * the postings of one term are in row-key order, those of several by term
+ * first.
  */
 export function searchPostingTerm(entry: string): string | undefined {
 	if (entry.charCodeAt(0) !== TERM_TAG) return undefined;

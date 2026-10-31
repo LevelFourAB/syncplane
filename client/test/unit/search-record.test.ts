@@ -15,7 +15,9 @@ import { SyncClient } from '../../src/client.js';
 import type { RowSet } from '../../src/coverage.js';
 import { RowChangeSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
 import {
+	indexPositionPrefix,
 	metaCursor,
+	metaIndexBuilt,
 	metaSnapshotGen,
 	searchIndexKey,
 	type SearchIndexRecord,
@@ -25,13 +27,15 @@ import type { KVStore } from '../../src/kv/store.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { ChainMutex } from '../../src/mutex.js';
 import { buildIndexes, markIndexesBuilt } from '../../src/optimistic/index-build.js';
-import { IndexCache } from '../../src/optimistic/index-maintain.js';
+import { IndexCache, searchIndexOf } from '../../src/optimistic/index-maintain.js';
 import {
 	applyBootstrapRows,
 	applyServerChanges,
 	wipeConfirmedState,
 } from '../../src/optimistic/rebase.js';
 import type { Query } from '../../src/query/index.js';
+import { fingerprint } from '../../src/query/indexkey.js';
+import { SEARCH_INDEX_NAME, SEARCH_TERMS_PER_ROW } from '../../src/query/searchindex.js';
 import { defineSchema, entity, type Infer, text } from '../../src/schema/builder.js';
 import type { QueryEvent } from '../../src/sync/events.js';
 import { TouchSet } from '../../src/touch.js';
@@ -278,5 +282,139 @@ describe('search queries over the split record', () => {
 		const { keys, receipt } = await queryThrough(kv, MILK);
 		expect(receipt.index).toBe('__search');
 		expect(keys).toEqual([ 'a1', 'a3' ]);
+	});
+});
+
+/** The prefix every search position of `article` in WS starts with. */
+function searchPrefix(indexes: IndexCache): string {
+	const idx = searchIndexOf(indexes.for('article'))!;
+	return indexPositionPrefix('article', SEARCH_INDEX_NAME, idx.specHash, WS);
+}
+
+/** A title with more distinct terms than one row stores postings for. */
+const oversized = (tail: string) =>
+	Array.from({ length: SEARCH_TERMS_PER_ROW + 20 }, (_, i) => `unique${i}`).join(' ') + tail;
+
+describe('search positions', () => {
+	it('carry the term alone, so rows sharing a term share its position', async () => {
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(registry);
+		await apply(kv, indexes, [
+			change('a1', 'milk cow', 'draft', 1n),
+			change('a2', 'cow milk', 'live', 2n),
+		]);
+		const prefix = searchPrefix(indexes);
+		const milk = `${prefix}\u0001milk\u0000\u0000`;
+		const cow = `${prefix}\u0001cow\u0000\u0000`;
+		expect((await searchRecord(kv, 'a1'))!.ix).toEqual([ milk, cow ]);
+		expect((await searchRecord(kv, 'a2'))!.ix).toEqual([ cow, milk ]);
+	});
+
+	it('store the overflow marker alone for every oversized row', async () => {
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(registry);
+		await apply(kv, indexes, [
+			change('b1', oversized(' needle'), 'draft', 1n),
+			change('b2', oversized(''), 'draft', 2n),
+		]);
+		const overflow = `${searchPrefix(indexes)}\u0002`;
+		expect((await searchRecord(kv, 'b1'))!.ix).toEqual([ overflow ]);
+		expect((await searchRecord(kv, 'b2'))!.ix).toEqual([ overflow ]);
+	});
+});
+
+describe('search queries over shared positions', () => {
+	const ROWS = [
+		change('a1', 'milk cow', 'draft', 1n),
+		change('a2', 'cow milk', 'live', 2n),
+		change('a3', 'milk cow', 'live', 3n),
+		change('a4', 'water', 'live', 4n),
+		change('b1', oversized(' needle milk'), 'draft', 5n),
+		change('b2', oversized(''), 'draft', 6n),
+	];
+
+	async function served(q: Query<Article>): Promise<string[]> {
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(registry);
+		await apply(kv, indexes, ROWS);
+		const { keys, receipt } = await queryServedByIndex(kv, indexes, q);
+		expect(receipt.index).toBe('__search');
+		return keys;
+	}
+
+	it('finds every row holding one term', async () => {
+		expect(await served({ where: (a) => a.match('milk ') })).toEqual([ 'a1', 'a2', 'a3', 'b1' ]);
+	});
+
+	it('finds every row holding all of several terms', async () => {
+		expect(await served({ where: (a) => a.match('cow milk ') })).toEqual([ 'a1', 'a2', 'a3' ]);
+	});
+
+	it('pages the rows of a shared term in key order', async () => {
+		expect(await served({ where: (a) => a.match('cow '), limit: 2 })).toEqual([ 'a1', 'a2' ]);
+		expect(await served({ where: (a) => a.match('cow '), offset: 2, limit: 2 })).toEqual([ 'a3' ]);
+	});
+
+	it('finds a term past the cap in only the oversized row that holds it', async () => {
+		expect(await served({ where: (a) => a.match('needle') })).toEqual([ 'b1' ]);
+	});
+});
+
+describe('a store written under an older position layout', () => {
+	it('is searched by scan until the build rewrites its positions', async () => {
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(registry);
+		const decl = searchIndexOf(indexes.for('article'))!.search!;
+		// The previous layout, spelled out rather than derived: what is under
+		// test is that positions and markers written by it are not trusted.
+		// It hashed `searchv1` into the spec, rooted each prefix at `i/`
+		// with 16 hex digits and a slash, and ended every search entry with
+		// the escaped, terminated row key.
+		const oldSpec = fingerprint(`searchv1|${decl.spec}|cap:${SEARCH_TERMS_PER_ROW}`);
+		const oldPrefix = `i/${fingerprint(`2/article/${SEARCH_INDEX_NAME}/${oldSpec}/${WS}`)}/`;
+		const oldMarker = `meta/ws/${WS}/index/article/${SEARCH_INDEX_NAME}@${oldSpec}~2`;
+		const oldTerm = (term: string, key: string) =>
+			`${oldPrefix}\u0001${term}\u0000\u0000${key}\u0000\u0000`;
+
+		const seed = await kv.write();
+		await applyServerChanges(seed, registry, WS, SEED, new TouchSet());
+		await seed.put(xKey('a1'), { ix: [ oldTerm('milk', 'a1'), oldTerm('cow', 'a1') ] });
+		await seed.put(xKey('a2'), { ix: [ oldTerm('water', 'a2') ] });
+		await seed.put(xKey('a3'), { ix: [ oldTerm('milk', 'a3'), oldTerm('goat', 'a3') ] });
+		await seed.put(oldMarker, true);
+		await seed.put(metaCursor(WS), new Uint8Array([ 1 ]));
+		await seed.put(metaSnapshotGen(WS), 1);
+		await seed.commit();
+
+		const before = await queryThrough(kv, MILK);
+		expect(before.receipt.index).toBeUndefined();
+		expect(before.keys).toEqual([ 'a1', 'a3' ]);
+
+		const mutex = new ChainMutex();
+		const built = await buildIndexes(kv, (fn) => mutex.run(fn), registry, indexes, WS);
+		expect(built).toEqual({ rows: 3, ready: true });
+
+		const prefix = searchPrefix(indexes);
+		for (const id of [ 'a1', 'a2', 'a3' ]) {
+			const ix = (await searchRecord(kv, id))!.ix;
+			expect(ix.every((p) => p.startsWith(prefix) && !p.startsWith(oldPrefix))).toBe(true);
+		}
+		const after = await queryThrough(kv, MILK);
+		expect(after.receipt.index).toBe('__search');
+		expect(after.keys).toEqual([ 'a1', 'a3' ]);
+
+		const r = await kv.read();
+		expect(await r.has(oldMarker)).toBe(false);
+		expect(
+			await r.has(
+				metaIndexBuilt(
+					WS,
+					'article',
+					SEARCH_INDEX_NAME,
+					searchIndexOf(indexes.for('article'))!.specHash,
+				),
+			),
+		).toBe(true);
+		r.release();
 	});
 });

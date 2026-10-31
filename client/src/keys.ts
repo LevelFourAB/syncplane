@@ -425,7 +425,7 @@ const textLogFieldOf = (segment: string): string =>
 	segment.replaceAll('%2F', '/').replaceAll('%25', '%');
 
 /**
- * A secondary-index POSITION: `i/<fingerprint>/<entry>`, where the entry is the
+ * A secondary-index POSITION: `<fingerprint><entry>`, where the entry is the
  * encoded sort key (see query/indexkey.ts) and the fingerprint stands for the
  * (layout, entity, index, spec, workspace) the entry belongs to. Positions are
  * the elements of a record's INDEX_FIELD array — the confirmed row's for a
@@ -451,10 +451,12 @@ const textLogFieldOf = (segment: string): string =>
  * it and again on the store's index entry over that row, so every character is
  * paid once per position on every entity scan and once more on every build
  * write — and the parts spelled out came to 42 characters for a short workspace
- * id and around 70 for a UUID one, against entries averaging under 30. A prefix
- * of `i/` plus 16 hex digits of FNV-1a over the parts is 18 characters whatever
- * the parts are, and two prefixes collide only where their part lists hash to
- * the same 64 bits.
+ * id and around 70 for a UUID one, against entries averaging under 30. The
+ * prefix is the 64 bits of FNV-1a over the parts, one character per byte
+ * (`\u0000`–`\u00ff`): 8 characters whatever the parts are, and two prefixes
+ * collide only where their part lists hash to the same 64 bits. Every prefix
+ * has the same length, so none is a prefix of another and no separator has to
+ * end it.
  *
  * The workspace sits INSIDE the fingerprint rather than outside it as in the
  * row keyspaces. A query is normally workspace-scoped, so selectivity matters
@@ -475,8 +477,6 @@ const textLogFieldOf = (segment: string): string =>
  * identical to the merged view without the index having to track uncommitted
  * state, and is also why an `o/` record must never grow an INDEX_FIELD.
  */
-const INDEX_POSITION_ROOT = 'i/';
-
 /** Search-index record stored at x/ keys, beside the confirmed row it
  * describes. Holds the row's search positions and nothing else, so a row
  * rewrite that leaves its terms alone can leave this record alone too. */
@@ -497,7 +497,7 @@ export interface SearchIndexRecord {
  * prefix implies, so positions of the old kind have to become unreachable at
  * the same moment.
  */
-const INDEX_POSITION_LAYOUT = 2;
+const INDEX_POSITION_LAYOUT = 3;
 
 /**
  * Prefixes already fingerprinted, keyed by the parts they were built from. A
@@ -527,7 +527,17 @@ export const indexPositionPrefix = (
 	const parts = `${INDEX_POSITION_LAYOUT}/${entity}/${index}/${specHash}/${workspaceId}`;
 	let prefix = positionPrefixes.get(parts);
 	if (prefix === undefined) {
-		prefix = `${INDEX_POSITION_ROOT}${fingerprint(parts)}/`;
+		// One character per byte rather than one per 16 bits. Entries are one
+		// character per byte too, so every position stays within \u0000 to \u00ff,
+		// which the engines keep at one byte per character in a record value and
+		// in memory. One wider character makes the whole position two bytes per
+		// character there, which gives back most of what the shorter index key
+		// saves, and 16-bit units can also form lone surrogates.
+		const hex = fingerprint(parts);
+		prefix = '';
+		for (let i = 0; i < hex.length; i += 2) {
+			prefix += String.fromCharCode(Number.parseInt(hex.slice(i, i + 2), 16));
+		}
 		positionPrefixes.set(parts, prefix);
 	}
 	return prefix;

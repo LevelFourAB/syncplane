@@ -270,12 +270,11 @@ export function searchPositions(
 	idx: CompiledIndex,
 	entity: string,
 	workspaceId: string,
-	key: string,
 	value: unknown,
 	schema: DescMessage,
 ): string[] {
 	const prefix = indexPositionPrefix(entity, idx.name, idx.specHash, workspaceId);
-	return searchEntries(idx.search!, value, key, schema).map((entry) => prefix + entry);
+	return searchEntries(idx.search!, value, schema).map((entry) => prefix + entry);
 }
 
 /**

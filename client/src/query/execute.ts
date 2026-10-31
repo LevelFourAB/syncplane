@@ -1661,9 +1661,10 @@ async function querySearchPostings<D extends DescMessage>(
 	}
 	for (const key of edited) if (!shadowed.has(key)) readWhole.add(key);
 
-	// Postings of one term are ordered by row key, which with no orderBy is the
-	// result order — so the rows past the budget are provably past the page,
-	// exactly as an ordered value walk settles (see candidateBudget). Overflow
+	// Postings of one term share one position, and the store orders a tie by
+	// record key and so by row key, which with no orderBy is the result order —
+	// so the rows past the budget are provably past the page, exactly as an
+	// ordered value walk settles (see candidateBudget). Overflow
 	// and overlay rows merge in AHEAD of postings rows, never displace them.
 	const budget = candidateBudget(compiled, overlayRows.length, undefined);
 	const pageKeys: string[] = [];
