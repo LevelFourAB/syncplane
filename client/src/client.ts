@@ -97,6 +97,7 @@ import {
 	type ConfirmedRecord,
 	confirmedWsPrefix,
 	FORMAT_VERSION,
+	legacySearchIndexWsPrefix,
 	META_CLIENT_ID,
 	META_FORMAT_VERSION,
 	META_WS_PREFIX,
@@ -2362,9 +2363,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					}
 					// The value positions ride on the confirmed rows above and are
 					// deleted with them; the search positions are records of their own
-					// and are not.
-					for await (const [ k ] of tx.scan(searchIndexWsPrefix(entity, workspaceId))) {
-						doomed.push(k);
+					// and are not, in both the current layout and the one before it.
+					for (
+						const prefix of [
+							searchIndexWsPrefix(entity, workspaceId),
+							legacySearchIndexWsPrefix(entity, workspaceId),
+						]
+					) {
+						for await (const [ k ] of tx.scan(prefix)) doomed.push(k);
 					}
 					touched.entity(workspaceId, entity);
 				}

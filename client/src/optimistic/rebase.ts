@@ -31,6 +31,7 @@ import {
 	type ConfirmedRecord,
 	confirmedWsPrefix,
 	isRowTextKey,
+	legacySearchIndexWsPrefix,
 	metaAckedSeq,
 	metaCallerAccess,
 	metaCallerAccessVersion,
@@ -561,13 +562,15 @@ export async function wipeConfirmedState(
 	// The built markers say the index covers the whole entity, which stops being
 	// true the moment the rows are gone, so they leave in the same transaction.
 	// The value positions need no sweep of their own — they ride on the rows
-	// below — but the search records are keys beside them and do.
+	// below — but the search records are keys beside them and do, in both the
+	// current layout and the one before it.
 	await deletePrefixes(tx, [ metaIndexPrefix(workspaceId) ]);
 	for (const entity of await syncableEntities(tx, registry)) {
 		for (
 			const prefix of [
 				confirmedWsPrefix(entity, workspaceId),
 				searchIndexWsPrefix(entity, workspaceId),
+				legacySearchIndexWsPrefix(entity, workspaceId),
 			]
 		) {
 			for await (const [ k ] of tx.scan(prefix)) {
@@ -596,6 +599,7 @@ export async function dropConfirmedEntities(
 			const prefix of [
 				confirmedWsPrefix(entity, workspaceId),
 				searchIndexWsPrefix(entity, workspaceId),
+				legacySearchIndexWsPrefix(entity, workspaceId),
 			]
 		) {
 			for await (const [ k ] of tx.scan(prefix)) {

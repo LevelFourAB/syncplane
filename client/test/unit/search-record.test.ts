@@ -1,4 +1,4 @@
-// The search-index record (`x/<entity>/<ws>/<key>`): a row's term postings,
+// The search-index record (`x/<scope><key>`): a row's term postings,
 // kept beside the row rather than on it so a write that leaves the searchable
 // text alone leaves the postings alone.
 //
@@ -16,11 +16,14 @@ import type { RowSet } from '../../src/coverage.js';
 import { RowChangeSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
 import {
 	indexPositionPrefix,
+	legacySearchIndexWsPrefix,
 	metaCursor,
 	metaIndexBuilt,
 	metaSnapshotGen,
+	SEARCH_INDEX_ROOT,
 	searchIndexKey,
 	type SearchIndexRecord,
+	searchIndexWsPrefix,
 } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { KVStore } from '../../src/kv/store.js';
@@ -31,6 +34,7 @@ import { IndexCache, searchIndexOf } from '../../src/optimistic/index-maintain.j
 import {
 	applyBootstrapRows,
 	applyServerChanges,
+	dropConfirmedEntities,
 	wipeConfirmedState,
 } from '../../src/optimistic/rebase.js';
 import type { Query } from '../../src/query/index.js';
@@ -119,6 +123,9 @@ async function searchRecord(kv: KVStore, id: string): Promise<SearchIndexRecord 
 }
 
 const xKey = (id: string) => searchIndexKey('article', WS, id);
+
+/** Where position layouts up to 3 kept the search record of `id`. */
+const legacyKey = (id: string) => `x/article/${WS}/${id}`;
 
 describe('the search-index record', () => {
 	it('is left alone by a change that does not move the terms', async () => {
@@ -378,9 +385,9 @@ describe('a store written under an older position layout', () => {
 
 		const seed = await kv.write();
 		await applyServerChanges(seed, registry, WS, SEED, new TouchSet());
-		await seed.put(xKey('a1'), { ix: [ oldTerm('milk', 'a1'), oldTerm('cow', 'a1') ] });
-		await seed.put(xKey('a2'), { ix: [ oldTerm('water', 'a2') ] });
-		await seed.put(xKey('a3'), { ix: [ oldTerm('milk', 'a3'), oldTerm('goat', 'a3') ] });
+		await seed.put(legacyKey('a1'), { ix: [ oldTerm('milk', 'a1'), oldTerm('cow', 'a1') ] });
+		await seed.put(legacyKey('a2'), { ix: [ oldTerm('water', 'a2') ] });
+		await seed.put(legacyKey('a3'), { ix: [ oldTerm('milk', 'a3'), oldTerm('goat', 'a3') ] });
 		await seed.put(oldMarker, true);
 		await seed.put(metaCursor(WS), new Uint8Array([ 1 ]));
 		await seed.put(metaSnapshotGen(WS), 1);
@@ -403,6 +410,7 @@ describe('a store written under an older position layout', () => {
 		expect(after.receipt.index).toBe('__search');
 		expect(after.keys).toEqual([ 'a1', 'a3' ]);
 
+		expect(await keysUnder(kv, legacySearchIndexWsPrefix('article', WS))).toEqual([]);
 		const r = await kv.read();
 		expect(await r.has(oldMarker)).toBe(false);
 		expect(
@@ -416,5 +424,220 @@ describe('a store written under an older position layout', () => {
 			),
 		).toBe(true);
 		r.release();
+	});
+});
+
+/** A fingerprint as the 8 characters, one per byte, a position prefix holds. */
+function fingerprintBytes(parts: string): string {
+	const hex = fingerprint(parts);
+	let out = '';
+	for (let i = 0; i < hex.length; i += 2) {
+		out += String.fromCharCode(Number.parseInt(hex.slice(i, i + 2), 16));
+	}
+	return out;
+}
+
+describe('a store written under position layout 3', () => {
+	// Layout 3 composed positions exactly as the current layout does, with a 3
+	// hashed in, and kept the search record at `x/<entity>/<ws>/<key>`. Spelled
+	// out rather than derived, like the layout 2 case above.
+	async function seedLayout3(kv: KVStore, indexes: IndexCache) {
+		const spec = searchIndexOf(indexes.for('article'))!.specHash;
+		const prefix = fingerprintBytes(`3/article/${SEARCH_INDEX_NAME}/${spec}/${WS}`);
+		const term = (t: string) => `${prefix}\u0001${t}\u0000\u0000`;
+		const marker = `meta/ws/${WS}/index/article/${SEARCH_INDEX_NAME}@${spec}~3`;
+		const seed = await kv.write();
+		await applyServerChanges(seed, registry, WS, SEED, new TouchSet());
+		await seed.put(legacyKey('a1'), { ix: [ term('milk'), term('cow') ] });
+		await seed.put(legacyKey('a2'), { ix: [ term('water') ] });
+		await seed.put(legacyKey('a3'), { ix: [ term('milk'), term('goat') ] });
+		// A record whose row a tombstone has since removed. Only the build's
+		// sweep can find it: no row is left to lead to it.
+		await seed.put(legacyKey('a9'), { ix: [ term('milk') ] });
+		await seed.put(marker, true);
+		await seed.put(metaCursor(WS), new Uint8Array([ 1 ]));
+		await seed.put(metaSnapshotGen(WS), 1);
+		await seed.commit();
+		return marker;
+	}
+
+	it('is searched by scan until the build, and from the new records after it', async () => {
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(registry);
+		const oldMarker = await seedLayout3(kv, indexes);
+
+		const before = await queryThrough(kv, MILK);
+		expect(before.receipt.index).toBeUndefined();
+		expect(before.keys).toEqual([ 'a1', 'a3' ]);
+
+		const mutex = new ChainMutex();
+		const built = await buildIndexes(kv, (fn) => mutex.run(fn), registry, indexes, WS);
+		expect(built).toEqual({ rows: 3, ready: true });
+
+		expect(await keysUnder(kv, SEARCH_INDEX_ROOT)).toEqual([ xKey('a1'), xKey('a2'), xKey('a3') ]);
+		const r = await kv.read();
+		expect(await r.has(oldMarker)).toBe(false);
+		r.release();
+
+		const after = await queryThrough(kv, MILK);
+		expect(after.receipt.index).toBe('__search');
+		expect(after.keys).toEqual([ 'a1', 'a3' ]);
+	});
+
+	it('loses its old records to a wipe of the workspace', async () => {
+		const kv = new MemoryKVStore();
+		await seedLayout3(kv, new IndexCache(registry));
+		const tx = await kv.write();
+		await wipeConfirmedState(tx, registry, WS, new TouchSet());
+		await tx.commit();
+		expect(await keysUnder(kv, SEARCH_INDEX_ROOT)).toEqual([]);
+	});
+
+	it('loses its old records to a drop of the entity', async () => {
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(registry);
+		await seedLayout3(kv, indexes);
+		const tx = await kv.write();
+		await dropConfirmedEntities(tx, WS, [ 'article' ], new TouchSet(), indexes);
+		await tx.commit();
+		expect(await keysUnder(kv, SEARCH_INDEX_ROOT)).toEqual([]);
+	});
+});
+
+describe('the search-index record key', () => {
+	it('is the root, an 8-character scope, then the row key verbatim', () => {
+		const prefix = searchIndexWsPrefix('article', WS);
+		const key = searchIndexKey('article', WS, 'a/1');
+		expect(key).toBe(`${prefix}a/1`);
+		expect(prefix.startsWith(SEARCH_INDEX_ROOT)).toBe(true);
+		const scope = prefix.slice(SEARCH_INDEX_ROOT.length);
+		expect(scope).toHaveLength(8);
+		expect([ ...scope ].every((c) => c.charCodeAt(0) <= 0xff)).toBe(true);
+		// The high bit is what keeps the scope apart from an old `x/<entity>/`
+		// key, whose third character is an ASCII entity name. Checked over many
+		// pairs, since half of all fingerprints have it set by chance.
+		for (let i = 0; i < 32; i++) {
+			const p = searchIndexWsPrefix(`e${i}`, `w${i}`);
+			expect(p.charCodeAt(SEARCH_INDEX_ROOT.length)).toBeGreaterThanOrEqual(0x80);
+		}
+	});
+
+	it('scopes pairs whose names share a prefix apart', () => {
+		const pairs = [
+			[ 'article', 'ws1' ],
+			[ 'article', 'ws10' ],
+			[ 'articles', 'ws1' ],
+			[ 'articles', 'ws10' ],
+		] as const;
+		const prefixes = pairs.map(([ e, w ]) => searchIndexWsPrefix(e, w));
+		expect(new Set(prefixes).size).toBe(pairs.length);
+		const legacy = pairs.map(([ e, w ]) => legacySearchIndexWsPrefix(e, w));
+		for (const p of prefixes) {
+			for (const q of [ ...prefixes, ...legacy ]) {
+				if (p !== q) expect(p.startsWith(q) || q.startsWith(p)).toBe(false);
+			}
+		}
+	});
+});
+
+describe('search records of entities and workspaces whose names share a prefix', () => {
+	const articles = entity('articles', {
+		id: text().key(),
+		title: text().searchable(),
+	});
+	const shared = defineSchema(article, articles);
+	const schemas = {
+		article: shared.descMessage('article'),
+		articles: shared.descMessage('articles'),
+	};
+	const reg = new EntityRegistry([ schemas.article, schemas.articles ]);
+	const PAIRS = [
+		[ 'article', 'ws1' ],
+		[ 'article', 'ws10' ],
+		[ 'articles', 'ws1' ],
+		[ 'articles', 'ws10' ],
+	] as const;
+	/** Row keys per pair: distinct per pair, so a scan returning another pair's
+	 * rows cannot pass. */
+	const rowsOf = (e: string, w: string) => [ `${e}-${w}-1`, `${e}-${w}-2` ];
+
+	async function seeded(): Promise<{ kv: KVStore; indexes: IndexCache }> {
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(reg);
+		for (const [ e, w ] of PAIRS) {
+			const schema = schemas[e];
+			const changes = rowsOf(e, w).map((id, i) =>
+				create(RowChangeSchema, {
+					entity: e,
+					key: id,
+					version: BigInt(i + 1),
+					body: {
+						case: 'value',
+						value: toBinary(schema, create(schema, { id, title: `milk ${id}` })),
+					},
+				})
+			);
+			const tx = await kv.write();
+			await applyServerChanges(tx, reg, w, changes, new TouchSet(), indexes);
+			await tx.commit();
+		}
+		return { kv, indexes };
+	}
+
+	async function rowKeysOf(kv: KVStore, e: string, w: string): Promise<string[]> {
+		const prefix = searchIndexWsPrefix(e, w);
+		return (await keysUnder(kv, prefix)).map((k) => k.slice(prefix.length));
+	}
+
+	it('scan as one prefix per pair, holding that pair alone', async () => {
+		const { kv } = await seeded();
+		for (const [ e, w ] of PAIRS) expect(await rowKeysOf(kv, e, w)).toEqual(rowsOf(e, w));
+		expect(await keysUnder(kv, SEARCH_INDEX_ROOT)).toHaveLength(PAIRS.length * 2);
+	});
+
+	it('leave with a wipe of their workspace and no other', async () => {
+		const { kv } = await seeded();
+		const tx = await kv.write();
+		await wipeConfirmedState(tx, reg, 'ws1', new TouchSet());
+		await tx.commit();
+		expect(await rowKeysOf(kv, 'article', 'ws1')).toEqual([]);
+		expect(await rowKeysOf(kv, 'articles', 'ws1')).toEqual([]);
+		expect(await rowKeysOf(kv, 'article', 'ws10')).toEqual(rowsOf('article', 'ws10'));
+		expect(await rowKeysOf(kv, 'articles', 'ws10')).toEqual(rowsOf('articles', 'ws10'));
+	});
+
+	it('leave with a drop of their entity in their workspace and no other', async () => {
+		const { kv, indexes } = await seeded();
+		const tx = await kv.write();
+		await dropConfirmedEntities(tx, 'ws10', [ 'article' ], new TouchSet(), indexes);
+		await tx.commit();
+		expect(await rowKeysOf(kv, 'article', 'ws10')).toEqual([]);
+		expect(await rowKeysOf(kv, 'article', 'ws1')).toEqual(rowsOf('article', 'ws1'));
+		expect(await rowKeysOf(kv, 'articles', 'ws10')).toEqual(rowsOf('articles', 'ws10'));
+		expect(await rowKeysOf(kv, 'articles', 'ws1')).toEqual(rowsOf('articles', 'ws1'));
+	});
+
+	it('leave one by one with the tombstones of their rows', async () => {
+		const { kv, indexes } = await seeded();
+		const tx = await kv.write();
+		const id = rowsOf('articles', 'ws1')[0]!;
+		await applyServerChanges(
+			tx,
+			reg,
+			'ws1',
+			[
+				create(RowChangeSchema, {
+					entity: 'articles',
+					key: id,
+					version: 9n,
+					body: { case: 'tombstone', value: true },
+				}),
+			],
+			new TouchSet(),
+			indexes,
+		);
+		await tx.commit();
+		expect(await rowKeysOf(kv, 'articles', 'ws1')).toEqual(rowsOf('articles', 'ws1').slice(1));
+		expect(await keysUnder(kv, SEARCH_INDEX_ROOT)).toHaveLength(PAIRS.length * 2 - 1);
 	});
 });

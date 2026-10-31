@@ -3,7 +3,9 @@
  * so `<ws>` is a segment inside the keys rather than the name of the database:
  *
  *   c/<entity>/<ws>/<key>        confirmed (server-acked) row bytes
- *   x/<entity>/<ws>/<key>        the confirmed row's SEARCH-index positions
+ *   x/<scope><key>               the confirmed row's SEARCH-index positions;
+ *                                <scope> fingerprints (entity, ws), see
+ *                                searchIndexWsPrefix
  *   o/<entity>/<ws>/<key>        optimistic overlay (value or local tombstone)
  *   ot/<entity>/<ws>/<key>/<field>/<id>
  *                                optimistic text log (one delta-state fragment
@@ -28,8 +30,9 @@
  *
  * - VALUE-index positions ride on the confirmed row (`c/`, ConfirmedRecord.ix),
  *   so indexing a row costs no record of its own.
- * - SEARCH-index positions sit beside it in `x/` (SearchIndexRecord), keyed
- *   identically so the two are one slice apart.
+ * - SEARCH-index positions sit beside it in `x/` (SearchIndexRecord), under
+ *   the same row key, so a search record's key gives the row's key by one
+ *   slice.
  *
  * The split is what keeps an ordinary field update off the search postings. A
  * store rewrites every position of a record it puts, changed or not, and a
@@ -47,7 +50,8 @@
  *
  * Workspace ids are percent-encoded where they appear as a key segment (see
  * `wsSegment`); row keys are NOT, since they are always last and may contain
- * slashes.
+ * slashes. The `x/` records are the exception to the spelled-out segments:
+ * they spell neither the entity nor the workspace (see searchIndexWsPrefix).
  */
 
 import { fingerprint } from './query/indexkey.js';
@@ -306,18 +310,77 @@ export const confirmedKey = (entity: string, workspaceId: string, key: string): 
 export const overlayKey = (entity: string, workspaceId: string, key: string): string =>
 	`${overlayWsPrefix(entity, workspaceId)}${key}`;
 
-/** Every workspace's search-index records of one entity — mirrors confirmedPrefix. */
-export const searchIndexPrefix = (entity: string): string => `x/${entity}/`;
-/** One workspace's search-index records of one entity. */
-export const searchIndexWsPrefix = (entity: string, workspaceId: string): string =>
-	`${searchIndexPrefix(entity)}${wsSegment(workspaceId)}/`;
+/**
+ * Root of every search-index record, of every entity and workspace. A record
+ * key is the root, then the 8-character scope of searchIndexWsPrefix, then the
+ * row key verbatim.
+ */
+export const SEARCH_INDEX_ROOT = 'x/';
+
+/**
+ * Scopes already fingerprinted, keyed by `<entity>/<workspace id>` — which is
+ * unambiguous, since an entity name holds no slash. A client has one entry per
+ * (entity, workspace), while the write path asks once per row.
+ */
+const searchScopes = new Map<string, string>();
+
+/**
+ * One workspace's search-index records of one entity: SEARCH_INDEX_ROOT and an
+ * 8-character fingerprint of the pair.
+ *
+ * The pair is a fingerprint rather than the parts spelled out because of what
+ * a record key costs. The store's index keeps the key of the record beside
+ * each position the record holds, and a searchable row holds one position per
+ * distinct term, so every key character is stored once per term of the row,
+ * and twice on WebKit. Spelled out, the pair is the entity name, the workspace
+ * segment and two slashes: 33 characters for a five-letter entity and a
+ * 26-character workspace id.
+ *
+ * The fingerprint is the 64 bits of FNV-1a over `<entity>/<ws segment>`, one
+ * character per byte, with the high bit of the first byte set. Every scope has
+ * the same length, so none is a prefix of another and no separator has to end
+ * it, and two scopes share a prefix only where their pairs hash to the same 63
+ * bits. The high bit keeps every scope apart from the `x/<entity>/` keys of
+ * legacySearchIndexWsPrefix, whose third character is an ASCII entity name.
+ *
+ * There is no prefix for every workspace of one entity, or every entity of one
+ * workspace: each reader of these records reads one (entity, workspace) pair,
+ * and a sweep of a workspace visits its entities one by one.
+ */
+export const searchIndexWsPrefix = (entity: string, workspaceId: string): string => {
+	const cacheKey = `${entity}/${workspaceId}`;
+	let prefix = searchScopes.get(cacheKey);
+	if (prefix === undefined) {
+		// Over the ws SEGMENT rather than the raw id: fingerprint reads only the
+		// low byte of each code unit, and the segment is ASCII.
+		const scope = fingerprintChars(`${entity}/${wsSegment(workspaceId)}`);
+		prefix = SEARCH_INDEX_ROOT
+			+ String.fromCharCode(scope.charCodeAt(0) | 0x80)
+			+ scope.slice(1);
+		searchScopes.set(cacheKey, prefix);
+	}
+	return prefix;
+};
+
 /**
  * The search-index positions of the confirmed row at the matching `c/` key.
- * The suffix after the prefix is the row key verbatim, exactly as it is under
- * `c/`, so a search-index scan yields a key one slice away from the row's.
+ * The suffix after searchIndexWsPrefix is the row key verbatim, exactly as it
+ * is under `c/`, so a search-index scan yields a key one slice away from the
+ * row's.
  */
 export const searchIndexKey = (entity: string, workspaceId: string, key: string): string =>
 	`${searchIndexWsPrefix(entity, workspaceId)}${key}`;
+
+/**
+ * One workspace's search-index records of one entity as position layout 3
+ * keyed them: `x/<entity>/<ws>/<key>`. Only a store last written by a build of
+ * that layout holds them, and none of their positions is reachable under the
+ * current layout. Every sweep of a workspace or an entity deletes them with
+ * the current records, and the index build deletes the rest of its entity
+ * when it claims its markers (see index-build.ts).
+ */
+export const legacySearchIndexWsPrefix = (entity: string, workspaceId: string): string =>
+	`${SEARCH_INDEX_ROOT}${entity}/${wsSegment(workspaceId)}/`;
 
 /**
  * The optimistic TEXT log: one delta-state fragment per local edit to one
@@ -493,11 +556,11 @@ export interface SearchIndexRecord {
  * stored position unreachable and every index-built marker written before the
  * bump read as unbuilt, so the background build re-walks and rewrites the rows.
  * Bump it for any change to how a position is composed, and for any change to
- * WHICH RECORD holds one: a scan resolves its keys by the record kind the
- * prefix implies, so positions of the old kind have to become unreachable at
- * the same moment.
+ * WHICH RECORD holds one, its key included: a scan resolves its keys by the
+ * record kind the prefix implies, so positions on records of the old kind or
+ * at the old keys have to become unreachable at the same moment.
  */
-const INDEX_POSITION_LAYOUT = 3;
+const INDEX_POSITION_LAYOUT = 4;
 
 /**
  * Prefixes already fingerprinted, keyed by the parts they were built from. A
@@ -533,15 +596,21 @@ export const indexPositionPrefix = (
 		// in memory. One wider character makes the whole position two bytes per
 		// character there, which gives back most of what the shorter index key
 		// saves, and 16-bit units can also form lone surrogates.
-		const hex = fingerprint(parts);
-		prefix = '';
-		for (let i = 0; i < hex.length; i += 2) {
-			prefix += String.fromCharCode(Number.parseInt(hex.slice(i, i + 2), 16));
-		}
+		prefix = fingerprintChars(parts);
 		positionPrefixes.set(parts, prefix);
 	}
 	return prefix;
 };
+
+/** The 64-bit fingerprint of `parts` as 8 characters, one per byte. */
+function fingerprintChars(parts: string): string {
+	const hex = fingerprint(parts);
+	let out = '';
+	for (let i = 0; i < hex.length; i += 2) {
+		out += String.fromCharCode(Number.parseInt(hex.slice(i, i + 2), 16));
+	}
+	return out;
+}
 
 /**
  * Marks an index as fully built for one workspace:

@@ -39,6 +39,7 @@ import {
 	type ConfirmedRecord,
 	confirmedWsPrefix,
 	type IndexBuildCursor,
+	legacySearchIndexWsPrefix,
 	metaCursor,
 	metaIndexBuildCursor,
 	metaIndexBuilt,
@@ -50,6 +51,7 @@ import type { EntityRegistry } from '../mutations.js';
 import { upperBound } from '../query/indexkey.js';
 import {
 	type CompiledIndex,
+	deletePrefixes,
 	type IndexCache,
 	indexedRecord,
 	searchIndexOf,
@@ -350,6 +352,13 @@ async function buildEntity(
 				if (!current.has(k)) stale.push(k);
 			}
 			for (const k of stale) await wtx.del(k);
+			// The search records of the previous layout go in the same transaction
+			// as that layout's markers. Before it, a tab of that build may still
+			// trust its marker and read them; after it, no build trusts them. The
+			// walk cannot reclaim them as it reclaims a superseded spec's
+			// positions, because they sit at another key than the record it
+			// rewrites.
+			await deletePrefixes(wtx, [ legacySearchIndexWsPrefix(entity, workspaceId) ]);
 			for (const marker of markers) await wtx.put(marker, true);
 			// The walk is over, so the position is spent. Leaving it would strand a
 			// key per entity per workspace, and a later rebuild (a changed spec)
