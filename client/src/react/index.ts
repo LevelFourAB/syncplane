@@ -15,6 +15,7 @@
 import type { DescMessage } from '@bufbuild/protobuf';
 
 import { buildReactDb } from './build-db.js';
+import { useBlob } from './hooks/use-blob.js';
 import { useCan, useCanCreate, useHasPermission } from './hooks/use-can.js';
 import { useOnMutationRejected } from './hooks/use-on-mutation-rejected.js';
 import { usePresenceHook, useRoomHook } from './hooks/use-room.js';
@@ -32,6 +33,8 @@ export {
 	useWorkspaceId,
 	useWorkspaceScope,
 } from './context.js';
+export { useBlob } from './hooks/use-blob.js';
+export type { UseBlobOptions, UseBlobResult } from './hooks/use-blob.js';
 export { useCan, useCanCreate, useHasPermission } from './hooks/use-can.js';
 export type { UseCanOptions, UseDetailOptions } from './hooks/use-can.js';
 export { useDistinctHook, useGroupCountHook, useGroupRowsHook } from './hooks/use-groups.js';
@@ -101,6 +104,8 @@ export interface ReactSync<E extends readonly DescMessage[]> {
 	useRoom: typeof useRoomHook;
 	/** The ephemeral plane: one room's roster, without the handle. */
 	usePresence: typeof usePresenceHook;
+	/** One blob's status and bytes. */
+	useBlob: typeof useBlob;
 }
 
 /**
@@ -130,5 +135,6 @@ export function createReactSync<const E extends readonly DescMessage[]>(
 		useOnMutationRejected,
 		useRoom: useRoomHook,
 		usePresence: usePresenceHook,
+		useBlob,
 	};
 }

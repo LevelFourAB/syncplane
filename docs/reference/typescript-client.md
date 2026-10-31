@@ -65,6 +65,7 @@ The `SyncClientOptions<E extends readonly DescMessage[]>` interface accepts the 
 | `streamEnabled`           | `boolean`                                      | Optional | `true`                                  | Holds the live change stream open. Setting `false` falls back to poll and poke streams.                                                                         |
 | `pushDebounceMs`          | `number`                                       | Optional | `50`                                    | Milliseconds to buffer local writes before pushing. Further writes restart the timer. Setting `0` pushes on every write.                                        |
 | `pushMaxDelayMs`          | `number`                                       | Optional | `250`                                   | Maximum wait ceiling in milliseconds from the first buffered write. Setting `0` removes the ceiling.                                                            |
+| `blobCacheBytes`          | `number`                                       | Optional | `268435456` (256 MiB)                   | Byte budget of the blob download cache, shared by the account's tabs. Queued uploads do not count and are never deleted. See [Blobs](#blobs).                   |
 | `pullLimit`               | `number`                                       | Optional | `0`                                     | Maximum row changes per pull page. `0` uses the server default.                                                                                                 |
 | `poisonThreshold`         | `number`                                       | Optional | `5`                                     | Identical push failures of the head mutation before dropping to dead-letter storage. `internal` never counts. `<= 0` disables dropping.                         |
 | `maxMutationsPerPush`     | `number`                                       | Optional | `256`                                   | Maximum batch size per push RPC.                                                                                                                                |
@@ -115,7 +116,7 @@ It leaves the store on the device for the next client session on the account.
 A closed client throws `"SyncClient is closed"` and cannot be reopened.
 Create a new instance instead.
 
-`purgeLocalData()` stops synchronization, deletes all account data (workspace rows, overlay, staging, cursors, queues, and `clientId`), and closes the client.
+`purgeLocalData()` stops synchronization, deletes all account data (workspace rows, overlay, staging, cursors, queues, `clientId`, queued blob uploads and cached blobs), and closes the client.
 The client discards queued mutations rather than pushing them, returns them in the result array, and emits them to `onMutationRejected` with code `workspace_purged`.
 The IndexedDB database remains in place and empty.
 Calling `purgeLocalData()` on a closed client returns an empty array.
@@ -142,10 +143,10 @@ interface RemoveWorkspaceResult {
 }
 ```
 
-A `WorkspaceClient` binds reads, `mutate`, `db`, `transact`, `text`, `hold`, `undoScope`, `pendingCount`, `setSubscriptions`, and `status()` to one workspace.
+A `WorkspaceClient` binds reads, `mutate`, `db`, `blobs`, `transact`, `text`, `hold`, `undoScope`, `pendingCount`, `setSubscriptions`, and `status()` to one workspace.
 Cross-workspace reads (`scanAll`, `queryAll`, `watchQueryAll`) remain on the root client and label each row with its `workspaceId`.
 
-When `purge` is `true` in `removeWorkspace`, the client deletes the workspace's local rows, overlay, cursors, and mutation queue.
+When `purge` is `true` in `removeWorkspace`, the client deletes the workspace's local rows, overlay, cursors, mutation queue, queued blob uploads and cached blobs.
 The client returns queued mutations in `discarded` and emits them to `onMutationRejected` with code `workspace_purged`.
 Removing the default workspace leaves the client without a default.
 
@@ -1659,6 +1660,9 @@ Storage resource identifiers derive from `storagePrefix` and `accountId`:
 | `changeChannel` | BroadcastChannel | `sync:change:<accountId>`         |
 | `reopenChannel` | BroadcastChannel | `sync:reopen:<accountId>`         |
 | `textPeerLocks` | Web Locks        | `sync:textpeer:<clientId>:<slot>` |
+| `blobStore`     | IndexedDB        | `sync:blobs:<accountId>`          |
+| `blobLock`      | Web Locks        | `sync:bloblock:<accountId>`       |
+| `blobChannel`   | BroadcastChannel | `sync:blob:<accountId>`           |
 
 Call `storageNames(prefix, accountId)` to obtain the names used by a given prefix and account.
 
@@ -2006,6 +2010,7 @@ useUndo(opts?: UseWorkspaceOptions): { canUndo: boolean; canRedo: boolean; undo:
 useUndoScope(opts?: UndoScopeOptions): UndoScope
 useNearestUndoScope(): UndoScope | undefined
 useOnMutationRejected(handler: (info: RejectionInfo) => void, opts?: UseOnMutationRejectedOptions): void
+useBlob(ref: BlobRefLike | undefined | null, opts?: UseBlobOptions): UseBlobResult  // see Blobs
 
 <SyncProvider options={SyncClientOptions} />
 <SyncProvider client={SyncClient} />
@@ -2034,7 +2039,8 @@ render their empty snapshot, since the data lives in the browser's store.
 - Subscription builder: `subscription`, `SubscriptionSpec`.
 - [Observability](telemetry.md#the-typescript-client): `SyncEvent`, `PushEvent`, `PullEvent`, `BootstrapEvent`, `RebaseEvent`, `PokeEvent`, `StreamEvent`, `LeadershipEvent`, `ResequenceEvent`, `QueryEvent`, `SyncEventHandler`, `SyncEventOutcome`, `QueryDeclineReason`.
 - [Rooms](#rooms-presence-and-broadcast): `jsonCodec`, `RoomSendError`, `Room`, `Peer`, `RoomCodec`, `RoomError`, `RoomMessage`, `RoomOptions`, `RoomStatus`.
-- Error codes: `CodeConflict`, `CodeInvalidArgument`, `CodePermissionDenied`, `CodePoisonDropped`, `CodeRoomDropped`, `CodeRoomOffline`, `CodeRoomClosed`.
+- [Blobs](#blobs): `BlobError`, `BlobErrorCode`, `BlobProgress`, `BlobPutOptions`, `BlobRef`, `BlobRefLike`, `BlobStatus`, `ClientBlobs`, `WorkspaceBlobs`, `isBlobDigest`, `BLOB_CHUNK_SIZE`.
+- Error codes: `CodeConflict`, `CodeInvalidArgument`, `CodePermissionDenied`, `CodePoisonDropped`, `CodeRoomDropped`, `CodeRoomOffline`, `CodeRoomClosed`, `CodeBlobRefused`, `CodeBlobUnavailable`, `CodeBlobCorrupt`.
 
 ## Rooms — presence and broadcast
 
@@ -2104,6 +2110,114 @@ One watch stream runs per account, elected using Web Locks.
 Publishing occurs directly from each tab via unary RPCs.
 See [Multi-tab behaviour](../explanation/multi-tab.md).
 
+## Blobs
+
+A row refers to a blob with a `syncplane.v1.BlobRef` field (see [Blob references](proto-options.md#blob-references)). The bytes move through `BlobService`, beside the row. See [Blobs](../explanation/blobs.md) and [Attach files to rows](../how-to/attach-files-to-rows.md).
+
+```ts
+client.blobs: ClientBlobs             // the default workspace, plus the account's queue
+client.ws(workspaceId).blobs: WorkspaceBlobs
+
+const ref = await client.blobs.put(file);          // hash and queue; works offline
+await client.db.attachment.mutate.create({ name: file.name, file: ref });
+await client.blobs.uploaded(ref);                  // the server holds every chunk
+const bytes = await client.blobs.get(ref);         // queue, then cache, then server
+```
+
+Blob traffic uses the client's transport, so its interceptors and a tunnel apply to it too.
+
+### `WorkspaceBlobs`
+
+Every method that takes a ref accepts a `BlobRefLike`: any value with `digest`, `size` and `mediaType`, such as the `BlobRef` that an app's generated entity types embed. A method rejects with a `TypeError` when the digest is not `sp1:` and 64 lowercase hex digits; `watch` throws it.
+
+| Member                                     | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `put(data: Blob, opts?): Promise<BlobRef>` | Hashes `data`, stores it in the device's upload queue, and resolves with the ref. Does not wait for the upload. Reads `data` once, one 8 MiB chunk at a time. Putting bytes that are already queued queues nothing new, and sets a `failed` upload back to `queued`. Rejects when the local store cannot hold the bytes, for example with `QuotaExceededError`. `opts.mediaType` defaults to `data.type`.                                                   |
+| `status(ref): Promise<BlobStatus>`         | The current status. Asks the server when the device has neither queued nor cached the blob and has not seen it complete. Reports `pending` when the server cannot be reached.                                                                                                                                                                                                                                                                               |
+| `watch(ref, cb): () => void`               | Calls `cb` with the status, then on each change, until the returned function is called. Never calls `cb` synchronously. Changes from other tabs arrive too. While the status is `pending` and the client is started, the tab holds a `WatchBlobs` stream for the blob's workspace. Against a server without `WatchBlobs`, or while the stream waits out a failure, the client asks the server again after each sync cycle and on a timer (2 to 60 seconds). |
+| `uploaded(ref): Promise<void>`             | Resolves at `uploaded`. Rejects with the `BlobError` of a `failed` status, and with an `Error` when the client closes first. Does not settle while the client is not started and the bytes are only local.                                                                                                                                                                                                                                                  |
+| `get(ref): Promise<Blob>`                  | The bytes, typed with `ref.mediaType`. Reads the queue, then the cache, then the server (one request per chunk). Checks every chunk against the digest and stores it in the cache as it arrives, whatever the size. The result is made of the stored chunks, so in a browser it is backed by IndexedDB and holds about one chunk in memory. Rejects with a `BlobError` (`blob_unavailable`, `blob_corrupt`) or with the `ConnectError` of a failed request. |
+| `stream(ref): ReadableStream<Uint8Array>`  | The bytes as chunks of up to 8 MiB, in order, from the same places as `get`. Reads at most one chunk ahead of the consumer, checks each downloaded chunk, and caches the download. `cancel()` stops the download and caches nothing. Errors with the reasons `get` rejects with.                                                                                                                                                                            |
+| `discard(ref): Promise<void>`              | Deletes the blob from the upload queue, whatever its state. A tab that uploads it stops after the chunk in flight. Rows keep the ref. Does nothing when the blob is not queued.                                                                                                                                                                                                                                                                             |
+
+`ClientBlobs` adds two account-wide members. Its `WorkspaceBlobs` methods throw when the client has no default workspace.
+
+| Member                            | Description                                                                                                                                                                                            |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `idle(): Promise<void>`           | Resolves when no upload of any workspace is `queued` or `uploading`. Rejects with an `Error` when the client closes first. Does not settle while the client is not started and the queue is not empty. |
+| `pendingCount(): Promise<number>` | The number of uploads, across workspaces and tabs, that are not uploaded or failed.                                                                                                                    |
+
+### `BlobStatus`
+
+```ts
+type BlobStatus =
+	| { state: 'queued' }
+	| { state: 'uploading'; progress: BlobProgress }
+	| { state: 'uploaded' }
+	| { state: 'pending' }
+	| { state: 'failed'; error: BlobError };
+
+interface BlobProgress {
+	sentChunks: number;
+	totalChunks: number;
+	sentBytes: number; // includes chunks the server had before
+	totalBytes: number;
+}
+```
+
+| State       | Meaning                                                                                                                                                                                 |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queued`    | The bytes are in this device's queue and wait for the uploader. Also reported between retries after a transient failure, and while the caller holds no permission in the workspace yet. |
+| `uploading` | A tab of this account sends the chunks.                                                                                                                                                 |
+| `uploaded`  | The server holds every chunk.                                                                                                                                                           |
+| `pending`   | This device has no bytes to send, and the server has not reported the blob complete, or could not be asked.                                                                             |
+| `failed`    | The server refused the upload, and sending the same bytes again gets the same answer. The bytes stay in the queue, readable through `get`, until `discard` or another `put`.            |
+
+### `BlobError`
+
+`BlobError` extends `Error` with `code`, `workspaceId`, `digest`, `transportCode`, the Connect code name of the server's answer when there was one (for example `ResourceExhausted`), and `errorCode`, the app's code the server tagged a refusal with when it sent one (for example a `CanUploadBlob` rejection's `upload_too_large`). A `failed` status keeps `errorCode` across reloads and tabs. `code` is one of:
+
+| Code               | Constant              | Meaning                                                                                                                        |
+| ------------------ | --------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `blob_refused`     | `CodeBlobRefused`     | The server refused the upload (`transportCode` names why), or this device lost the queued bytes. Arrives on a `failed` status. |
+| `blob_unavailable` | `CodeBlobUnavailable` | The server has no complete blob that the caller can read. Not terminal.                                                        |
+| `blob_corrupt`     | `CodeBlobCorrupt`     | The server's size, chunk hashes or bytes do not match the ref. The bytes are not returned and not cached.                      |
+
+See [Sync status and failure codes](sync-status-and-codes.md) for when each one arrives.
+
+### Local storage
+
+- The queue and the cache are in their own IndexedDB database (`blobStore` in [Storage names](#storage-names)) when the KV store is `IDBKVStore`, or when there is no `kvStore` option and IndexedDB exists. Otherwise they are in memory, and a reload loses the queue.
+- One tab of the account sends the queue: the holder of the `blobLock` Web Lock. It sends one chunk at a time, and resumes an upload with the chunks the server reports missing.
+- A transient failure puts that upload into its own backoff (1 to 30 seconds), and the uploader goes on with the next upload. A caller with no permission in the workspace yet backs off from 5 seconds to 5 minutes, and is tried again when its access in the workspace changes.
+- The download cache drops the least recently read blobs first when it holds more than `blobCacheBytes`. It keeps a blob read in the last 10 minutes, and, in the tab that read it, a blob whose `get()` result is still reachable, so it can stay above the budget by what those hold. A blob larger than the budget is cached too, and goes in a later eviction. An upload that completes moves into the cache.
+- A download in progress is also kept, in the tab that runs it. In WebKit, a `Blob` held for more than 10 minutes without a new read can lose its bytes when another tab evicts them; call `get()` again before a late read.
+- `purgeLocalData()` deletes the queue and the cache. `removeWorkspace(id, { purge: true })` deletes the workspace's part of them.
+
+### Helpers
+
+- `isBlobDigest(s: string): boolean`: whether `s` is `sp1:` and 64 lowercase hex digits.
+- `BLOB_CHUNK_SIZE`: `8388608`, the size of every chunk except the last.
+
+### React: `useBlob`
+
+```tsx
+import { useBlob } from 'syncplane/react';
+
+const { status, blob, url, error } = useBlob(row.file, { workspaceId }); // workspaceId is optional
+```
+
+`useBlob` watches one blob and reads its bytes when they can be read: at once when the device has them queued or cached, and after the upload completes otherwise. A failed read is tried again on the next status change. It is also on the `createReactSync` bundle as `sync.useBlob`.
+
+| Result   | Description                                                                                                                          |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `status` | The `BlobStatus`; `undefined` until it is first known.                                                                               |
+| `blob`   | The bytes, once read.                                                                                                                |
+| `url`    | An object URL of `blob`. Revoked when the component unmounts or the ref changes. `undefined` where `URL.createObjectURL` is missing. |
+| `error`  | Why the last read failed; cleared by the next read.                                                                                  |
+
+Pass `undefined` or `null` for a row with no blob; the result then stays empty. A change of digest or media type starts over. The workspace resolves as for every hook (see [Workspace resolution](#workspace-resolution)).
+
 ## Test kit
 
 The `syncplane/testing` package provides in-memory testing utilities.
@@ -2134,6 +2248,7 @@ The testing kit does not simulate the following features:
 - Write checks of the access model (use `server.reject` to refuse a write).
 - Server queries (`queryServer` and related functions fail).
 - Presence rooms.
+- Blobs. `put` and `get` of queued bytes work; an upload fails with `blob_refused` (`Unimplemented`), and a download of a blob that is not queued or cached fails.
 - Multi-tab behavior (Node.js does not provide a shared lock manager).
 
 To test these features against the engine, see [Testing](../how-to/testing.md).

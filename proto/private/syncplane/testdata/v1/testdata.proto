@@ -3,6 +3,7 @@ syntax = "proto3";
 // Entities used only by the engine and client test suites.
 package syncplane.testdata.v1;
 
+import "syncplane/v1/blob.proto";
 import "syncplane/v1/options.proto";
 
 option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1;testdatav1";
@@ -738,4 +739,123 @@ message HistoriedUnmarked {
 
 	string id = 1;
 	string title = 2;
+}
+
+// Refers to blobs from each place a syncplane.v1.BlobRef can sit that a
+// derived index reaches: the top level, a nested message, a repeated field, a
+// keyed list element and a map value. Every admitted caller reads a row
+// unless `hidden` is set, and reads `secret` only when `owner_id` names them.
+message BlobHolder {
+	option (syncplane.v1.entity) = {
+		name: "blob_holder"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{
+					read: true
+					admitted: {}
+					when: {
+						cmp: {
+							path: [ "hidden" ]
+							op: CMP_OP_EQ
+							value: { bool_value: false }
+						}
+					}
+				},
+				{
+					write: true
+					admitted: {}
+				}
+			]
+			guard: [ {
+				fields: [ "secret" ]
+				allow: [
+					{
+						read: true
+						admitted: {}
+						caller_is: "owner_id"
+					},
+					{
+						write: true
+						admitted: {}
+					}
+				]
+			} ]
+		}
+	};
+
+	string id = 1;
+	string title = 2;
+	bool hidden = 3;
+	string owner_id = 4;
+	syncplane.v1.BlobRef photo = 5;
+	BlobAlbum album = 6;
+	repeated syncplane.v1.BlobRef files = 7;
+	repeated BlobPage pages = 8
+		[(syncplane.v1.field_behavior) = { key_field: "id" }];
+	map<string, syncplane.v1.BlobRef> by_name = 9;
+	syncplane.v1.BlobRef secret = 10;
+}
+
+message BlobAlbum {
+	string name = 1;
+	syncplane.v1.BlobRef cover = 2;
+}
+
+message BlobPage {
+	string id = 1;
+	syncplane.v1.BlobRef scan = 2;
+}
+
+// Refers to blobs from places no derived index reaches: a repeated field
+// inside a list element, and a message that contains itself. The engine finds
+// these blob references by reading the rows. Every admitted caller reads and
+// writes it.
+message BlobTree {
+	option (syncplane.v1.entity) = {
+		name: "blob_tree"
+		key_fields: [ "id" ]
+		access: {
+			allow: [ {
+				read: true
+				write: true
+				admitted: {}
+			} ]
+		}
+	};
+
+	string id = 1;
+	repeated BlobShelf shelves = 2
+		[(syncplane.v1.field_behavior) = { key_field: "id" }];
+	BlobNode root = 3;
+}
+
+message BlobShelf {
+	string id = 1;
+	repeated syncplane.v1.BlobRef files = 2;
+}
+
+message BlobNode {
+	syncplane.v1.BlobRef icon = 1;
+	repeated BlobNode children = 2;
+}
+
+// A server-only row that refers to a blob. No client receives its rows, so
+// no client reads the blob through it, but it keeps the blob from blob GC.
+message BlobLedger {
+	option (syncplane.v1.entity) = {
+		name: "blob_ledger"
+		key_fields: [ "id" ]
+		server_only: true
+		access: {
+			allow: [ {
+				read: true
+				write: true
+				admitted: {}
+			} ]
+		}
+	};
+
+	string id = 1;
+	syncplane.v1.BlobRef receipt = 2;
 }

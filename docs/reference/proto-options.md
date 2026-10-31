@@ -284,6 +284,39 @@ Each reference member is a **case** of the relation. A row holds at most one cas
 | Merge             | The holder's oneof replaces as a whole when a `PATCH` mask names the group. A polymorphic reference message also replaces as a whole. A repeated reference message merges as a set with element identity `<workspace>/<case>/<key>`. Two elements with the same key under different cases remain distinct.                                                                                                                            |
 | Workspaces        | In a reference message, `workspace_id` sets the workspace for all cases. In a holder oneof, each reference message case specifies its own workspace. All [workspace-qualified reference rules](#syncplanev1reference--workspace-qualified-references) apply per case.                                                                                                                                                                 |
 
+## Blob references
+
+A field of type `syncplane.v1.BlobRef`, from `syncplane/v1/blob.proto` in the same Buf module, refers from a row to an immutable blob of bytes. It needs no option: the engine finds every such field by type at registration.
+
+```proto
+import "syncplane/v1/blob.proto";
+
+message Attachment {
+	option (syncplane.v1.entity) = { name: "attachment" key_fields: [ "id" ] };
+	string id = 1;
+	syncplane.v1.BlobRef file = 2;
+	repeated syncplane.v1.BlobRef pages = 3;
+}
+```
+
+| Field        | Type     | Description                                                                                                                                                                       |
+| ------------ | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `digest`     | `string` | `sp1:` and 64 lowercase hex digits: the SHA-256 of the size as an 8-byte unsigned big-endian integer, followed by the SHA-256 of each 8 MiB chunk. An empty digest names no blob. |
+| `size`       | `int64`  | The size of the blob in bytes.                                                                                                                                                    |
+| `media_type` | `string` | The media type of the bytes, for example `image/png`. The engine does not read or check it.                                                                                       |
+
+Rules for every blob reference:
+
+- A `BlobRef` can sit at the top level, in a nested message, in a repeated field, in a keyed list or in a map value.
+- A row can name a digest before its upload is complete. The engine does not check that the blob exists.
+- A caller can read a blob when a live row it can read names the digest, after its [field guards](#field-guards) are applied. A deleted row and a row of a [server-only entity](#server-only-entities) do not count. A server-only row still keeps the blob from garbage collection.
+- A `BlobRef` in the target entity of a reference does not count for the row that holds the reference: that row stores only the target's key.
+- The engine maintains one sparse secondary index per `BlobRef` path, named `__blob_<path>` (for example `__blob_file`, `__blob_album.cover`), over the digest. Map fan segments are left out of the name. The entries count toward `MaxIndexEntriesPerRow`; a repeated `BlobRef` adds one per element.
+- A `BlobRef` in a list inside a list element, or inside a message that contains itself, has no index. Blob reads and blob GC then read every row of the entity.
+- A `BlobRef` merges as a message: the last `PATCH` that names the field wins. Write the three fields together.
+
+See [Blobs](../explanation/blobs.md) and [Attach files to rows](../how-to/attach-files-to-rows.md).
+
 ## Access model
 
 Three entity options declare who can read and write rows: `access`, `grant` and `members`.

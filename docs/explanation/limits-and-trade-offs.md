@@ -362,6 +362,10 @@ The same re-admission happens when the principal behind one client ID changes, f
 
 Set `d` well past the longest time a client can stay away and still hold unpushed work. Leave the option unset unless the clients table is a measured problem.
 
+## Blob bytes travel beside the log
+
+A row refers to a file with a `BlobRef` field, and the bytes move through `BlobService`, not through the mutation log. The row write does not wait for the upload, so a row can name a blob that the server does not have yet, or that no device will ever upload. A caller reads a blob through the rows it can read, so a digest acts as a read capability inside its workspace. A tab that waits for another device's upload holds a `WatchBlobs` stream per workspace; against a server without it, the tab asks again on a timer, and can see a completed upload up to about one minute late. Blob GC protects only what live rows name, not tombstones or field history, so a restore after the blob retention can bring back a ref to a deleted blob. `fsstore` serves one host. See [Blobs](blobs.md).
+
 ## Wire cursors are opaque
 
 Wire cursors are opaque tokens. Clients must not parse or interpret cursor structure.
@@ -374,8 +378,9 @@ Web browsers limit concurrent HTTP/1.1 connections to approximately six per host
 
 - `Subscribe` multiplexes workspace data streams over a single connection.
 - Applications using [Rooms](rooms.md) open a second persistent stream per account (`Watch`) because room navigation changes frequently and would otherwise force data stream reconnects.
+- A tab that waits for [blobs](blobs.md) another device uploads holds a `WatchBlobs` stream per workspace until the blobs are complete. This stream is per tab, not per account.
 
-Each account uses up to two persistent connections (one per plane). If multiple `SyncClient` instances run under different accounts on the same page, connection limits are reached at approximately three accounts.
+Each account uses up to two persistent connections (one per plane), plus the short-lived `WatchBlobs` streams of tabs that wait for blobs. If multiple `SyncClient` instances run under different accounts on the same page, connection limits are reached at approximately three accounts.
 
 To mitigate connection limits, consider the following options in order of preference:
 

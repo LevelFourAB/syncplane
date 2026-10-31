@@ -1,0 +1,204 @@
+syntax = "proto3";
+
+package syncplane.v1;
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1";
+
+// Refers from a row to an immutable blob of bytes, such as an image, a PDF or
+// a video.
+//
+// A field of this type is a blob reference wherever it appears in an entity:
+// at the top level, inside a nested message, inside a repeated field or inside
+// a keyed list. The engine finds such fields by type at registration. A caller
+// that can read a row whose blob reference names a digest can read that blob,
+// unless a field guard hides the field from the caller.
+//
+// The bytes do not travel with the row. Upload them through `BlobService`. A
+// row can refer to a blob before the upload is complete; a reader then sees
+// the blob as not yet available.
+message BlobRef {
+	// Identifies the content, in the form `sp1:<64 lowercase hex digits>`.
+	//
+	// The hex digits are the SHA-256 of the blob's size, as an 8-byte unsigned
+	// big-endian integer, followed by the SHA-256 of each chunk, in order.
+	// Every chunk except the last is exactly 8 MiB (8388608 bytes). The last
+	// chunk holds the remaining bytes. An empty blob has no chunks, so its
+	// digest is the SHA-256 of eight zero bytes.
+	string digest = 1;
+	// The size of the blob in bytes.
+	int64 size = 2;
+	// The media type of the bytes, for example `image/png`. The engine does
+	// not read or check it.
+	string media_type = 3;
+}
+
+// Moves blob bytes between clients and the server, in chunks.
+//
+// A blob belongs to one workspace and is named by its digest (see
+// `BlobRef.digest`). Two uploads of the same bytes into one workspace store
+// one blob. Uploads into different workspaces are separate.
+//
+// An upload is resumable without a session: `BeginUpload` for a digest that
+// is part-way uploaded returns the chunks that are still missing. The blob
+// becomes available when the server has every chunk and has checked them
+// against the digest.
+service BlobService {
+	// Starts or resumes the upload of one blob.
+	//
+	// The caller must have access to the workspace. Calling it again for the
+	// same digest is safe and returns the current state. A blob that is
+	// already complete returns `BLOB_STATE_COMPLETE` and no missing chunks.
+	//
+	// Fails with `invalid_argument` when the digest is malformed, when the
+	// number of chunk hashes does not match the size, or when the chunk hashes
+	// do not produce the digest. Fails with `resource_exhausted` when the size
+	// is above the server's blob size limit. Fails with `permission_denied`
+	// when the server's upload policy refuses the caller.
+	//
+	// The answer for a complete blob tells the caller that the server stores
+	// it. A caller learns that only by sending every chunk hash, which only a
+	// holder of the bytes, or a reader of the blob, has.
+	rpc BeginUpload(BeginUploadRequest) returns (BeginUploadResponse);
+	// Stores one chunk of a blob whose upload `BeginUpload` started.
+	//
+	// The server checks the chunk against its hash from `BeginUpload` and
+	// fails with `invalid_argument` when they differ. Storing a chunk that is
+	// already stored is safe. The response reports `BLOB_STATE_COMPLETE` once
+	// the blob has every chunk. Fails with `failed_precondition` when no
+	// upload of the digest was started, or when the upload expired.
+	//
+	// When no upload is staged but the blob is complete, the response is
+	// `BLOB_STATE_COMPLETE` only when the chunk matches the blob. Otherwise
+	// it fails with `failed_precondition`, exactly as for a digest the server
+	// does not have, so the call does not tell whether the server stores a
+	// blob. Fails with `invalid_argument` when the digest is malformed.
+	rpc PutChunk(PutChunkRequest) returns (PutChunkResponse);
+	// Reports the state of blobs.
+	//
+	// The caller learns the state only of a blob that a row it can read
+	// refers to. Every other digest reports `BLOB_STATE_MISSING`, whether or
+	// not the server stores it.
+	//
+	// Fails with `invalid_argument` when a digest is malformed, or when the
+	// request names more than 256 digests.
+	rpc StatBlobs(StatBlobsRequest) returns (StatBlobsResponse);
+	// Returns one chunk of a complete blob.
+	//
+	// Fails with `not_found` when no row the caller can read refers to the
+	// blob, or when the blob is not complete yet. Fails with `out_of_range`
+	// when the index is past the last chunk. Fails with `invalid_argument`
+	// when the digest is malformed.
+	rpc GetChunk(GetChunkRequest) returns (GetChunkResponse);
+	// Streams the state of blobs the caller waits for, so a client learns that
+	// an upload from another device is complete without polling.
+	//
+	// The first message holds the state of every requested digest, in request
+	// order, as `StatBlobs` reports it. After that, the server checks the
+	// digests again when the workspace changes or an upload into it
+	// completes, and sends a message that holds only the digests whose state
+	// changed. A digest can skip a state: it can go from `BLOB_STATE_MISSING`
+	// to `BLOB_STATE_COMPLETE` with no `BLOB_STATE_UPLOADING` message.
+	// The same read rule as `StatBlobs` applies at every message: a digest the
+	// caller cannot read stays `BLOB_STATE_MISSING`, and becomes
+	// `BLOB_STATE_COMPLETE` when the blob is complete and a row the caller can
+	// read refers to it. A message with no blobs is a keepalive.
+	//
+	// The server checks the caller's workspace access again at each
+	// keepalive and ends the stream with the gate's error when the access is
+	// gone, for example `permission_denied` tagged
+	// `workspace_access_revoked`.
+	//
+	// The server ends the stream with OK after it has reported every digest
+	// as `BLOB_STATE_COMPLETE`. To watch a different set of digests, close
+	// the stream and open a new one.
+	//
+	// Fails with `invalid_argument` when a digest is malformed, when the
+	// request names no digests, or when it names more than 256.
+	rpc WatchBlobs(WatchBlobsRequest) returns (stream WatchBlobsResponse);
+}
+
+// The state of one blob on the server, as one caller sees it.
+enum BlobState {
+	BLOB_STATE_UNSPECIFIED = 0;
+	// The server does not have the blob, or the caller cannot read it.
+	BLOB_STATE_MISSING = 1;
+	// An upload has started, but the server does not have every chunk yet.
+	BLOB_STATE_UPLOADING = 2;
+	// The server has every chunk and has checked them against the digest.
+	BLOB_STATE_COMPLETE = 3;
+}
+
+message BeginUploadRequest {
+	string workspace_id = 1;
+	// The blob's digest. See `BlobRef.digest`.
+	string digest = 2;
+	// The blob's size in bytes.
+	int64 size = 3;
+	// The SHA-256 of each chunk, in order, 32 bytes each.
+	repeated bytes chunk_hashes = 4;
+}
+
+message BeginUploadResponse {
+	BlobState state = 1;
+	// The indexes of the chunks the server does not have yet, in ascending
+	// order. Empty when `state` is `BLOB_STATE_COMPLETE`.
+	repeated uint32 missing_chunks = 2;
+}
+
+message PutChunkRequest {
+	string workspace_id = 1;
+	string digest = 2;
+	// The chunk's position, from 0.
+	uint32 index = 3;
+	// The chunk's bytes: 8 MiB for every chunk except the last.
+	bytes data = 4;
+}
+
+message PutChunkResponse {
+	// `BLOB_STATE_COMPLETE` when this call stored the last missing chunk, or
+	// when the blob was already complete. Otherwise `BLOB_STATE_UPLOADING`.
+	BlobState state = 1;
+}
+
+message StatBlobsRequest {
+	string workspace_id = 1;
+	repeated string digests = 2;
+}
+
+message StatBlobsResponse {
+	// One entry for each requested digest, in request order.
+	repeated BlobStatus blobs = 1;
+}
+
+// What a caller can know about one blob.
+message BlobStatus {
+	string digest = 1;
+	BlobState state = 2;
+	// The size in bytes. Zero unless `state` is `BLOB_STATE_UPLOADING` or
+	// `BLOB_STATE_COMPLETE`.
+	int64 size = 3;
+	// The SHA-256 of each chunk, in order. Set only when `state` is
+	// `BLOB_STATE_COMPLETE`, so a client can check each chunk it downloads.
+	repeated bytes chunk_hashes = 4;
+}
+
+message GetChunkRequest {
+	string workspace_id = 1;
+	string digest = 2;
+	// The chunk's position, from 0.
+	uint32 index = 3;
+}
+
+message GetChunkResponse {
+	bytes data = 1;
+}
+
+message WatchBlobsRequest {
+	string workspace_id = 1;
+	repeated string digests = 2;
+}
+
+message WatchBlobsResponse {
+	// The digests whose state this message reports. Empty on a keepalive.
+	repeated BlobStatus blobs = 1;
+}

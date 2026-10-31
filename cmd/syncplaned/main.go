@@ -37,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/levelfourab/syncplane/engine/blob/fsstore"
 	"github.com/levelfourab/syncplane/engine/notify/pgnotify"
 	"github.com/levelfourab/syncplane/engine/pglisten"
 	"github.com/levelfourab/syncplane/engine/presence/pgpresence"
@@ -72,6 +73,7 @@ func main() {
 		chunkSize    = flag.Int("chunk-size", 256, "bootstrap chunk size in rows")
 		otelEnabled  = flag.Bool("otel", false, "export OpenTelemetry traces and metrics over OTLP (configured by the OTEL_EXPORTER_OTLP_* environment variables)")
 		otelService  = flag.String("otel-service-name", "syncplaned", "service.name reported on exported telemetry")
+		blobDir      = flag.String("blob-dir", "", "directory that keeps the blobs of every hosted app (empty: no blob store, and BlobService answers unimplemented)")
 	)
 	buildLogger := clilog.Flags(flag.CommandLine)
 	flag.Parse()
@@ -196,6 +198,18 @@ func main() {
 			server.WithNotifier(notifier),
 			server.WithPresenceBus(bus),
 		))
+	}
+
+	// One directory for every app: each app's server names its workspaces in
+	// the store with the same "<appID>/" prefix the Manager gives its rows,
+	// so no app reaches another's blobs.
+	if *blobDir != "" {
+		blobs, err := fsstore.Open(*blobDir)
+		if err != nil {
+			clilog.Fatal(logger, "open blob store", err)
+		}
+		defer blobs.Close()
+		managerOpts = append(managerOpts, server.WithServerOptions(server.WithBlobStore(blobs)))
 	}
 
 	mgr, err := server.NewManager(context.Background(), observed, managerOpts...)

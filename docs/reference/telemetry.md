@@ -212,8 +212,10 @@ contain collectable data. `outcome=skipped` indicates that another node held the
 workspace lease.
 
 `gc_kind` is one of `client_verdicts`, `idle_clients`, `idempotency_keys`,
-`history_records`, `lineage_records`, or `stranded_consumers`. `idle_clients` appears only with
-`WithClientRetention`. The value `stranded_consumers` indicates that an effect
+`history_records`, `lineage_records`, `stranded_consumers`, `blobs`, or
+`blob_uploads`. `idle_clients` appears only with `WithClientRetention`.
+`blobs` (deleted blobs) and `blob_uploads` (aborted staged uploads) appear only
+with `WithBlobStore`. The value `stranded_consumers` indicates that an effect
 consumer collected below the horizon stopped processing writes and cannot
 recover missed data.
 

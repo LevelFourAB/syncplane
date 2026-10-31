@@ -213,3 +213,21 @@ Each sync node opens the following database connections:
 Primary pool connections handle writes, anchor point-reads (one statement per bootstrap and query), and fallback reads from lagging or unreachable replicas.
 
 For high-availability deployment patterns, see [Deploy for high availability](../explanation/multi-node-architecture.md#table-layout-and-partitioning).
+
+## Blob stores
+
+Blob bytes do not go through `storage.Adapter`. `blob.Store` (package `engine/blob`) is a separate seam, set with `server.WithBlobStore`. The package doc of `engine/blob` states the full contract. In summary:
+
+- **Names are per workspace.** The same digest in two workspaces is two blobs, whether or not the store keeps one copy of the bytes.
+- **Stage, then commit.** `Begin` stages an upload, `PutChunk` stores and checks one chunk, and `Complete` commits the upload atomically: a reader sees no blob or the whole blob. `Abort` removes a staged upload. Only a committed blob can be read, and it does not change, except for its `UnreferencedSince` mark, until `Delete`.
+- **Errors are sentinels.** `blob.ErrNotFound` for a missing blob or upload, `blob.ErrIncomplete` from `Complete` while a chunk is missing, and an error wrapping `blob.ErrInvalid` for a chunk that does not match its hash.
+- **Shared use is safe.** A store must be safe for concurrent use, also by several processes that share it. Calls that race on one name must leave a state that one of them alone could have made.
+
+The `blobtest` package holds the conformance suite: `blobtest.Conformance` for every store, and `blobtest.Shared` for a store that several handles or processes share.
+
+The engine includes two stores:
+
+- **`fsstore`**: A local directory. Several stores can share one directory, in one process or in several. The directory must be on a local file system that renames atomically, supports hard links and keeps an open file readable after it is removed (ext4, XFS, APFS, ZFS), not on NFS or SMB. A commit does not copy the bytes, so its cost does not depend on the blob's size. `Open` removes what a crash left behind. Every process must run as the same user. The package doc of `engine/blob/fsstore` describes the on-disk layout and crash behavior.
+- **`memstore`**: In memory, for tests and for servers whose blobs need not outlive the process.
+
+For how blobs behave across nodes, see [Blobs](../explanation/blobs.md#more-than-one-node).

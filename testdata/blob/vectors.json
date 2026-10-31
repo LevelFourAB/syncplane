@@ -1,0 +1,80 @@
+{
+	"cases": [
+		{
+			"name": "empty",
+			"size": 0,
+			"pattern": "text",
+			"digest": "sp1:af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc",
+			"chunkHashes": []
+		},
+		{
+			"name": "hello",
+			"size": 5,
+			"pattern": "text",
+			"text": "hello",
+			"digest": "sp1:513f57e7393ac0fcd9207e18f0cfd13c13be4c73de8ec9da35f3756d53de8457",
+			"chunkHashes": [
+				"2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+			]
+		},
+		{
+			"name": "one byte",
+			"size": 1,
+			"pattern": "mod251",
+			"digest": "sp1:f116abd57c3e0560fd70ec4abc84e1a1385d3aaa1a936cdda4bfefbcf099a26c",
+			"chunkHashes": [
+				"6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+			]
+		},
+		{
+			"name": "small",
+			"size": 1000,
+			"pattern": "mod251",
+			"digest": "sp1:a88c4e2a0717a509578d0f8639a8efa3376acec78fd4b49f7e83a62eee4a4cc3",
+			"chunkHashes": [
+				"4e4c294b331f7a2099a379bec34b9f9fc03dc46ab465d998f4d683da53487e6d"
+			]
+		},
+		{
+			"name": "one chunk minus one",
+			"size": 8388607,
+			"pattern": "mod251",
+			"digest": "sp1:449f3ee0b468448404477660cd94b71888dbba78c6cd0024892cb48ab42b34bc",
+			"chunkHashes": [
+				"336c4f9863c8eeaf70121e79fc4ca0bbae4c885fa00c4cdc524212c78726c23f"
+			]
+		},
+		{
+			"name": "exactly one chunk",
+			"size": 8388608,
+			"pattern": "mod251",
+			"digest": "sp1:f341573dcce95602676b6bcde3104ed3db4e19d6c352cd8f2474c782024afb2a",
+			"chunkHashes": [
+				"bdf23837181f5808331800c1ae2b4f7d7a839536b10d58491471c50dde23833a"
+			]
+		},
+		{
+			"name": "one chunk plus one",
+			"size": 8388609,
+			"pattern": "mod251",
+			"digest": "sp1:01d3a8536f79faacd4da65335eed42f04be7864e022258adf063e0106a0a77ef",
+			"chunkHashes": [
+				"bdf23837181f5808331800c1ae2b4f7d7a839536b10d58491471c50dde23833a",
+				"26e5bfe4b0686167e3e4e0aac40cbae03515171d375f91ea563c9c044e9c5cc7"
+			]
+		},
+		{
+			"name": "two chunks and a tail",
+			"size": 16789561,
+			"pattern": "mod251",
+			"digest": "sp1:86a5197d4b73d00f27e8e95defdeafb58364797f3c07c8277f6411a9e6dcd77b",
+			"chunkHashes": [
+				"bdf23837181f5808331800c1ae2b4f7d7a839536b10d58491471c50dde23833a",
+				"b653ddd6654434d6355400425dacdfb91f41bbb843e74cb0b31ffb24b30d330c",
+				"e0c9f567ad82d2c2f303b17284b1ab0ab13a6b3feed62e6105fd67aff34f3c46"
+			]
+		}
+	],
+	"chunkSize": 8388608,
+	"comment": "Blob digest vectors. pattern \"mod251\" means byte i of the blob is i % 251; pattern \"text\" means the UTF-8 bytes of text. chunkSize is the fixed chunk size the digest is defined over."
+}

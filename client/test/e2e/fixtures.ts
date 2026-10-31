@@ -6,6 +6,9 @@ import type {
 	AccessSamples,
 	AccessView,
 	AccessWireView,
+	BlobReadView,
+	BlobRefView,
+	BlobStoredView,
 	MarkView,
 	OpenOptions,
 	PeerView,
@@ -307,6 +310,34 @@ export class Tab {
 
 	confirmedText(id: string): Promise<string | null> {
 		return this.page.evaluate((i) => window.harness.confirmedText(i), id);
+	}
+
+	putBlob(size: number, seed: number, mediaType: string): Promise<BlobRefView> {
+		return this.page.evaluate((a) => window.harness.putBlob(a.size, a.seed, a.mediaType), {
+			size,
+			seed,
+			mediaType,
+		});
+	}
+
+	putBlobHolder(id: string, ref: BlobRefView): Promise<void> {
+		return this.page.evaluate((a) => window.harness.putBlobHolder(a.id, a.ref), { id, ref });
+	}
+
+	blobUploaded(ref: BlobRefView): Promise<void> {
+		return this.page.evaluate((r) => window.harness.blobUploaded(r), ref);
+	}
+
+	getBlob(ref: BlobRefView): Promise<BlobReadView> {
+		return this.page.evaluate((r) => window.harness.getBlob(r), ref);
+	}
+
+	streamBlob(ref: BlobRefView): Promise<BlobReadView> {
+		return this.page.evaluate((r) => window.harness.streamBlob(r), ref);
+	}
+
+	storedBlob(ref: BlobRefView): Promise<BlobStoredView> {
+		return this.page.evaluate((r) => window.harness.storedBlob(r), ref);
 	}
 
 	databases(): Promise<string[]> {

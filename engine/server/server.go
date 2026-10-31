@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/levelfourab/syncplane/engine/blob"
 	"github.com/levelfourab/syncplane/engine/cursorstate"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
@@ -57,7 +58,10 @@ type entityInfo struct {
 	// search is the entity's search index, nil for an entity that declares no
 	// search fields. Its entries ride the same storage and maintenance as
 	// indexes, under the reserved searchIndexName.
-	search  *searchIndex
+	search *searchIndex
+	// blobs is where the entity's rows can name a blob, nil for an entity
+	// without a syncplane.v1.BlobRef field. See blobref.go.
+	blobs   *blobRefs
 	mergers lww.Mergers
 	// serverOnly is (syncplane.v1.entity).server_only: the entity's rows never
 	// reach a client. Enforced at the row emitter, which is the chokepoint
@@ -501,6 +505,9 @@ type Limits struct {
 	// write path. A row that holds more from before the limit was lowered
 	// keeps them until a write changes them. Default 64.
 	MaxAccessParents int
+	// Maximum size in bytes of one blob. BeginUpload of a larger blob fails
+	// with resource_exhausted. Default 4 GiB.
+	MaxBlobBytes int64
 	// Maximum facet axes one Query may carry. Each axis costs a bucket per
 	// distinct value and a lookup per matching row, and a request carrying any
 	// walks every match rather than the page. Default 8.
@@ -634,6 +641,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxParticipantsPerRoom <= 0 {
 		l.MaxParticipantsPerRoom = 128
+	}
+	if l.MaxBlobBytes <= 0 {
+		l.MaxBlobBytes = 4 << 30
 	}
 	return l
 }
@@ -804,6 +814,11 @@ type Server struct {
 	// roomAnchors memoizes the anchor-row read the join gate performs, so a hot
 	// document costs one read per interval rather than one per watcher.
 	roomAnchors *anchorCache
+	// blobs keeps blob bytes, nil when WithBlobStore was not given, which
+	// fails every BlobService call. blobRetention is how long an unreferenced
+	// blob and a staged upload are kept; see WithBlobRetention.
+	blobs         blob.Store
+	blobRetention time.Duration
 	// cursorState holds the bulky membership tail of issued cursors so the
 	// wire carries a reference instead (see encodeCursor). Nil disables the
 	// indirection: every cursor inlines its sets, exactly as cursors always
@@ -1325,6 +1340,19 @@ func (s *Server) PresenceHandler() (string, http.Handler) {
 		connect.WithInterceptors(s.interceptors()...))
 }
 
+// BlobHandler returns the mount path and HTTP handler for the blob service,
+// syncplanev1connect.BlobServiceHandler. Without WithBlobStore every call to
+// it fails with unimplemented.
+//
+// It shares the sync service's interceptor chain. Its request-size bound is
+// Limits.MaxRequestBytes, raised where needed to fit one chunk of
+// blob.ChunkSize bytes.
+func (s *Server) BlobHandler() (string, http.Handler) {
+	return syncplanev1connect.NewBlobServiceHandler(s,
+		connect.WithReadMaxBytes(max(s.limits.MaxRequestBytes, blobRequestBytes)),
+		connect.WithInterceptors(s.interceptors()...))
+}
+
 // Handlers returns every Connect service this server mounts, keyed by mount
 // path. Mount all of them on a mux that also carries the app's own routes:
 //
@@ -1337,9 +1365,11 @@ func (s *Server) PresenceHandler() (string, http.Handler) {
 func (s *Server) Handlers() map[string]http.Handler {
 	syncPath, sync := s.Handler()
 	presencePath, presence := s.PresenceHandler()
+	blobPath, blobs := s.BlobHandler()
 	return map[string]http.Handler{
 		syncPath:     sync,
 		presencePath: presence,
+		blobPath:     blobs,
 	}
 }
 
@@ -1548,6 +1578,11 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
 	if err := buildSubjectIndexes(info); err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	// Blob reads and blob GC ask which rows name a digest, so the engine
+	// indexes every BlobRef digest the way it indexes reference keys.
+	if err := buildBlobIndexes(info); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
 	// Search: a field-level `searchable` mark and an entity-level `search`

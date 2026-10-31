@@ -129,6 +129,8 @@ syncplaned -db postgres://user:pass@host/syncplane \
 
 **Note:** `syncplaned` has no built-in authentication or permissions system. Run `syncplaned` behind a trusted network boundary.
 
+`-blob-dir` keeps blobs in a local directory (`fsstore`), which only processes on one host can share. Do not pass it to nodes on different hosts. See [Blobs: more than one node](../explanation/blobs.md#more-than-one-node).
+
 ## Isolating deployments on a shared database
 
 If multiple deployments (such as staging and production) share a PostgreSQL database, isolate their channels and schemas:

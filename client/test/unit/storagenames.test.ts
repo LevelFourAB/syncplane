@@ -40,6 +40,9 @@ describe('storageNames', () => {
 			presenceLock: 'sync:presencelock:acct',
 			presenceChannel: 'sync:presence:acct',
 			textPeerLocks: 'sync:textpeer',
+			blobStore: 'sync:blobs:acct',
+			blobLock: 'sync:bloblock:acct',
+			blobChannel: 'sync:blob:acct',
 		});
 	});
 

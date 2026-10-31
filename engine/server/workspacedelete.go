@@ -29,6 +29,9 @@ var errWorkspaceDeletedDenial error = &WorkspaceDenial{
 // delta log and compaction floors, index entries, idempotency records, effect
 // consumer positions and shadows, and the workspace's sequence and store epoch.
 // It does this in one storage transaction, after any write in flight commits.
+// With WithBlobStore it then deletes the workspace's blobs and staged
+// uploads. When that fails, it returns an error and the next blob GC pass of
+// WithGC deletes them.
 //
 // The id then stays refused until RestoreWorkspace:
 //
@@ -64,6 +67,14 @@ func (s *Server) DeleteWorkspace(ctx context.Context, workspaceID string) error 
 	// their cursor, and send the client to bootstrap, which the gate refuses.
 	// Without it they would wait for the heartbeat re-check.
 	s.notifier.Notify(workspaceID)
+	// After the rows: the deletion mark is what lets blob GC finish the job
+	// when this fails, and an upload admitted before the mark can still commit
+	// a blob after this call.
+	if s.blobs != nil {
+		if err := s.blobs.DeleteWorkspace(ctx, s.blobKey(workspaceID)); err != nil {
+			return fmt.Errorf("server: delete blobs of workspace %q: %w", workspaceID, err)
+		}
+	}
 	return nil
 }
 

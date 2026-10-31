@@ -9,7 +9,7 @@
 package testdatav1
 
 import (
-	_ "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	v1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	reflect "reflect"
@@ -3242,11 +3242,457 @@ func (x *HistoriedUnmarked) GetTitle() string {
 	return ""
 }
 
+// Refers to blobs from each place a syncplane.v1.BlobRef can sit that a
+// derived index reaches: the top level, a nested message, a repeated field, a
+// keyed list element and a map value. Every admitted caller reads a row
+// unless `hidden` is set, and reads `secret` only when `owner_id` names them.
+type BlobHolder struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title         string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Hidden        bool                   `protobuf:"varint,3,opt,name=hidden,proto3" json:"hidden,omitempty"`
+	OwnerId       string                 `protobuf:"bytes,4,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
+	Photo         *v1.BlobRef            `protobuf:"bytes,5,opt,name=photo,proto3" json:"photo,omitempty"`
+	Album         *BlobAlbum             `protobuf:"bytes,6,opt,name=album,proto3" json:"album,omitempty"`
+	Files         []*v1.BlobRef          `protobuf:"bytes,7,rep,name=files,proto3" json:"files,omitempty"`
+	Pages         []*BlobPage            `protobuf:"bytes,8,rep,name=pages,proto3" json:"pages,omitempty"`
+	ByName        map[string]*v1.BlobRef `protobuf:"bytes,9,rep,name=by_name,json=byName,proto3" json:"by_name,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Secret        *v1.BlobRef            `protobuf:"bytes,10,opt,name=secret,proto3" json:"secret,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlobHolder) Reset() {
+	*x = BlobHolder{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[41]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlobHolder) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlobHolder) ProtoMessage() {}
+
+func (x *BlobHolder) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[41]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlobHolder.ProtoReflect.Descriptor instead.
+func (*BlobHolder) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{41}
+}
+
+func (x *BlobHolder) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *BlobHolder) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *BlobHolder) GetHidden() bool {
+	if x != nil {
+		return x.Hidden
+	}
+	return false
+}
+
+func (x *BlobHolder) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *BlobHolder) GetPhoto() *v1.BlobRef {
+	if x != nil {
+		return x.Photo
+	}
+	return nil
+}
+
+func (x *BlobHolder) GetAlbum() *BlobAlbum {
+	if x != nil {
+		return x.Album
+	}
+	return nil
+}
+
+func (x *BlobHolder) GetFiles() []*v1.BlobRef {
+	if x != nil {
+		return x.Files
+	}
+	return nil
+}
+
+func (x *BlobHolder) GetPages() []*BlobPage {
+	if x != nil {
+		return x.Pages
+	}
+	return nil
+}
+
+func (x *BlobHolder) GetByName() map[string]*v1.BlobRef {
+	if x != nil {
+		return x.ByName
+	}
+	return nil
+}
+
+func (x *BlobHolder) GetSecret() *v1.BlobRef {
+	if x != nil {
+		return x.Secret
+	}
+	return nil
+}
+
+type BlobAlbum struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Cover         *v1.BlobRef            `protobuf:"bytes,2,opt,name=cover,proto3" json:"cover,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlobAlbum) Reset() {
+	*x = BlobAlbum{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[42]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlobAlbum) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlobAlbum) ProtoMessage() {}
+
+func (x *BlobAlbum) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[42]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlobAlbum.ProtoReflect.Descriptor instead.
+func (*BlobAlbum) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{42}
+}
+
+func (x *BlobAlbum) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *BlobAlbum) GetCover() *v1.BlobRef {
+	if x != nil {
+		return x.Cover
+	}
+	return nil
+}
+
+type BlobPage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Scan          *v1.BlobRef            `protobuf:"bytes,2,opt,name=scan,proto3" json:"scan,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlobPage) Reset() {
+	*x = BlobPage{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[43]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlobPage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlobPage) ProtoMessage() {}
+
+func (x *BlobPage) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[43]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlobPage.ProtoReflect.Descriptor instead.
+func (*BlobPage) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{43}
+}
+
+func (x *BlobPage) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *BlobPage) GetScan() *v1.BlobRef {
+	if x != nil {
+		return x.Scan
+	}
+	return nil
+}
+
+// Refers to blobs from places no derived index reaches: a repeated field
+// inside a list element, and a message that contains itself. The engine finds
+// these blob references by reading the rows. Every admitted caller reads and
+// writes it.
+type BlobTree struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Shelves       []*BlobShelf           `protobuf:"bytes,2,rep,name=shelves,proto3" json:"shelves,omitempty"`
+	Root          *BlobNode              `protobuf:"bytes,3,opt,name=root,proto3" json:"root,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlobTree) Reset() {
+	*x = BlobTree{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[44]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlobTree) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlobTree) ProtoMessage() {}
+
+func (x *BlobTree) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[44]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlobTree.ProtoReflect.Descriptor instead.
+func (*BlobTree) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *BlobTree) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *BlobTree) GetShelves() []*BlobShelf {
+	if x != nil {
+		return x.Shelves
+	}
+	return nil
+}
+
+func (x *BlobTree) GetRoot() *BlobNode {
+	if x != nil {
+		return x.Root
+	}
+	return nil
+}
+
+type BlobShelf struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Files         []*v1.BlobRef          `protobuf:"bytes,2,rep,name=files,proto3" json:"files,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlobShelf) Reset() {
+	*x = BlobShelf{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[45]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlobShelf) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlobShelf) ProtoMessage() {}
+
+func (x *BlobShelf) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[45]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlobShelf.ProtoReflect.Descriptor instead.
+func (*BlobShelf) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{45}
+}
+
+func (x *BlobShelf) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *BlobShelf) GetFiles() []*v1.BlobRef {
+	if x != nil {
+		return x.Files
+	}
+	return nil
+}
+
+type BlobNode struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Icon          *v1.BlobRef            `protobuf:"bytes,1,opt,name=icon,proto3" json:"icon,omitempty"`
+	Children      []*BlobNode            `protobuf:"bytes,2,rep,name=children,proto3" json:"children,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlobNode) Reset() {
+	*x = BlobNode{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[46]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlobNode) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlobNode) ProtoMessage() {}
+
+func (x *BlobNode) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[46]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlobNode.ProtoReflect.Descriptor instead.
+func (*BlobNode) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{46}
+}
+
+func (x *BlobNode) GetIcon() *v1.BlobRef {
+	if x != nil {
+		return x.Icon
+	}
+	return nil
+}
+
+func (x *BlobNode) GetChildren() []*BlobNode {
+	if x != nil {
+		return x.Children
+	}
+	return nil
+}
+
+// A server-only row that refers to a blob. No client receives its rows, so
+// no client reads the blob through it, but it keeps the blob from blob GC.
+type BlobLedger struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Receipt       *v1.BlobRef            `protobuf:"bytes,2,opt,name=receipt,proto3" json:"receipt,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlobLedger) Reset() {
+	*x = BlobLedger{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[47]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlobLedger) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlobLedger) ProtoMessage() {}
+
+func (x *BlobLedger) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[47]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlobLedger.ProtoReflect.Descriptor instead.
+func (*BlobLedger) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{47}
+}
+
+func (x *BlobLedger) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *BlobLedger) GetReceipt() *v1.BlobRef {
+	if x != nil {
+		return x.Receipt
+	}
+	return nil
+}
+
 var File_syncplane_testdata_v1_testdata_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
 	"\n" +
-	"$syncplane/testdata/v1/testdata.proto\x12\x15syncplane.testdata.v1\x1a\x1asyncplane/v1/options.proto\"\x9b\t\n" +
+	"$syncplane/testdata/v1/testdata.proto\x12\x15syncplane.testdata.v1\x1a\x17syncplane/v1/blob.proto\x1a\x1asyncplane/v1/options.proto\"\x9b\t\n" +
 	"\x06Widget\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05label\x18\x02 \x01(\tR\x05label\x12\x14\n" +
@@ -3572,7 +4018,53 @@ const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
 	"\x11HistoriedUnmarked\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title:\x1e\xa2\xbb\x18\x1a\n" +
-	"\x12historied_unmarked\x12\x02id2\x00BNZLgithub.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1;testdatav1b\x06proto3"
+	"\x12historied_unmarked\x12\x02id2\x00\"\xd8\x04\n" +
+	"\n" +
+	"BlobHolder\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05title\x18\x02 \x01(\tR\x05title\x12\x16\n" +
+	"\x06hidden\x18\x03 \x01(\bR\x06hidden\x12\x19\n" +
+	"\bowner_id\x18\x04 \x01(\tR\aownerId\x12+\n" +
+	"\x05photo\x18\x05 \x01(\v2\x15.syncplane.v1.BlobRefR\x05photo\x126\n" +
+	"\x05album\x18\x06 \x01(\v2 .syncplane.testdata.v1.BlobAlbumR\x05album\x12+\n" +
+	"\x05files\x18\a \x03(\v2\x15.syncplane.v1.BlobRefR\x05files\x12?\n" +
+	"\x05pages\x18\b \x03(\v2\x1f.syncplane.testdata.v1.BlobPageB\b\xaa\xbb\x18\x04\x12\x02idR\x05pages\x12F\n" +
+	"\aby_name\x18\t \x03(\v2-.syncplane.testdata.v1.BlobHolder.ByNameEntryR\x06byName\x12-\n" +
+	"\x06secret\x18\n" +
+	" \x01(\v2\x15.syncplane.v1.BlobRefR\x06secret\x1aP\n" +
+	"\vByNameEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12+\n" +
+	"\x05value\x18\x02 \x01(\v2\x15.syncplane.v1.BlobRefR\x05value:\x028\x01:U\xa2\xbb\x18Q\n" +
+	"\vblob_holder\x12\x02idR>\n" +
+	"\x16\b\x01:\x00R\x10\n" +
+	"\x0e\n" +
+	"\x06hidden\x10\x01\x1a\x02(\x00\n" +
+	"\x04(\x01:\x00\x12\x1e\n" +
+	"\x06secret\x12\x0e\b\x01:\x00B\bowner_id\x12\x04(\x01:\x00\"L\n" +
+	"\tBlobAlbum\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12+\n" +
+	"\x05cover\x18\x02 \x01(\v2\x15.syncplane.v1.BlobRefR\x05cover\"E\n" +
+	"\bBlobPage\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12)\n" +
+	"\x04scan\x18\x02 \x01(\v2\x15.syncplane.v1.BlobRefR\x04scan\"\xb4\x01\n" +
+	"\bBlobTree\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
+	"\ashelves\x18\x02 \x03(\v2 .syncplane.testdata.v1.BlobShelfB\b\xaa\xbb\x18\x04\x12\x02idR\ashelves\x123\n" +
+	"\x04root\x18\x03 \x01(\v2\x1f.syncplane.testdata.v1.BlobNodeR\x04root:\x1d\xa2\xbb\x18\x19\n" +
+	"\tblob_tree\x12\x02idR\b\n" +
+	"\x06\b\x01(\x01:\x00\"H\n" +
+	"\tBlobShelf\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12+\n" +
+	"\x05files\x18\x02 \x03(\v2\x15.syncplane.v1.BlobRefR\x05files\"r\n" +
+	"\bBlobNode\x12)\n" +
+	"\x04icon\x18\x01 \x01(\v2\x15.syncplane.v1.BlobRefR\x04icon\x12;\n" +
+	"\bchildren\x18\x02 \x03(\v2\x1f.syncplane.testdata.v1.BlobNodeR\bchildren\"p\n" +
+	"\n" +
+	"BlobLedger\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12/\n" +
+	"\areceipt\x18\x02 \x01(\v2\x15.syncplane.v1.BlobRefR\areceipt:!\xa2\xbb\x18\x1d\n" +
+	"\vblob_ledger\x12\x02id(\x01R\b\n" +
+	"\x06\b\x01(\x01:\x00BNZLgithub.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1;testdatav1b\x06proto3"
 
 var (
 	file_syncplane_testdata_v1_testdata_proto_rawDescOnce sync.Once
@@ -3586,7 +4078,7 @@ func file_syncplane_testdata_v1_testdata_proto_rawDescGZIP() []byte {
 	return file_syncplane_testdata_v1_testdata_proto_rawDescData
 }
 
-var file_syncplane_testdata_v1_testdata_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
+var file_syncplane_testdata_v1_testdata_proto_msgTypes = make([]protoimpl.MessageInfo, 56)
 var file_syncplane_testdata_v1_testdata_proto_goTypes = []any{
 	(*Widget)(nil),                  // 0: syncplane.testdata.v1.Widget
 	(*FieldValue)(nil),              // 1: syncplane.testdata.v1.FieldValue
@@ -3629,20 +4121,29 @@ var file_syncplane_testdata_v1_testdata_proto_goTypes = []any{
 	(*HistoriedOneof)(nil),          // 38: syncplane.testdata.v1.HistoriedOneof
 	(*HistoriedNested)(nil),         // 39: syncplane.testdata.v1.HistoriedNested
 	(*HistoriedUnmarked)(nil),       // 40: syncplane.testdata.v1.HistoriedUnmarked
-	nil,                             // 41: syncplane.testdata.v1.Widget.AttrsEntry
-	nil,                             // 42: syncplane.testdata.v1.Widget.ByIdEntry
-	nil,                             // 43: syncplane.testdata.v1.Widget.CustomEntry
-	nil,                             // 44: syncplane.testdata.v1.MapTextEntity.NotesEntry
-	nil,                             // 45: syncplane.testdata.v1.KeyedTextEntity.SectionsEntry
-	nil,                             // 46: syncplane.testdata.v1.Issue.CustomEntry
-	nil,                             // 47: syncplane.testdata.v1.Issue.TagsMapEntry
+	(*BlobHolder)(nil),              // 41: syncplane.testdata.v1.BlobHolder
+	(*BlobAlbum)(nil),               // 42: syncplane.testdata.v1.BlobAlbum
+	(*BlobPage)(nil),                // 43: syncplane.testdata.v1.BlobPage
+	(*BlobTree)(nil),                // 44: syncplane.testdata.v1.BlobTree
+	(*BlobShelf)(nil),               // 45: syncplane.testdata.v1.BlobShelf
+	(*BlobNode)(nil),                // 46: syncplane.testdata.v1.BlobNode
+	(*BlobLedger)(nil),              // 47: syncplane.testdata.v1.BlobLedger
+	nil,                             // 48: syncplane.testdata.v1.Widget.AttrsEntry
+	nil,                             // 49: syncplane.testdata.v1.Widget.ByIdEntry
+	nil,                             // 50: syncplane.testdata.v1.Widget.CustomEntry
+	nil,                             // 51: syncplane.testdata.v1.MapTextEntity.NotesEntry
+	nil,                             // 52: syncplane.testdata.v1.KeyedTextEntity.SectionsEntry
+	nil,                             // 53: syncplane.testdata.v1.Issue.CustomEntry
+	nil,                             // 54: syncplane.testdata.v1.Issue.TagsMapEntry
+	nil,                             // 55: syncplane.testdata.v1.BlobHolder.ByNameEntry
+	(*v1.BlobRef)(nil),              // 56: syncplane.v1.BlobRef
 }
 var file_syncplane_testdata_v1_testdata_proto_depIdxs = []int32{
 	27, // 0: syncplane.testdata.v1.Widget.settings:type_name -> syncplane.testdata.v1.Settings
 	28, // 1: syncplane.testdata.v1.Widget.doc:type_name -> syncplane.testdata.v1.Blob
-	41, // 2: syncplane.testdata.v1.Widget.attrs:type_name -> syncplane.testdata.v1.Widget.AttrsEntry
-	42, // 3: syncplane.testdata.v1.Widget.by_id:type_name -> syncplane.testdata.v1.Widget.ByIdEntry
-	43, // 4: syncplane.testdata.v1.Widget.custom:type_name -> syncplane.testdata.v1.Widget.CustomEntry
+	48, // 2: syncplane.testdata.v1.Widget.attrs:type_name -> syncplane.testdata.v1.Widget.AttrsEntry
+	49, // 3: syncplane.testdata.v1.Widget.by_id:type_name -> syncplane.testdata.v1.Widget.ByIdEntry
+	50, // 4: syncplane.testdata.v1.Widget.custom:type_name -> syncplane.testdata.v1.Widget.CustomEntry
 	16, // 5: syncplane.testdata.v1.Widget.members:type_name -> syncplane.testdata.v1.Member
 	18, // 6: syncplane.testdata.v1.Widget.refs:type_name -> syncplane.testdata.v1.Pair
 	17, // 7: syncplane.testdata.v1.Widget.items:type_name -> syncplane.testdata.v1.Item
@@ -3653,9 +4154,9 @@ var file_syncplane_testdata_v1_testdata_proto_depIdxs = []int32{
 	27, // 12: syncplane.testdata.v1.Guarded.settings:type_name -> syncplane.testdata.v1.Settings
 	8,  // 13: syncplane.testdata.v1.OneofNestedTextEntity.holder:type_name -> syncplane.testdata.v1.TextHolder
 	8,  // 14: syncplane.testdata.v1.ListTextEntity.notes:type_name -> syncplane.testdata.v1.TextHolder
-	44, // 15: syncplane.testdata.v1.MapTextEntity.notes:type_name -> syncplane.testdata.v1.MapTextEntity.NotesEntry
+	51, // 15: syncplane.testdata.v1.MapTextEntity.notes:type_name -> syncplane.testdata.v1.MapTextEntity.NotesEntry
 	12, // 16: syncplane.testdata.v1.KeyedTextEntity.notes:type_name -> syncplane.testdata.v1.KeyedNote
-	45, // 17: syncplane.testdata.v1.KeyedTextEntity.sections:type_name -> syncplane.testdata.v1.KeyedTextEntity.SectionsEntry
+	52, // 17: syncplane.testdata.v1.KeyedTextEntity.sections:type_name -> syncplane.testdata.v1.KeyedTextEntity.SectionsEntry
 	8,  // 18: syncplane.testdata.v1.KeyedNote.deep:type_name -> syncplane.testdata.v1.TextHolder
 	14, // 19: syncplane.testdata.v1.OneofListIdentityEntity.entries:type_name -> syncplane.testdata.v1.VariantElement
 	19, // 20: syncplane.testdata.v1.OneofRefEntity.project:type_name -> syncplane.testdata.v1.Project
@@ -3665,8 +4166,8 @@ var file_syncplane_testdata_v1_testdata_proto_depIdxs = []int32{
 	20, // 24: syncplane.testdata.v1.Issue.assignee:type_name -> syncplane.testdata.v1.User
 	20, // 25: syncplane.testdata.v1.Issue.reporter:type_name -> syncplane.testdata.v1.User
 	18, // 26: syncplane.testdata.v1.Issue.pair:type_name -> syncplane.testdata.v1.Pair
-	46, // 27: syncplane.testdata.v1.Issue.custom:type_name -> syncplane.testdata.v1.Issue.CustomEntry
-	47, // 28: syncplane.testdata.v1.Issue.tags_map:type_name -> syncplane.testdata.v1.Issue.TagsMapEntry
+	53, // 27: syncplane.testdata.v1.Issue.custom:type_name -> syncplane.testdata.v1.Issue.CustomEntry
+	54, // 28: syncplane.testdata.v1.Issue.tags_map:type_name -> syncplane.testdata.v1.Issue.TagsMapEntry
 	20, // 29: syncplane.testdata.v1.UserRef.user:type_name -> syncplane.testdata.v1.User
 	22, // 30: syncplane.testdata.v1.Task.assignee:type_name -> syncplane.testdata.v1.UserRef
 	22, // 31: syncplane.testdata.v1.Task.watchers:type_name -> syncplane.testdata.v1.UserRef
@@ -3680,15 +4181,30 @@ var file_syncplane_testdata_v1_testdata_proto_depIdxs = []int32{
 	30, // 39: syncplane.testdata.v1.Article.meta:type_name -> syncplane.testdata.v1.ArticleMeta
 	12, // 40: syncplane.testdata.v1.HistoriedKeyedText.notes:type_name -> syncplane.testdata.v1.KeyedNote
 	27, // 41: syncplane.testdata.v1.HistoriedNested.settings:type_name -> syncplane.testdata.v1.Settings
-	1,  // 42: syncplane.testdata.v1.Widget.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
-	8,  // 43: syncplane.testdata.v1.MapTextEntity.NotesEntry.value:type_name -> syncplane.testdata.v1.TextHolder
-	8,  // 44: syncplane.testdata.v1.KeyedTextEntity.SectionsEntry.value:type_name -> syncplane.testdata.v1.TextHolder
-	1,  // 45: syncplane.testdata.v1.Issue.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
-	46, // [46:46] is the sub-list for method output_type
-	46, // [46:46] is the sub-list for method input_type
-	46, // [46:46] is the sub-list for extension type_name
-	46, // [46:46] is the sub-list for extension extendee
-	0,  // [0:46] is the sub-list for field type_name
+	56, // 42: syncplane.testdata.v1.BlobHolder.photo:type_name -> syncplane.v1.BlobRef
+	42, // 43: syncplane.testdata.v1.BlobHolder.album:type_name -> syncplane.testdata.v1.BlobAlbum
+	56, // 44: syncplane.testdata.v1.BlobHolder.files:type_name -> syncplane.v1.BlobRef
+	43, // 45: syncplane.testdata.v1.BlobHolder.pages:type_name -> syncplane.testdata.v1.BlobPage
+	55, // 46: syncplane.testdata.v1.BlobHolder.by_name:type_name -> syncplane.testdata.v1.BlobHolder.ByNameEntry
+	56, // 47: syncplane.testdata.v1.BlobHolder.secret:type_name -> syncplane.v1.BlobRef
+	56, // 48: syncplane.testdata.v1.BlobAlbum.cover:type_name -> syncplane.v1.BlobRef
+	56, // 49: syncplane.testdata.v1.BlobPage.scan:type_name -> syncplane.v1.BlobRef
+	45, // 50: syncplane.testdata.v1.BlobTree.shelves:type_name -> syncplane.testdata.v1.BlobShelf
+	46, // 51: syncplane.testdata.v1.BlobTree.root:type_name -> syncplane.testdata.v1.BlobNode
+	56, // 52: syncplane.testdata.v1.BlobShelf.files:type_name -> syncplane.v1.BlobRef
+	56, // 53: syncplane.testdata.v1.BlobNode.icon:type_name -> syncplane.v1.BlobRef
+	46, // 54: syncplane.testdata.v1.BlobNode.children:type_name -> syncplane.testdata.v1.BlobNode
+	56, // 55: syncplane.testdata.v1.BlobLedger.receipt:type_name -> syncplane.v1.BlobRef
+	1,  // 56: syncplane.testdata.v1.Widget.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
+	8,  // 57: syncplane.testdata.v1.MapTextEntity.NotesEntry.value:type_name -> syncplane.testdata.v1.TextHolder
+	8,  // 58: syncplane.testdata.v1.KeyedTextEntity.SectionsEntry.value:type_name -> syncplane.testdata.v1.TextHolder
+	1,  // 59: syncplane.testdata.v1.Issue.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
+	56, // 60: syncplane.testdata.v1.BlobHolder.ByNameEntry.value:type_name -> syncplane.v1.BlobRef
+	61, // [61:61] is the sub-list for method output_type
+	61, // [61:61] is the sub-list for method input_type
+	61, // [61:61] is the sub-list for extension type_name
+	61, // [61:61] is the sub-list for extension extendee
+	0,  // [0:61] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_v1_testdata_proto_init() }
@@ -3751,7 +4267,7 @@ func file_syncplane_testdata_v1_testdata_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_v1_testdata_proto_rawDesc), len(file_syncplane_testdata_v1_testdata_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   48,
+			NumMessages:   56,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

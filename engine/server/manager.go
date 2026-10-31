@@ -688,10 +688,10 @@ func (m *Manager) registerOver(ctx context.Context, appID string, app *hostedApp
 // SyncHandler returns the routed public handler. It strips the leading
 // "/<appID>" path segment, looks up that app's *Server, and delegates to that
 // server's own mux, which carries every Connect service it mounts at the full
-// method path each expects ("/syncplane.v1.SyncService/..." and
-// "/syncplane.v1.PresenceService/..."). An unknown app is 404. App servers are
-// created on demand by Register / boot reload, so a request for an unregistered
-// app never auto-creates one.
+// method path each expects ("/syncplane.v1.SyncService/...",
+// "/syncplane.v1.PresenceService/..." and "/syncplane.v1.BlobService/...").
+// An unknown app is 404. App servers are created on demand by Register / boot
+// reload, so a request for an unregistered app never auto-creates one.
 func (m *Manager) SyncHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		appID, rest := splitAppPrefix(r.URL.Path)

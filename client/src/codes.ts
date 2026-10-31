@@ -28,6 +28,12 @@
  * | Room withdrawn by the server         | `Room.status()` + `Room.onError` | `room_dropped`          |
  * | Room publish could not be sent       | `Room.onError`                 | `room_offline`             |
  * | Room send on a closed or dropped room | the `RoomSendError` it rejects with | `room_closed`, `room_dropped` |
+ * | Blob upload refused by the server    | `BlobStatus` `failed` + the    | `blob_refused`             |
+ * |                                      | `BlobError` `uploaded()` rejects with |                     |
+ * | Blob not on the server, or not       | the `BlobError` `blobs.get()`  | `blob_unavailable`         |
+ * | readable by the caller               | rejects with                   |                            |
+ * | Blob bytes do not match the ref      | the `BlobError` `blobs.get()`  | `blob_corrupt`             |
+ * |                                      | rejects with                   |                            |
  * | Access to a workspace withdrawn      | `status().workspaces[id].access` | (no code — `'revoked'`)  |
  * | No grant in a workspace yet          | `status().workspaces[id].access` | (no code — `'none'`)     |
  * | Server/client schema revisions differ | `status().schemaSkew`         | (no code — see SchemaSkewInfo) |
@@ -248,6 +254,31 @@ export const CodeRoomOffline = 'room_offline';
  * a room the app still holds open.
  */
 export const CodeRoomClosed = 'room_closed';
+
+/**
+ * The server refused a blob upload with an answer that retrying the same bytes
+ * cannot change: a malformed manifest, a blob above the server's size limit,
+ * a permission denial (the app's upload policy, or access to the workspace
+ * revoked), or a server without a blob store. `BlobError.transportCode` names
+ * which. A caller that holds no grant in the workspace yet is not refused: the
+ * upload stays queued and is tried again when access changes. Also used when this device's queued
+ * bytes were lost and cannot be sent. Arrives on a `failed` `BlobStatus`.
+ */
+export const CodeBlobRefused = 'blob_refused';
+
+/**
+ * The server has no complete blob under the digest that the caller can read:
+ * the upload is not complete yet, or no row the caller can read refers to the
+ * blob. Not terminal: a later `blobs.get()` succeeds once the upload completes.
+ */
+export const CodeBlobUnavailable = 'blob_unavailable';
+
+/**
+ * Blob bytes from the server do not match the ref: a chunk does not match its
+ * hash, the chunk hashes do not produce the digest, or the size differs from
+ * the ref's. The bytes are not returned and not cached.
+ */
+export const CodeBlobCorrupt = 'blob_corrupt';
 
 /**
  * Codes that can ride on a rejected mutation. Apps may define their own on the

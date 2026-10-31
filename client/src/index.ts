@@ -5,6 +5,20 @@ export type {
 	UnknownDetail,
 	UnknownReason,
 } from './access.js';
+// Blobs: the API is reached through `client.blobs` and `client.ws(id).blobs`;
+// the digest check lets an app validate a ref it did not make.
+export { BlobError } from './blob/api.js';
+export type {
+	BlobErrorCode,
+	BlobProgress,
+	BlobPutOptions,
+	BlobRef,
+	BlobRefLike,
+	BlobStatus,
+	ClientBlobs,
+	WorkspaceBlobs,
+} from './blob/api.js';
+export { BLOB_CHUNK_SIZE, isBlobDigest } from './blob/digest.js';
 export { subscription, SyncClient } from './client.js';
 export type {
 	CanOptions,
@@ -40,6 +54,9 @@ export type {
 } from './client.js';
 export {
 	CodeAccessDenied,
+	CodeBlobCorrupt,
+	CodeBlobRefused,
+	CodeBlobUnavailable,
 	CodeConflict,
 	CodeFormatUpgraded,
 	CodeInternal,

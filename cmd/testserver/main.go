@@ -8,6 +8,10 @@
 // browser e2e suite can reach it from the harness origin and assert what did
 // (and did not) reach the server; see debug.go.
 //
+// Blobs are kept in memory, so BlobService works in either schema; the
+// default one carries the entities that refer to them (blob_holder,
+// blob_tree, blob_ledger).
+//
 // A second listener answers each TCP connection as a tunnel (engine/tunnel)
 // to the same handlers, and its address is printed as "TUNNEL tcp://…" before
 // the LISTENING line.
@@ -26,6 +30,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/levelfourab/syncplane/engine/blob/memstore"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
@@ -53,6 +58,10 @@ func main() {
 			"serve the access-model test schema instead of the default one; see access.go")
 		maxAccessDepth = flag.Int("max-access-depth", 0,
 			"Limits.MaxAccessDepth: the most access parent hops a permission reaches down (0 is the default)")
+		maxBlobBytes = flag.Int64("max-blob-bytes", 0,
+			"Limits.MaxBlobBytes: the largest blob BeginUpload accepts (0 is the default, 4 GiB)")
+		blobRetention = flag.Duration("blob-retention", 0,
+			"how long blob GC keeps an unreferenced blob or a staged upload (0 is the default, 30 days); /debug/gc runs a pass")
 		tunnelAddr = flag.String("tunnel-addr", "127.0.0.1:0",
 			"listen address for tunnel connections, each a byte stream of length-prefixed frames (empty disables)")
 	)
@@ -91,7 +100,9 @@ func main() {
 		server.WithNotifyCoalescing(*notifyWindow),
 		server.WithChunkSize(*chunkSize),
 		server.WithLogger(logger),
-		server.WithLimits(server.Limits{MaxAccessDepth: *maxAccessDepth}),
+		server.WithLimits(server.Limits{MaxAccessDepth: *maxAccessDepth, MaxBlobBytes: *maxBlobBytes}),
+		server.WithBlobStore(memstore.New()),
+		server.WithBlobRetention(*blobRetention),
 	}
 	if *access {
 		opts = append(opts, accessOptions()...)
@@ -248,6 +259,14 @@ func defaultOptions() []server.Option {
 			// per element by instance path ("notes.<id>.body") and merge
 			// concurrent edits element by element.
 			&testdatav1.KeyedTextEntity{},
+			// Rows that refer to blobs: blob_holder from each place an index
+			// reaches (photo, album.cover, files, pages[].scan, by_name), with
+			// rows hidden while `hidden` is set and `secret` read only by the
+			// subject `owner_id` names; blob_tree from places only a row scan
+			// reaches; blob_ledger is server-only, so no client reads a blob
+			// through its `receipt`. Integration tests verify which blobs
+			// BlobService serves to which caller.
+			&testdatav1.BlobHolder{}, &testdatav1.BlobTree{}, &testdatav1.BlobLedger{},
 		),
 	)
 }

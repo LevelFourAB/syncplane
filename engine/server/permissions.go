@@ -492,6 +492,27 @@ func (AllowAllRooms) VisibleParticipants(
 	return nil, nil
 }
 
+// BlobPermissions is an optional Permissions extension that decides who may
+// upload blobs. A Permissions that does not implement it lets every caller
+// admitted to the workspace upload a blob up to Limits.MaxBlobBytes.
+//
+// Who may READ a blob is not decided here: a caller reads a blob when it
+// reads a row that refers to it.
+type BlobPermissions interface {
+	// CanUploadBlob admits or refuses the upload of a blob of size bytes. The
+	// engine calls it from BeginUpload, after the workspace gate admitted the
+	// caller and the request was found valid, and not for a Trusted ctx.
+	// PutChunk does not call it: a chunk only completes an upload that a
+	// BeginUpload started, and it must match the hash that call gave.
+	//
+	// Return a Rejection (see Reject) for a settled no. It reaches the client
+	// as permission_denied, with the Rejection's code under
+	// ErrorCodeMetadataKey and its message as the error message. An error
+	// that carries a Connect code reaches the client unchanged; any other
+	// error is internal, which a client retries.
+	CanUploadBlob(ctx context.Context, p Principal, workspaceID string, size int64) error
+}
+
 // AllowAll is the default Permissions implementation: every caller may do
 // everything. It is the right default for the engine's original posture —
 // embedded behind an app that already authenticated and authorized the request

@@ -36,7 +36,7 @@ export interface OpenOptions {
 	 * that asks for a subset IS an older build of the app, sharing the store and
 	 * the pending queue with newer tabs that register more.
 	 */
-	entities?: ('todo' | 'widget')[];
+	entities?: ('todo' | 'widget' | 'blob')[];
 	/**
 	 * Whole-entity subscriptions this tab declares. Default none, which is full
 	 * sync; a tab that names only `todo` holds no widget unless it holds one.
@@ -98,6 +98,44 @@ export interface MarkView {
  * One participant of a room, narrowed to what crosses the page boundary. The
  * app state is a plain string here, which is all the specs publish.
  */
+/** A blob ref in JSON form: `size` is a number, not the wire's bigint. */
+export interface BlobRefView {
+	digest: string;
+	size: number;
+	mediaType: string;
+}
+
+/** What a tab read back of a blob. */
+export interface BlobReadView {
+	size: number;
+	type: string;
+	/** Lowercase hex SHA-256 of the bytes. */
+	sha256: string;
+	/** The lengths of the chunks a stream() read yielded, in order; empty for get(). */
+	chunks: number[];
+}
+
+/**
+ * What the blob store's IndexedDB database holds for one digest: whether it
+ * is cached, and whether every stored chunk is a Blob value (which a browser
+ * keeps on disk) rather than an array of bytes.
+ */
+export interface BlobStoredView {
+	cached: boolean;
+	chunks: number;
+	allBlobs: boolean;
+}
+
+/**
+ * The bytes of a test blob: byte i is (i * 31 + seed) % 251. Shared by the page,
+ * which uploads them, and the specs, which check what comes back.
+ */
+export function blobBytes(size: number, seed: number): Uint8Array {
+	const out = new Uint8Array(size);
+	for (let i = 0; i < size; i++) out[i] = (i * 31 + seed) % 251;
+	return out;
+}
+
 export interface PeerView {
 	sessionId: string;
 	subject: string;
@@ -268,6 +306,21 @@ export interface HarnessApi {
 	 * one spec checks the store really is on disk under `sync:<accountId>`.
 	 */
 	databases(): Promise<string[]>;
+
+	/**
+	 * Blobs. Requires open({ entities: [..., 'blob'] }) for the row writes.
+	 * putBlob queues blobBytes(size, seed) and returns its ref.
+	 */
+	putBlob(size: number, seed: number, mediaType: string): Promise<BlobRefView>;
+	/** Writes a BlobHolder row whose `photo` is `ref`. */
+	putBlobHolder(id: string, ref: BlobRefView): Promise<void>;
+	blobUploaded(ref: BlobRefView): Promise<void>;
+	/** Reads the blob through blobs.get(). */
+	getBlob(ref: BlobRefView): Promise<BlobReadView>;
+	/** Reads the blob through blobs.stream(). */
+	streamBlob(ref: BlobRefView): Promise<BlobReadView>;
+	/** Inspects the blob store's own IndexedDB database for `ref`. */
+	storedBlob(ref: BlobRefView): Promise<BlobStoredView>;
 
 	pendingCount(): Promise<number>;
 	/**

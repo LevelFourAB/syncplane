@@ -328,11 +328,11 @@ func (g *gcLoop) close() {
 
 // CollectGarbage runs one manual collection pass (tombstones, idle clients'
 // verdicts and, with WithClientRetention, their watermarks) for a single
-// workspace using the retention configured via WithGC. The pass runs in one
-// write transaction, plus one transaction per
-// further chunk of expired field history (see historyPurgeChunk); it is
-// stateless and safe to re-run, and an interrupted drain resumes on the next
-// pass.
+// workspace using the retention configured via WithGC. With WithBlobStore it
+// also collects the workspace's blobs (see WithBlobRetention). The pass runs
+// in one write transaction, plus one transaction per further chunk of
+// expired field history (see historyPurgeChunk); it is stateless and safe to
+// re-run, and an interrupted drain resumes on the next pass.
 //
 // Do not call it from inside a mutator: it opens a write transaction, which
 // would deadlock against the one the mutator already holds. When the context
@@ -346,6 +346,15 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 	if inWriteTx(ctx) {
 		return fmt.Errorf("server: CollectGarbage called re-entrantly inside a write transaction (workspace %q): it opens a write transaction that would deadlock against the running one", workspaceID)
 	}
+	err := s.collectRows(ctx, workspaceID)
+	if s.blobs != nil {
+		err = errors.Join(err, s.collectBlobs(ctx, workspaceID))
+	}
+	return err
+}
+
+// collectRows is CollectGarbage for everything the storage adapter holds.
+func (s *Server) collectRows(ctx context.Context, workspaceID string) error {
 	// Through cutoffs rather than the retentions directly, so that what a work
 	// query selects a workspace for and what this pass then collects are read
 	// off one value (see gcLoop.cutoffs).
@@ -574,7 +583,7 @@ func (s *Server) collectAllGarbage(ctx context.Context) (err error) {
 					telemetry.AttrOutcome.String(telemetry.OutcomeSkipped)))
 				continue
 			}
-			cerr := s.CollectGarbage(ctx, id)
+			cerr := s.collectRows(ctx, id)
 			release()
 			// Per-workspace, because the pass swallows individual failures and
 			// carries on: without this, one workspace that fails every pass
@@ -593,6 +602,14 @@ func (s *Server) collectAllGarbage(ctx context.Context) (err error) {
 			break
 		}
 		after = ids[len(ids)-1]
+	}
+	if s.blobs != nil {
+		if berr := s.collectAllBlobs(ctx); berr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			errs = append(errs, berr)
+		}
 	}
 	s.log().LogAttrs(ctx, slog.LevelInfo, "garbage collection pass complete",
 		slog.String("component", "gc"),

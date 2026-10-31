@@ -6,7 +6,7 @@ To configure and operate a multi-node deployment, see [Run multiple nodes](../ho
 
 ## State tiers and failure impact
 
-Only PostgreSQL holds persistent state in a syncplane deployment. Sync nodes scan the shared store and send content-free sequence advancement signals through the notifier. Leases depend on active PostgreSQL sessions and release as soon as the connection drops.
+Only PostgreSQL holds persistent state in a syncplane deployment, plus the blob store when the server keeps [blobs](blobs.md#more-than-one-node). Sync nodes scan the shared store and send content-free sequence advancement signals through the notifier. Leases depend on active PostgreSQL sessions and release as soon as the connection drops.
 
 | Tier       | Replicas | Failure impact                                          |
 | ---------- | -------- | ------------------------------------------------------- |
@@ -59,6 +59,7 @@ Background work divides across nodes through per-workspace leases. `pgstore` bac
 
 - Garbage collection and index sweeps skip a workspace while another node holds its garbage collection lease.
 - An effects runtime leases each `(consumer, workspace)` drain in the same way.
+- Blob garbage collection takes a lease of its own per workspace. It deletes a blob under the workspace write lock, so two nodes that collect at once do not delete a blob that a row names.
 - When a node crashes, its connection closes and releases held advisory locks immediately. This prevents lease timeout delays.
 - Two holders on one node exclude each other. A node holds all of its leases on one connection. Because an advisory lock allows the holding connection to take the lock again, the store tracks held leases in memory and refuses a second holder. For the same reason, a caller that cancels its context never closes the connection. Closing the connection would release leases held by all other callers on that node.
 

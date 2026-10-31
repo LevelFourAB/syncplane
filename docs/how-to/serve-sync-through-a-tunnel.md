@@ -41,6 +41,7 @@ Before you start, make sure that you have:
    mux := http.NewServeMux()
    mux.Handle("/syncplane.v1.SyncService/", proxy)
    mux.Handle("/syncplane.v1.PresenceService/", proxy)
+   mux.Handle("/syncplane.v1.BlobService/", proxy)
    ```
 
 2. **Give the handler an identity, if the engine runs locally.**

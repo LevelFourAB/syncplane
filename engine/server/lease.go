@@ -12,6 +12,7 @@ const (
 	leaseRoleGC      = "gc"
 	leaseRoleIndexes = "indexes"
 	leaseRoleCompact = "compact"
+	leaseRoleBlobs   = "blobs"
 )
 
 // tryLease takes role's lease on a workspace for one background pass,

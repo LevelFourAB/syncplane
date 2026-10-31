@@ -55,6 +55,7 @@ Task-oriented guides. Each guide assumes you already have a running app.
 - [Search data](how-to/search.md)
 - [Sync only part of a workspace](how-to/partial-sync.md)
 - [Use collaborative text](how-to/use-collaborative-text.md)
+- [Attach files to rows](how-to/attach-files-to-rows.md)
 - [Add presence to an app](how-to/add-presence.md)
 - [Build a UI with React](how-to/react.md)
 - [Hold several workspaces on one client](how-to/multiple-workspaces.md)
@@ -72,11 +73,11 @@ Task-oriented guides. Each guide assumes you already have a running app.
 Information-oriented. Use these pages to look up facts.
 
 - [Go server API](reference/server.md) — construction, options, limits, GC,
-  trusted writes, the change feed, `Manager` and the admin service.
+  trusted writes, the change feed, blobs, `Manager` and the admin service.
 - [TypeScript client API](reference/typescript-client.md) — the full surface of
   `syncplane` and `syncplane/react`.
-- [Proto options](reference/proto-options.md) — `(syncplane.v1.entity)` and
-  `(syncplane.v1.field_behavior)`.
+- [Proto options](reference/proto-options.md) — `(syncplane.v1.entity)`,
+  `(syncplane.v1.field_behavior)` and `syncplane.v1.BlobRef`.
 - [Connectors](reference/connectors.md) — the `Source` port and its optional
   halves, every connector `Config` field, error sentinels, and `Health`.
 - [Effects runtime](reference/effects.md) — the `Sink` seam, `Runtime.Register`,
@@ -86,7 +87,7 @@ Information-oriented. Use these pages to look up facts.
 - [Sync status and failure codes](reference/sync-status-and-codes.md) — the
   status snapshot, which channel reports which failure, and the code vocabulary.
 - [Storage adapter contract](reference/storage-adapter.md) — what an adapter
-  must honor to be correct.
+  must honor to be correct, and the `blob.Store` seam for blob bytes.
 - [Telemetry](reference/telemetry.md) — every metric and span the engine emits,
   their attributes, and the cardinality rule they follow.
 - [Tunnel](reference/tunnel.md) — the frame protocol, `engine/tunnel` and
@@ -125,6 +126,8 @@ Understanding-oriented. Read these when a behavior surprises you.
 - [Rooms: the ephemeral plane](explanation/rooms.md) — presence and broadcast,
   why the mutation log is the wrong home for them, and expiry by
   re-announcement.
+- [Blobs](explanation/blobs.md) — why file bytes stay out of the mutation log,
+  content addressing per workspace, reads through rows, and garbage collection.
 - [Tunnels](explanation/tunnels.md) — why the tunnel carries HTTP and not
   RPCs, one channel per call or one shared channel, and what a tunnel does not
   do.

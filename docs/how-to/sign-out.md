@@ -119,6 +119,7 @@ The following table lists what `purgeLocalData()` removes:
 | Item                                                          | Result                                                      |
 | ------------------------------------------------------------- | ----------------------------------------------------------- |
 | Rows, overlay, bootstrap staging, cursors, queues, `clientId` | Deleted                                                     |
+| Queued blob uploads and cached blobs                          | Deleted; their IndexedDB database is kept, empty            |
 | The IndexedDB database itself                                 | Kept, empty                                                 |
 | Tokens, caches, and application state                         | Kept; clear these in your application                       |
 | Data on the server                                            | Untouched; the wipe is local and does not notify the server |

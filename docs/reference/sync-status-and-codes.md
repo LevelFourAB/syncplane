@@ -17,23 +17,26 @@ For the full status object type definition, see the [client reference](typescrip
 
 The client reports failures and errors through specific channels based on their scope and lifecycle:
 
-| Failure                                                      | Channel                                                                     | Code                                                                              |
-| ------------------------------------------------------------ | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| A mutation was refused by application rules                  | `onMutationRejected`                                                        | `permission_denied`, `invalid_argument`, `conflict`, or a custom application code |
-| A mutation was refused by the schema's access model          | `onMutationRejected`                                                        | `access_denied`                                                                   |
-| The client dropped a mutation after repeated server failures | `onMutationRejected`                                                        | `poison_dropped`                                                                  |
-| A purge operation discarded a queued mutation                | `onMutationRejected`, plus the `removeWorkspace` or `purgeLocalData` result | `workspace_purged`                                                                |
-| A local format upgrade could not salvage a queued mutation   | `onMutationRejected`, plus a count in `lastError`                           | `format_upgraded`                                                                 |
-| A sync cycle failed                                          | `status().lastError`                                                        | Server error code, `unavailable`, or `internal`                                   |
-| A workspace queue was refused due to a mutation ID gap       | `status().lastError`, plus a `resequence` sync event                        | `mutation_id_gap`                                                                 |
-| A watch could not be registered                              | `status().lastError`                                                        | `watch_failed`                                                                    |
-| A text handle could not merge remote state                   | `TextHandle.status()`, `TextHandle.onError`                                 | `text_merge_failed`                                                               |
-| The server withdrew a room                                   | `Room.status()`, `Room.onError`                                             | `room_dropped`                                                                    |
-| A room publish message could not be sent                     | `Room.onError`                                                              | `room_offline`                                                                    |
-| `Room.send` was called on a closed or dropped room           | The rejected `RoomSendError`                                                | `room_closed`, `room_dropped`                                                     |
-| Access to a workspace was withdrawn                          | `status().workspaces[id].access` is `'revoked'`                             | None                                                                              |
-| The caller holds no permission in a workspace yet            | `status().workspaces[id].access` is `'none'`                                | None                                                                              |
-| Server and client schema revisions differ                    | `status().schemaSkew`                                                       | None                                                                              |
+| Failure                                                      | Channel                                                                           | Code                                                                              |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| A mutation was refused by application rules                  | `onMutationRejected`                                                              | `permission_denied`, `invalid_argument`, `conflict`, or a custom application code |
+| A mutation was refused by the schema's access model          | `onMutationRejected`                                                              | `access_denied`                                                                   |
+| The client dropped a mutation after repeated server failures | `onMutationRejected`                                                              | `poison_dropped`                                                                  |
+| A purge operation discarded a queued mutation                | `onMutationRejected`, plus the `removeWorkspace` or `purgeLocalData` result       | `workspace_purged`                                                                |
+| A local format upgrade could not salvage a queued mutation   | `onMutationRejected`, plus a count in `lastError`                                 | `format_upgraded`                                                                 |
+| A sync cycle failed                                          | `status().lastError`                                                              | Server error code, `unavailable`, or `internal`                                   |
+| A workspace queue was refused due to a mutation ID gap       | `status().lastError`, plus a `resequence` sync event                              | `mutation_id_gap`                                                                 |
+| A watch could not be registered                              | `status().lastError`                                                              | `watch_failed`                                                                    |
+| A text handle could not merge remote state                   | `TextHandle.status()`, `TextHandle.onError`                                       | `text_merge_failed`                                                               |
+| The server withdrew a room                                   | `Room.status()`, `Room.onError`                                                   | `room_dropped`                                                                    |
+| A room publish message could not be sent                     | `Room.onError`                                                                    | `room_offline`                                                                    |
+| `Room.send` was called on a closed or dropped room           | The rejected `RoomSendError`                                                      | `room_closed`, `room_dropped`                                                     |
+| The server refused a blob upload                             | A `failed` `BlobStatus`, and the `BlobError` that `blobs.uploaded()` rejects with | `blob_refused`                                                                    |
+| A blob is not on the server, or the caller cannot read it    | The `BlobError` that `blobs.get()` rejects with                                   | `blob_unavailable`                                                                |
+| Blob bytes from the server do not match the ref              | The `BlobError` that `blobs.get()` rejects with                                   | `blob_corrupt`                                                                    |
+| Access to a workspace was withdrawn                          | `status().workspaces[id].access` is `'revoked'`                                   | None                                                                              |
+| The caller holds no permission in a workspace yet            | `status().workspaces[id].access` is `'none'`                                      | None                                                                              |
+| Server and client schema revisions differ                    | `status().schemaSkew`                                                             | None                                                                              |
 
 Failure reporting channels operate with different lifecycles:
 
@@ -42,6 +45,7 @@ Failure reporting channels operate with different lifecycles:
 - `status().workspaces[id].access` and `status().schemaSkew`: Report standing conditions that persist until the underlying condition changes.
 - `TextHandle.status()` and `TextHandle.onError`: Report errors on an individual live text handle without affecting client status.
 - `Room.status()`, `Room.onError`, and `RoomSendError`: Report errors on an individual open room without affecting client status.
+- `BlobStatus` and `BlobError`: Report errors on an individual blob without affecting client status.
 
 Workspace access has these values:
 
@@ -56,6 +60,16 @@ Room failure codes have the following behaviors:
 - If a caller holds no grant in the workspace yet, the server does not drop the room: `Room.status()` reports `'waiting'` with no error. The client retries with backoff, 1 to 30 seconds apart, and immediately when caller access in the workspace changes. The room changes to `'open'` when a grant admits the caller. The same transition occurs if the caller loses its last grant while the room is open.
 - `room_offline`: Non-terminal. A publish did not reach the server. The room resends state when the stream reconnects.
 - Room data is not durable, and room failure codes do not indicate data loss (see [Rooms](../explanation/rooms.md)).
+
+Blob failure codes have the following behaviors:
+
+- `blob_refused`: Terminal for those bytes. The server answered `InvalidArgument`, `ResourceExhausted`, `PermissionDenied` or `Unimplemented`, and `BlobError.transportCode` names which. `PermissionDenied` covers revoked access to the workspace and a refusal by the server's upload policy (`CanUploadBlob`). The code also reports queued bytes that this device lost. The client stops sending the blob and keeps its bytes in the queue. Another `put` of the same bytes queues the upload again.
+- A caller that holds no permission in the workspace yet (`workspace_no_access`) gets no code: the upload stays `queued`. The client tries it again when the caller's access in the workspace changes, and with backoff, 5 seconds to 5 minutes apart.
+- Every other upload failure is retried with backoff, 1 to 30 seconds apart. Each upload backs off on its own, so one upload that keeps failing does not hold back the others.
+- `blob_unavailable`: Not terminal. The upload is not complete, or no row that the caller can read names the blob. A later `get()` succeeds when the upload completes.
+- `blob_corrupt`: The size, the chunk hashes or a chunk from the server do not match the ref. The client does not return or cache the bytes.
+
+A `get()` that fails for another reason, such as the network, rejects with the `ConnectError` of the request. See [Blobs](../explanation/blobs.md).
 
 ## Two codes that deliberately appear nowhere above
 

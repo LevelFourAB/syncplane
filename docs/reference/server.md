@@ -75,6 +75,8 @@ The following table lists configuration options for `server.New`:
 | `WithHistorySession(d)`                     | 5m           | Sets the duration a field-history record remains open to consecutive writes by the same actor. `HistorySessionOff` records every write separately. See [Field history](#field-history).                                                                                        |
 | `WithPresenceBus(b)`                        | in-process   | Sets the bus implementation for the ephemeral plane. Multi-node setups require a shared implementation such as `engine/presence/pgpresence`. One bus may be shared by every app a `Manager` hosts. See [Rooms](#rooms).                                                        |
 | `WithRoomAnnounce(d)`                       | 5s           | Sets the interval for re-announcing active presence records. Sessions disappear after three missed intervals. See [Rooms](#rooms).                                                                                                                                             |
+| `WithBlobStore(st)`                         | —            | Keeps blobs in `st` and serves `BlobService` from it. Without it, every `BlobService` call fails with `unimplemented`. The server does not close `st`. One store may be shared by every app a `Manager` hosts. See [Blobs](#blobs).                                            |
+| `WithBlobRetention(d)`                      | 30d          | Sets how long blob GC keeps a committed blob that no live row names, and a staged upload that has not completed. Takes effect only with `WithBlobStore` and `WithGC`. Zero or negative keeps the default. See [Blobs](#blobs).                                                 |
 
 ### Limits
 
@@ -109,6 +111,7 @@ The following table lists request and data bounds in `server.Limits`:
 | `MaxBroadcastBytes`       | 4 KiB   | Maximum broadcast message payload size.                                                                                                                                                                                                                                                                                                                                                     |
 | `MaxPublishItems`         | 32      | Maximum items permitted in a single `Publish` request.                                                                                                                                                                                                                                                                                                                                      |
 | `MaxParticipantsPerRoom`  | 128     | Maximum participant records retained per room. When full, the room retains the lowest session IDs, reports snapshot truncation, and rejects additional sessions.                                                                                                                                                                                                                            |
+| `MaxBlobBytes`            | 4 GiB   | Maximum size of one blob. `BeginUpload` of a larger blob fails with `resource_exhausted`.                                                                                                                                                                                                                                                                                                   |
 
 Increasing `MaxMutationsPerPush` or `MaxValueBytes` requires increasing `MaxRequestBytes` accordingly.
 
@@ -145,6 +148,7 @@ A garbage collection pass prunes:
 - **Field history** (`WithHistoryRetention`): Prunes historical field records independently of tombstone retention. Record age is calculated from its last appended write, not from its initial `recorded_at` timestamp.
 - **Client rejection verdicts** (`WithGC`): Clears verdicts recorded for clients that have not pushed within the tombstone retention window. A resend of a refused mutation then receives `ALREADY_APPLIED` instead of the original verdict.
 - **Idle client watermark records** (`WithClientRetention`): Deletes watermark records of clients that have not pushed for duration `d`. The server keeps every record when this option is unset. A deleted watermark allows a resend of an already-applied mutation to apply again. See [Limits and trade-offs](../explanation/limits-and-trade-offs.md#deleting-idle-client-watermarks-can-apply-a-resend-twice).
+- **Blobs** (`WithBlobStore`, `WithBlobRetention`): Marks committed blobs that no live row names, deletes them when the mark is older than the blob retention, and aborts staged uploads older than the retention. Deletes what a deleted workspace still holds. See [Blobs](#garbage-collection-of-blobs).
 
 Field-history records are hard-deleted without creating tombstones.
 
@@ -207,6 +211,8 @@ if err := srv.DeleteWorkspace(ctx, graphID); err != nil {
 Neither call runs a permission hook. Expose them only to callers your application authorized. Both return an error when called from inside a mutator or write transaction.
 
 Each admitted request reads the deletion mark: one indexed lookup. On `pgstore` this is one extra round trip per request.
+
+With `WithBlobStore`, the call then deletes the workspace's blobs and staged uploads. When that fails, the call returns an error, and the next blob GC pass deletes them. `RestoreWorkspace` does not bring them back.
 
 State outside the storage adapter remains: a custom `WithCursorStateStore` keeps its entries until it evicts them, and presence rooms keep sessions until they end.
 
@@ -799,6 +805,97 @@ type Bus interface {
 
 Nodes re-announce active sessions at the `WithRoomAnnounce` interval. Records not re-announced within three intervals are discarded. `Publish` returns the announcement interval so standalone publishers can refresh records.
 
+## Blobs
+
+`BlobService` moves the bytes of blobs that rows name with a `syncplane.v1.BlobRef` field (see [Blob references](proto-options.md#blob-references)). Give the server a store with `WithBlobStore`:
+
+```go
+blobs, err := fsstore.Open("/var/lib/myapp/blobs")
+if err != nil {
+	return err
+}
+defer blobs.Close() // the server does not close the blob store
+
+srv, err := server.New(store,
+	server.WithBlobStore(blobs),
+	server.WithGC(30*24*time.Hour, time.Hour), // blob GC runs inside the GC pass
+)
+
+path, h := srv.BlobHandler()   // one service
+for path, h := range srv.Handlers() { mux.Handle(path, h) } // all of them
+```
+
+`Handlers()` and `HTTPHandler()` mount `BlobService` whether or not a store is set. `BlobHandler` uses the interceptor chain of the sync service. Its request-size bound is `Limits.MaxRequestBytes`, raised to one chunk plus 64 KiB (8454144 bytes) when `MaxRequestBytes` is smaller.
+
+See [Blobs](../explanation/blobs.md) for the model and [Attach files to rows](../how-to/attach-files-to-rows.md) for a recipe.
+
+### RPCs
+
+A blob belongs to one workspace and is named by its digest. Chunks are 8 MiB (`blob.ChunkSize`), except the last.
+
+| RPC           | Admits                                    | Does                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `BeginUpload` | Workspace admission, then `CanUploadBlob` | Starts or resumes an upload. Returns `BLOB_STATE_COMPLETE` for a committed blob, or `BLOB_STATE_UPLOADING` and the missing chunk indexes. Safe to repeat.                                                                                                                                                                                                                                                             |
+| `PutChunk`    | Workspace admission                       | Stores one chunk of a staged upload after it checks the chunk against its hash. The call that stores the last chunk commits the blob and pokes the workspace's subscribers. Safe to repeat. With nothing staged, answers `BLOB_STATE_COMPLETE` for a committed blob only when the chunk matches it.                                                                                                                   |
+| `StatBlobs`   | A readable row names the blob             | Reports the state, size and chunk hashes of up to 256 blobs, in request order. A blob the caller cannot read reports `BLOB_STATE_MISSING`.                                                                                                                                                                                                                                                                            |
+| `GetChunk`    | A readable row names the blob             | Returns one chunk of a committed blob.                                                                                                                                                                                                                                                                                                                                                                                |
+| `WatchBlobs`  | A readable row names the blob             | Server stream. The first message holds the state of every requested digest (1 to 256), in request order, as `StatBlobs` reports it. Later messages hold only the digests whose state changed, checked again each time the workspace is notified. A digest can skip a state. An empty message is a keepalive, sent at the `WithHeartbeat` interval. Ends with OK once every digest was reported `BLOB_STATE_COMPLETE`. |
+
+A caller can read a blob when at least one live row it can read names the digest in a `BlobRef` field, after the fields that a guard hides from it are cleared. Rows of server-only entities do not count. `StatBlobs` and `WatchBlobs` read the store first, and run this check only for the digests it holds. A `Trusted` context reads every blob that a live row names, server-only rows included, and skips the workspace gate and `CanUploadBlob` on uploads.
+
+| Code                  | Returned when                                                                                                                                                                                                                                                                                                                           |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `unimplemented`       | The server has no `WithBlobStore`.                                                                                                                                                                                                                                                                                                      |
+| `invalid_argument`    | A malformed workspace ID or digest. A manifest whose chunk-hash count does not match the size, or whose size and chunk hashes do not produce the digest. A chunk that does not match its hash in a staged upload. More than 256 digests in one `StatBlobs` or `WatchBlobs`, or none in a `WatchBlobs`.                                  |
+| `resource_exhausted`  | `BeginUpload` of a blob larger than `Limits.MaxBlobBytes`.                                                                                                                                                                                                                                                                              |
+| `failed_precondition` | `PutChunk` for a digest with no staged upload: `BeginUpload` was not called, or GC aborted the upload. Call `BeginUpload` again. Also `PutChunk` for a committed blob with nothing staged, when the chunk does not match the blob.                                                                                                      |
+| `not_found`           | `GetChunk` for a blob that is not committed, or that the caller cannot read. The two cases give the same error.                                                                                                                                                                                                                         |
+| `out_of_range`        | `GetChunk` with an index past the last chunk.                                                                                                                                                                                                                                                                                           |
+| `unavailable`         | `BeginUpload` found its staged upload removed while it started. Retry.                                                                                                                                                                                                                                                                  |
+| `internal`            | The blob store failed (`the blob store failed`; the server logs the details), or `CanUploadBlob` returned an error without a Connect code. An error with a Connect code reaches the client unchanged.                                                                                                                                   |
+| `permission_denied`   | The workspace gate refused the caller, with the same codes as the sync service. A `WatchBlobs` stream runs the gate again at each heartbeat, and ends with this error when the caller is no longer admitted. Or `CanUploadBlob` returned a `Rejection`: its code is under `ErrorCodeMetadataKey`, and its message is the error message. |
+
+### Upload policy
+
+Every caller admitted to the workspace can upload a blob up to `Limits.MaxBlobBytes`. To decide more, implement `BlobPermissions` on the `Permissions` passed to `WithPermissions`. The server detects it by type assertion.
+
+```go
+type BlobPermissions interface {
+    CanUploadBlob(ctx context.Context, p Principal, workspaceID string, size int64) error
+}
+```
+
+`BeginUpload` calls it after the workspace gate admitted the caller and the request is valid, also for a blob the server already stores. `PutChunk` does not call it. A `Trusted` context skips it. Return `server.Reject(code, message)` for a settled refusal. Who may read a blob is not decided here.
+
+### Garbage collection of blobs
+
+Blob GC runs inside the [GC pass](#garbage-collection), so it needs `WithGC`. `CollectGarbage` runs it for one workspace. Each workspace's blob pass takes its own [lease](#leases), `blobs`.
+
+For each committed blob of each workspace in the store, a pass:
+
+- removes the `UnreferencedSince` mark when a live row names the blob, whatever the access rules, server-only rows included;
+- sets the mark to now when no live row names it and it has no mark;
+- deletes it when no live row names it and the mark is older than `WithBlobRetention`. The pass checks the references again in a read transaction, then deletes in a write transaction only when the workspace sequence has not moved since and the mark is still old. Otherwise the blob waits for the next pass.
+
+The pass deletes no blob in a workspace that holds a live row of an entity outside the catalog. It still sets and removes marks, and logs a warning (`blob GC deletes nothing in a workspace that holds rows of an entity the schema does not declare`). This check reads every row of the workspace before each batch of deletes.
+
+A `BeginUpload` that names a committed blob also removes the mark. The pass aborts each staged upload whose first `BeginUpload` is older than the retention, and deletes every blob of a workspace that `DeleteWorkspace` deleted.
+
+`syncplane.gc.collected` counts deleted blobs with `gc_kind=blobs` and aborted uploads with `gc_kind=blob_uploads` (see [Telemetry](telemetry.md#background-maintenance)).
+
+### Blob stores
+
+`blob.Store` (package `engine/blob`) is the seam that keeps the bytes. The engine includes:
+
+- **`fsstore.Open(dir)`**: A local directory. Several stores, in one process or in several, can share one directory on a local file system. Not for NFS or SMB.
+- **`memstore.New()`**: In memory, for tests and for servers whose blobs need not outlive the process.
+
+See [Blob stores](storage-adapter.md#blob-stores) for the contract.
+
+A `Manager` that passes one store to every app (`WithServerOptions(server.WithBlobStore(st))`) keeps the apps apart: each app names its workspaces in the store with its own prefix, and each app's GC pass collects its own workspaces only.
+
+`syncplaned -blob-dir <dir>` opens an `fsstore` over `<dir>` and passes it to every hosted app this way. Without the flag, `BlobService` answers `unimplemented`. `syncplaned` has no GC flags, so it runs no blob GC, and the blobs it stores are never deleted.
+
 ## Hosting many apps
 
 Use `server.NewManager` to run multiple applications on a shared root adapter:
@@ -853,6 +950,7 @@ Background maintenance acquires a non-blocking lease for each `(role, workspace)
 
 - `gc`: Garbage collection sweeps.
 - `indexes`: Secondary index backfills.
+- `blobs`: Blob garbage collection.
 - `effects/<consumer>`: Background effect consumers.
 
 If another process holds the lease, the sweep is skipped. If the lease provider returns an error, the task executes without a lease. Application workers leasing custom tasks through `Server.Leases()` must use role names that the engine does not reserve.

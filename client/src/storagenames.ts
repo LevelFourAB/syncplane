@@ -87,6 +87,15 @@ export interface StorageNames {
 	 * is what a text peer is derived from; the account never enters the name.
 	 */
 	readonly textPeerLocks: string;
+	/**
+	 * IndexedDB database holding the blob upload queue and download cache. Apart
+	 * from `store`, so blob bytes never share a transaction with the rows.
+	 */
+	readonly blobStore: string;
+	/** Web Lock whose holder uploads the account's queued blobs. */
+	readonly blobLock: string;
+	/** BroadcastChannel carrying blob upload status between tabs. */
+	readonly blobChannel: string;
 }
 
 /** Derives every name of one account's storage from the configured prefix. */
@@ -100,5 +109,8 @@ export function storageNames(prefix: string, accountId: string): StorageNames {
 		presenceLock: `${prefix}:presencelock:${accountId}`,
 		presenceChannel: `${prefix}:presence:${accountId}`,
 		textPeerLocks: `${prefix}:textpeer`,
+		blobStore: `${prefix}:blobs:${accountId}`,
+		blobLock: `${prefix}:bloblock:${accountId}`,
+		blobChannel: `${prefix}:blob:${accountId}`,
 	};
 }

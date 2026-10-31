@@ -38,6 +38,10 @@ Leader handovers are transparent to other clients. The outgoing leader publishes
 
 The fallback behavior matches the data stream. In environments without Web Locks or `BroadcastChannel`, such as older browsers or server runtimes, every tab runs its own `Watch` stream. This approach increases connection overhead while preserving correct behavior.
 
+## One uploader for blobs
+
+Another Web Lock elects the tab that uploads the account's queued [blobs](blobs.md). The queue lives in an IndexedDB database of its own, so every tab can add to it, but one tab sends it. This lock is not tied to visibility: an upload in a hidden tab is still progress. A frozen page releases the lock to the tabs that still run. The uploader shares progress and completion with the other tabs over a `BroadcastChannel`. Waiting for another device's upload is per tab instead: each tab that watches pending blobs holds its own `WatchBlobs` stream, and shares the completions it hears on the same channel.
+
 ## Scope is the union, coverage is your own
 
 The coordinator synchronizes the union of subscriptions across all active tabs. As a result, a tab can hold rows in storage that it did not explicitly request.

@@ -19,6 +19,7 @@ Syncplane is a sync engine for local-first applications. Clients read and write 
 
 - **Collaborative text**: A field can hold a text document that merges concurrent edits. Formatting and comment anchors stay attached to the characters that they cover as other users edit around them.
 - **Presence and broadcast**: The server delivers live cursors, presence indicators, and typing indicators without storing them. Attach a room to a row, and any user who can read the row can join the room.
+- **File attachments**: A row refers to an image, a PDF or a video with a `BlobRef` field. The bytes upload in resumable chunks beside the row, also after a reload, and every user who can read the row can read the file. See [Attach files to rows](docs/how-to/attach-files-to-rows.md).
 - **Field history**: Record previous field values and user identities before each editing session. You can restore an old value with a standard write.
 
 ### Server
@@ -176,9 +177,9 @@ Changes propagate in under one second without polling. The demo shows undo and r
 Documentation is in the [`docs/`](docs/README.md) directory, organized by Diátaxis documentation type:
 
 - **[Tutorials](docs/README.md#tutorials)**: Build your first sync application and add collaborative text.
-- **[How-to guides](docs/README.md#how-to-guides)**: Configure permissions, queries, partial sync, collaborative text, server-side writes, change feeds and effects, external store connectors, field history, multi-app hosting, multi-node setups, observability, React, and failure handling.
+- **[How-to guides](docs/README.md#how-to-guides)**: Configure permissions, queries, partial sync, collaborative text, server-side writes, file attachments, change feeds and effects, external store connectors, field history, multi-app hosting, multi-node setups, observability, React, and failure handling.
 - **[Reference](docs/README.md#reference)**: Review the Go server API, TypeScript client API, Protocol Buffers options, connectors, naming rules, sync status and rejection codes, storage adapter contracts, and telemetry.
-- **[Explanation](docs/README.md#explanation)**: Read about the convergence model, partial sync coverage, collaborative text CRDTs, multi-tab behavior, and system trade-offs.
+- **[Explanation](docs/README.md#explanation)**: Read about the convergence model, partial sync coverage, collaborative text CRDTs, blobs, multi-tab behavior, and system trade-offs.
 
 ## Development
 

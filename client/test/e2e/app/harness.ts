@@ -24,7 +24,10 @@ import {
 	ProjectSchema,
 	TaskSchema,
 } from '../../../src/gen/syncplane/testdata/access/v1/access_pb.js';
-import { WidgetSchema } from '../../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import {
+	BlobHolderSchema,
+	WidgetSchema,
+} from '../../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import type { PullResponse, SubscribeResponse } from '../../../src/gen/syncplane/v1/service_pb.js';
 import {
 	decodeTextDoc,
@@ -47,11 +50,14 @@ import type {
 	AccessSamples,
 	AccessView,
 	AccessWireView,
+	BlobReadView,
+	BlobRefView,
 	HarnessApi,
 	MarkView,
 	StatusView,
 	TodoView,
 } from '../harness-api.js';
+import { blobBytes } from '../harness-api.js';
 import { WriteMeter } from './write-meter.js';
 
 /** The spawned testserver's address, handed over as ?server=... by Tab.open. */
@@ -252,6 +258,17 @@ function todoView(
 	return row === undefined ? null : { id: row.id, title: row.title, completed: row.completed };
 }
 
+function refOf(ref: BlobRefView) {
+	return { digest: ref.digest, size: BigInt(ref.size), mediaType: ref.mediaType };
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+	const hash = new Uint8Array(
+		await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>),
+	);
+	return [ ...hash ].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
 const harness: HarnessApi = {
 	async open(opts) {
 		if (client !== undefined) throw new Error('harness: client already open');
@@ -295,7 +312,7 @@ const harness: HarnessApi = {
 			kvStore: meter,
 			entities: user === undefined
 				? (opts.entities ?? [ 'todo', 'widget' ]).map((name) =>
-					name === 'todo' ? TodoSchema : WidgetSchema
+					name === 'todo' ? TodoSchema : name === 'blob' ? BlobHolderSchema : WidgetSchema
 				)
 				: ACCESS_ENTITIES,
 			subscriptions: opts.subscriptions?.map((name) =>
@@ -534,6 +551,87 @@ const harness: HarnessApi = {
 	async confirmedText(id) {
 		const body = await confirmedBody(id);
 		return body === null ? null : textOf(body);
+	},
+
+	async putBlob(size, seed, mediaType) {
+		const bytes = blobBytes(size, seed);
+		const ref = await current().blobs.put(new Blob([ bytes as Uint8Array<ArrayBuffer> ]), {
+			mediaType,
+		});
+		return { digest: ref.digest, size: Number(ref.size), mediaType: ref.mediaType };
+	},
+
+	async putBlobHolder(id, ref) {
+		await current().mutate.put(BlobHolderSchema, { id, title: id, photo: refOf(ref) });
+	},
+
+	async blobUploaded(ref) {
+		await current().blobs.uploaded(refOf(ref));
+	},
+
+	async getBlob(ref) {
+		const blob = await current().blobs.get(refOf(ref));
+		return {
+			size: blob.size,
+			type: blob.type,
+			sha256: await sha256Hex(new Uint8Array(await blob.arrayBuffer())),
+			chunks: [],
+		};
+	},
+
+	async streamBlob(ref) {
+		const parts: Uint8Array[] = [];
+		const reader = current().blobs.stream(refOf(ref)).getReader();
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			parts.push(value);
+		}
+		const all = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+		let at = 0;
+		for (const p of parts) {
+			all.set(p, at);
+			at += p.length;
+		}
+		return {
+			size: all.length,
+			type: ref.mediaType,
+			sha256: await sha256Hex(all),
+			chunks: parts.map((p) => p.length),
+		};
+	},
+
+	async storedBlob(ref) {
+		const c = current();
+		// Read beside the client, on a connection of the spec's own: what is on
+		// disk is the question, not what the client reports.
+		const db = await new Promise<IDBDatabase>((resolve, reject) => {
+			const req = indexedDB.open(c.storageNames.blobStore);
+			req.onsuccess = () => resolve(req.result);
+			req.onerror = () => reject(req.error);
+		});
+		try {
+			const get = <T>(store: string, key: IDBValidKey): Promise<T | undefined> =>
+				new Promise((resolve, reject) => {
+					const req = db.transaction(store, 'readonly').objectStore(store).get(key);
+					req.onsuccess = () => resolve(req.result as T | undefined);
+					req.onerror = () => reject(req.error);
+				});
+			const ws = workspaceId ?? '';
+			const owner = (await get<{ bytesId: string }>('cache', [ ws, ref.digest ]))
+				?? (await get<{ bytesId: string }>('uploads', [ ws, ref.digest ]));
+			const cached = (await get('cache', [ ws, ref.digest ])) !== undefined;
+			if (owner === undefined) return { cached, chunks: 0, allBlobs: false };
+			const count = Math.ceil(ref.size / (8 * 1024 * 1024));
+			let allBlobs = true;
+			for (let i = 0; i < count; i++) {
+				const v = await get<unknown>('chunks', [ owner.bytesId, i ]);
+				if (!(v instanceof Blob)) allBlobs = false;
+			}
+			return { cached, chunks: count, allBlobs };
+		} finally {
+			db.close();
+		}
 	},
 
 	async databases() {

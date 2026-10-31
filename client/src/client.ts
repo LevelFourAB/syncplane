@@ -55,6 +55,11 @@ import {
 	withinReads,
 	writeChangesAccess,
 } from './access.js';
+import type { ClientBlobs, WorkspaceBlobs } from './blob/api.js';
+import { clientBlobs, workspaceBlobs } from './blob/facade.js';
+import { IDBBlobStore } from './blob/idb.js';
+import { BlobManager, DEFAULT_BLOB_CACHE_BYTES } from './blob/manager.js';
+import { MemoryBlobStore } from './blob/store.js';
 import { CodeFormatUpgraded, CodeWatchFailed, CodeWorkspacePurged } from './codes.js';
 import {
 	COMPLETE,
@@ -776,6 +781,16 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 * in place of the connection.
 	 */
 	presenceEnabled?: boolean;
+	/**
+	 * Byte budget of the blob download cache, shared by the account's tabs.
+	 * When the cache is over it, the least recently read blobs go first. Queued
+	 * uploads are never deleted and do not count. A blob read in the last 10
+	 * minutes, or whose `get()` result this tab still holds, is kept, so the
+	 * cache can stay above the budget by what those hold.
+	 *
+	 * @defaultValue 268435456 (256 MiB)
+	 */
+	blobCacheBytes?: number;
 	/** Max row changes per pull page; 0 = server default. Pages loop until drained. */
 	pullLimit?: number;
 	/**
@@ -1128,10 +1143,11 @@ export interface Transaction<E extends readonly DescMessage[] = readonly DescMes
 export interface RemoveWorkspaceOptions {
 	/**
 	 * Also delete the workspace's local data: its confirmed rows, optimistic
-	 * overlay, bootstrap staging, cursor, watermarks and every mutation still
-	 * queued for it. Use this when access was revoked and the app has decided the
-	 * copy must not stay on the device; without it the client merely stops
-	 * syncing and the rows remain readable until the workspace is added back.
+	 * overlay, bootstrap staging, cursor, watermarks, every mutation still
+	 * queued for it, and its queued and cached blobs. Use this when access was
+	 * revoked and the app has decided the copy must not stay on the device;
+	 * without it the client merely stops syncing and the rows remain readable
+	 * until the workspace is added back.
 	 *
 	 * The queued mutations are handed back in RemoveWorkspaceResult.discarded —
 	 * that is the only copy left, so an app that wants to keep unsent work must
@@ -1217,6 +1233,8 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 	readonly workspaceId: string;
 	readonly mutate: MutateApi;
 	readonly db: EntityApis<E>;
+	/** The blobs of this workspace: upload, status and download (see WorkspaceBlobs). */
+	readonly blobs: WorkspaceBlobs;
 	/** Opens a live text-field handle in this workspace (see TextHandle). */
 	text<D extends DescMessage>(schema: D, key: string, field: string): Promise<TextHandle>;
 	/**
@@ -1439,6 +1457,7 @@ export interface UndoScope<E extends readonly DescMessage[] = readonly DescMessa
 class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClient<E> {
 	readonly mutate: MutateApi;
 	private dbApi?: EntityApis<E>;
+	private blobApi?: WorkspaceBlobs;
 	/**
 	 * In-memory undo/redo over the mutations issued through THIS scope. Cleared
 	 * again when a nested scope closes, which is what makes a closed scope inert.
@@ -1479,6 +1498,11 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 			},
 			list: (schema, rowKey, field) => this.client.listHandle(this, schema, rowKey, field),
 		};
+	}
+
+	get blobs(): WorkspaceBlobs {
+		this.blobApi ??= this.client.blobsIn(this.workspaceId);
+		return this.blobApi;
 	}
 
 	/** The undo stack writes through this scope record into, if any. */
@@ -2178,6 +2202,13 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 */
 	private presence?: PresenceCoordinator;
 	/**
+	 * The blob layer (blob/manager.ts), created on first use or at start(): a
+	 * queue left by an earlier session has to upload even if this one never
+	 * touches `blobs`.
+	 */
+	private blobMgr?: BlobManager;
+	private clientBlobsApi?: ClientBlobs;
+	/**
 	 * The in-flight (or completed) start, memoized so concurrent callers share
 	 * one. Cleared again when that start REJECTS, which is what makes start()
 	 * retryable; see start().
@@ -2336,6 +2367,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		}
 		if (!opts?.purge) return { removed: true, purged: false, discarded: [] };
 		const discarded = await this.purgeWorkspace(workspaceId);
+		if (!this.closed) await this.blobManager().clear(workspaceId);
 		return { removed: true, purged: true, discarded };
 	}
 
@@ -2585,6 +2617,67 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		});
 		return this.presence;
 	}
+
+	/**
+	 * The blobs of the default workspace, and the account's upload queue (see
+	 * ClientBlobs). The per-blob methods throw when there is no default
+	 * workspace; `client.ws(id).blobs` reaches the others.
+	 */
+	get blobs(): ClientBlobs {
+		this.clientBlobsApi ??= clientBlobs(
+			() => this.blobManager(),
+			() => this.defaultScope().workspaceId,
+		);
+		return this.clientBlobsApi;
+	}
+
+	/** @internal the WorkspaceBlobs a workspace scope hands out. */
+	blobsIn(workspaceId: string): WorkspaceBlobs {
+		return workspaceBlobs(() => this.blobManager(), () => workspaceId);
+	}
+
+	/**
+	 * The blob layer, created on first use. Its store follows the KV store's
+	 * backend: IndexedDB where the KV store is IndexedDB, memory otherwise.
+	 */
+	private blobManager(): BlobManager {
+		this.assertOpen();
+		this.blobMgr ??= new BlobManager({
+			transport: () => this.resolveTransport(),
+			openStore: async () => {
+				const idb = this.opts.kvStore
+					? this.opts.kvStore instanceof IDBKVStore
+					: typeof indexedDB !== 'undefined';
+				return idb ? IDBBlobStore.open(this.storageNames.blobStore) : new MemoryBlobStore();
+			},
+			lockName: this.storageNames.blobLock,
+			channelName: this.storageNames.blobChannel,
+			cacheBytes: this.opts.blobCacheBytes ?? DEFAULT_BLOB_CACHE_BYTES,
+		});
+		// Blob work that access stopped — an upload refused for want of a grant,
+		// the watch of a revoked workspace — starts again when access may have
+		// come back: on a change of what the caller holds, and when a
+		// workspace's access leaves 'none' or 'revoked'.
+		this.accessListeners.add(this.retryBlobsOnAccess);
+		const accessLost = (status: SyncStatus): Set<string> => {
+			const out = new Set<string>();
+			for (const [ ws, st ] of Object.entries(status.workspaces)) {
+				if (st.access === 'none' || st.access === 'revoked') out.add(ws);
+			}
+			return out;
+		};
+		let lost = accessLost(this.statusTracker.current());
+		this.statusTracker.onChange((status) => {
+			const now = accessLost(status);
+			for (const ws of lost) if (!now.has(ws)) this.blobMgr?.accessChanged(ws);
+			lost = now;
+		});
+		return this.blobMgr;
+	}
+
+	private readonly retryBlobsOnAccess = (workspaceId: string): void => {
+		this.blobMgr?.accessChanged(workspaceId);
+	};
 
 	/**
 	 * Builds the put/patch/update/del facade over a `sink` that decides where
@@ -2948,6 +3041,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				const touched = TouchSet.fromTokens(tokens);
 				void hub.notify(touched);
 				this.fireAccessChange(touched);
+				// A peer tab's pull may have brought the row whose blob completed.
+				this.blobMgr?.noteSync();
 			});
 			return hub;
 		})();
@@ -3128,6 +3223,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			await coordinator.stop().catch(() => {});
 			throw err;
 		}
+		if (!this.closed) this.blobManager().start();
 		this.startIndexBuild();
 	}
 
@@ -3231,6 +3327,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * coordinator holds it as its onSyncEvent handler.
 	 */
 	private readonly dispatchSyncEvent: SyncEventHandler = (event: SyncEvent): void => {
+		// The server pokes a workspace when a blob upload completes, so a pull is
+		// when a watched pending blob may have become available.
+		if ((event.type === 'pull' && event.outcome === 'ok') || event.type === 'poke') {
+			this.blobMgr?.noteSync(event.workspaceId);
+		}
 		const handler = this.opts.onSyncEvent;
 		if (handler) safeInvoke(handler, event, 'onSyncEvent');
 		for (const listener of [ ...this.syncEventListeners ]) {
@@ -4822,7 +4923,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * Deletes the account's local data, then closes the client.
 	 *
 	 * Everything the store holds goes: every workspace's rows, overlay,
-	 * bootstrap staging, cursors and queues, and the `clientId` with them.
+	 * bootstrap staging, cursors and queues, and the `clientId` with them, and
+	 * every queued blob upload and cached blob.
 	 * Watchers are woken before the close, so the UI drops the rows. A client
 	 * built on the account afterwards mints a new `clientId` and bootstraps from
 	 * empty; to delete one workspace of an account the device keeps, use
@@ -4852,6 +4954,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		this.coordinator = undefined;
 		await this.presence?.stop();
 		this.presence = undefined;
+		const blobs = this.blobManager();
+		await blobs.stop();
+		await blobs.clear();
 		// reportRejection refreshes this tab's intent record from the trimmed
 		// undo stacks; the registry has to go first, or that refresh writes a
 		// record back into the emptied store.
@@ -4942,6 +5047,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		for (const ws of [ ...this.holds.keys(), ...this.scopeWaiters.keys() ]) this.dropHolds(ws);
 		await this.coordinator?.stop();
 		await this.presence?.stop();
+		await this.blobMgr?.close();
 		this.changeShare?.stop();
 		this.hubInstance?.close();
 		if (this.kvPromise) {
