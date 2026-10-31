@@ -207,7 +207,7 @@ var _ = Describe("byte-equal index entries of different rows", func() {
 		GinkgoHelper()
 		var id int64
 		Expect(store.read.QueryRow(
-			`SELECT id FROM index_row_entries WHERE workspace_id = 'ws1' AND entity = 'widget' AND key = ?`, key,
+			`SELECT id FROM index_row_ids WHERE workspace_id = 'ws1' AND entity = 'widget' AND key = ?`, key,
 		).Scan(&id)).To(Succeed())
 		return id
 	}
@@ -304,7 +304,7 @@ var _ = Describe("row key cache", func() {
 		GinkgoHelper()
 		var id int64
 		Expect(store.read.QueryRow(
-			`SELECT id FROM index_row_entries WHERE workspace_id = 'ws1' AND entity = 'widget' AND key = ?`, key,
+			`SELECT id FROM index_row_ids WHERE workspace_id = 'ws1' AND entity = 'widget' AND key = ?`, key,
 		).Scan(&id)).To(Succeed())
 		return id
 	}
@@ -348,7 +348,7 @@ var _ = Describe("row key cache", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(keys).To(Equal([]string{"row-lost"}))
 			Expect(tx.(*sqliteTx).queryRow(
-				`SELECT id FROM index_row_entries WHERE key = 'row-lost'`,
+				`SELECT id FROM index_row_ids WHERE key = 'row-lost'`,
 			).Scan(&lost)).To(Succeed())
 			return rollback
 		})).To(MatchError(rollback))

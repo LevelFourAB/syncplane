@@ -60,13 +60,14 @@ var _ = Describe("SQLite schema versioning", func() {
 	const baselineVersion = 1
 	// The version a database this binary creates or upgrades ends at: the
 	// baseline plus every migration since. Bump it with each migration added.
-	const latestVersion = 6
+	const latestVersion = 7
 
 	// oldIndexTables puts the index entry tables back in the shape every
 	// version before 4 has, so a test can rewind a database past migration 4.
 	const oldIndexTables = `
 		DROP TABLE index_entries;
 		DROP TABLE index_row_entries;
+		DROP TABLE index_row_ids;
 		DROP TABLE index_row_keys;
 		DROP TABLE index_scopes;
 		CREATE TABLE index_entries (
@@ -243,6 +244,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		_, err = db.Exec(`
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
+			DROP TABLE index_row_ids;
 			DROP TABLE index_row_keys;
 			CREATE TABLE index_entries (
 				scope INTEGER NOT NULL,
@@ -325,6 +327,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		_, err = db.Exec(`
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
+			DROP TABLE index_row_ids;
 			DROP TABLE index_row_keys;
 			CREATE TABLE index_entries (
 				scope INTEGER NOT NULL,
@@ -381,6 +384,102 @@ var _ = Describe("SQLite schema versioning", func() {
 			})
 		})).To(Succeed())
 		Expect(scan()).To(Equal([]string{"k1", "k1"}))
+	})
+
+	It("upgrades version-6 entry lists by dropping them for a rebuild", func() {
+		ctx := context.Background()
+		path := filepath.Join(GinkgoT().TempDir(), "upgrade-index-6.db")
+		store, err := sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			if err := tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{}); err != nil {
+				return err
+			}
+			if err := tx.PutIndexEntries("widget", "k1", []storage.IndexEntry{{Index: "by_label", Key: []byte("a\x00k1\x00\x00")}}); err != nil {
+				return err
+			}
+			return tx.SetIndexState("widget", "by_label", "h1", true)
+		})).To(Succeed())
+		Expect(store.Close()).To(Succeed())
+
+		// Back to the version-6 shape, where each list sits next to its row's
+		// id, with a ready index and a workspace whose build mark says it is up
+		// to date. The list is the one the two entries pack to under scope 1 in
+		// the version-6 format.
+		db, err := sql.Open("sqlite", path)
+		Expect(err).NotTo(HaveOccurred())
+		var scope int
+		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
+		Expect(scope).To(Equal(1))
+		_, err = db.Exec(`
+			DROP TABLE index_entries;
+			DROP TABLE index_row_entries;
+			DROP TABLE index_row_ids;
+			DROP TABLE index_row_keys;
+			CREATE TABLE index_row_keys (
+				id  INTEGER PRIMARY KEY AUTOINCREMENT,
+				key TEXT NOT NULL
+			);
+			CREATE TABLE index_row_entries (
+				workspace_id TEXT NOT NULL,
+				entity       TEXT NOT NULL,
+				key          TEXT NOT NULL,
+				id           INTEGER NOT NULL,
+				entries      BLOB NOT NULL,
+				PRIMARY KEY (workspace_id, entity, key)
+			) WITHOUT ROWID;
+			CREATE TABLE index_entries (
+				scope INTEGER NOT NULL,
+				k     BLOB NOT NULL,
+				key   NOT NULL,
+				PRIMARY KEY (scope, k, key)
+			) WITHOUT ROWID;
+			INSERT INTO index_row_keys (id, key) VALUES (1, 'k1');
+			INSERT INTO index_row_entries VALUES ('ws1', 'widget', 'k1', 1, x'01020101056100');
+			INSERT INTO index_entries VALUES (1, x'61006b310000', -2), (1, x'01', 1);
+			UPDATE workspaces SET index_build_mark = 'm1' WHERE workspace_id = 'ws1';
+			PRAGMA user_version = 6;`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(db.Close()).To(Succeed())
+
+		store, err = sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+		scan := func() []string {
+			GinkgoHelper()
+			var keys []string
+			Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+				return tx.ScanIndex("widget", "by_label", nil, nil, 0, storage.ScanAsc, func(_ []byte, k string) error {
+					keys = append(keys, k)
+					return nil
+				})
+			})).To(Succeed())
+			return keys
+		}
+		Expect(scan()).To(BeEmpty(), "the old entries are not carried over")
+		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+			_, ready, err := tx.IndexState("widget", "by_label")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ready).To(BeFalse(), "an index without its entries must not read as ready")
+			return nil
+		})).To(Succeed())
+		stale, err := store.ListStaleIndexWorkspaceIDs(ctx, "m1", storage.Range{}, 10)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stale).To(ContainElement("ws1"), "the build pass must visit the workspace again")
+
+		// The list went with the entries and the id, so the rebuild writes both
+		// entries again instead of reading a list it cannot decode. A second put of the same entries reads the new list back and
+		// writes nothing.
+		entries := []storage.IndexEntry{
+			{Index: "by_label", Key: []byte("a\x00k1\x00\x00")},
+			{Index: "by_label", Key: []byte{0x01}},
+		}
+		for range 2 {
+			Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+				return tx.PutIndexEntries("widget", "k1", entries)
+			})).To(Succeed())
+			Expect(scan()).To(Equal([]string{"k1", "k1"}))
+		}
 	})
 
 	It("refuses a database from a schema lineage that predates the stamp", func() {

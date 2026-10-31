@@ -79,6 +79,7 @@ var _ = Describe("workspace deletion coverage", func() {
 				return nil
 			})).To(Succeed())
 			Expect(count("index_entries")).To(Equal(4))
+			Expect(count("index_row_ids")).To(Equal(2))
 			Expect(count("index_row_entries")).To(Equal(2))
 			Expect(count("index_row_keys")).To(Equal(2))
 		})
@@ -86,9 +87,26 @@ var _ = Describe("workspace deletion coverage", func() {
 		It("leaves none behind when the workspace is deleted", func() {
 			Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
 			Expect(count("index_entries")).To(BeZero())
+			Expect(count("index_row_ids")).To(BeZero())
 			Expect(count("index_row_entries")).To(BeZero())
 			Expect(count("index_row_keys")).To(BeZero())
 			Expect(count("index_scopes")).To(BeZero())
+		})
+
+		It("keeps the lists and ids of another workspace", func() {
+			Expect(store.WithWriteTx(ctx, "ws2", func(tx storage.WriteTx) error {
+				return tx.PutIndexEntries("widget", "k1", []storage.IndexEntry{{Index: "by_label", Key: []byte("k1")}})
+			})).To(Succeed())
+			Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
+			Expect(count("index_entries")).To(Equal(1))
+			Expect(count("index_row_ids")).To(Equal(1))
+			Expect(count("index_row_entries")).To(Equal(1))
+			Expect(count("index_row_keys")).To(Equal(1))
+			Expect(store.WithWriteTx(ctx, "ws2", func(tx storage.WriteTx) error {
+				return tx.DeleteIndexEntries("widget", "k1")
+			})).To(Succeed())
+			Expect(count("index_entries")).To(BeZero())
+			Expect(count("index_row_entries")).To(BeZero())
 		})
 
 		It("leaves none behind when the rows are purged", func() {
@@ -97,6 +115,7 @@ var _ = Describe("workspace deletion coverage", func() {
 				return err
 			})).To(Succeed())
 			Expect(count("index_entries")).To(Equal(2), "a limited purge drops the entries of the rows it purged")
+			Expect(count("index_row_ids")).To(Equal(1))
 			Expect(count("index_row_entries")).To(Equal(1))
 			Expect(count("index_row_keys")).To(Equal(1))
 			Expect(dangling()).To(BeZero())
@@ -107,6 +126,7 @@ var _ = Describe("workspace deletion coverage", func() {
 				return tx.DeleteIndexEntries("widget", "k1")
 			})).To(Succeed())
 			Expect(count("index_entries")).To(Equal(2))
+			Expect(count("index_row_ids")).To(Equal(1))
 			Expect(count("index_row_entries")).To(Equal(1))
 			Expect(count("index_row_keys")).To(Equal(1))
 			Expect(dangling()).To(BeZero())

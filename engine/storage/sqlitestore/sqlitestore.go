@@ -62,6 +62,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"runtime"
 	"sort"
@@ -442,16 +443,53 @@ CREATE TABLE index_entries (
 	key   NOT NULL,
 	PRIMARY KEY (scope, k, key)
 ) WITHOUT ROWID;`,
+	// 7: entry lists in a smaller format, in a table keyed by row id. The
+	// entries, the lists and the row ids are dropped for a rebuild, as in
+	// migration 6: a list in the old format cannot be read, and an entry or
+	// id left without its list cannot be found to be deleted.
+	//
+	// encodeRowEntries writes each scope once and stores an entry as the
+	// bytes it does not share with the entry before it. index_row_ids maps a
+	// row to its id, and index_row_entries holds the list of each id. The
+	// lists are in a rowid table because SQLite keeps a cell of up to about a
+	// page on a page of a rowid table, but only about a quarter page on a page
+	// of a WITHOUT ROWID table. A list of a text-heavy row is a few kilobytes,
+	// so in a WITHOUT ROWID table it puts all but its first bytes on an
+	// overflow page of its own, and leaves most of that page empty.
+	// index_row_keys stays a table of its own, for the reason migration 6
+	// gives.
+	`DROP TABLE index_entries;
+DROP TABLE index_row_entries;
+DELETE FROM index_row_keys;
+DELETE FROM index_state;
+UPDATE workspaces SET index_build_mark = '';
+CREATE TABLE index_row_ids (
+	workspace_id TEXT NOT NULL,
+	entity       TEXT NOT NULL,
+	key          TEXT NOT NULL,
+	id           INTEGER NOT NULL,
+	PRIMARY KEY (workspace_id, entity, key)
+) WITHOUT ROWID;
+CREATE TABLE index_row_entries (
+	id      INTEGER PRIMARY KEY,
+	entries BLOB NOT NULL
+);
+CREATE TABLE index_entries (
+	scope INTEGER NOT NULL,
+	k     BLOB NOT NULL,
+	key   NOT NULL,
+	PRIMARY KEY (scope, k, key)
+) WITHOUT ROWID;`,
 }
 
 // workspaceTables names every table that holds state of one workspace, keyed
 // by its workspace_id column. DeleteWorkspace empties each of them for the
 // workspace it deletes, so a table added by a migration must be added here
 // too; deleted_workspaces is the one table with that column left out, because
-// it holds the mark DeleteWorkspace leaves. index_entries and index_row_keys
-// have no such column: their rows belong to a workspace through index_scopes
-// and index_row_entries, and DeleteWorkspace deletes them through those before
-// it empties them.
+// it holds the mark DeleteWorkspace leaves. index_entries, index_row_keys and
+// index_row_entries have no such column: their rows belong to a workspace
+// through index_scopes and index_row_ids, and DeleteWorkspace deletes them
+// through those before it empties them.
 var workspaceTables = []string{
 	"workspaces",
 	"rows",
@@ -460,7 +498,7 @@ var workspaceTables = []string{
 	"text_floors",
 	"idempotency",
 	"index_scopes",
-	"index_row_entries",
+	"index_row_ids",
 	"index_state",
 	"consumer_positions",
 	"consumer_shadows",
@@ -963,12 +1001,14 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 		); err != nil {
 			return fmt.Errorf("sqlitestore: delete workspace %q from index_entries: %w", workspaceID, err)
 		}
-		if _, err := t.exec(
-			`DELETE FROM index_row_keys
-			 WHERE id IN (SELECT id FROM index_row_entries WHERE workspace_id = ?)`,
-			workspaceID,
-		); err != nil {
-			return fmt.Errorf("sqlitestore: delete workspace %q from index_row_keys: %w", workspaceID, err)
+		for _, table := range []string{"index_row_entries", "index_row_keys"} {
+			if _, err := t.exec(
+				`DELETE FROM `+table+`
+				 WHERE id IN (SELECT id FROM index_row_ids WHERE workspace_id = ?)`,
+				workspaceID,
+			); err != nil {
+				return fmt.Errorf("sqlitestore: delete workspace %q from %s: %w", workspaceID, table, err)
+			}
 		}
 		for _, table := range workspaceTables {
 			if _, err := t.exec(`DELETE FROM `+table+` WHERE workspace_id = ?`, workspaceID); err != nil {
@@ -2165,7 +2205,7 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 	// pages that the savepoint each mutation runs in must copy into SQLite's
 	// statement sub-journal, so the cost of a push tracks entries WRITTEN, not
 	// entries held. Reading the current set first is one point read of the
-	// row's entry list and turns the common case into no writes at all.
+	// row's id and entry list and turns the common case into no writes at all.
 	listID, have, err := t.rowIndexEntries(entity, key)
 	if err != nil {
 		return err
@@ -2212,15 +2252,20 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 			return err
 		}
 		if _, err := t.exec(
-			`INSERT INTO index_row_entries (workspace_id, entity, key, id, entries) VALUES (?, ?, ?, ?, ?)`,
-			t.ws, entity, key, listID, encodeRowEntries(key, want),
+			`INSERT INTO index_row_ids (workspace_id, entity, key, id) VALUES (?, ?, ?, ?)`,
+			t.ws, entity, key, listID,
+		); err != nil {
+			return err
+		}
+		if _, err := t.exec(
+			`INSERT INTO index_row_entries (id, entries) VALUES (?, ?)`,
+			listID, encodeRowEntries(key, want),
 		); err != nil {
 			return err
 		}
 	} else if _, err := t.exec(
-		`UPDATE index_row_entries SET entries = ?
-		 WHERE workspace_id = ? AND entity = ? AND key = ?`,
-		encodeRowEntries(key, want), t.ws, entity, key,
+		`UPDATE index_row_entries SET entries = ? WHERE id = ?`,
+		encodeRowEntries(key, want), listID,
 	); err != nil {
 		return err
 	}
@@ -2305,8 +2350,8 @@ func (t *sqliteTx) rowIndexEntries(entity, key string) (int64, map[rowIndexEntry
 		blob []byte
 	)
 	err := t.queryRow(
-		`SELECT id, entries FROM index_row_entries
-		 WHERE workspace_id = ? AND entity = ? AND key = ?`,
+		`SELECT i.id, e.entries FROM index_row_ids i JOIN index_row_entries e ON e.id = i.id
+		 WHERE i.workspace_id = ? AND i.entity = ? AND i.key = ?`,
 		t.ws, entity, key,
 	).Scan(&id, &blob)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -2327,25 +2372,38 @@ func (t *sqliteTx) rowIndexEntries(entity, key string) (int64, map[rowIndexEntry
 	return id, have, nil
 }
 
-// encodeRowEntries packs the entry set of the row with key rowKey as a
-// sequence of (uvarint scope, uvarint head, entry bytes), sorted so that the
-// same set always packs to the same bytes.
+// encodeRowEntries packs the entry set of the row with key rowKey, sorted so
+// that the same set always packs to the same bytes. The entries of one scope
+// make one group, and the groups are in ascending order of scope:
 //
-// The engine ends most entries with the row's key as an index string — for a
-// key with no U+0000 and no astral character, its UTF-8 bytes and a
-// "\x00\x00" terminator. An entry that ends with exactly that is stored
-// without it: head is its remaining length shifted left once with the low bit
-// set, and decodeRowEntries appends the suffix back. Any other entry is stored
-// whole under a clear low bit. The check is on the bytes alone, so the list
-// round-trips whatever the entries hold; a key the guess does not fit only
-// costs the bytes it would have saved.
+//	list  = group+
+//	group = uvarint scope, uvarint head, part, entry*
+//	entry = uvarint shared, uvarint head, part
+//
+// The first entry of a group shares no bytes with an entry before it, so it
+// has no shared field. A head holds three values:
+//
+//   - head >> 3 is the length of part.
+//   - Bits 1 and 2 name a tail that the list leaves out and decodeRowEntries
+//     adds back. 0 is no tail. 1 is rowKeySuffix(rowKey): the engine ends most
+//     entries with the row's key as an index string, which for a key with no
+//     U+0000 and no astral character is its UTF-8 bytes and the terminator
+//     "\x00\x00". 2 is "\x00\x00" alone, the end of an index string that is
+//     not the row key, such as a search term.
+//   - Bit 0 is set when another entry of the same group follows.
+//
+// An entry without its tail is the first shared bytes of the previous entry
+// of the group without its tail, then part. The entries of a group are
+// sorted, so neighbours often start with the same bytes. The checks are on
+// the bytes alone, so the list round-trips whatever the entries hold; an entry
+// the guesses do not fit only costs the bytes they would have saved.
 func encodeRowEntries(rowKey string, set map[rowIndexEntry]struct{}) []byte {
 	suffix := rowKeySuffix(rowKey)
 	list := make([]rowIndexEntry, 0, len(set))
 	size := 0
 	for e := range set {
 		list = append(list, e)
-		size += 2*binary.MaxVarintLen64 + len(e.k)
+		size += 3*binary.MaxVarintLen64 + len(e.k)
 	}
 	sort.Slice(list, func(i, j int) bool {
 		if list[i].scope != list[j].scope {
@@ -2354,23 +2412,41 @@ func encodeRowEntries(rowKey string, set map[rowIndexEntry]struct{}) []byte {
 		return list[i].k < list[j].k
 	})
 	out := make([]byte, 0, size)
-	for _, e := range list {
-		out = binary.AppendUvarint(out, uint64(e.scope))
-		k := e.k
+	prev := ""
+	for i, e := range list {
+		first := i == 0 || list[i-1].scope != e.scope
+		k, tail := e.k, uint64(0)
 		if strings.HasSuffix(k, suffix) {
-			k = k[:len(k)-len(suffix)]
-			out = binary.AppendUvarint(out, uint64(len(k))<<1|1)
-		} else {
-			out = binary.AppendUvarint(out, uint64(len(k))<<1)
+			k, tail = k[:len(k)-len(suffix)], 1
+		} else if strings.HasSuffix(k, indexStringEnd) {
+			k, tail = k[:len(k)-len(indexStringEnd)], 2
 		}
-		out = append(out, k...)
+		shared := 0
+		if first {
+			out = binary.AppendUvarint(out, uint64(e.scope))
+		} else {
+			for shared < len(k) && shared < len(prev) && k[shared] == prev[shared] {
+				shared++
+			}
+			out = binary.AppendUvarint(out, uint64(shared))
+		}
+		head := uint64(len(k)-shared)<<3 | tail<<1
+		if i+1 < len(list) && list[i+1].scope == e.scope {
+			head |= 1
+		}
+		out = binary.AppendUvarint(out, head)
+		out = append(out, k[shared:]...)
+		prev = k
 	}
 	return out
 }
 
+// indexStringEnd terminates an index string.
+const indexStringEnd = "\x00\x00"
+
 // rowKeySuffix is the tail encodeRowEntries leaves out of an entry of the row
 // with key rowKey.
-func rowKeySuffix(rowKey string) string { return rowKey + "\x00\x00" }
+func rowKeySuffix(rowKey string) string { return rowKey + indexStringEnd }
 
 // endsWithRowKey reports whether the entry k ends with rowKeySuffix(rowKey).
 func endsWithRowKey(k, rowKey string) bool {
@@ -2424,28 +2500,65 @@ func (t *sqliteTx) rowKeyByID(id int64) (string, error) {
 	return key, nil
 }
 
-// decodeRowEntries reverses encodeRowEntries for the row with key rowKey.
+// decodeRowEntries reverses encodeRowEntries for the row with key rowKey. It
+// returns an error for a list that encodeRowEntries cannot have made, and for
+// a list that ends inside a group.
 func decodeRowEntries(rowKey string, b []byte) (map[rowIndexEntry]struct{}, error) {
 	suffix := rowKeySuffix(rowKey)
 	out := make(map[rowIndexEntry]struct{})
+	// prev holds the previous entry of the group without its tail, and full
+	// the entry being built, so that each entry costs one allocation: the
+	// string it is stored as.
+	var prev, full []byte
+	var scope uint64
+	more := false
 	for len(b) > 0 {
-		scope, n := binary.Uvarint(b)
-		if n <= 0 {
-			return nil, errors.New("truncated scope id")
+		var shared uint64
+		if more {
+			v, n := binary.Uvarint(b)
+			if n <= 0 {
+				return nil, errors.New("truncated shared prefix")
+			}
+			if v > uint64(len(prev)) {
+				return nil, fmt.Errorf("entry shares %d bytes with an entry of %d", v, len(prev))
+			}
+			shared, b = v, b[n:]
+		} else {
+			v, n := binary.Uvarint(b)
+			if n <= 0 {
+				return nil, errors.New("truncated scope id")
+			}
+			if v > math.MaxInt64 {
+				return nil, fmt.Errorf("scope id %d is out of range", v)
+			}
+			if len(out) > 0 && v <= scope {
+				return nil, fmt.Errorf("scope %d does not follow scope %d", v, scope)
+			}
+			scope, b = v, b[n:]
 		}
-		b = b[n:]
 		head, n := binary.Uvarint(b)
-		size := head >> 1
+		size := head >> 3
 		if n <= 0 || size > uint64(len(b)-n) {
 			return nil, errors.New("truncated entry")
 		}
 		b = b[n:]
-		k := string(b[:size])
-		if head&1 == 1 {
-			k += suffix
-		}
-		out[rowIndexEntry{scope: int64(scope), k: k}] = struct{}{}
+		prev = append(prev[:shared], b[:size]...)
 		b = b[size:]
+		full = append(full[:0], prev...)
+		switch head >> 1 & 3 {
+		case 0:
+		case 1:
+			full = append(full, suffix...)
+		case 2:
+			full = append(full, indexStringEnd...)
+		default:
+			return nil, errors.New("unknown entry tail")
+		}
+		out[rowIndexEntry{scope: int64(scope), k: string(full)}] = struct{}{}
+		more = head&1 == 1
+	}
+	if more {
+		return nil, errors.New("truncated group")
 	}
 	return out, nil
 }
@@ -2472,10 +2585,13 @@ func (t *sqliteTx) DeleteIndexEntries(entity, key string) error {
 		}
 	}
 	if _, err := t.exec(
-		`DELETE FROM index_row_entries
+		`DELETE FROM index_row_ids
 		 WHERE workspace_id = ? AND entity = ? AND key = ?`,
 		t.ws, entity, key,
 	); err != nil {
+		return err
+	}
+	if _, err := t.exec(`DELETE FROM index_row_entries WHERE id = ?`, listID); err != nil {
 		return err
 	}
 	_, err = t.exec(`DELETE FROM index_row_keys WHERE id = ?`, listID)

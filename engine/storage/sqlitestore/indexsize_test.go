@@ -35,6 +35,7 @@ func sizeKey(kind, i int) string {
 // ids.
 var indexObjects = []string{
 	"index_entries",
+	"index_row_ids",
 	"index_row_entries",
 	"index_scopes",
 	"sqlite_autoindex_index_scopes_1",
@@ -197,7 +198,7 @@ func measureIndexSize() indexSizeReport {
 // bytesPerEntryCeiling bounds the on-disk cost of one index entry in the size
 // fixture. It sits about 10% above the measured value, so a change that grows
 // entries fails here. Lower it when a change makes entries smaller.
-const bytesPerEntryCeiling = 120
+const bytesPerEntryCeiling = 108
 
 var _ = Describe("index storage size", func() {
 	It("keeps index entries within the per-entry ceiling", func() {
