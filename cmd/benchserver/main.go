@@ -115,6 +115,7 @@ func main() {
 	mux.Handle("/debug/stats", stats)
 	mux.Handle("/debug/tiers", tiersHandler())
 	mux.Handle("/debug/seed", seedHandler(srv, logger))
+	mux.Handle("/debug/seed-search", seedSearchHandler(srv))
 	mux.Handle("/debug/write", writeHandler(srv))
 	mux.Handle("/debug/gc", gcHandler(srv))
 	// Go's profiler, for attributing a server-side number the stats endpoint
