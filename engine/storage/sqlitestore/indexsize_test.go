@@ -30,6 +30,15 @@ func sizeKey(kind, i int) string {
 	return fmt.Sprintf("%08x-0000-4000-8000-%012x", kind, i)
 }
 
+// indexObjects names every table and b-tree that holds index entries or what
+// finds them: the entries, the per-row entry lists and the scope ids.
+var indexObjects = []string{
+	"index_entries",
+	"index_row_entries",
+	"index_scopes",
+	"sqlite_autoindex_index_scopes_1",
+}
+
 // emptyObjectBytes is the size of a table or b-tree that holds no data: one
 // page at SQLite's default page size.
 const emptyObjectBytes = 4096
@@ -160,13 +169,14 @@ func measureIndexSize() indexSizeReport {
 	}
 	Expect(rows.Err()).NotTo(HaveOccurred())
 	r.rowsBytes = r.objects["rows"]
-	for name, size := range r.objects {
-		if strings.HasPrefix(name, "index_entries") {
-			r.indexBytes += size
-		}
+	for _, name := range indexObjects {
+		r.indexBytes += r.objects[name]
 	}
 
-	rows, err = db.Query(`SELECT idx, COUNT(*), SUM(substr(k, 1, 1) = x'ff') FROM index_entries GROUP BY idx`)
+	rows, err = db.Query(`
+		SELECT s.idx, COUNT(*), SUM(substr(e.k, 1, 1) = x'ff')
+		  FROM index_entries e JOIN index_scopes s ON s.id = e.scope
+		 GROUP BY s.idx`)
 	Expect(err).NotTo(HaveOccurred())
 	for rows.Next() {
 		var (
@@ -185,7 +195,7 @@ func measureIndexSize() indexSizeReport {
 // bytesPerEntryCeiling bounds the on-disk cost of one index entry in the size
 // fixture. It sits about 10% above the measured value, so a change that grows
 // entries fails here. Lower it when a change makes entries smaller.
-const bytesPerEntryCeiling = 400
+const bytesPerEntryCeiling = 170
 
 var _ = Describe("index storage size", func() {
 	It("keeps index entries within the per-entry ceiling", func() {

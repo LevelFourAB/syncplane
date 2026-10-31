@@ -1,10 +1,14 @@
 package sqlitestore
 
 import (
+	"context"
 	"path/filepath"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/levelfourab/syncplane/engine/storage"
 )
 
 var _ = Describe("workspace deletion coverage", func() {
@@ -31,5 +35,64 @@ var _ = Describe("workspace deletion coverage", func() {
 		Expect(rows.Err()).NotTo(HaveOccurred())
 
 		Expect(tables).To(ConsistOf(append([]string{"deleted_workspaces"}, workspaceTables...)))
+	})
+
+	Describe("index entries, which are keyed by scope rather than by workspace", func() {
+		var store *Store
+		ctx := context.Background()
+
+		count := func(table string) int {
+			GinkgoHelper()
+			var n int
+			Expect(store.read.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n)).To(Succeed())
+			return n
+		}
+
+		BeforeEach(func() {
+			var err error
+			store, err = Open(filepath.Join(GinkgoT().TempDir(), "entries.db"))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+			Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+				for _, k := range []string{"k1", "k2"} {
+					if err := tx.PutRow("widget", k, []byte("v"), 1, storage.Actor{}); err != nil {
+						return err
+					}
+					if err := tx.PutIndexEntries("widget", k, []storage.IndexEntry{
+						{Index: "by_label", Key: []byte(k)},
+						{Index: "by_owner", Key: []byte(k)},
+					}); err != nil {
+						return err
+					}
+				}
+				return nil
+			})).To(Succeed())
+			Expect(count("index_entries")).To(Equal(4))
+			Expect(count("index_row_entries")).To(Equal(2))
+		})
+
+		It("leaves none behind when the workspace is deleted", func() {
+			Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
+			Expect(count("index_entries")).To(BeZero())
+			Expect(count("index_row_entries")).To(BeZero())
+			Expect(count("index_scopes")).To(BeZero())
+		})
+
+		It("leaves none behind when the rows are purged", func() {
+			Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+				_, _, err := tx.PurgeEntityRows("widget", "", time.Now().Add(time.Hour), 1)
+				return err
+			})).To(Succeed())
+			Expect(count("index_entries")).To(Equal(2), "a limited purge drops the entries of the rows it purged")
+			Expect(count("index_row_entries")).To(Equal(1))
+		})
+
+		It("leaves none behind when a row's entries are deleted", func() {
+			Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+				return tx.DeleteIndexEntries("widget", "k1")
+			})).To(Succeed())
+			Expect(count("index_entries")).To(Equal(2))
+			Expect(count("index_row_entries")).To(Equal(1))
+		})
 	})
 })

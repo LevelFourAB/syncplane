@@ -58,11 +58,13 @@ package sqlitestore
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -321,13 +323,60 @@ CREATE INDEX seq_lineage_gc ON seq_lineage (workspace_id, written_at);`,
 	deleted_at   INTEGER NOT NULL,
 	PRIMARY KEY (workspace_id)
 );`,
+	// 4: compact index entries. The entries are dropped rather than converted:
+	// an index is derived, so clearing index_state and every build mark makes
+	// the build pass rewrite them from the rows, and reads scan until it has.
+	//
+	// index_scopes gives each (workspace, entity, index) a short id, so an entry
+	// stores an integer where it stored three names. AUTOINCREMENT keeps an id
+	// from ever being handed out twice: an entry left under a reused id would
+	// show up in the index of whichever workspace got it next.
+	//
+	// index_entries is WITHOUT ROWID with a covering primary key, so a range
+	// scan reads the b-tree it is ordered by and never touches rows. k is a
+	// BLOB, which SQLite compares with memcmp — the bytewise order the engine's
+	// key encoder is built for. key sits in the key after k for uniqueness
+	// only, and costs no bytes there: a WITHOUT ROWID table stores every column
+	// in the cell either way.
+	//
+	// index_row_entries holds, per row, the packed list of entries it occupies
+	// (see encodeRowEntries). Entries are replaced and deleted per row without
+	// the caller naming the indexes, and one list per row finds them at a
+	// fraction of the bytes a secondary index over index_entries costs, which
+	// would repeat the workspace, entity, row key and entry per entry.
+	`DROP INDEX index_entries_by_row;
+DROP TABLE index_entries;
+DELETE FROM index_state;
+UPDATE workspaces SET index_build_mark = '';
+CREATE TABLE index_scopes (
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id TEXT NOT NULL,
+	entity       TEXT NOT NULL,
+	idx          TEXT NOT NULL,
+	UNIQUE (workspace_id, entity, idx)
+);
+CREATE TABLE index_entries (
+	scope INTEGER NOT NULL,
+	k     BLOB NOT NULL,
+	key   TEXT NOT NULL,
+	PRIMARY KEY (scope, k, key)
+) WITHOUT ROWID;
+CREATE TABLE index_row_entries (
+	workspace_id TEXT NOT NULL,
+	entity       TEXT NOT NULL,
+	key          TEXT NOT NULL,
+	entries      BLOB NOT NULL,
+	PRIMARY KEY (workspace_id, entity, key)
+) WITHOUT ROWID;`,
 }
 
 // workspaceTables names every table that holds state of one workspace, keyed
 // by its workspace_id column. DeleteWorkspace empties each of them for the
 // workspace it deletes, so a table added by a migration must be added here
 // too; deleted_workspaces is the one table with that column left out, because
-// it holds the mark DeleteWorkspace leaves.
+// it holds the mark DeleteWorkspace leaves. index_entries has no such column:
+// its rows belong to a workspace through index_scopes, and DeleteWorkspace
+// deletes them by scope before it empties index_scopes.
 var workspaceTables = []string{
 	"workspaces",
 	"rows",
@@ -335,7 +384,8 @@ var workspaceTables = []string{
 	"field_deltas",
 	"text_floors",
 	"idempotency",
-	"index_entries",
+	"index_scopes",
+	"index_row_entries",
 	"index_state",
 	"consumer_positions",
 	"consumer_shadows",
@@ -825,6 +875,13 @@ func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(sto
 func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 	return s.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
 		t := tx.(*sqliteTx)
+		if _, err := t.exec(
+			`DELETE FROM index_entries
+			 WHERE scope IN (SELECT id FROM index_scopes WHERE workspace_id = ?)`,
+			workspaceID,
+		); err != nil {
+			return fmt.Errorf("sqlitestore: delete workspace %q from index_entries: %w", workspaceID, err)
+		}
 		for _, table := range workspaceTables {
 			if _, err := t.exec(`DELETE FROM `+table+` WHERE workspace_id = ?`, workspaceID); err != nil {
 				return fmt.Errorf("sqlitestore: delete workspace %q from %s: %w", workspaceID, table, err)
@@ -1843,7 +1900,10 @@ func (t *sqliteTx) ScanIndex(
 	// so the predicate is built to match what was given. k is a BLOB, which
 	// SQLite compares with memcmp — the bytewise order the entry encoding is
 	// built for, and the reason this must never become a TEXT column.
-	where := `workspace_id = ? AND entity = ? AND idx = ?`
+	// The scope id is a scalar subquery, which SQLite evaluates once, so the
+	// scan is still a range of the primary key. An index nothing has written
+	// has no scope, the subquery is NULL and no entry matches it.
+	where := `scope = (SELECT id FROM index_scopes WHERE workspace_id = ? AND entity = ? AND idx = ?)`
 	args := []any{t.ws, entity, index}
 	if lo != nil {
 		where += ` AND k >= ?`
@@ -1986,86 +2046,229 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 	// usually moves one or two of them. Every entry written dirties btree
 	// pages that the savepoint each mutation runs in must copy into SQLite's
 	// statement sub-journal, so the cost of a push tracks entries WRITTEN, not
-	// entries held. Reading the current set first is one range read through
-	// index_entries_by_row and turns the common case into no writes at all.
+	// entries held. Reading the current set first is one point read of the
+	// row's entry list and turns the common case into no writes at all.
 	have, err := t.rowIndexEntries(entity, key)
+	if err != nil {
+		return err
+	}
+	scopes, err := t.indexScopes(entity)
 	if err != nil {
 		return err
 	}
 	want := make(map[rowIndexEntry]struct{}, len(entries))
 	for _, e := range entries {
+		id, ok := scopes[e.Index]
+		if !ok {
+			if id, err = t.createIndexScope(entity, e.Index); err != nil {
+				return err
+			}
+			scopes[e.Index] = id
+		}
 		// A set, so a caller that passes the same entry twice stores one copy
 		// instead of failing the whole write on a primary-key conflict: two
 		// components of one index can only collide for one row that way, and a
 		// harmless caller bug must not stick the write path.
-		want[rowIndexEntry{idx: e.Index, k: string(e.Key)}] = struct{}{}
+		want[rowIndexEntry{scope: id, k: string(e.Key)}] = struct{}{}
 	}
+	changed := false
 	for e := range have {
 		if _, keep := want[e]; keep {
 			continue
 		}
 		if _, err := t.exec(
-			`DELETE FROM index_entries
-			 WHERE workspace_id = ? AND entity = ? AND idx = ? AND k = ? AND key = ?`,
-			t.ws, entity, e.idx, []byte(e.k), key,
+			`DELETE FROM index_entries WHERE scope = ? AND k = ? AND key = ?`,
+			e.scope, []byte(e.k), key,
 		); err != nil {
 			return err
 		}
+		changed = true
 	}
 	for e := range want {
 		if _, unchanged := have[e]; unchanged {
 			continue
 		}
 		if _, err := t.exec(
-			`INSERT INTO index_entries (workspace_id, entity, idx, k, key)
-			 VALUES (?, ?, ?, ?, ?)`,
-			t.ws, entity, e.idx, []byte(e.k), key,
+			`INSERT INTO index_entries (scope, k, key) VALUES (?, ?, ?)`,
+			e.scope, []byte(e.k), key,
 		); err != nil {
 			return err
 		}
+		changed = true
 	}
-	return nil
+	if !changed {
+		return nil
+	}
+	_, err = t.exec(
+		`INSERT INTO index_row_entries (workspace_id, entity, key, entries)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT (workspace_id, entity, key) DO UPDATE SET entries = excluded.entries`,
+		t.ws, entity, key, encodeRowEntries(key, want),
+	)
+	return err
 }
 
-// rowIndexEntry is one stored entry of one row, as a map key: the index it
-// sits in and its sort key held as a string so the pair compares by value.
+// rowIndexEntry is one stored entry of one row, as a map key: the scope id of
+// the index it sits in and its sort key held as a string so the pair compares
+// by value.
 type rowIndexEntry struct {
-	idx string
-	k   string
+	scope int64
+	k     string
 }
 
-// rowIndexEntries reads every index entry one row currently occupies, as the
-// set PutIndexEntries diffs against.
-func (t *sqliteTx) rowIndexEntries(entity, key string) (map[rowIndexEntry]struct{}, error) {
+// indexScopes reads the scope id of every index of entity this workspace has
+// stored entries for, keyed by index name.
+func (t *sqliteTx) indexScopes(entity string) (map[string]int64, error) {
 	rows, err := t.query(
-		`SELECT idx, k FROM index_entries
-		 WHERE workspace_id = ? AND entity = ? AND key = ?`,
-		t.ws, entity, key,
+		`SELECT idx, id FROM index_scopes WHERE workspace_id = ? AND entity = ?`,
+		t.ws, entity,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	have := make(map[rowIndexEntry]struct{})
+	out := make(map[string]int64)
 	for rows.Next() {
 		var (
 			idx string
-			k   []byte
+			id  int64
 		)
-		if err := rows.Scan(&idx, &k); err != nil {
+		if err := rows.Scan(&idx, &id); err != nil {
 			return nil, err
 		}
-		have[rowIndexEntry{idx: idx, k: string(k)}] = struct{}{}
+		out[idx] = id
 	}
-	return have, rows.Err()
+	return out, rows.Err()
+}
+
+// createIndexScope allocates the scope id of one index. The caller has read
+// the scopes in the same write transaction and found none, so the insert
+// cannot conflict.
+func (t *sqliteTx) createIndexScope(entity, index string) (int64, error) {
+	res, err := t.exec(
+		`INSERT INTO index_scopes (workspace_id, entity, idx) VALUES (?, ?, ?)`,
+		t.ws, entity, index,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// rowIndexEntries reads every index entry one row currently occupies, as the
+// set PutIndexEntries diffs against. A row with no stored list has none.
+func (t *sqliteTx) rowIndexEntries(entity, key string) (map[rowIndexEntry]struct{}, error) {
+	var blob []byte
+	err := t.queryRow(
+		`SELECT entries FROM index_row_entries
+		 WHERE workspace_id = ? AND entity = ? AND key = ?`,
+		t.ws, entity, key,
+	).Scan(&blob)
+	if errors.Is(err, sql.ErrNoRows) {
+		return map[rowIndexEntry]struct{}{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	have, err := decodeRowEntries(key, blob)
+	if err != nil {
+		return nil, fmt.Errorf("sqlitestore: index entry list of %s/%s: %w", entity, key, err)
+	}
+	return have, nil
+}
+
+// encodeRowEntries packs the entry set of the row with key rowKey as a
+// sequence of (uvarint scope, uvarint head, entry bytes), sorted so that the
+// same set always packs to the same bytes.
+//
+// The engine ends every entry with the row's key as an index string — for a
+// key with no U+0000 and no astral character, its UTF-8 bytes and a
+// "\x00\x00" terminator. An entry that ends with exactly that is stored
+// without it: head is its remaining length shifted left once with the low bit
+// set, and decodeRowEntries appends the suffix back. Any other entry is stored
+// whole under a clear low bit. The check is on the bytes alone, so the list
+// round-trips whatever the entries hold; a key the guess does not fit only
+// costs the bytes it would have saved.
+func encodeRowEntries(rowKey string, set map[rowIndexEntry]struct{}) []byte {
+	suffix := rowKeySuffix(rowKey)
+	list := make([]rowIndexEntry, 0, len(set))
+	size := 0
+	for e := range set {
+		list = append(list, e)
+		size += 2*binary.MaxVarintLen64 + len(e.k)
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].scope != list[j].scope {
+			return list[i].scope < list[j].scope
+		}
+		return list[i].k < list[j].k
+	})
+	out := make([]byte, 0, size)
+	for _, e := range list {
+		out = binary.AppendUvarint(out, uint64(e.scope))
+		k := e.k
+		if strings.HasSuffix(k, suffix) {
+			k = k[:len(k)-len(suffix)]
+			out = binary.AppendUvarint(out, uint64(len(k))<<1|1)
+		} else {
+			out = binary.AppendUvarint(out, uint64(len(k))<<1)
+		}
+		out = append(out, k...)
+	}
+	return out
+}
+
+// rowKeySuffix is the tail encodeRowEntries leaves out of an entry of the row
+// with key rowKey.
+func rowKeySuffix(rowKey string) string { return rowKey + "\x00\x00" }
+
+// decodeRowEntries reverses encodeRowEntries for the row with key rowKey.
+func decodeRowEntries(rowKey string, b []byte) (map[rowIndexEntry]struct{}, error) {
+	suffix := rowKeySuffix(rowKey)
+	out := make(map[rowIndexEntry]struct{})
+	for len(b) > 0 {
+		scope, n := binary.Uvarint(b)
+		if n <= 0 {
+			return nil, errors.New("truncated scope id")
+		}
+		b = b[n:]
+		head, n := binary.Uvarint(b)
+		size := head >> 1
+		if n <= 0 || size > uint64(len(b)-n) {
+			return nil, errors.New("truncated entry")
+		}
+		b = b[n:]
+		k := string(b[:size])
+		if head&1 == 1 {
+			k += suffix
+		}
+		out[rowIndexEntry{scope: int64(scope), k: k}] = struct{}{}
+		b = b[size:]
+	}
+	return out, nil
 }
 
 func (t *sqliteTx) DeleteIndexEntries(entity, key string) error {
 	// No register(): removing entries a row never had must leave no trace, the
 	// same reason a write closure that writes nothing does not create a
 	// workspace.
-	_, err := t.exec(
-		`DELETE FROM index_entries
+	have, err := t.rowIndexEntries(entity, key)
+	if err != nil {
+		return err
+	}
+	if len(have) == 0 {
+		return nil
+	}
+	for e := range have {
+		if _, err := t.exec(
+			`DELETE FROM index_entries WHERE scope = ? AND k = ? AND key = ?`,
+			e.scope, []byte(e.k), key,
+		); err != nil {
+			return err
+		}
+	}
+	_, err = t.exec(
+		`DELETE FROM index_row_entries
 		 WHERE workspace_id = ? AND entity = ? AND key = ?`,
 		t.ws, entity, key,
 	)
@@ -2307,11 +2510,11 @@ func (t *sqliteTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 // BINARY-collated, so a range is the same bytewise comparison every other key
 // predicate here makes, and it needs no escaping of LIKE's wildcards.
 //
-// A limit turns both statements into the same `key IN (SELECT … ORDER BY key
-// LIMIT n)` subquery. The ORDER BY is load-bearing rather than cosmetic: the two
-// subqueries run against the same rows (the entries delete does not touch them)
-// and must select the SAME set, or entries outlive their row or die before it.
-// A total order over a unique key is what makes them agree.
+// A limit turns both the key selection and the row delete into the same
+// `… ORDER BY key LIMIT n` selection. The ORDER BY is load-bearing rather than
+// cosmetic: the two run against the same rows (the entries delete does not
+// touch them) and must select the SAME set, or entries outlive their row or
+// die before it. A total order over a unique key is what makes them agree.
 //
 // more is "this call hit its limit", which the interface allows: the drain that
 // exactly emptied the selection costs one more no-op call, which is cheaper than
@@ -2329,14 +2532,24 @@ func (t *sqliteTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, l
 		   SELECT key FROM rows WHERE ` + selected + `)`
 		rowsArgs = append([]any{t.ws, entity}, args...)
 	}
-	if _, err := t.exec(
-		`DELETE FROM index_entries
-		 WHERE workspace_id = ? AND entity = ? AND key IN (
-		   SELECT key FROM rows WHERE `+selected+`
-		 )`,
-		append([]any{t.ws, entity}, args...)...,
-	); err != nil {
+	// Entries are found through each row's entry list, which no statement over
+	// index_entries alone can read, so the selected keys come out first. The
+	// selection is bounded by the limit when there is one.
+	var keys []string
+	if err := t.scanRows(`SELECT key FROM rows WHERE `+selected, args, func(rows *sql.Rows) error {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return err
+		}
+		keys = append(keys, k)
+		return nil
+	}); err != nil {
 		return 0, false, err
+	}
+	for _, k := range keys {
+		if err := t.DeleteIndexEntries(entity, k); err != nil {
+			return 0, false, err
+		}
 	}
 	res, err := t.exec(`DELETE FROM rows WHERE `+rowsWhere, rowsArgs...)
 	if err != nil {

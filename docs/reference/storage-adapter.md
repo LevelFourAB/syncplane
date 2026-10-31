@@ -168,6 +168,12 @@ Fixed SQLite settings include:
 - Reader pool mode: `query_only`
 - Synchronous mode: `NORMAL`
 
+### Schema upgrades in `sqlitestore`
+
+`Open` migrates the database file to the schema version of the binary. A migration that changes how index entries are stored drops the stored entries and marks every index as not ready. The index build pass then rebuilds the entries in the background. Until an index is ready, queries scan the entity instead and return the same results.
+
+SQLite keeps freed pages in the file for reuse, so the file does not shrink after such a migration. To give the space back to the file system, stop every process that has the file open, then run `sqlite3 <file> VACUUM`.
+
 ### Tuning `pgstore`
 
 Pass configuration options as `Option` values to `Open`, `Migrate`, and `Statements`. Options that do not apply to `Migrate` or `Statements` are ignored. A zero or empty value selects the default.
