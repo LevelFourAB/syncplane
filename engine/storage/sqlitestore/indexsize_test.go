@@ -195,7 +195,7 @@ func measureIndexSize() indexSizeReport {
 // bytesPerEntryCeiling bounds the on-disk cost of one index entry in the size
 // fixture. It sits about 10% above the measured value, so a change that grows
 // entries fails here. Lower it when a change makes entries smaller.
-const bytesPerEntryCeiling = 170
+const bytesPerEntryCeiling = 120
 
 var _ = Describe("index storage size", func() {
 	It("keeps index entries within the per-entry ceiling", func() {

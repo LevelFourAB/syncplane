@@ -368,6 +368,28 @@ CREATE TABLE index_row_entries (
 	entries      BLOB NOT NULL,
 	PRIMARY KEY (workspace_id, entity, key)
 ) WITHOUT ROWID;`,
+	// 5: index entries without a second copy of the row key. The entries and
+	// the per-row lists are dropped for a rebuild, as in migration 4; the
+	// scopes stay, because their ids are still valid.
+	//
+	// The engine ends every entry k with the row key (see rowKeySuffix), so key
+	// holds the byte length of the row key when k ends with it, and the row
+	// key text only when k does not (see entryRowKeyValue). A small integer
+	// costs one byte where a UUID key costs 36. key has no declared type, so
+	// its affinity is BLOB and SQLite stores each value with the type it was
+	// bound with: a TEXT or NUMERIC affinity would convert one form into the
+	// other. The primary key stays unique: two rows with the same k and the
+	// same length have the same row key, and an integer never equals a text.
+	`DROP TABLE index_entries;
+DELETE FROM index_row_entries;
+DELETE FROM index_state;
+UPDATE workspaces SET index_build_mark = '';
+CREATE TABLE index_entries (
+	scope INTEGER NOT NULL,
+	k     BLOB NOT NULL,
+	key   NOT NULL,
+	PRIMARY KEY (scope, k, key)
+) WITHOUT ROWID;`,
 }
 
 // workspaceTables names every table that holds state of one workspace, keyed
@@ -1914,9 +1936,11 @@ func (t *sqliteTx) ScanIndex(
 		args = append(args, hi)
 	}
 	args = append(args, limit)
-	// The row key is part of the sort so that two entries sharing a key come
+	// The key column is part of the sort so that two entries sharing a key come
 	// out in a fixed order; reversing the walk has to reverse it too, or the
-	// descending scan would not be the exact mirror of the ascending one.
+	// descending scan would not be the exact mirror of the ascending one. It
+	// holds a length or a text (see entryRowKeyValue), and SQLite orders every
+	// integer before every text, so the order stays total.
 	orderBy := `k, key`
 	if order == storage.ScanDesc {
 		orderBy = `k DESC, key DESC`
@@ -1927,10 +1951,14 @@ func (t *sqliteTx) ScanIndex(
 		func(rows *sql.Rows) error {
 			var (
 				entry  []byte
-				rowKey string
+				stored any
 			)
-			if err := rows.Scan(&entry, &rowKey); err != nil {
+			if err := rows.Scan(&entry, &stored); err != nil {
 				return err
+			}
+			rowKey, err := entryRowKey(entry, stored)
+			if err != nil {
+				return fmt.Errorf("sqlitestore: index entry of %s/%s: %w", entity, index, err)
 			}
 			return fn(entry, rowKey)
 		})
@@ -2078,7 +2106,7 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 		}
 		if _, err := t.exec(
 			`DELETE FROM index_entries WHERE scope = ? AND k = ? AND key = ?`,
-			e.scope, []byte(e.k), key,
+			e.scope, []byte(e.k), entryRowKeyValue(e.k, key),
 		); err != nil {
 			return err
 		}
@@ -2090,7 +2118,7 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 		}
 		if _, err := t.exec(
 			`INSERT INTO index_entries (scope, k, key) VALUES (?, ?, ?)`,
-			e.scope, []byte(e.k), key,
+			e.scope, []byte(e.k), entryRowKeyValue(e.k, key),
 		); err != nil {
 			return err
 		}
@@ -2222,6 +2250,42 @@ func encodeRowEntries(rowKey string, set map[rowIndexEntry]struct{}) []byte {
 // with key rowKey.
 func rowKeySuffix(rowKey string) string { return rowKey + "\x00\x00" }
 
+// endsWithRowKey reports whether the entry k ends with rowKeySuffix(rowKey).
+func endsWithRowKey(k, rowKey string) bool {
+	n := len(k) - 2
+	return n >= len(rowKey) && k[n:] == "\x00\x00" && k[n-len(rowKey):n] == rowKey
+}
+
+// entryRowKeyValue is the value the key column of index_entries holds for the
+// entry k of the row with key rowKey: the byte length of rowKey when k ends
+// with rowKeySuffix(rowKey), and rowKey itself for any other entry.
+// entryRowKey reads the row key back out of k by that length.
+func entryRowKeyValue(k, rowKey string) any {
+	if endsWithRowKey(k, rowKey) {
+		return int64(len(rowKey))
+	}
+	return rowKey
+}
+
+// entryRowKey reverses entryRowKeyValue for the entry k, given the value the
+// key column holds as the driver scans it.
+func entryRowKey(k []byte, stored any) (string, error) {
+	switch v := stored.(type) {
+	case int64:
+		end := len(k) - 2
+		if v < 0 || int64(end) < v {
+			return "", fmt.Errorf("row key length %d does not fit an entry of %d bytes", v, len(k))
+		}
+		return string(k[end-int(v) : end]), nil
+	case string:
+		return v, nil
+	case []byte:
+		return string(v), nil
+	default:
+		return "", fmt.Errorf("row key stored as %T", stored)
+	}
+}
+
 // decodeRowEntries reverses encodeRowEntries for the row with key rowKey.
 func decodeRowEntries(rowKey string, b []byte) (map[rowIndexEntry]struct{}, error) {
 	suffix := rowKeySuffix(rowKey)
@@ -2262,7 +2326,7 @@ func (t *sqliteTx) DeleteIndexEntries(entity, key string) error {
 	for e := range have {
 		if _, err := t.exec(
 			`DELETE FROM index_entries WHERE scope = ? AND k = ? AND key = ?`,
-			e.scope, []byte(e.k), key,
+			e.scope, []byte(e.k), entryRowKeyValue(e.k, key),
 		); err != nil {
 			return err
 		}
