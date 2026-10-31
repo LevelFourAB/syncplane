@@ -179,15 +179,25 @@ export const metaSnapshotGen = (workspaceId: string): string =>
 export const metaBootstrapResume = (workspaceId: string): string =>
 	`${metaWsPrefix(workspaceId)}bootstrapResume`;
 /**
- * Workspace seq the shared store has pulled through (decimal string), written
- * in the same transaction as the cursor. The pull path's monotonic gate
- * compares each incoming page against it and drops stale pages whole, so two
+ * Workspace seq the shared store's confirmed rows reach (decimal string),
+ * written in the same transaction as the rows. The pull path's monotonic gate
+ * compares each incoming page against it and against metaCursorSeq, so two
  * tabs pulling concurrently can never commit the shared cursor (or rows) out
  * of order. A bootstrap swap writes it unconditionally — a full snapshot is
  * authoritative even when its seq went backwards (e.g. restored backup).
  */
 export const metaServerSeq = (workspaceId: string): string =>
 	`${metaWsPrefix(workspaceId)}serverSeq`;
+/**
+ * Workspace seq of the stored cursor (decimal string), written in the same
+ * transaction as the cursor. It can be lower than metaServerSeq: a Subscribe
+ * frame without a cursor applies rows and moves metaServerSeq, but keeps the
+ * stored cursor. The gate in rebase() still applies a page at or above this
+ * seq, because that page can be the only way forward from the stored cursor.
+ * Absent means the store did not record it, and reads as 0.
+ */
+export const metaCursorSeq = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}cursorSeq`;
 /**
  * Highest workspace seq the server acked one of this store's pushes at
  * (decimal string; MutationResult.seq over APPLIED results). Sent back as

@@ -36,6 +36,7 @@ import {
 	metaCallerAccess,
 	metaCallerAccessVersion,
 	metaCursor,
+	metaCursorSeq,
 	metaIndexEntityPrefix,
 	metaIndexPrefix,
 	metaLastMutationId,
@@ -547,6 +548,7 @@ export async function wipeConfirmedState(
 	touched: TouchSet,
 ): Promise<void> {
 	await tx.del(metaCursor(workspaceId));
+	await tx.del(metaCursorSeq(workspaceId));
 	// The summary is what the cursor's lineage was told; the snapshot that
 	// replaces it brings its own. Announced like the write that stored it, so
 	// access listeners stop answering from it now.
@@ -983,6 +985,12 @@ export interface FinalizeInput {
 	 */
 	serverSeq?: bigint;
 	/**
+	 * Keep the stored serverSeq when it is higher than `serverSeq`. Set for a
+	 * page behind rows the store already holds (see rebase()): its cursor
+	 * replaces the stored one, but the rows still reach the stored seq.
+	 */
+	keepHigherSeq?: boolean;
+	/**
 	 * Set on a bootstrap swap, where the snapshot defines a fresh baseline that
 	 * is authoritative even moving the seq BACKWARDS (a recreated, restored, or
 	 * swapped store). Unlike a pull, the baseline is written even when serverSeq
@@ -1109,6 +1117,14 @@ export async function finalizeRebase(
 	// page resident until the next one replaced it, hence detached().
 	if (input.nextCursor.length > 0) {
 		await tx.put(metaCursor(workspaceId), detached(input.nextCursor));
+		// The seq goes with the cursor it describes, so a cursorless frame below
+		// leaves both alone. Without a seq the cursor's position is unknown, and
+		// an absent value lets the gate take any page for it.
+		if (input.serverSeq) {
+			await tx.put(metaCursorSeq(workspaceId), input.serverSeq.toString());
+		} else {
+			await tx.del(metaCursorSeq(workspaceId));
+		}
 	}
 	// Unconditional (not monotonic) on purpose: pulls already gated in rebase(),
 	// and a bootstrap swap must be able to move the seq BACKWARDS — a full
@@ -1123,7 +1139,7 @@ export async function finalizeRebase(
 		// to the primary. wipeConfirmedState already dropped it on the direct
 		// path — this covers the staged swap, whose wipe and install commit here.
 		await tx.del(metaAckedSeq(workspaceId));
-	} else if (input.serverSeq) {
+	} else if (input.serverSeq && !input.keepHigherSeq) {
 		await tx.put(metaServerSeq(workspaceId), input.serverSeq.toString());
 	}
 	if (input.callerAccess !== undefined) {
@@ -1223,9 +1239,8 @@ export interface RebaseInput {
 	 * FinalizeInput.deferAcked). */
 	deferAcked?: boolean;
 	/**
-	 * The page's workspace seq (PullResponse.seq), gating application: a page
-	 * at or below the workspace's stored seq is dropped whole. 0/unset applies
-	 * ungated (older server).
+	 * The page's workspace seq (PullResponse.seq), gating application: see
+	 * rebase(). 0/unset applies ungated (older server).
 	 */
 	serverSeq?: bigint;
 	/** The page's CallerAccess (PullResponse.caller_access); see FinalizeInput. */
@@ -1254,6 +1269,13 @@ export interface RebaseResult {
 	 * `touched` is empty and `pendingCount` is meaningless. See rebase().
 	 */
 	skipped?: boolean;
+	/**
+	 * True when the page applied below the stored seq: its rows were older
+	 * than some the store held, which it kept. A row a Subscribe frame deleted
+	 * can be back until a pull from the new cursor brings its tombstone again.
+	 * See rebase().
+	 */
+	behind?: boolean;
 	/**
 	 * The CallerAccess the transaction stored: the page's own, or the stored
 	 * one with the page's delta applied. Absent when it stored none.
@@ -1285,29 +1307,43 @@ export async function rebase(
 	try {
 		// Monotonic cursor gate: with several tabs pulling the shared store
 		// concurrently, responses can commit out of request order. A page whose
-		// seq is strictly below what the store already pulled through for this
-		// workspace is from a stale read of the shared cursor — its patches AND
-		// its cursor are dropped whole, so it can never overwrite newer confirmed
-		// rows or regress the cursor. (This replaces the previous undocumented
-		// reliance on redundant re-pulls being idempotent.) An EQUAL seq must
-		// apply: the server legitimately re-delivers under an unchanged seq when
-		// only the scope changed (a setSubscriptions delta-resync) or when a drain
-		// pages through rows sharing one seq — such pages are merged snapshots
-		// current through that same seq, so applying them regresses nothing. Seq
-		// 0/unset applies ungated: an older server sends no seq, and wrongly
-		// applying is merely the old redundant-but-idempotent behavior.
+		// seq is strictly below the stored cursor's is from a stale read of the
+		// shared cursor — its patches AND its cursor are dropped whole, so it can
+		// never overwrite newer confirmed rows or regress the cursor. An EQUAL seq
+		// must apply: the server legitimately re-delivers under an unchanged seq
+		// when only the scope changed (a setSubscriptions delta-resync) or when a
+		// drain pages through rows sharing one seq — such pages are merged
+		// snapshots current through that same seq, so applying them regresses
+		// nothing. Seq 0/unset applies ungated: an older server sends no seq, and
+		// wrongly applying is merely the old redundant-but-idempotent behavior.
+		//
+		// The stored seq can be higher than the cursor's: a cursorless Subscribe
+		// frame moves the first and keeps the second. A page at or above the
+		// cursor's seq but below the stored seq is then the server's answer for
+		// the stored cursor, or for one no older, and can be the only way
+		// forward: a resync page reports the cursor's own seq, and a page ending
+		// inside a large transaction reports that transaction's. Dropping it
+		// would leave the cursor where it was, and every pull would get the same
+		// page back. It applies, without the rows older than the ones stored.
+		let changes = input.changes;
+		let behind = false;
 		if (input.serverSeq) {
 			const stored = (await tx.get(metaServerSeq(workspaceId))) as string | undefined;
 			if (stored !== undefined && input.serverSeq < BigInt(stored)) {
-				tx.release();
-				return { touched, pendingCount: 0, skipped: true };
+				const cursorSeq = (await tx.get(metaCursorSeq(workspaceId))) as string | undefined;
+				if (input.serverSeq < BigInt(cursorSeq ?? '0')) {
+					tx.release();
+					return { touched, pendingCount: 0, skipped: true };
+				}
+				behind = true;
+				changes = await notOlderThanStored(tx, workspaceId, changes);
 			}
 		}
 		// The rows a dropped entity loses get no new base, so only the changed
 		// rows can strand a queued text edit.
-		const logged = await captureTextLogs(tx, registry, workspaceId, input.changes);
+		const logged = await captureTextLogs(tx, registry, workspaceId, changes);
 		await dropConfirmedEntities(tx, workspaceId, input.dropEntities ?? [], touched, indexes);
-		await applyServerChanges(tx, registry, workspaceId, input.changes, touched, indexes);
+		await applyServerChanges(tx, registry, workspaceId, changes, touched, indexes);
 		await keepStrandedTextEdits(tx, registry, workspaceId, logged);
 		let callerAccess = input.callerAccess;
 		let accessStale = false;
@@ -1326,7 +1362,9 @@ export async function rebase(
 			registry,
 			mirrors,
 			workspaceId,
-			callerAccess === input.callerAccess ? input : { ...input, callerAccess },
+			callerAccess === input.callerAccess && !behind
+				? input
+				: { ...input, callerAccess, keepHigherSeq: behind },
 			touched,
 		);
 		await tx.commit();
@@ -1335,11 +1373,36 @@ export async function rebase(
 			pendingCount,
 			...(callerAccess === undefined ? {} : { callerAccess }),
 			...(accessStale ? { accessStale } : {}),
+			...(behind ? { behind } : {}),
 		};
 	} catch (err) {
 		tx.release();
 		throw err;
 	}
+}
+
+/**
+ * The changes whose row version is not below the version of the row the store
+ * holds. A row that is not stored passes.
+ *
+ * Row versions only grow on the server, so a change below the stored version
+ * comes from an older read than the stored row, and applying it would put the
+ * older row back.
+ */
+async function notOlderThanStored(
+	tx: KVRead,
+	workspaceId: string,
+	changes: RowChange[],
+): Promise<RowChange[]> {
+	const out: RowChange[] = [];
+	for (const change of changes) {
+		const stored = (await tx.get(confirmedKey(change.entity, workspaceId, change.key))) as
+			| ConfirmedRecord
+			| undefined;
+		if (stored !== undefined && BigInt(stored.ver) > change.version) continue;
+		out.push(change);
+	}
+	return out;
 }
 
 /**

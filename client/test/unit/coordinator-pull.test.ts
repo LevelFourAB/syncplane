@@ -1,11 +1,11 @@
-import { create, toBinary } from '@bufbuild/protobuf';
-import { createRouterTransport, type Transport } from '@connectrpc/connect';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
+import { Code, ConnectError, createRouterTransport, type Transport } from '@connectrpc/connect';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { type RowChange, RowChangeSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
-import { SyncService } from '../../src/gen/syncplane/v1/service_pb.js';
-import { metaCursor, rowTouchKey } from '../../src/keys.js';
+import { BootstrapResponseSchema, SyncService } from '../../src/gen/syncplane/v1/service_pb.js';
+import { metaCursor, metaCursorSeq, metaServerSeq, rowTouchKey } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { createKvMutex } from '../../src/mutex.js';
@@ -112,6 +112,137 @@ describe('coordinator paged pull', () => {
 		read.release();
 		expect(bytes).toBeDefined();
 
+		await coord.stop();
+	});
+
+	/** Puts the given meta values into the store. */
+	async function seedMeta(values: Record<string, unknown>): Promise<void> {
+		const tx = await kv.write();
+		for (const [ k, v ] of Object.entries(values)) await tx.put(k, v);
+		await tx.commit();
+	}
+
+	async function title(key: string): Promise<string | undefined> {
+		const read = await kv.read();
+		try {
+			const bytes = await readMergedRow(read, registry, 'todo', WS, key);
+			return bytes === undefined ? undefined : fromBinary(TodoSchema, bytes).title;
+		} finally {
+			read.release();
+		}
+	}
+
+	async function storedCursor(): Promise<unknown> {
+		const read = await kv.read();
+		try {
+			return await read.get(metaCursor(WS));
+		} finally {
+			read.release();
+		}
+	}
+
+	// The state a cursorless Subscribe frame leaves behind: rows and serverSeq at
+	// 61, the cursor at 60. A scope change then pulls a resync, and every resync
+	// page reports the cursor's own seq, 60. The store must take those pages, or
+	// each pull asks for the same page again and the drain never ends.
+	it('resyncs from a cursor behind the stored seq instead of pulling the same page forever', async () => {
+		await seedMeta({ [metaCursor(WS)]: new Uint8Array([ 60 ]), [metaServerSeq(WS)]: '61' });
+		let pulls = 0;
+		const transport = createRouterTransport(({ service }) => {
+			service(SyncService, {
+				push: (req) => pushResults(req, []),
+				pull(req) {
+					if (++pulls > 20) throw new ConnectError('pull loop', Code.Aborted);
+					const page = (changes: RowChange[], cursor: number, seq: bigint, hasMore: boolean) => ({
+						patch: { changes, dropEntities: [] },
+						nextCursor: new Uint8Array([ cursor ]),
+						lastAckedMutationId: 0n,
+						reset: false,
+						hasMore,
+						seq,
+						schemaRevision: '',
+					});
+					switch (req.cursor[0]) {
+						case 60: // a resync step: the cursor's own seq
+							return page([ serverRow('t3', 40n, 'now visible') ], 160, 60n, true);
+						case 160: // the resync completes, still at the cursor's seq
+							return page([], 161, 60n, true);
+						case 161: // the catch-up under the new scope
+							return page([ serverRow('t4', 62n, 'caught up') ], 62, 62n, false);
+						default:
+							return page([], req.cursor[0]!, 62n, false);
+					}
+				},
+				// eslint-disable-next-line require-yield
+				async *bootstrap() {
+					throw new Error('bootstrap not used');
+				},
+				query: () => ({ rows: [] }),
+			});
+		});
+		const coord = newCoordinator(transport, new Set());
+
+		await coord.syncNow();
+
+		expect(pulls).toBe(3);
+		expect(await title('t3')).toBe('now visible');
+		expect(await title('t4')).toBe('caught up');
+		expect(await storedCursor()).toEqual(new Uint8Array([ 62 ]));
+		await coord.stop();
+	});
+
+	// The backstop for a gate and cursor that disagree in a way the gate does not
+	// expect: the server answers the stored cursor with a page the gate keeps
+	// dropping. Pulling again from the same cursor cannot change that, so the
+	// drain gives up on the cursor and re-bootstraps.
+	it('re-bootstraps when the pages for the stored cursor are dropped again and again', async () => {
+		await seedMeta({
+			[metaCursor(WS)]: new Uint8Array([ 60 ]),
+			[metaServerSeq(WS)]: '61',
+			[metaCursorSeq(WS)]: '61',
+		});
+		let pulls = 0;
+		let bootstraps = 0;
+		const transport = createRouterTransport(({ service }) => {
+			service(SyncService, {
+				push: (req) => pushResults(req, []),
+				pull() {
+					if (++pulls > 20) throw new ConnectError('pull loop', Code.Aborted);
+					return {
+						patch: { changes: [ serverRow('t1', 59n, 'dropped') ], dropEntities: [] },
+						nextCursor: new Uint8Array([ 59 ]),
+						lastAckedMutationId: 0n,
+						reset: false,
+						hasMore: true,
+						seq: 59n,
+						schemaRevision: '',
+					};
+				},
+				async *bootstrap() {
+					bootstraps++;
+					yield create(BootstrapResponseSchema, {
+						body: {
+							case: 'begin',
+							value: {
+								cursor: new Uint8Array([ 9 ]),
+								lastAckedMutationId: 0n,
+								seq: 70n,
+								schemaRevision: '',
+							},
+						},
+					});
+					yield create(BootstrapResponseSchema, { body: { case: 'end', value: {} } });
+				},
+				query: () => ({ rows: [] }),
+			});
+		});
+		const coord = newCoordinator(transport, new Set());
+
+		await coord.syncNow();
+
+		expect(bootstraps).toBe(1);
+		expect(pulls).toBeLessThanOrEqual(5);
+		expect(await storedCursor()).toEqual(new Uint8Array([ 9 ]));
 		await coord.stop();
 	});
 });

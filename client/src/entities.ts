@@ -41,6 +41,7 @@ import {
 	META_WS_PREFIX,
 	metaBootstrapResume,
 	metaCursor,
+	metaCursorSeq,
 	wsFromSegment,
 } from './keys.js';
 import type { KVRead, KVWrite } from './kv/store.js';
@@ -116,6 +117,7 @@ export async function reconcileStoreEntities(
 	for (const segment of await workspaceSegments(tx)) {
 		const workspaceId = wsFromSegment(segment);
 		await tx.del(metaCursor(workspaceId));
+		await tx.del(metaCursorSeq(workspaceId));
 		await tx.del(metaBootstrapResume(workspaceId));
 	}
 	await tx.put(META_ENTITIES, [ ...stored, ...added ].sort());

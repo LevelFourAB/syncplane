@@ -15,6 +15,7 @@ import {
 	metaBootstrapGen,
 	metaCallerAccess,
 	metaCursor,
+	metaServerSeq,
 	overlayKey,
 	STAGING_ROOT,
 	stagingKey,
@@ -190,19 +191,120 @@ describe('rebase', () => {
 		expect(await tx.get(metaCursor(WS))).toEqual(cursor(7));
 		tx.release();
 
-		// The seq still advances, so the gate keeps dropping stale pages from a
-		// concurrent tab even while the cursor sits behind what has been applied.
-		const stale = await rebase(kv, registry, noMirrors, WS, {
+		// The seq still advances, so a row from a concurrent tab's older read
+		// cannot overwrite the newer one the frame applied.
+		await rebase(kv, registry, noMirrors, WS, {
 			changes: [ serverRow('t2', 1n, { id: 't2', title: 'stale' }) ],
 			nextCursor: new Uint8Array(),
 			lastAckedMutationId: 0n,
 			serverSeq: 1n,
 		});
-		expect(stale.skipped).toBe(true);
 
 		const todos = await mergedTodos(kv);
 		expect(todos.get('t1')?.title).toBe('one');
 		expect(todos.get('t2')?.title).toBe('two');
+	});
+
+	// Cursorless frames move the stored seq past the stored cursor. A page the
+	// server answers for that cursor can then report a lower seq than the store
+	// holds: a resync page always reports the cursor's own seq, and a forward
+	// page that ends inside a large transaction reports that transaction's seq.
+	// Dropping such a page leaves the cursor where it was, so the next pull gets
+	// the same page again and the client never moves.
+	it('applies a page answered for the stored cursor after cursorless frames moved the seq past it', async () => {
+		const kv = new MemoryKVStore();
+		await rebase(kv, registry, noMirrors, WS, {
+			changes: [ serverRow('t1', 60n, { id: 't1', title: 'one' }) ],
+			nextCursor: cursor(60),
+			lastAckedMutationId: 0n,
+			serverSeq: 60n,
+		});
+		await rebase(kv, registry, noMirrors, WS, {
+			changes: [ serverRow('t2', 61n, { id: 't2', title: 'two' }) ],
+			nextCursor: new Uint8Array(),
+			lastAckedMutationId: 0n,
+			serverSeq: 61n,
+		});
+
+		// A resync page for the cursor at 60: a row the new scope shows, and an
+		// older read of the row the frame applied.
+		const page = await rebase(kv, registry, noMirrors, WS, {
+			changes: [
+				serverRow('t3', 40n, { id: 't3', title: 'now visible' }),
+				serverRow('t2', 59n, { id: 't2', title: 'older read' }),
+			],
+			nextCursor: cursor(160),
+			lastAckedMutationId: 0n,
+			deferAcked: true,
+			serverSeq: 60n,
+		});
+
+		expect(page.skipped).toBeFalsy();
+		const todos = await mergedTodos(kv);
+		expect(todos.get('t3')?.title).toBe('now visible');
+		expect(todos.get('t2')?.title).toBe('two');
+		const tx = await kv.read();
+		try {
+			expect(await tx.get(metaCursor(WS))).toEqual(cursor(160));
+			// The rows still reach 61, so the gate stays there.
+			expect(await tx.get(metaServerSeq(WS))).toBe('61');
+		} finally {
+			tx.release();
+		}
+	});
+
+	it('still drops a page whose seq is below the stored cursor', async () => {
+		const kv = new MemoryKVStore();
+		await rebase(kv, registry, noMirrors, WS, {
+			changes: [ serverRow('t1', 60n, { id: 't1', title: 'one' }) ],
+			nextCursor: cursor(60),
+			lastAckedMutationId: 0n,
+			serverSeq: 60n,
+		});
+		await rebase(kv, registry, noMirrors, WS, {
+			changes: [ serverRow('t2', 61n, { id: 't2', title: 'two' }) ],
+			nextCursor: new Uint8Array(),
+			lastAckedMutationId: 0n,
+			serverSeq: 61n,
+		});
+
+		const stale = await rebase(kv, registry, noMirrors, WS, {
+			changes: [ serverRow('t4', 59n, { id: 't4', title: 'stale' }) ],
+			nextCursor: cursor(59),
+			lastAckedMutationId: 0n,
+			serverSeq: 59n,
+		});
+
+		expect(stale.skipped).toBe(true);
+		expect((await mergedTodos(kv)).has('t4')).toBe(false);
+		const tx = await kv.read();
+		try {
+			expect(await tx.get(metaCursor(WS))).toEqual(cursor(60));
+		} finally {
+			tx.release();
+		}
+	});
+
+	// A store written by a client that did not record the cursor's seq can hold
+	// the stuck state already: a seq above its cursor's. Its pages must still
+	// apply, or the store never leaves that state.
+	it('applies a page below the stored seq when the cursor seq was never recorded', async () => {
+		const kv = new MemoryKVStore();
+		const seed = await kv.write();
+		await seed.put(metaCursor(WS), cursor(60));
+		await seed.put(metaServerSeq(WS), '61');
+		await seed.commit();
+
+		const page = await rebase(kv, registry, noMirrors, WS, {
+			changes: [ serverRow('t3', 40n, { id: 't3', title: 'now visible' }) ],
+			nextCursor: cursor(160),
+			lastAckedMutationId: 0n,
+			deferAcked: true,
+			serverSeq: 60n,
+		});
+
+		expect(page.skipped).toBeFalsy();
+		expect((await mergedTodos(kv)).get('t3')?.title).toBe('now visible');
 	});
 
 	it('with deferAcked, keeps acked mutations queued so a row does not regress mid-drain', async () => {

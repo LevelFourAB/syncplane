@@ -2,6 +2,7 @@ import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { type Client, Code, ConnectError, createClient, type Transport } from '@connectrpc/connect';
 
 import { type DecodedAccess, encodeAccess, touchPendingAccess } from '../access.js';
+import { sameBytes } from '../blob/digest.js';
 import {
 	CodeInternal,
 	CodeMutationIdGap,
@@ -188,6 +189,15 @@ const DEFAULT_PUSH_MAX_DELAY_MS = 250;
  * Bounded so a client under an unbroken run of writes still reaches its pull.
  */
 const MAX_EXTRA_PUSH_ROUNDS = 2;
+
+/**
+ * How many pages in a row the seq gate may drop for the same request cursor
+ * before a pull gives up on that cursor and re-bootstraps the workspace. A
+ * dropped page leaves the stored cursor as it was, so asking again from it
+ * gets the same page; only a cursor another tab stored meanwhile changes the
+ * answer, and that shows as a different cursor on the next request.
+ */
+const MAX_DROPPED_PAGES = 3;
 
 /**
  * Default per-push mutation cap. Matches the engine's default
@@ -2466,6 +2476,9 @@ export class Coordinator {
 		// version, gets the change from there; a second one could only race
 		// another tab again, and the next cycle covers that.
 		let repulled = false;
+		// Consecutive pages the gate dropped, all answered for droppedFrom.
+		let dropped = 0;
+		let droppedFrom: Uint8Array | undefined;
 		for (;;) {
 			const { cursor, minSeq, callerAccessVersion } = await this.pullPosition(workspaceId);
 			// Timed from issuing the request to the page being committed locally,
@@ -2501,7 +2514,11 @@ export class Coordinator {
 			}
 			lastAcked = resp.lastAckedMutationId;
 			const responded = performance.now();
-			const { reset, accessStale } = await this.applyServerPage(workspaceId, resp, subs);
+			const { reset, accessStale, skipped, behind } = await this.applyServerPage(
+				workspaceId,
+				resp,
+				subs,
+			);
 			this.emit({
 				type: 'pull',
 				workspaceId,
@@ -2516,8 +2533,27 @@ export class Coordinator {
 			// A reset re-bootstrapped instead of paging, and a bootstrap leaves the
 			// queue alone: the next cycle's push re-reports any gap.
 			if (reset) return;
+			if (skipped && resp.hasMore) {
+				const sent = cursor ?? new Uint8Array();
+				dropped = droppedFrom !== undefined && sameBytes(droppedFrom, sent) ? dropped + 1 : 1;
+				droppedFrom = sent;
+				if (dropped >= MAX_DROPPED_PAGES) {
+					reportError(
+						`pull: the stored cursor of workspace ${workspaceId} gets a page the seq gate drops; re-bootstrapping`,
+						new Error(`page seq ${resp.seq} dropped ${dropped} times`),
+					);
+					await this.doBootstrap(workspaceId, subs);
+					return;
+				}
+				continue;
+			}
+			dropped = 0;
+			droppedFrom = undefined;
 			if (resp.hasMore) continue;
-			if (!accessStale || repulled) break;
+			// A page behind the stored seq can put back a row a stream frame
+			// deleted. One more pull, from the cursor that page stored, brings the
+			// tombstone again; so does it bring a summary for a stale access delta.
+			if ((!accessStale && !behind) || repulled) break;
 			repulled = true;
 		}
 		await this.recoverGap(workspaceId, lastAcked);
@@ -2532,8 +2568,8 @@ export class Coordinator {
 	 * a reset, whether the re-bootstrap actually `committed` — a superseded
 	 * bootstrap left the cursor untouched, so a stream reopening on it would just
 	 * reset again. `accessStale` is RebaseResult.accessStale: the caller pulls
-	 * again. Shared so the stream applies pages through exactly the path Pull
-	 * does.
+	 * again. `skipped` and `behind` are RebaseResult's. Shared so the stream
+	 * applies pages through exactly the path Pull does.
 	 */
 	private async applyServerPage(
 		workspaceId: string,
@@ -2543,11 +2579,13 @@ export class Coordinator {
 		// shape. Pull and Subscribe stay identical by construction.
 		page: PullResponse,
 		subs: Subscription[],
-	): Promise<{ reset: boolean; committed: boolean; accessStale: boolean }> {
+	): Promise<
+		{ reset: boolean; committed: boolean; accessStale: boolean; skipped: boolean; behind: boolean }
+	> {
 		this.observeServerRevision(page.schemaRevision);
 		if (page.reset) {
 			const committed = await this.doBootstrap(workspaceId, subs);
-			return { reset: true, committed, accessStale: false };
+			return { reset: true, committed, accessStale: false, skipped: false, behind: false };
 		}
 		const state = this.workspaces.get(workspaceId);
 		let applied;
@@ -2562,9 +2600,9 @@ export class Coordinator {
 			// state both sides agree on. Treated exactly like a server-sent
 			// reset, because it is the same verdict reached one layer later.
 			const committed = await this.doBootstrap(workspaceId, subs);
-			return { reset: true, committed, accessStale: false };
+			return { reset: true, committed, accessStale: false, skipped: false, behind: false };
 		}
-		const { touched, pendingCount, skipped, accessStale = false } = applied;
+		const { touched, pendingCount, skipped = false, behind = false, accessStale = false } = applied;
 		if (state && page.seq > state.serverSeq) state.serverSeq = page.seq;
 		if (!skipped) {
 			this.opts.status.setPendingCount(workspaceId, pendingCount);
@@ -2574,7 +2612,7 @@ export class Coordinator {
 			// entities this page changed.
 			await this.opts.notify(touched);
 		}
-		return { reset: false, committed: false, accessStale };
+		return { reset: false, committed: false, accessStale, skipped, behind };
 	}
 
 	/** One page's rebase transaction; see applyServerPage. */

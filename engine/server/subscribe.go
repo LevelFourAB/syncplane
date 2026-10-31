@@ -411,14 +411,14 @@ func (s *Server) regateScopes(ctx context.Context, stream *connect.ServerStream[
 // Withholding one leaves the client resuming from an older position, so a
 // reopened stream re-delivers every row sent since. That is a saving only
 // while those rows weigh less than the cursor they displaced, which is what
-// the byte debt tracks — and it needs no tuning to stay honest. The cursor of
-// a subscription with no window and no follow is smaller than any page it
-// rides on, so every frame checkpoints exactly as it did before sparse
-// cursors existed; only a cursor carrying a whole membership set is large
-// enough to be worth skipping, and even then never for longer than it takes
-// the skipped rows to add up to it. With a cursor-state store installed every
-// cursor is a fixed-size reference (see encodeCursor), so no frame clears the
-// bar and withholding fires only on servers running without one.
+// the byte debt tracks — and it needs no tuning to stay honest. Any scope can
+// withhold: a frame of one small row weighs less than most cursors, the
+// fixed-size reference a cursor-state store issues among them (see
+// encodeCursor). A cursor carrying a whole membership set withholds most
+// often, and never for longer than it takes the skipped rows to add up to it.
+// The client then holds rows past the seq of its stored cursor, and its next
+// pull can answer below that seq; the client takes such a page rather than
+// drop it.
 func (sc *subScope) checkpointDue(pageBytes, cursorBytes int) bool {
 	if !sc.sparseCursor || !sc.cursorSent {
 		return true
