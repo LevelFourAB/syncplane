@@ -41,11 +41,11 @@ Before you configure partial sync, ensure that you have:
    A `limit` makes a subscription windowed. The `orderBy` or `byRecency` option determines row rank, and ties break on row key. The server bounds the cap with `MaxWindowSize` (default 1000). A key scope holds only the named rows. The keys match the row keys that `get()` accepts, an empty array names no rows, and the server bounds the set with `MaxSubscriptionKeys` (default 1000). You cannot combine `keys` with `where` or `limit`. The `include` option works with all scopes. An empty subscription set syncs the full workspace.
 
 2. Update subscriptions when the required scope changes.
-   If you need to change subscriptions after initialization, call `setSubscriptions`:
+   If you need to change subscriptions after initialization, call `setSubscriptions`. Await it before the view reads or edits rows in the new scope:
 
    ```ts
    // Changing the set later delta-resyncs the difference, not a re-bootstrap.
-   client.setSubscriptions([ subscription(TodoSchema) ]);
+   await client.setSubscriptions([ subscription(TodoSchema) ]);
    // Pinning one more document delivers that document and nothing else.
    client.setSubscriptions([
    	subscription(DocumentSchema, { keys: [ ...pinnedDocumentIds, newId ] }),

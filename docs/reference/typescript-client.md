@@ -106,7 +106,7 @@ client.status(): SyncStatus                          // snapshot (works before s
 client.onStatusChange(cb): () => void                // subscribe; returns unsubscribe function
 client.onMutationRejected(cb): () => void            // multi-listener callback for rejections
 client.onSyncEvent(cb): () => void                   // multi-listener callback for sync events
-client.setSubscriptions(specs: SubscriptionSpec[]): void  // swap partial sync scope at runtime
+client.setSubscriptions(specs: SubscriptionSpec[]): Promise<void>  // swap partial sync scope at runtime
 client.hold(schema, key): HoldHandle                     // keep one row in scope on demand
 ```
 
@@ -1218,6 +1218,26 @@ Validation rules:
 - Supplying `keys` together with `where`, `limit`, `orderBy` or `byRecency` throws an error.
 - Supplying an empty key, or one with a control character, throws an error.
 - The server rejects sets that exceed the server maximum (`MaxSubscriptionKeys`, [default 1000](server.md)).
+
+### Changing the set at runtime
+
+`setSubscriptions(specs)` replaces the set: on the client for every workspace, on `client.ws(id)` for that workspace alone.
+It throws at the call for an invalid set.
+The returned promise resolves once a sync cycle has pulled under the new set:
+
+```ts
+await client.setSubscriptions([ subscription(Document, { keys: [ id ] }) ]);
+// Every row the new set admits, and the server holds, is local now.
+const doc = await client.db.document.get(id);
+```
+
+Await it before a view reads the new scope or writes to rows in it.
+Before that, a read can show the old scope.
+
+- A later `setSubscriptions` or hold change that replaces the set also resolves the earlier promise, once a pull runs under the later set.
+- Before `start()`, the promise waits for the first sync cycle.
+- While the server denies the workspace, the promise waits for access.
+- The promise resolves early when the workspace is removed or the client closes. It never rejects.
 
 ### Holds: one row in scope on demand
 

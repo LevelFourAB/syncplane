@@ -1180,8 +1180,11 @@ interface HeldRow {
 	expiry?: ReturnType<typeof setTimeout>;
 }
 
-/** A hold whose `ready` is pending; `gen` is set once its scope was published. */
-interface HoldWaiter {
+/**
+ * A caller waiting for a pull under a scope generation: a hold's `ready` or a
+ * setSubscriptions() promise. `gen` is set once its scope was published.
+ */
+interface ScopeWaiter {
 	gen?: number;
 	resolve(): void;
 }
@@ -1343,8 +1346,19 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 	pendingCount(): Promise<number>;
 	/** This workspace's slice of the sync status. */
 	status(): WorkspaceStatus;
-	/** Replaces the subscription set for this workspace alone. */
-	setSubscriptions(specs: SubscriptionSpec[]): void;
+	/**
+	 * Replaces the subscription set for this workspace alone. Throws on unknown
+	 * entities or invalid predicates.
+	 *
+	 * The promise resolves once a sync cycle has pulled under the new set, or
+	 * under a set that replaced it later. From then on every row the set admits
+	 * and the server holds is in the local store: await it before a view reads
+	 * the new scope or writes to rows in it. It resolves early when the
+	 * workspace is removed or the client closes, and never rejects. Before
+	 * start() it waits for the first cycle; while the workspace is denied it
+	 * waits for access.
+	 */
+	setSubscriptions(specs: SubscriptionSpec[]): Promise<void>;
 	/**
 	 * Brings one row into scope on demand, without changing the declared
 	 * subscriptions. The row syncs like a row named by a key-set subscription:
@@ -1805,8 +1819,8 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 		return this.client.workspaceStatus(this.workspaceId);
 	}
 
-	setSubscriptions(specs: SubscriptionSpec[]): void {
-		this.client.setWorkspaceSubscriptions(this.workspaceId, specs);
+	setSubscriptions(specs: SubscriptionSpec[]): Promise<void> {
+		return this.client.setWorkspaceSubscriptions(this.workspaceId, specs);
 	}
 
 	hold<D extends DescMessage>(schema: D, key: string): HoldHandle {
@@ -2188,8 +2202,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * row with an `expiry` timer was released and is waiting out holdGraceMs.
 	 */
 	private holds = new Map<string, Map<string, Map<string, HeldRow>>>();
-	/** Holds whose `ready` has not resolved yet, per workspace. */
-	private holdWaiters = new Map<string, Set<HoldWaiter>>();
+	/**
+	 * Hold `ready` promises and setSubscriptions() promises that have not
+	 * resolved yet, per workspace.
+	 */
+	private scopeWaiters = new Map<string, Set<ScopeWaiter>>();
 	/** Workspaces whose hold set changed since it was last published. */
 	private dirtyHolds = new Set<string>();
 	private holdPublishQueued = false;
@@ -3095,7 +3112,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			onSchemaSkew: this.opts.onSchemaSkew,
 			intent: this.intentReg,
 			forceResync: newEntities,
-			onScopeSynced: (ws, gen) => this.settleHolds(ws, gen),
+			onScopeSynced: (ws, gen) => this.settleScopes(ws, gen),
 		});
 		// Published before start() so a racing close() finds it (see above), and
 		// withdrawn again if that start fails, so a retry builds a fresh one rather
@@ -3345,14 +3362,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		}
 		row.count++;
 
-		let resolveReady!: () => void;
-		const ready = new Promise<void>((resolve) => {
-			resolveReady = resolve;
-		});
-		const waiter: HoldWaiter = { resolve: resolveReady };
-		let waiters = this.holdWaiters.get(workspaceId);
-		if (waiters === undefined) this.holdWaiters.set(workspaceId, waiters = new Set());
-		waiters.add(waiter);
+		const { waiter, settled: ready } = this.waitForScope(workspaceId);
+		const waiters = this.scopeWaiters.get(workspaceId)!;
 
 		const held = row;
 		const drop = (): void => {
@@ -3383,7 +3394,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * Coalesces hold changes into one scope publish per tick, so a screen that
 	 * mounts a list of held rows re-scopes the coordinator once rather than
 	 * once per row. Waiters learn the generation their hold was published under
-	 * here; settleHolds resolves them once a pull has run under it.
+	 * here; settleScopes resolves them once a pull has run under it.
 	 */
 	private scheduleHoldPublish(workspaceId: string): void {
 		this.dirtyHolds.add(workspaceId);
@@ -3399,14 +3410,49 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				// Before start() there is no coordinator: the set goes in with its
 				// construction as generation 0, which the first cycle reports.
 				const gen = this.coordinator?.setSubscriptions(ws, this.effectiveScope(ws)) ?? 0;
-				for (const waiter of this.holdWaiters.get(ws) ?? []) waiter.gen ??= gen;
+				for (const waiter of this.scopeWaiters.get(ws) ?? []) waiter.gen ??= gen;
 			}
 		});
 	}
 
-	/** Resolves every hold published at or before the generation a pull served. */
-	private settleHolds(workspaceId: string, gen: number): void {
-		const waiters = this.holdWaiters.get(workspaceId);
+	/**
+	 * Registers a waiter that settleScopes resolves once a pull has served
+	 * `gen`. Without `gen` the waiter stays unsettled until the next hold
+	 * publish assigns one.
+	 */
+	private waitForScope(
+		workspaceId: string,
+		gen?: number,
+	): { waiter: ScopeWaiter; settled: Promise<void> } {
+		let resolve!: () => void;
+		const settled = new Promise<void>((r) => {
+			resolve = r;
+		});
+		const waiter: ScopeWaiter = { gen, resolve };
+		let waiters = this.scopeWaiters.get(workspaceId);
+		if (waiters === undefined) this.scopeWaiters.set(workspaceId, waiters = new Set());
+		waiters.add(waiter);
+		return { waiter, settled };
+	}
+
+	/**
+	 * Hands a workspace's effective scope to the coordinator and returns a
+	 * promise that resolves once a pull has run under it. Before start() the
+	 * scope goes in with the coordinator's construction as generation 0, which
+	 * the first cycle reports.
+	 */
+	private publishScope(workspaceId: string): Promise<void> {
+		const gen = this.coordinator?.setSubscriptions(workspaceId, this.effectiveScope(workspaceId))
+			?? 0;
+		return this.waitForScope(workspaceId, gen).settled;
+	}
+
+	/**
+	 * Resolves every waiter whose scope was published at or before the
+	 * generation a pull served.
+	 */
+	private settleScopes(workspaceId: string, gen: number): void {
+		const waiters = this.scopeWaiters.get(workspaceId);
 		if (waiters === undefined) return;
 		for (const waiter of waiters) {
 			if (waiter.gen !== undefined && waiter.gen <= gen) {
@@ -3417,7 +3463,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
-	 * Forgets a workspace's holds: timers cleared, waiters resolved (nothing
+	 * Forgets a workspace's holds: timers cleared, scope waiters resolved (nothing
 	 * will sync them now), rows dropped. Nothing is published — the caller is
 	 * removing the workspace or closing the client.
 	 */
@@ -3428,8 +3474,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			}
 		}
 		this.holds.delete(workspaceId);
-		for (const waiter of this.holdWaiters.get(workspaceId) ?? []) waiter.resolve();
-		this.holdWaiters.delete(workspaceId);
+		for (const waiter of this.scopeWaiters.get(workspaceId) ?? []) waiter.resolve();
+		this.scopeWaiters.delete(workspaceId);
 	}
 
 	/**
@@ -3451,23 +3497,28 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * cursor and delta-resyncs the difference (rows entering scope arrive, rows
 	 * leaving scope drop), falling back to a re-bootstrap when it cannot
 	 * reconstruct the old scope. Throws on unknown entities or invalid predicates.
+	 *
+	 * The promise resolves once every workspace has pulled under the new set,
+	 * on the terms of WorkspaceClient.setSubscriptions.
 	 */
-	setSubscriptions(specs: SubscriptionSpec[]): void {
+	setSubscriptions(specs: SubscriptionSpec[]): Promise<void> {
 		this.assertOpen();
 		const compiled = this.compileSubscriptions(specs);
+		const synced: Promise<void>[] = [];
 		for (const [ ws, scope ] of this.scopes) {
 			scope.subscriptions = compiled;
-			this.coordinator?.setSubscriptions(ws, this.effectiveScope(ws));
+			synced.push(this.publishScope(ws));
 		}
+		return Promise.all(synced).then(() => {});
 	}
 
 	/** @internal backs WorkspaceClient.setSubscriptions. */
-	setWorkspaceSubscriptions(workspaceId: string, specs: SubscriptionSpec[]): void {
+	setWorkspaceSubscriptions(workspaceId: string, specs: SubscriptionSpec[]): Promise<void> {
 		this.assertOpen();
 		const scope = this.scopes.get(workspaceId);
-		if (!scope) return;
+		if (!scope) return Promise.resolve();
 		scope.subscriptions = this.compileSubscriptions(specs);
-		this.coordinator?.setSubscriptions(workspaceId, this.effectiveScope(workspaceId));
+		return this.publishScope(workspaceId);
 	}
 
 	private compileSubscriptions(specs: SubscriptionSpec[]): Subscription[] {
@@ -4885,7 +4936,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	async close(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true;
-		for (const ws of [ ...this.holds.keys(), ...this.holdWaiters.keys() ]) this.dropHolds(ws);
+		for (const ws of [ ...this.holds.keys(), ...this.scopeWaiters.keys() ]) this.dropHolds(ws);
 		await this.coordinator?.stop();
 		await this.presence?.stop();
 		this.changeShare?.stop();

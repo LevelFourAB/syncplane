@@ -84,6 +84,69 @@ describe('partial sync (subscriptions)', () => {
 		await reader.close();
 	});
 
+	it('resolves setSubscriptions once the new scope is in the local store', async () => {
+		const ws = freshWorkspace();
+		const writer = newClient(ws);
+		await writer.start();
+		await writer.mutate.put(WidgetSchema, { id: 'w-low', count: 5 });
+		await writer.mutate.put(WidgetSchema, { id: 'w-high', count: 50 });
+		await writer.syncNow();
+
+		const reader = newClient(ws, { subscriptions: [ highCount ] });
+		await reader.start();
+		await reader.syncNow();
+
+		// No syncNow(): the promise alone must cover the pull that widens scope.
+		await reader.setSubscriptions([ subscription(WidgetSchema, (w) => w.count.lt(10)) ]);
+		expect((await reader.scan(WidgetSchema)).map((r) => r.key)).toEqual([ 'w-low' ]);
+
+		await reader.ws(ws).setSubscriptions([]);
+		expect((await reader.scan(WidgetSchema)).map((r) => r.key)).toEqual([ 'w-high', 'w-low' ]);
+
+		await writer.close();
+		await reader.close();
+	});
+
+	it('resolves a setSubscriptions made before start() after the first pull', async () => {
+		const ws = freshWorkspace();
+		const writer = newClient(ws);
+		await writer.start();
+		await writer.mutate.put(WidgetSchema, { id: 'w-low', count: 5 });
+		await writer.mutate.put(WidgetSchema, { id: 'w-high', count: 50 });
+		await writer.syncNow();
+
+		const reader = newClient(ws, { subscriptions: [ highCount ] });
+		const ready = reader.setSubscriptions([ subscription(WidgetSchema, (w) => w.count.lt(10)) ]);
+		await reader.start();
+		await ready;
+		expect((await reader.scan(WidgetSchema)).map((r) => r.key)).toEqual([ 'w-low' ]);
+
+		await writer.close();
+		await reader.close();
+	});
+
+	it('resolves a replaced setSubscriptions once the later set is local', async () => {
+		const ws = freshWorkspace();
+		const writer = newClient(ws);
+		await writer.start();
+		await writer.mutate.put(WidgetSchema, { id: 'w-low', count: 5 });
+		await writer.mutate.put(WidgetSchema, { id: 'w-high', count: 50 });
+		await writer.syncNow();
+
+		const reader = newClient(ws, { subscriptions: [ highCount ] });
+		await reader.start();
+		await reader.syncNow();
+
+		const first = reader.setSubscriptions([]);
+		const second = reader.setSubscriptions([ subscription(WidgetSchema, (w) => w.count.lt(10)) ]);
+		await first;
+		await second;
+		expect((await reader.scan(WidgetSchema)).map((r) => r.key)).toEqual([ 'w-low' ]);
+
+		await writer.close();
+		await reader.close();
+	});
+
 	it("converges a pending patch that moves a row out of the client's own scope", async () => {
 		const ws = freshWorkspace();
 		const a = newClient(ws, { subscriptions: [ highCount ] });
