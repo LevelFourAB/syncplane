@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"slices"
 	"sort"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -750,7 +751,10 @@ type probeCase struct {
 	OrderBy []json.RawMessage `json:"orderBy"`
 	Rows    []vectorRow       `json:"rows"`
 	Matches []string          `json:"matches"`
-	Want    json.RawMessage   `json:"want"`
+	// Walk, with Rows, is the row keys a walk of the plan's ranges yields, in
+	// order; see planWalk.
+	Walk []string        `json:"walk"`
+	Want json.RawMessage `json:"want"`
 }
 
 // vectorRow is one row of a read-checking vector case.
@@ -820,6 +824,45 @@ func planReads(plan *query.Plan, candidates []query.Index) func(protoreflect.Mes
 	}
 }
 
+// planWalk is the row keys a walk of a single-index plan yields from rows: each
+// range in the order listed, its entries backward when the plan is Reverse,
+// and each row at its first entry. The residual is not applied — the walk
+// order is what this pins, and matches already pins what the residual keeps.
+func planWalk(typ string, plan *query.Plan, enc *query.IndexEncoder, rows []vectorRow) []string {
+	GinkgoHelper()
+	type at struct {
+		entry []byte
+		key   string
+	}
+	var entries []at
+	for _, r := range rows {
+		msg := msgForType(typ)
+		Expect(protojson.Unmarshal(r.Row, msg)).To(Succeed())
+		for _, e := range enc.Encode(msg.ProtoReflect(), r.Key) {
+			entries = append(entries, at{entry: e, key: r.Key})
+		}
+	}
+	out := []string{}
+	for _, rg := range plan.Ranges {
+		var inside []at
+		for _, e := range entries {
+			if inRange([][]byte{e.entry}, rg) {
+				inside = append(inside, e)
+			}
+		}
+		sort.Slice(inside, func(i, j int) bool { return bytes.Compare(inside[i].entry, inside[j].entry) < 0 })
+		if plan.Reverse {
+			slices.Reverse(inside)
+		}
+		for _, e := range inside {
+			if !slices.Contains(out, e.key) {
+				out = append(out, e.key)
+			}
+		}
+	}
+	return out
+}
+
 // groupReads is planReads for a group plan, which reads one range of one
 // index.
 func groupReads(plan *query.GroupPlan, candidates []query.Index) func(protoreflect.Message, string) bool {
@@ -847,6 +890,7 @@ type probeWant struct {
 	Index    string       `json:"index"`
 	Ranges   int          `json:"ranges"`
 	Ordered  bool         `json:"ordered"`
+	Reverse  bool         `json:"reverse"`
 	Residual bool         `json:"residual"`
 	Union    []branchWant `json:"union"`
 }
@@ -954,7 +998,17 @@ var _ = Describe("Planner conformance vectors", func() {
 			Expect(plan.Index).To(Equal(want.Index))
 			Expect(plan.Ranges).To(HaveLen(want.Ranges))
 			Expect(plan.Ordered).To(Equal(want.Ordered))
+			Expect(plan.Reverse).To(Equal(want.Reverse))
 			Expect(plan.Residual != nil).To(Equal(want.Residual))
+			if len(tc.Walk) > 0 {
+				var enc *query.IndexEncoder
+				for _, c := range candidates {
+					if c.Name == plan.Index {
+						enc = c.Encoder
+					}
+				}
+				Expect(planWalk(tc.Type, plan, enc, tc.Rows)).To(Equal(tc.Walk))
+			}
 		})
 	}
 })

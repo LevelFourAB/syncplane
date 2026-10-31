@@ -93,13 +93,14 @@ var _ = Describe("PlanQuery", func() {
 		Expect(unordered.OrderSpansIndex).To(BeFalse(), "there is no ordering to span it")
 	})
 
-	It("does not claim an ordering the index sorts the other way", func() {
+	It("claims an ordering the index sorts the other way by reading it backward", func() {
 		p := query.PlanQuery(
 			[]query.Index{byLabelCount},
 			compile(query.Eq("label", "a")),
 			order(query.Asc("count")))
 		Expect(p).NotTo(BeNil())
-		Expect(p.Ordered).To(BeFalse(), "the component is stored descending")
+		Expect(p.Ordered).To(BeTrue())
+		Expect(p.Reverse).To(BeTrue(), "the component is stored descending")
 	})
 
 	It("leaves a term the range does not cover as a residual", func() {

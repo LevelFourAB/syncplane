@@ -232,10 +232,15 @@ interface ProbeCase {
 	/** With `matches`, pins what the plan reads; see expectReads. */
 	rows?: VectorRow[];
 	matches?: string[];
+	/** With `rows`, the keys a walk of the plan's ranges yields, in order; see
+	 * planWalk. */
+	walk?: string[];
 	want: 'scan' | {
 		index: string;
 		ranges: number;
 		ordered: boolean;
+		/** Absent means false. */
+		reverse?: boolean;
 		residual: boolean;
 		/** A union plan: one branch per entry, unordered by construction, with
 		 * index/ranges/ordered unset. */
@@ -287,6 +292,34 @@ function planReads(
 	return (row, key) =>
 		(!plan.residual || evalCond(row, plan.residual, schema))
 		&& branches.some((b) => inRange(encoders.get(b.index)!.encode(row, key, schema), b.ranges));
+}
+
+/**
+ * The row keys a walk of a single-index plan yields from `rows`: each range in
+ * the order listed, its entries backward when the plan is reversed, and each
+ * row at its first entry. The residual is not applied — the walk order is what
+ * this pins, and `matches` already pins what the residual keeps.
+ */
+function planWalk(
+	schema: DescMessage,
+	plan: QueryPlan,
+	encoder: IndexEncoder,
+	rows: VectorRow[],
+): string[] {
+	const entries = rows.flatMap((r) =>
+		encoder.encode(fromJson(schema, r.row), r.key, schema).map((entry) => ({ entry, key: r.key }))
+	);
+	const out: string[] = [];
+	for (const range of plan.ranges) {
+		const inside = entries
+			.filter(({ entry }) =>
+				(range.lo === undefined || entry >= range.lo) && (range.hi === undefined || entry < range.hi)
+			)
+			.sort((a, b) => (a.entry < b.entry ? -1 : a.entry > b.entry ? 1 : 0));
+		if (plan.reverse) inside.reverse();
+		for (const { key } of inside) if (!out.includes(key)) out.push(key);
+	}
+	return out;
 }
 
 /** planReads for a group plan, which reads one range of one index. */
@@ -348,7 +381,14 @@ describe('planner conformance vectors', () => {
 			expect(plan!.index).toBe(tc.want.index);
 			expect(plan!.ranges).toHaveLength(tc.want.ranges);
 			expect(plan!.ordered).toBe(tc.want.ordered);
+			expect(plan!.reverse).toBe(tc.want.reverse ?? false);
 			expect(plan!.residual !== undefined).toBe(tc.want.residual);
+			if (tc.walk) {
+				expect(
+					planWalk(schema, plan!, candidates.find((c) => c.name === plan!.index)!.encoder, tc.rows!),
+				)
+					.toEqual(tc.walk);
+			}
 		});
 	}
 });

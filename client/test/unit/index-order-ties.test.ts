@@ -50,7 +50,7 @@ const SEED: Journal[] = [
 	{ id: 'j6', day: 3, title: 'm' },
 ];
 
-async function seeded(built: boolean) {
+async function seeded(built: boolean, rows: Journal[] = SEED) {
 	const kv = new MemoryKVStore();
 	const indexes = new IndexCache(registry);
 	const tx = await kv.write();
@@ -59,7 +59,7 @@ async function seeded(built: boolean) {
 		tx,
 		registry,
 		WS,
-		SEED.map((row, i) =>
+		rows.map((row, i) =>
 			create(RowChangeSchema, {
 				entity: 'journal',
 				key: row.id,
@@ -79,8 +79,8 @@ async function seeded(built: boolean) {
 }
 
 /** A client over the seeded store, with `overlay` written as pending puts. */
-async function clientWith(built: boolean, overlay: Journal[] = []) {
-	const { kv } = await seeded(built);
+async function clientWith(built: boolean, overlay: Journal[] = [], rows: Journal[] = SEED) {
+	const { kv } = await seeded(built, rows);
 	const client = new SyncClient({
 		workspaceId: WS,
 		kvStore: kv,
@@ -196,5 +196,57 @@ describe('an ordered walk over an index with components past the order keys', ()
 		};
 		expect(await pageAll(false)).toEqual([ 'j1', 'j2', 'j3', 'j4', 'j5', 'j6' ]);
 		expect(await pageAll(true)).toEqual(await pageAll(false));
+	});
+
+	it('counts a page bounded by both cursors as the scan does', async () => {
+		const bounded = async (built: boolean) => {
+			const client = await clientWith(built);
+			try {
+				const all = await query(client, { orderBy: (j) => [ j.day.asc() ] });
+				const after = (await query(client, { orderBy: (j) => [ j.day.asc() ], limit: 1 })).endCursor;
+				const before = (await query(client, { orderBy: (j) => [ j.day.asc() ], offset: 1, limit: 1 }))
+					.endCursor;
+				const page = await query(client, { orderBy: (j) => [ j.day.asc() ], limit: 1, after, before });
+				return {
+					all: all.length,
+					keys: page.map((r) => r.key),
+					total: page.total,
+					hasMore: page.hasMore,
+				};
+			} finally {
+				await client.close();
+			}
+		};
+		expect(await bounded(true)).toEqual(await bounded(false));
+	});
+
+	// The seek keeps the before cursor's whole tie group inside the range. The
+	// page ends in day 1, so k2 closes that tie group and settles the walk; in
+	// index order k4 and k5 (at and past the before cursor) follow it inside
+	// day 2, and the walk must not count them.
+	it('leaves the rows past a before cursor out of the total', async () => {
+		const rows: Journal[] = [
+			{ id: 'k0', day: 0, title: 'a' },
+			{ id: 'k1', day: 1, title: 'a' },
+			{ id: 'k2', day: 2, title: 'a' },
+			{ id: 'k3', day: 2, title: 'z' },
+			{ id: 'k4', day: 2, title: 'b' },
+			{ id: 'k5', day: 2, title: 'c' },
+		];
+		const order: Query<Journal> = { orderBy: (j) => [ j.day.asc() ] };
+		const bounded = async (built: boolean) => {
+			const client = await clientWith(built, [], rows);
+			try {
+				const after = (await query(client, { ...order, limit: 1 })).endCursor;
+				const before = (await query(client, { ...order, offset: 4, limit: 1 })).endCursor;
+				const page = await query(client, { ...order, limit: 1, after, before });
+				return { keys: page.map((r) => r.key), total: page.total, hasMore: page.hasMore };
+			} finally {
+				await client.close();
+			}
+		};
+		const scanned = await bounded(false);
+		expect(scanned.keys).toEqual([ 'k1' ]);
+		expect(await bounded(true)).toEqual(scanned);
 	});
 });

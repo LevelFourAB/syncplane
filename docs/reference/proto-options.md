@@ -1008,6 +1008,8 @@ Selection criteria:
 
 `IndexKey.path` is a dotted Protobuf path. A path targeting a single-key reference automatically resolves to that reference's key field. Setting `desc: true` sorts that component in descending order; missing and `NaN` values sort last regardless of direction.
 
+An index serves an ordering in both directions. When every order key runs against the direction of its component, the engine reads the index backward, and missing and `NaN` values still sort last. An ordering that runs with some components and against others is not served by the index; the query sorts its candidates instead. A grouped read (`groupRows`) uses the declared direction only.
+
 A path can traverse repeated fields or target repeated scalars (`assignees.id`, `labels`). This produces a fan-out index where each row generates one index entry per element:
 
 - Rows with an empty list generate a single entry tagged as missing, allowing unconstrained queries to locate all rows.

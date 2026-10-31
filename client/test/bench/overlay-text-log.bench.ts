@@ -175,9 +175,9 @@ function cloningRead(tx: KVRead): KVRead {
 		async *scan(prefix) {
 			for await (const [ k, v ] of tx.scan(prefix)) yield [ k, copy(v) ];
 		},
-		indexScan: (lo, hi) => tx.indexScan(lo, hi),
-		async *indexScanRows(lo, hi) {
-			for await (const e of tx.indexScanRows(lo, hi)) yield { ...e, value: copy(e.value) };
+		indexScan: (lo, hi, dir) => tx.indexScan(lo, hi, dir),
+		async *indexScanRows(lo, hi, dir) {
+			for await (const e of tx.indexScanRows(lo, hi, dir)) yield { ...e, value: copy(e.value) };
 		},
 		indexCount: (lo, hi) => tx.indexCount(lo, hi),
 		indexSeek: (lo, hi, dir) => tx.indexSeek(lo, hi, dir),

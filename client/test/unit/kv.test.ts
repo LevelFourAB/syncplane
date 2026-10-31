@@ -340,11 +340,16 @@ describe.each(implementations)('KVStore: %s', (_name, open) => {
 			await w.commit();
 		}
 
-		const positions = async (store: KVStore, lo?: string, hi?: string): Promise<string[]> => {
+		const positions = async (
+			store: KVStore,
+			lo?: string,
+			hi?: string,
+			direction?: 'asc' | 'desc',
+		): Promise<string[]> => {
 			const r = await store.read();
 			try {
 				const out: string[] = [];
-				for await (const key of r.indexScan(lo, hi)) out.push(key);
+				for await (const key of r.indexScan(lo, hi, direction)) out.push(key);
 				return out;
 			} finally {
 				r.release();
@@ -370,6 +375,22 @@ describe.each(implementations)('KVStore: %s', (_name, open) => {
 			// A collapsed range selects nothing, exactly as scanRange's does.
 			expect(await positions(store, 'i/a/2', 'i/a/2')).toEqual([]);
 			expect(await positions(store, 'i/b', 'i/a')).toEqual([]);
+		});
+
+		it('yields the exact reverse under desc', async () => {
+			store = await open();
+			await seedPositions(store);
+			expect(await positions(store, 'i/a/2', 'i/a/3', 'desc')).toEqual([ 'c/y' ]);
+			expect(await positions(store, 'i/a/2', undefined, 'desc')).toEqual([ 'c/z', 'c/x', 'c/y' ]);
+			expect(await positions(store, undefined, 'i/a/2', 'desc')).toEqual([ 'c/x' ]);
+			expect(await positions(store, undefined, undefined, 'desc')).toEqual([
+				'c/z',
+				'c/x',
+				'c/y',
+				'c/x',
+			]);
+			expect(await positions(store, 'i/a/2', 'i/a/2', 'desc')).toEqual([]);
+			expect(await positions(store, 'i/b', 'i/a', 'desc')).toEqual([]);
 		});
 
 		it('drops a record’s positions when the record is rewritten or deleted', async () => {
@@ -398,6 +419,9 @@ describe.each(implementations)('KVStore: %s', (_name, open) => {
 			// positions, c/y is gone. A backend reading only committed state would
 			// answer the seed's [x, y, x] instead.
 			expect(seen).toEqual([ 'c/w', 'c/x' ]);
+			const backward: string[] = [];
+			for await (const key of w.indexScan('i/a/', 'i/a0', 'desc')) backward.push(key);
+			expect(backward).toEqual([ 'c/x', 'c/w' ]);
 			await w.commit();
 		});
 
@@ -774,19 +798,39 @@ function indexScanRowsCases(open: () => Promise<KVStore>): void {
 	});
 
 	/** Every entry of a range, as (position, key) pairs — values checked apart. */
-	const walk = async (lo?: string, hi?: string): Promise<IndexEntry[]> => {
+	const walk = async (
+		lo?: string,
+		hi?: string,
+		direction?: 'asc' | 'desc',
+	): Promise<IndexEntry[]> => {
 		const r = await store!.read();
 		try {
 			const out: IndexEntry[] = [];
-			for await (const entry of r.indexScanRows(lo, hi)) out.push(entry);
+			for await (const entry of r.indexScanRows(lo, hi, direction)) out.push(entry);
 			return out;
 		} finally {
 			r.release();
 		}
 	};
 
-	const pairs = async (lo?: string, hi?: string): Promise<[string, string][]> =>
-		(await walk(lo, hi)).map((e) => [ e.position, e.key ]);
+	const pairs = async (
+		lo?: string,
+		hi?: string,
+		direction?: 'asc' | 'desc',
+	): Promise<[string, string][]> =>
+		(await walk(lo, hi, direction)).map((e) => [ e.position, e.key ]);
+
+	/** indexScan's keys over a range, backward. */
+	const keysBackward = async (lo?: string, hi?: string): Promise<string[]> => {
+		const r = await store!.read();
+		try {
+			const out: string[] = [];
+			for await (const key of r.indexScan(lo, hi, 'desc')) out.push(key);
+			return out;
+		} finally {
+			r.release();
+		}
+	};
 
 	/** `count` records under `keyPrefix`, each holding the positions it is given. */
 	const seedRows = async (
@@ -845,6 +889,61 @@ function indexScanRowsCases(open: () => Promise<KVStore>): void {
 		]);
 		expect(await pairs('i/a/2', 'i/a/2')).toEqual([]);
 		expect(await pairs('i/b', 'i/a')).toEqual([]);
+	});
+
+	it('yields the exact reverse under desc, values included', async () => {
+		store = await open();
+		const w = await store.write();
+		await w.put('c/x', { v: 'x', ix: [ 'i/a/1', 'i/a/3' ] });
+		await w.put('c/y', { v: 'y', ix: [ 'i/a/2' ] });
+		await w.put('c/z', { v: 'z', ix: [ 'i/b/1' ] });
+		await w.commit();
+
+		for (
+			const [ lo, hi ] of [ [ 'i/a/', 'i/a0' ], [ 'i/a/2', undefined ], [ undefined, 'i/a/2' ], [] ]
+		) {
+			expect(await walk(lo, hi, 'desc')).toEqual((await walk(lo, hi)).reverse());
+		}
+		expect(await pairs('i/a/2', 'i/a/2', 'desc')).toEqual([]);
+		expect(await pairs('i/b', 'i/a', 'desc')).toEqual([]);
+	});
+
+	it('reads a range longer than one request backward', async () => {
+		store = await open();
+		await seedRows(store, 600, 'c/', (at) => [ `i/a/${at}`, `i/b/${at}` ]);
+		const forward = await pairs('i/');
+		expect(await pairs('i/', undefined, 'desc')).toEqual([ ...forward ].reverse());
+		expect(await keysBackward('i/')).toEqual(forward.map(([ , k ]) => k).reverse());
+	});
+
+	// Backward, a continuation resumes at the position of the last entry
+	// yielded with only the records below it on the record key still to come.
+	it('yields a tie group that straddles a chunk boundary exactly once, backward', async () => {
+		store = await open();
+		await seedRows(store, 600, 'c/', () => [ 'i/tie' ]);
+		const w = await store.write();
+		await w.put('c/before', { v: 'before', ix: [ 'i/aaa' ] });
+		await w.put('c/after', { v: 'after', ix: [ 'i/zzz' ] });
+		await w.commit();
+
+		const forward = await pairs('i/');
+		const backward = await pairs('i/', undefined, 'desc');
+		expect(backward).toHaveLength(602);
+		expect(backward).toEqual([ ...forward ].reverse());
+		expect(await keysBackward('i/')).toEqual(forward.map(([ , k ]) => k).reverse());
+	});
+
+	it('stops when the caller does, backward', async () => {
+		store = await open();
+		await seedRows(store, 600, 'c/', (at) => [ `i/a/${at}` ]);
+		const r = await store.read();
+		const seen: string[] = [];
+		for await (const entry of r.indexScanRows('i/a/', undefined, 'desc')) {
+			seen.push(entry.key);
+			if (seen.length === 3) break;
+		}
+		r.release();
+		expect(seen).toEqual([ 'c/0599', 'c/0598', 'c/0597' ]);
 	});
 
 	it('names the same records indexScan does, in the same order', async () => {
@@ -940,6 +1039,9 @@ function indexScanRowsCases(open: () => Promise<KVStore>): void {
 			{ position: 'i/a/0', key: 'c/w', value: { v: 'w', ix: [ 'i/a/0' ] } },
 			{ position: 'i/a/9', key: 'c/x', value: { v: 'x2', ix: [ 'i/a/9' ] } },
 		]);
+		const backward: IndexEntry[] = [];
+		for await (const entry of w.indexScanRows('i/a/', 'i/a0', 'desc')) backward.push(entry);
+		expect(backward).toEqual([ ...seen ].reverse());
 		w.release();
 	});
 }

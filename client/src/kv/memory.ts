@@ -91,12 +91,29 @@ class MemoryRead implements KVRead {
 	 * backend exists for tests and Node, where the constant is what it costs and
 	 * the asymptotics of the two paths still match.
 	 */
-	async *indexScan(lo?: string, hi?: string): AsyncIterable<string> {
-		for (const entry of this.indexEntries(lo, hi)) yield entry.key;
+	async *indexScan(
+		lo?: string,
+		hi?: string,
+		direction: 'asc' | 'desc' = 'asc',
+	): AsyncIterable<string> {
+		for (const entry of this.indexEntriesIn(lo, hi, direction)) yield entry.key;
 	}
 
-	async *indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry> {
-		yield* this.indexEntries(lo, hi);
+	async *indexScanRows(
+		lo?: string,
+		hi?: string,
+		direction: 'asc' | 'desc' = 'asc',
+	): AsyncIterable<IndexEntry> {
+		yield* this.indexEntriesIn(lo, hi, direction);
+	}
+
+	private indexEntriesIn(
+		lo: string | undefined,
+		hi: string | undefined,
+		direction: 'asc' | 'desc',
+	): IndexEntry[] {
+		const entries = this.indexEntries(lo, hi);
+		return direction === 'desc' ? entries.reverse() : entries;
 	}
 
 	async indexSeek(

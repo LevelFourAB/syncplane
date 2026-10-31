@@ -106,7 +106,8 @@ export interface QueryPlan {
 	/**
 	 * The ranges to read, in order. Usually one; an `in` over the leading
 	 * component produces several, and a caller serving an ORDERED query from
-	 * several ranges must merge them rather than concatenate.
+	 * several ranges must merge them rather than concatenate. A `reverse` plan
+	 * is the exception: its ranges are read one after the other, as listed.
 	 */
 	ranges: IndexRange[];
 	/**
@@ -120,6 +121,16 @@ export interface QueryPlan {
 	 * narrower candidate set.
 	 */
 	ordered: boolean;
+	/**
+	 * Whether an `ordered` plan supplies its ordering by reading each range from
+	 * its high end to its low end, the ranges in the order listed. It is set when
+	 * every order key runs against its component's direction. The ranges then
+	 * hold the first order component's real values, its NaN rank and its missing
+	 * rank, in that order and each only when the predicate admits it: the two
+	 * non-real ranks sort last in either direction, where reading backward would
+	 * put them first.
+	 */
+	reverse: boolean;
 	/**
 	 * The encoded equality-pinned components every entry in the range shares. A
 	 * range component is NOT part of it: only the components the range fixes to
@@ -360,6 +371,7 @@ function planUnion(
 		// the full `or` is a correct per-row re-check.
 		...(exact ? {} : { residual: where }),
 		ordered: false,
+		reverse: false,
 		orderSpansIndex: false,
 		distinctPerRange: false,
 		union,
@@ -577,12 +589,18 @@ function planAgainst(
 	// An index that pins nothing and bounds nothing reads the whole thing, in a
 	// different order than the rows are stored — strictly worse than a scan
 	// unless it supplies the ordering.
-	let ordered = orderServedBy(comps, w.pinned, orderBy, w.pinnedKeys);
+	const forward = orderServedBy(comps, w.pinned, orderBy, w.pinnedKeys, false);
+	let reverse = !forward && orderServedBy(comps, w.pinned, orderBy, w.pinnedKeys, true);
+	let ordered = forward || reverse;
 	if (w.pinned === 0 && !ranged && !ordered) return undefined;
 
 	// Several ranges cannot be read in order without a merge, so a caller that
 	// needs the ordering has to be told the plan does not supply it.
-	if (ranges.length > 1 && orderBy !== undefined && orderBy.length > 0) ordered = false;
+	if (ranges.length > 1 && orderBy !== undefined && orderBy.length > 0) {
+		ordered = false;
+		reverse = false;
+	}
+	if (reverse) ranges = splitRanks(ranges[0]!, w.prefixes[0]!);
 
 	return {
 		plan: {
@@ -590,6 +608,7 @@ function planAgainst(
 			ranges,
 			residual: residualOf(terms, used),
 			ordered,
+			reverse,
 			...(w.prefixes.length === 1 ? { prefix: w.prefixes[0]! } : {}),
 			orderSpansIndex: ordered && w.pinned + (orderBy?.length ?? 0) === comps.length,
 			distinctPerRange: comps.every((c, ci) => c.fans.length === 0 || ci < w.pinned),
@@ -772,7 +791,7 @@ function planGroupAgainst(
 			// that order exactly when nothing sits between the partition and it.
 			ordered: orderBy === undefined || orderBy.length === 0
 				? w.pinned + 1 === comps.length
-				: orderServedBy(comps, w.pinned + 1, orderBy, w.pinnedKeys),
+				: orderServedBy(comps, w.pinned + 1, orderBy, w.pinnedKeys, false),
 			partition: w.pinned + 1,
 		},
 		score: w.pinned * 4 + (residual === undefined ? 2 : 0) + (positionsAreRows ? 1 : 0),
@@ -783,13 +802,17 @@ function planGroupAgainst(
  * Whether reading the index in order yields the query's requested order. The
  * equality prefix contributes nothing — every row in the range agrees on those
  * components — so the order keys must line up with the components that FOLLOW
- * it, in sequence, direction included.
+ * it, in sequence, direction included. With `reversed` set, every direction
+ * must be the opposite one instead: the order reading the index backward
+ * yields, before the NaN and missing ranks are moved back to the end (see
+ * splitRanks).
  */
 function orderServedBy(
 	comps: IndexComponent[],
 	pinned: number,
 	orderBy: OrderKey[] | undefined,
 	pinnedKeys: Map<number, Scalar>,
+	reversed: boolean,
 ): boolean {
 	if (orderBy === undefined || orderBy.length === 0) return false;
 	if (pinned + orderBy.length > comps.length) return false;
@@ -799,7 +822,7 @@ function orderServedBy(
 		if (k.relevance) return false;
 		const j = pinned + i;
 		const c = comps[j]!;
-		if (c.desc !== (k.dir === 'desc')) return false;
+		if (c.desc !== ((k.dir === 'desc') !== reversed)) return false;
 		const keys = matchFanPath(c, k.path);
 		if (keys === undefined) return false;
 		if (keys.length === 0) {
@@ -1295,6 +1318,40 @@ function cmpBounds(
 	}
 	return undefined;
 }
+
+/**
+ * Cuts `r`, a range over the component that follows the equality prefix `p`,
+ * into the parts holding that component's real values, its NaN rank and its
+ * missing rank, in that order, leaving out the parts `r` does not reach. Read
+ * backward one after the other, they give the component's real values in the
+ * opposite of their stored order, then the two ranks that sort last in either
+ * direction.
+ */
+function splitRanks(r: IndexRange, p: string): IndexRange[] {
+	const parts: IndexRange[] = [
+		{ lo: p + TAG_PRESENT, hi: upperBound(p + TAG_PRESENT) },
+		{ lo: p + TAG_NAN, hi: upperBound(p + TAG_NAN) },
+		// The missing rank is the last tag, so its part runs to the end of the
+		// prefix.
+		{ lo: p + TAG_MISSING, hi: upperBound(p) },
+	];
+	const out: IndexRange[] = [];
+	for (const part of parts) {
+		const lo = r.lo === undefined || r.lo < part.lo! ? part.lo! : r.lo;
+		const hi = r.hi === undefined
+			? part.hi
+			: part.hi === undefined || r.hi < part.hi
+			? r.hi
+			: part.hi;
+		if (hi !== undefined && lo >= hi) continue;
+		out.push(hi === undefined ? { lo } : { lo, hi });
+	}
+	return out;
+}
+
+/** The NaN tag, as a one-character key — the rank between the real values and
+ * the missing one. */
+const TAG_NAN = '\u00fd';
 
 /** The missing tag, as a one-character key — the ceiling of every rank, and
  * the whole payload of a component whose path resolved to nothing. */

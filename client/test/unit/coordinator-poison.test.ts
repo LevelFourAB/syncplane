@@ -106,12 +106,12 @@ class HookedWrite implements KVWrite {
 		return this.inner.scanRange(lo, hi);
 	}
 
-	indexScan(lo?: string, hi?: string): AsyncIterable<string> {
-		return this.inner.indexScan(lo, hi);
+	indexScan(lo?: string, hi?: string, direction?: 'asc' | 'desc'): AsyncIterable<string> {
+		return this.inner.indexScan(lo, hi, direction);
 	}
 
-	indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry> {
-		return this.inner.indexScanRows(lo, hi);
+	indexScanRows(lo?: string, hi?: string, direction?: 'asc' | 'desc'): AsyncIterable<IndexEntry> {
+		return this.inner.indexScanRows(lo, hi, direction);
 	}
 
 	indexCount(lo?: string, hi?: string): Promise<number> {

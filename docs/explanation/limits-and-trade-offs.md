@@ -12,6 +12,8 @@ Only memory is bounded to the requested page size; the underlying scan work is u
 
 A composite index reduces query time to $O(\text{limit})$. Without a composite index, a query that filters on `state` and orders by `rank` must scan the entire matching range to sort the results.
 
+An index read backward also stops at the limit, but a keyset cursor does not move the start of that read. A cursor holds the order keys in the direction of the query, so its bytes do not identify a position in an index stored the other way. Each page starts at the top of the range and skips the rows before the cursor, so page $n$ costs $O(n \cdot \text{limit})$. For a list that users page deep into, declare the index components in the direction that the list is read.
+
 Unlike the RPC, a `Spec` without a `Limit` holds every match in memory. Inside `EntityTx`, the scan also runs while the engine holds the workspace write lock.
 
 ### Unsupported index shapes

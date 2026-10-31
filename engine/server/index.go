@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 
@@ -608,11 +609,12 @@ func indexWalk(
 	seenRows := make(map[string]struct{})
 	seen := 0
 	budget := limits.maxIndexScanCandidates()
-	// A backward page wants the rows nearest its before bound, so an ordered
-	// walk has to come at the range from that end — otherwise stopping early
-	// would stop on the wrong rows.
+	// A Reverse plan reads its ranges backward to supply the ordering. A
+	// backward page wants the rows nearest its before bound, so an ordered walk
+	// has to come at the ranges from that end instead — otherwise stopping
+	// early would stop on the wrong rows.
 	scanOrder := storage.ScanAsc
-	if plan.Ordered && pg.backward {
+	if plan.Ordered && plan.Reverse != pg.backward {
 		scanOrder = storage.ScanDesc
 	}
 	sink := sinkFor(residual)
@@ -623,7 +625,12 @@ func indexWalk(
 	// index; a single plan is one branch of itself. The row-key dedupe above
 	// spans branches, so a row two branches yield is offered once.
 	for _, br := range plan.Branches() {
-		for _, r := range br.Ranges {
+		ranges := br.Ranges
+		if plan.Ordered && pg.backward {
+			ranges = slices.Clone(ranges)
+			slices.Reverse(ranges)
+		}
+		for _, r := range ranges {
 			// The sink carries across ranges, so the fill check at a boundary
 			// has to see what the previous range buffered — keys still buffered
 			// were never offered, and want would be answering for the page
@@ -880,7 +887,10 @@ func searchSeed(
 // seekRange narrows one range of an ordered plan to the part of it the page's
 // cursors can still contain. It returns r unchanged for a plan that is not
 // Ordered, for a plan with several ranges (which have no shared prefix to
-// compose with), and for a page with no cursors.
+// compose with), for a Reverse plan, and for a page with no cursors. A cursor
+// encodes the order keys in the query's directions, which on a Reverse plan
+// are the opposite of the index's, so its bytes name no position there; the
+// caller's page check alone applies the cursor.
 //
 // The bound is the plan's equality prefix followed by as much of the cursor as
 // the chosen index can take:
@@ -898,7 +908,7 @@ func searchSeed(
 //     narrows, the comparison decides.
 func seekRange(plan *query.Plan, order *query.Order, pg page, r query.Range) (lo, hi []byte, err error) {
 	lo, hi = r.Lo, r.Hi
-	if !plan.Ordered || len(plan.Ranges) != 1 || plan.Prefix == nil || !pg.bounded() {
+	if !plan.Ordered || plan.Reverse || len(plan.Ranges) != 1 || plan.Prefix == nil || !pg.bounded() {
 		return lo, hi, nil
 	}
 	bound := func(entry []byte) ([]byte, error) {

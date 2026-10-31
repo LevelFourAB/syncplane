@@ -452,8 +452,16 @@ class IDBRead implements KVRead {
 		}
 	}
 
-	async *indexScan(lo?: string, hi?: string): AsyncIterable<string> {
+	async *indexScan(
+		lo?: string,
+		hi?: string,
+		direction: 'asc' | 'desc' = 'asc',
+	): AsyncIterable<string> {
 		if (emptyRange(lo, hi)) return;
+		if (direction === 'desc') {
+			for await (const entry of this.indexBackward(lo, hi, false)) yield entry.key;
+			return;
+		}
 		const range = boundRange(lo, hi);
 		// `getAllKeys` on an INDEX returns the PRIMARY keys of the matching
 		// records, one per matching index entry, in index order — which is the
@@ -478,8 +486,16 @@ class IDBRead implements KVRead {
 		}
 	}
 
-	async *indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry> {
+	async *indexScanRows(
+		lo?: string,
+		hi?: string,
+		direction: 'asc' | 'desc' = 'asc',
+	): AsyncIterable<IndexEntry> {
 		if (emptyRange(lo, hi)) return;
+		if (direction === 'desc') {
+			yield* this.indexBackward(lo, hi, true);
+			return;
+		}
 		let want = INDEX_ROW_CHUNK;
 		let from = lo;
 		// The last entry yielded, which the next request resumes AT rather than
@@ -507,6 +523,81 @@ class IDBRead implements KVRead {
 			// past it — so that case grows past the cap rather than spinning.
 			want = fresh === 0 ? want * 2 : Math.min(want * 2, INDEX_ROW_CHUNK_MAX);
 		}
+	}
+
+	/**
+	 * The entries of [lo, hi) from the high end down, a chunk per request,
+	 * growing as indexScan's do. `values` decides whether each entry carries its
+	 * record; without it `value` is undefined.
+	 *
+	 * Backward reads take a cursor rather than getAll*: a getAll request has no
+	 * direction outside the newest engines. The cursor walks one chunk inside a
+	 * single request and is dropped before the first yield, because it cannot
+	 * survive the awaits a caller does between yields; the next chunk opens a
+	 * fresh one at the last entry yielded.
+	 */
+	private async *indexBackward(
+		lo: string | undefined,
+		hi: string | undefined,
+		values: boolean,
+	): AsyncIterable<IndexEntry> {
+		let want = INDEX_SCAN_CHUNK;
+		let last: IndexEntry | undefined;
+		for (;;) {
+			const chunk = await this.backwardChunk(lo, hi, want, last, values);
+			yield* chunk;
+			if (chunk.length < want) return;
+			last = chunk[chunk.length - 1]!;
+			want = Math.min(want * 2, INDEX_ROW_CHUNK_MAX);
+		}
+	}
+
+	/**
+	 * Up to `want` entries of [lo, hi) read backward in one request, starting
+	 * below `after` when it is set: below its position, or at its position with
+	 * a lesser record key.
+	 */
+	private backwardChunk(
+		lo: string | undefined,
+		hi: string | undefined,
+		want: number,
+		after: IndexEntry | undefined,
+		values: boolean,
+	): Promise<IndexEntry[]> {
+		// The resumed range keeps `after.position` itself, closed, because the
+		// records sharing it with a lesser key are still to come.
+		const range = after === undefined
+			? boundRange(lo, hi)
+			: lo === undefined
+			? IDBKeyRange.upperBound(after.position)
+			: IDBKeyRange.bound(lo, after.position);
+		const index = this.store().index(INDEX_FIELD);
+		const request = values ? index.openCursor(range, 'prev') : index.openKeyCursor(range, 'prev');
+		return new Promise<IndexEntry[]>((resolve, reject) => {
+			const out: IndexEntry[] = [];
+			request.onerror = () => reject(request.error);
+			request.onsuccess = () => {
+				const cursor = request.result;
+				if (cursor === null) {
+					resolve(out);
+					return;
+				}
+				const position = cursor.key as string;
+				const key = cursor.primaryKey as string;
+				if (after !== undefined && position === after.position && key >= after.key) {
+					// Under 'prev' a tie runs from the greatest record key down, so
+					// the ones already yielded come first. continuePrimaryKey skips
+					// them in one step, landing on `after` itself, which the plain
+					// continue below steps past.
+					if (key > after.key) cursor.continuePrimaryKey(after.position, after.key);
+					else cursor.continue();
+					return;
+				}
+				out.push({ position, key, value: values ? (cursor as IDBCursorWithValue).value : undefined });
+				if (out.length >= want) resolve(out);
+				else cursor.continue();
+			};
+		});
 	}
 
 	/**
@@ -641,14 +732,31 @@ class IDBWrite extends IDBRead implements KVWrite {
 	 * queries take a read transaction (see query/execute.ts) — so the honest
 	 * semantics are worth more here than the request-shaped ones above.
 	 */
-	override async *indexScan(lo?: string, hi?: string): AsyncIterable<string> {
-		for (const entry of await this.indexEntries(lo, hi)) yield entry.key;
+	override async *indexScan(
+		lo?: string,
+		hi?: string,
+		direction: 'asc' | 'desc' = 'asc',
+	): AsyncIterable<string> {
+		for (const entry of await this.indexEntriesIn(lo, hi, direction)) yield entry.key;
 	}
 
 	/** indexScanRows with this transaction's uncommitted writes folded in, for
 	 * the reason indexScan above does. */
-	override async *indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry> {
-		yield* await this.indexEntries(lo, hi);
+	override async *indexScanRows(
+		lo?: string,
+		hi?: string,
+		direction: 'asc' | 'desc' = 'asc',
+	): AsyncIterable<IndexEntry> {
+		yield* await this.indexEntriesIn(lo, hi, direction);
+	}
+
+	private async indexEntriesIn(
+		lo: string | undefined,
+		hi: string | undefined,
+		direction: 'asc' | 'desc',
+	): Promise<IndexEntry[]> {
+		const entries = await this.indexEntries(lo, hi);
+		return direction === 'desc' ? entries.reverse() : entries;
 	}
 
 	/**

@@ -253,6 +253,8 @@ func buildNote(mt protoreflect.MessageType, fields map[string]any) proto.Message
 			m.Set(fd, protoreflect.ValueOfInt64(val))
 		case uint64:
 			m.Set(fd, protoreflect.ValueOfUint64(val))
+		case float64:
+			m.Set(fd, protoreflect.ValueOfFloat64(val))
 		case bool:
 			m.Set(fd, protoreflect.ValueOfBool(val))
 		case []byte:

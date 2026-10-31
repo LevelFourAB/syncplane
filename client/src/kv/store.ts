@@ -167,6 +167,8 @@ export interface KVRead {
 	 * Positions are ordered by code-unit string comparison, exactly as keys are,
 	 * and a tie is broken on the record's key; a position ends with the row key
 	 * it belongs to, so ties do not arise in practice (see query/indexkey.ts).
+	 * `'desc'` yields the exact reverse: positions descending, a tie on the
+	 * record's key descending. Omitted means `'asc'`.
 	 * A record occupying several positions in the range is therefore yielded
 	 * several times, and a caller that wants rows dedupes (queryByIndex does).
 	 *
@@ -175,16 +177,16 @@ export interface KVRead {
 	 * first few rows of a wide range, and a backend must not have paid for the
 	 * tail a caller never pulled. Stopping the iteration stops the work.
 	 */
-	indexScan(lo?: string, hi?: string): AsyncIterable<string>;
+	indexScan(lo?: string, hi?: string, direction?: 'asc' | 'desc'): AsyncIterable<string>;
 	/**
 	 * Yields every index position in [lo, hi) together with the record holding
 	 * it — indexScan's entries, each against the value a caller would otherwise
 	 * fetch by key. An undefined bound is open on that end.
 	 *
-	 * Order is indexScan's: by position, ties broken on the record's key. A
-	 * record occupying several positions in the range comes back once per
-	 * position, carrying the same value each time, so a caller that wants rows
-	 * dedupes on `key`.
+	 * Order is indexScan's: by position, ties broken on the record's key, and
+	 * the exact reverse under `'desc'`. A record occupying several positions in
+	 * the range comes back once per position, carrying the same value each time,
+	 * so a caller that wants rows dedupes on `key`.
 	 *
 	 * Lazy: stopping the iteration stops the work. The range is taken a chunk at
 	 * a time, and continuing past a chunk re-reads only the records sharing the
@@ -196,7 +198,7 @@ export interface KVRead {
 	 * page out of a wide range wants indexScan, which reads no record it does
 	 * not name.
 	 */
-	indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry>;
+	indexScanRows(lo?: string, hi?: string, direction?: 'asc' | 'desc'): AsyncIterable<IndexEntry>;
 	/**
 	 * The number of index positions in [lo, hi) — how many entries an indexScan
 	 * over the same range would yield, counted per POSITION exactly as indexScan
@@ -282,12 +284,12 @@ export class CountingWrite implements KVWrite {
 		return this.inner.scanRange(lo, hi);
 	}
 
-	indexScan(lo?: string, hi?: string): AsyncIterable<string> {
-		return this.inner.indexScan(lo, hi);
+	indexScan(lo?: string, hi?: string, direction?: 'asc' | 'desc'): AsyncIterable<string> {
+		return this.inner.indexScan(lo, hi, direction);
 	}
 
-	indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry> {
-		return this.inner.indexScanRows(lo, hi);
+	indexScanRows(lo?: string, hi?: string, direction?: 'asc' | 'desc'): AsyncIterable<IndexEntry> {
+		return this.inner.indexScanRows(lo, hi, direction);
 	}
 
 	indexSeek(

@@ -392,7 +392,7 @@ func groupOrderServedBy(comps []IndexComponent, after int, order *Order, pinnedK
 	if order == nil || len(order.keys) == 0 {
 		return after == len(comps)
 	}
-	return orderServedBy(comps, after, order, pinnedKeys)
+	return orderServedBy(comps, after, order, pinnedKeys, false)
 }
 
 // ValueOf names the group a prefix from GroupPrefix stands for, by matching the

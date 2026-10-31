@@ -121,7 +121,8 @@ type Plan struct {
 	// Ranges are the byte ranges to read, in the order they must be read.
 	// Usually one; an `in` over the leading component produces several, and a
 	// caller serving an ORDERED query from several ranges must merge them
-	// rather than concatenate.
+	// rather than concatenate. A Reverse plan is the exception: its ranges are
+	// read one after the other, as listed.
 	Ranges []Range
 	// Residual is the part of the predicate the ranges do not guarantee, to be
 	// re-checked against each fetched row. Nil means the range is exact and no
@@ -131,6 +132,14 @@ type Plan struct {
 	// query's requested order. When false the caller must still sort, and the
 	// index bought only a narrower candidate set.
 	Ordered bool
+	// Reverse reports that an Ordered plan supplies its ordering by reading
+	// each range from its high end to its low end, the ranges in the order
+	// listed. It is set when every order key runs against its component's
+	// direction. The ranges then hold the first order component's real values,
+	// its NaN rank and its missing rank, in that order and each only when the
+	// predicate admits it: the two non-real ranks sort last in either
+	// direction, where reading backward would put them first.
+	Reverse bool
 	// Prefix is the encoded equality-pinned components every entry in the range
 	// shares. A range component is NOT part of it: only the components the
 	// range fixes to a single value are.
@@ -167,14 +176,18 @@ type Plan struct {
 
 // TieGroup returns the leading bytes of entry that every entry of the plan's
 // index tying with it on the order keys shares, or nil when the plan has no
-// tie group to finish: one that is not Ordered, or whose OrderSpansIndex
-// holds. The result aliases entry.
+// tie group to finish: one that is not Ordered, or a forward one whose
+// OrderSpansIndex holds. The result aliases entry.
 //
 // Past the order keys the index orders a tie by its remaining components,
 // where Order.Less orders it by row key, so the entry that follows a full page
-// in the walk can still sort before a row the page holds. A walk that stops
-// when its page is full has to read on while the next entry returns the same
-// tie group as the previous one, and can stop at the first that does not.
+// in the walk can still sort before a row the page holds. A Reverse plan has
+// the same problem whatever the index holds: reading backward inverts the
+// row-key tiebreak, and puts a later order key's NaN and missing ranks before
+// its real values. Its tie group is therefore cut at the first order key
+// alone, where the ranges keep the order exact. A walk that stops when its
+// page is full has to read on while the next entry returns the same tie group
+// as the previous one, and can stop at the first that does not.
 //
 // It errors on bytes that are not an entry of the plan's index.
 func (p *Plan) TieGroup(entry []byte) ([]byte, error) {
@@ -544,7 +557,9 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 	// An index that pins nothing and bounds nothing reads the whole thing, in a
 	// different order than the rows are stored — strictly worse than a scan
 	// unless it supplies the ordering.
-	ordered := orderServedBy(comps, w.pinned, order, w.pinnedKeys)
+	ordered := orderServedBy(comps, w.pinned, order, w.pinnedKeys, false)
+	reverse := !ordered && orderServedBy(comps, w.pinned, order, w.pinnedKeys, true)
+	ordered = ordered || reverse
 	if w.pinned == 0 && rangedComp < 0 && !ordered {
 		return nil, 0
 	}
@@ -555,6 +570,10 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 	// Ordered honestly here is what keeps the sort correct.
 	if len(ranges) > 1 && order != nil && len(order.keys) > 0 {
 		ordered = false
+		reverse = false
+	}
+	if reverse {
+		ranges = splitRanks(ranges[0], w.prefixes[0])
 	}
 	if idx.Encoder.Sparse() && !insidePresentRanks(ranges) {
 		return nil, 0
@@ -567,7 +586,10 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 	var tieComps []IndexComponent
 	if ordered {
 		spans = w.pinned+len(order.keys) == len(comps)
-		if !spans {
+		switch {
+		case reverse:
+			tieComps = comps[:w.pinned+1]
+		case !spans:
 			tieComps = comps[:w.pinned+len(order.keys)]
 		}
 	}
@@ -576,10 +598,37 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 		Ranges:          ranges,
 		Residual:        residual,
 		Ordered:         ordered,
+		Reverse:         reverse,
 		Prefix:          prefix,
 		OrderSpansIndex: spans,
 		tieComps:        tieComps,
 	}, w.pinned
+}
+
+// splitRanks cuts r, a range over the component that follows the equality
+// prefix p, into the parts holding that component's real values, its NaN rank
+// and its missing rank, in that order, leaving out the parts r does not reach.
+// Read backward one after the other, they give the component's real values in
+// the opposite of their stored order, then the two ranks that sort last in
+// either direction.
+func splitRanks(r Range, p []byte) []Range {
+	at := func(tag byte) []byte { return append(append([]byte{}, p...), tag) }
+	parts := []Range{
+		{Lo: at(tagPresent), Hi: UpperBound(at(tagPresent))},
+		{Lo: at(tagNaN), Hi: UpperBound(at(tagNaN))},
+		// The missing rank is the last tag, so its part runs to the end of the
+		// prefix.
+		{Lo: at(tagMissing), Hi: UpperBound(p)},
+	}
+	out := make([]Range, 0, len(parts))
+	for _, part := range parts {
+		lo, hi := maxBytes(part.Lo, r.Lo), minBytes(part.Hi, r.Hi)
+		if hi != nil && bytes.Compare(lo, hi) >= 0 {
+			continue
+		}
+		out = append(out, Range{Lo: lo, Hi: hi})
+	}
+	return out
 }
 
 // insidePresentRanks reports whether every range lies in [tagPresent,
@@ -696,12 +745,15 @@ type reduction struct {
 // requested order. The equality prefix contributes nothing to the ordering —
 // every row in the range agrees on those components — so the order keys must
 // line up with the components that FOLLOW it, in sequence, direction included.
+// With reversed set, every direction must be the opposite one instead: the
+// order reading the index backward yields, before the NaN and missing ranks
+// are moved back to the end (see splitRanks).
 //
 // A query that asks for no order reports false rather than true. Any index
 // would "serve" an empty order trivially, but this answer is also what decides
 // whether supplying the ordering is reason enough to use an index that pins and
 // bounds nothing — and for a caller that wanted no order it is not.
-func orderServedBy(comps []IndexComponent, pinned int, order *Order, pinnedKeys map[int]condValue) bool {
+func orderServedBy(comps []IndexComponent, pinned int, order *Order, pinnedKeys map[int]condValue, reversed bool) bool {
 	if order == nil || len(order.keys) == 0 {
 		return false
 	}
@@ -711,7 +763,7 @@ func orderServedBy(comps []IndexComponent, pinned int, order *Order, pinnedKeys 
 	for i, k := range order.keys {
 		j := pinned + i
 		c := comps[j]
-		if c.desc != k.desc {
+		if c.desc != (k.desc != reversed) {
 			return false
 		}
 		keys, ok := matchFanPath(c.fields, k.fields)

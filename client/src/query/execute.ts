@@ -409,7 +409,7 @@ export async function queryByIndex<D extends DescMessage>(
 		&& plan.ordered
 		&& plan.residual === undefined
 		&& (window === undefined || window.seek.before === undefined)
-		&& plan.ranges.length === 1
+		&& (plan.ranges.length === 1 || plan.reverse)
 		&& plan.distinctPerRange;
 	// The confirmed base version survives an optimistic edit — it is what a
 	// compare-and-swap writes back — so it is read rather than zeroed. A row
@@ -461,20 +461,31 @@ export async function queryByIndex<D extends DescMessage>(
 	let reads = 0;
 	// Matches past the page, which `total` still has to account for.
 	let beyond = 0;
-	// The order keys an ordered plan serves, which is every key the query asked
-	// for (orderServedBy claims no ordering for an empty one).
-	const servedOrder = compiled.orderBy ?? [];
+	// The order keys a tie group is cut on: every key the query asked for
+	// (orderServedBy claims no ordering for an empty one), or the first alone on
+	// a reversed plan. Reading backward puts a later key's NaN and missing ranks
+	// before its real values, so past the first key the walk order is not the
+	// comparator's; splitRanks keeps it exact on the first.
+	const tieOrder = plan.reverse ? (compiled.orderBy ?? []).slice(0, 1) : compiled.orderBy ?? [];
 	// Whether the walk has read past every row that ties with the boundary row
-	// — the budget-th match in walk order — on the order keys. Until then the
-	// walk cannot settle.
+	// — the budget-th match in walk order — on `tieOrder`. Until then the walk
+	// cannot settle.
 	//
 	// The scan breaks such a tie on the row key. An index whose order keys reach
-	// its last component orders the tie the same way, because every entry ends
-	// with the row key, so the boundary row is the last of its group the page
-	// can need. One with components past the order keys orders the tie by those
-	// components instead, and a later row of the group can sort before the
-	// boundary row on its key.
-	let tieClosed = plan.orderSpansIndex;
+	// its last component orders the tie the same way when read forward, because
+	// every entry ends with the row key, so the boundary row is the last of its
+	// group the page can need. One with components past the order keys orders
+	// the tie by those components instead, and a backward read orders it by row
+	// key descending; either way a later row of the group can sort before the
+	// boundary row.
+	let tieClosed = plan.orderSpansIndex && !plan.reverse;
+	// Past the budget only a row can close the tie group, so while it is open
+	// the walk reads rows in batches that start at one and double: the next
+	// row usually closes the group, and a long group still costs few reads.
+	let tieBatch = 1;
+	// The walk direction, which also reverses how the stores order a tie on the
+	// position (see KVRead.indexScan).
+	const direction = plan.reverse ? 'desc' : 'asc';
 	// How a settled walk accounts for the rest of its range, and the range's
 	// position count the decision was made from. Both are resolved at the first
 	// settled position and then hold, so the choice cannot flip mid-range and
@@ -503,11 +514,23 @@ export async function queryByIndex<D extends DescMessage>(
 	// agrees with the comparator, so every position after an accepted one is
 	// accepted. A `before` bound breaks that: whatever its seek keeps inside the
 	// range sits at the END, in exactly the remainder the count would claim.
+	//
+	// A reversed plan's ranges are the parts of ONE range, so a row with no
+	// fan-out past the prefix still holds one position across all of them, and
+	// the count is taken over every leg.
 	const countable = plan.residual === undefined
 		&& (window === undefined || window.seek.before === undefined)
 		&& (shadowed.size === 0 || countAssist)
-		&& plan.ranges.length === 1
+		&& (plan.ranges.length === 1 || plan.reverse)
 		&& plan.distinctPerRange;
+	// Whether a position past a settled walk is a match without its row being
+	// read. A residual leaves that to the row. So does a `before` bound, unless
+	// its seek ends the range exactly at the cursor: one composed from the
+	// components alone keeps the cursor's whole tie group inside the range, and
+	// a reversed plan takes no seek at all (see seekRange), so positions past
+	// the cursor are still in the walk and only `within` rejects them.
+	const positionIsMatch = plan.residual === undefined
+		&& !(window?.seek.before !== undefined && (plan.reverse || !plan.orderSpansIndex));
 	// Candidate row keys not yet read. Rows are fetched in getMany batches — one
 	// backend transaction per batch rather than per row — and classified when the
 	// batch flushes, in position order, so the outcome per row is the same as
@@ -550,7 +573,7 @@ export async function queryByIndex<D extends DescMessage>(
 				// first row that does not tie closes the group for good.
 				if (
 					!tieClosed
-					&& compareOrderKeys(entry.row, confirmed[budget - 1]!.row, servedOrder, schema) === 0
+					&& compareOrderKeys(entry.row, confirmed[budget - 1]!.row, tieOrder, schema) === 0
 				) {
 					confirmed.push(entry);
 					continue;
@@ -563,8 +586,8 @@ export async function queryByIndex<D extends DescMessage>(
 
 	ranges: for (const { lo, hi } of legs) {
 		const entries: AsyncIterable<string | IndexEntry> = batchRows === undefined
-			? tx.indexScan(lo, hi)
-			: tx.indexScanRows(lo, hi);
+			? tx.indexScan(lo, hi, direction)
+			: tx.indexScanRows(lo, hi, direction);
 		for await (const at of entries) {
 			const cKey = typeof at === 'string' ? at : at.key;
 			walked++;
@@ -597,7 +620,7 @@ export async function queryByIndex<D extends DescMessage>(
 			// counting the rest of the range costs no row reads at all. A residual
 			// predicate takes that away — the row is the only thing that can
 			// settle it — which is the price of reporting a total here.
-			if (settled && plan.residual === undefined) {
+			if (settled && positionIsMatch) {
 				// With the total opted out the walk only owes hasMore, and this
 				// position settles it: not seen, not shadowed, no residual left to
 				// reject its row — one distinct live match past the page. A `before`
@@ -616,7 +639,8 @@ export async function queryByIndex<D extends DescMessage>(
 					// (see INDEX_SCAN_CHUNK). A key out of a bulk getAllKeys is far
 					// cheaper than a record out of a point read, hence the ratio.
 					if (rangeCount === undefined) {
-						rangeCount = await tx.indexCount(lo, hi);
+						rangeCount = 0;
+						for (const leg of legs) rangeCount += await tx.indexCount(leg.lo, leg.hi);
 						settleBy = shadowed.size === 0
 								|| rangeCount - walked > shadowed.size * POSITIONS_PER_BASE_READ
 							? 'count'
@@ -632,7 +656,9 @@ export async function queryByIndex<D extends DescMessage>(
 						let shadowedInRange = 0;
 						for (const record of bases.values()) {
 							for (const p of record.ix ?? []) {
-								if (p >= lo && (hi === undefined || p < hi)) shadowedInRange++;
+								if (legs.some((leg) => p >= leg.lo && (leg.hi === undefined || p < leg.hi))) {
+									shadowedInRange++;
+								}
 							}
 						}
 						// Assigned, not accumulated: the count covers every position past
@@ -657,6 +683,13 @@ export async function queryByIndex<D extends DescMessage>(
 			batch.push(key);
 			batchRows?.push((at as IndexEntry).value);
 			if (batch.length >= READ_BATCH) await flush();
+			else if (
+				!tieClosed && budget !== undefined && plan.ordered
+				&& confirmed.length + batch.length > budget && batch.length >= tieBatch
+			) {
+				await flush();
+				tieBatch = Math.min(tieBatch * 2, READ_BATCH);
+			}
 		}
 	}
 	await flush();
@@ -1760,7 +1793,10 @@ function decline(
  * Narrows one range of an ordered plan to the part of it the page's cursors can
  * still contain. It returns the range unchanged for a plan that is not ordered,
  * for a plan with several ranges (which have no shared prefix to compose with),
- * and for a query with no cursors.
+ * for a reversed plan, and for a query with no cursors. A cursor encodes the
+ * order keys in the query's directions, which on a reversed plan are the
+ * opposite of the index's, so its bytes name no position there; the walk's
+ * `within` check alone applies the cursor.
  *
  * The bound is the plan's equality prefix followed by as much of the cursor as
  * the chosen index can take:
@@ -1778,7 +1814,8 @@ function decline(
  */
 function seekRange(plan: QueryPlan, range: IndexRange, window?: PageWindow): IndexRange {
 	if (
-		!plan.ordered || plan.ranges.length !== 1 || plan.prefix === undefined || window === undefined
+		!plan.ordered || plan.reverse || plan.ranges.length !== 1 || plan.prefix === undefined
+		|| window === undefined
 	) {
 		return range;
 	}
