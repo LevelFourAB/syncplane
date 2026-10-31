@@ -47,9 +47,7 @@ import {
 	overlayTextPrefix,
 	overlayTextWsPrefix,
 	overlayWsPrefix,
-	searchIndexKey,
-	type SearchIndexRecord,
-	searchIndexWsPrefix,
+	searchPostingsBase,
 	splitOverlayTextSuffix,
 } from '../keys.js';
 import type { IndexEntry, KVRead } from '../kv/store.js';
@@ -58,6 +56,7 @@ import type { CompiledIndex } from '../optimistic/index-maintain.js';
 import { sortOrderedFields } from '../ordering.js';
 import type { OverlayEntry } from '../overlaycache.js';
 import { decodeWholeRow, foldTextLog, readOverlay, type Row, rowOf } from '../read.js';
+import type { QueryTerm } from '../search/index.js';
 import type { QueryDeclineReason } from '../sync/events.js';
 import type { CompiledQuery, Cond, PageWindow, Path } from './ast.js';
 import { compareOrderKeys, compareRows, evalCond, type Matcher, matcherOf } from './evaluate.js';
@@ -74,16 +73,20 @@ import { IndexEncoder, upperBound } from './indexkey.js';
 import type { GroupPlan, IndexRange, QueryPlan } from './plan.js';
 import { planGroup, planGroupRows, planQuery } from './plan.js';
 import {
+	postingsTermsKey,
+	readAllKeys,
+	readTerm,
+	scanTerms,
+	type TermHead,
+	termKeys,
+	termListOf,
+} from './postings.js';
+import {
 	projectionFor,
 	projectionForGroup,
 	projectionForOverlay,
 } from './projection.js';
-import {
-	requiredMatchCond,
-	searchOverflowRange,
-	searchPostingTerm,
-	searchTermRange,
-} from './searchindex.js';
+import { requiredMatchCond, SEARCH_OVERFLOW_ENTRY, searchTermRange } from './searchindex.js';
 import type { FacetTable } from './types.js';
 
 /**
@@ -1363,11 +1366,7 @@ async function querySearchIndex<D extends DescMessage>(
 	// rows rather than believing the range about them.
 	const edited = await textEditedRows(tx, registry, def.name, workspaceId);
 
-	const prefix = indexPositionPrefix(def.name, idx.name, idx.specHash, workspaceId);
-	// Search positions sit on the row's `x/` sibling, so an indexScan over this
-	// prefix answers with `x/` keys. The suffix is the row key either way, which
-	// is what every walk below slices off.
-	const entryPrefix = searchIndexWsPrefix(def.name, workspaceId);
+	const base = searchPostingsBase(def.name, workspaceId, idx.specHash);
 
 	const postings = await querySearchPostings(
 		tx,
@@ -1377,8 +1376,7 @@ async function querySearchIndex<D extends DescMessage>(
 		matcher,
 		compiled,
 		workspaceId,
-		prefix,
-		entryPrefix,
+		base,
 		shadowed,
 		edited,
 		overlayRows,
@@ -1394,28 +1392,40 @@ async function querySearchIndex<D extends DescMessage>(
 	}
 
 	let walked = 0;
+	// One source per query term and one for the overflow rows, each reading
+	// the heads it needs once however many rounds below ask about it.
+	const sources = matcher.terms.map((t) => new TermPostings(tx, base, t));
 	/**
-	 * Reads the rows a posting range names, giving up once it has seen more
-	 * than `max` of them — 'wide' — or once the whole walk has outrun its
-	 * budget — 'budget'. Only 'ok' means the range was read completely, and
-	 * only a completely read range may narrow anything.
+	 * Reads the rows a term's postings name, giving up once they name more
+	 * than `max` — 'wide' — or once the whole walk has outrun its budget —
+	 * 'budget'. Only 'ok' means the postings were read completely, and only
+	 * completely read postings may narrow anything.
+	 *
+	 * `walked` counts one step per posting, as a walk of the postings one at a
+	 * time would: the heads hold each term's count, so the outcome and the
+	 * steps a walk would have taken to reach it are known before any chunk is
+	 * read, and a chunk is read only for an 'ok'.
 	 */
 	const scanKeys = async (
-		lo: string,
-		hi: string | undefined,
+		src: TermPostings,
 		max: number,
 		keep: (key: string) => void,
 	): Promise<'ok' | 'wide' | 'budget'> => {
-		const scanLo = prefix + lo;
-		const scanHi = hi === undefined ? successorOf(prefix) : prefix + hi;
-		let seen = 0;
-		for await (const xKey of tx.indexScan(scanLo, scanHi)) {
-			if (++walked > indexCandidateBudget) return 'budget';
-			if (++seen > max) return 'wide';
-			if (!xKey.startsWith(entryPrefix)) continue;
-			keep(xKey.slice(entryPrefix.length));
+		const room = indexCandidateBudget - walked;
+		await src.fill(Math.min(max, room));
+		if (src.count <= max && src.count <= room) {
+			walked += src.count;
+			for (const key of await src.keys()) keep(key);
+			return 'ok';
 		}
-		return 'ok';
+		// The step at which a one-at-a-time walk would have stopped: the
+		// budget is checked ahead of the cap on the same step.
+		if (room <= max) {
+			walked += room + 1;
+			return 'budget';
+		}
+		walked += max + 1;
+		return 'wide';
 	};
 
 	/**
@@ -1437,9 +1447,8 @@ async function querySearchIndex<D extends DescMessage>(
 			: [ ...SEARCH_SEED_CAPS.filter((c) => c < indexCandidateBudget), indexCandidateBudget ];
 		for (const max of caps) {
 			for (let at = 0; at < matcher.terms.length; at++) {
-				const { lo, hi } = searchTermRange(matcher.terms[at]!);
 				const keys = new Set<string>();
-				const outcome = await scanKeys(lo, hi, max, (key) => keys.add(key));
+				const outcome = await scanKeys(sources[at]!, max, (key) => keys.add(key));
 				if (outcome === 'budget') return undefined;
 				if (outcome === 'ok') return { keys, at };
 			}
@@ -1458,12 +1467,10 @@ async function querySearchIndex<D extends DescMessage>(
 	let all = seeded.keys;
 	for (let at = 0; at < matcher.terms.length; at++) {
 		if (at === seeded.at || all.size === 0) continue;
-		const { lo, hi } = searchTermRange(matcher.terms[at]!);
 		const next = new Set<string>();
 		const kept = all;
 		const outcome = await scanKeys(
-			lo,
-			hi,
+			sources[at]!,
 			Math.min(kept.size * SEARCH_NARROW_RATIO, indexCandidateBudget),
 			(key) => {
 				if (kept.has(key)) next.add(key);
@@ -1475,9 +1482,12 @@ async function querySearchIndex<D extends DescMessage>(
 
 	// The overflow rows carry no postings to narrow on, so they join whatever
 	// the terms left — including an empty intersection.
-	const overflow = searchOverflowRange();
 	if (
-		await scanKeys(overflow.lo, overflow.hi, indexCandidateBudget, (key) => all.add(key)) !== 'ok'
+		await scanKeys(
+			new TermPostings(tx, base, undefined),
+			indexCandidateBudget,
+			(key) => all.add(key),
+		) !== 'ok'
 	) {
 		return decline(report, 'budget', walked);
 	}
@@ -1505,9 +1515,9 @@ async function querySearchIndex<D extends DescMessage>(
 				view,
 			)
 		) {
-			// Every path that deletes a confirmed row deletes its search record
-			// in the same transaction; the guard stays because answering from a
-			// row that is not there would be silent and wrong.
+			// Every path that deletes a confirmed row removes its postings in the
+			// same transaction; the guard stays because answering from a row
+			// that is not there would be silent and wrong.
 			if (entry === undefined) continue;
 			if (!matches(entry.row.value, compiled.where, schema)) continue;
 			if (window && !window.within(entry.row.value, entry.row.key)) continue;
@@ -1565,36 +1575,36 @@ type Postings<T> =
 
 /**
  * Answers a single-term search from the postings alone — the page from the
- * first of them the result can reach, the total from the store's count of the
- * range — instead of reading every row the term names.
+ * first of them the result can reach, the total from the counts the term's
+ * head holds — instead of reading every row the term names.
  *
- * A posting IS a match. The index stores one entry per distinct analyzed term
- * per row, produced by the analyzer the matcher itself runs, so every
- * non-overflow row holding the term has an entry in the term's range and every
- * entry in it belongs to a row holding the term. With one required term and
- * nothing else in the predicate, that is the whole question — so the rows only
- * have to be read to be RETURNED, and a common term costs a page of reads
- * rather than a posting list of them.
+ * A posting IS a match. The index posts each row under every distinct
+ * analyzed term it holds, produced by the analyzer the matcher itself runs, so
+ * every non-overflow row holding the term is in the term's postings and every
+ * row in them holds the term. With one required term and nothing else in the
+ * predicate, that is the whole question — so the rows only have to be read to
+ * be RETURNED, and a common term costs a page of reads rather than a posting
+ * list of them.
  *
  * Rows the postings cannot speak for are answered without them, and merged in
  * row-key order:
  *
- *   - rows past the per-row term cap store the overflow marker and no term
- *     postings at all, and rows carrying unacked collaborative-text edits have
+ *   - rows past the per-row term cap are posted under the overflow entry and
+ *     no term at all, and rows carrying unacked collaborative-text edits have
  *     postings from the confirmed document rather than the folded one the query
  *     sees — both are read and evaluated as the scan would;
  *   - rows the overlay shadows are answered by the overlay rows the caller
  *     already decoded.
  *
- * Whatever positions those rows still hold inside the counted range come back
- * out of it, and each one that matches is counted from the row instead.
+ * Whatever postings those rows still hold under the term come back out of the
+ * count, and each one that matches is counted from the row instead.
  *
  * 'unfit' covers everything the argument above does not: several required
  * terms, a predicate carrying more than the match, a relevance ordering (whose
- * rank needs every candidate row), a page window, a prefix probe whose range
- * spans several stored terms — their postings interleave by term rather than by
- * row key, so neither the walk order nor one-posting-per-row survives — and
- * more locally-changed rows than the count subtraction is worth reading.
+ * rank needs every candidate row), a page window, a prefix probe that reaches
+ * several stored terms — their postings would have to be merged by row key,
+ * and a row holding two of them would be counted twice — and more
+ * locally-changed rows than the count subtraction is worth reading.
  */
 async function querySearchPostings<D extends DescMessage>(
 	tx: KVRead,
@@ -1604,8 +1614,7 @@ async function querySearchPostings<D extends DescMessage>(
 	matcher: Matcher,
 	compiled: CompiledQuery,
 	workspaceId: string,
-	prefix: string,
-	entryPrefix: string,
+	base: string,
 	shadowed: ReadonlySet<string>,
 	edited: ReadonlySet<string>,
 	overlayRows: readonly IndexedRow<MessageShape<D>>[],
@@ -1620,25 +1629,17 @@ async function querySearchPostings<D extends DescMessage>(
 
 	const term = matcher.terms[0]!;
 	const range = searchTermRange(term);
-	const lo = prefix + range.lo;
-	const hi: string | undefined = range.hi === undefined
-		? successorOf(prefix)
-		: prefix + range.hi;
-	// A prefix probe brackets every stored term the prefix reaches. Two seeks
-	// say whether it found one or several, which costs two index steps against
-	// re-walking the range from the candidate path.
+	let posted: TermHead | undefined;
 	if (term.prefix) {
-		const first = await tx.indexSeek(lo, hi, 'asc');
-		if (first !== undefined) {
-			const last = await tx.indexSeek(lo, hi, 'desc');
-			const one = searchPostingTerm(first.position.slice(prefix.length));
-			if (
-				one === undefined || last === undefined
-				|| one !== searchPostingTerm(last.position.slice(prefix.length))
-			) {
-				return { kind: 'unfit' };
-			}
+		// A prefix probe brackets every stored term the prefix reaches, and the
+		// shortcut holds only for one: reading stops at the second.
+		for await (const t of scanTerms(tx, base, range.lo, range.hi)) {
+			if (posted !== undefined) return { kind: 'unfit' };
+			posted = t;
 		}
+	} else {
+		// An exact term's range opens at the term's own entry.
+		posted = await readTerm(tx, base, range.lo);
 	}
 
 	const wantTotal = compiled.total !== false;
@@ -1647,40 +1648,51 @@ async function querySearchPostings<D extends DescMessage>(
 	if (answered.size > SHADOW_COUNT_CAP) return { kind: 'unfit' };
 
 	let walked = 0;
-	// Rows read whatever the range says: the overflow rows it cannot see, and
-	// the text-edited ones it sees stale. They are disjoint from the postings
-	// walk below — an overflow row stores the marker INSTEAD of its terms, and
-	// an edited row is in `answered` — so nothing is counted twice.
+	// Rows read whatever the postings say: the overflow rows they cannot see,
+	// and the text-edited ones they see stale. They are disjoint from the
+	// postings walk below — an overflow row is posted under the overflow entry
+	// INSTEAD of its terms, and an edited row is in `answered` — so nothing is
+	// counted twice.
 	const readWhole = new Set<string>();
-	const overflow = searchOverflowRange();
-	for await (const xKey of tx.indexScan(prefix + overflow.lo, prefix + overflow.hi)) {
-		if (++walked > indexCandidateBudget) return { kind: 'decline', reason: 'budget', walked };
-		if (!xKey.startsWith(entryPrefix)) continue;
-		const key = xKey.slice(entryPrefix.length);
-		if (!shadowed.has(key)) readWhole.add(key);
+	const overflow = await readTerm(tx, base, SEARCH_OVERFLOW_ENTRY);
+	if (overflow !== undefined) {
+		// A walk of the overflow postings one at a time stops on the step past
+		// the budget.
+		if (overflow.count > indexCandidateBudget) {
+			return { kind: 'decline', reason: 'budget', walked: indexCandidateBudget + 1 };
+		}
+		walked += overflow.count;
+		for (const key of await readAllKeys(tx, base, [ overflow ])) {
+			if (!shadowed.has(key)) readWhole.add(key);
+		}
 	}
 	for (const key of edited) if (!shadowed.has(key)) readWhole.add(key);
 
-	// Postings of one term share one position, and the store orders a tie by
-	// record key and so by row key, which with no orderBy is the result order —
-	// so the rows past the budget are provably past the page, exactly as an
-	// ordered value walk settles (see candidateBudget). Overflow
+	// A term's postings come out in row-key order, which with no orderBy is the
+	// result order — so the rows past the budget are provably past the page,
+	// exactly as an ordered value walk settles (see candidateBudget). Overflow
 	// and overlay rows merge in AHEAD of postings rows, never displace them.
 	const budget = candidateBudget(compiled, overlayRows.length, undefined);
 	const pageKeys: string[] = [];
 	// Whether a match exists past the ones taken — what hasMore rides on when
 	// the total is opted out and the walk therefore stops at the page.
 	let more = false;
-	for await (const xKey of tx.indexScan(lo, hi)) {
-		if (++walked > indexCandidateBudget) return { kind: 'decline', reason: 'budget', walked };
-		if (!xKey.startsWith(entryPrefix)) continue;
-		const key = xKey.slice(entryPrefix.length);
-		if (answered.has(key)) continue;
-		if (budget !== undefined && pageKeys.length >= budget) {
-			more = true;
-			break;
+	if (posted !== undefined) {
+		// The first read takes as many chunks as the page can need: the page,
+		// one more posting for hasMore, and every answered row skipped on the
+		// way.
+		const first = budget === undefined
+			? posted.head.bounds.length
+			: chunksCovering(posted, budget + answered.size + 1);
+		for await (const key of termKeys(tx, base, posted, first)) {
+			if (++walked > indexCandidateBudget) return { kind: 'decline', reason: 'budget', walked };
+			if (answered.has(key)) continue;
+			if (budget !== undefined && pageKeys.length >= budget) {
+				more = true;
+				break;
+			}
+			pageKeys.push(key);
 		}
-		pageKeys.push(key);
 	}
 
 	const readMatching = async (keys: string[]): Promise<IndexedRow<MessageShape<D>>[]> => {
@@ -1697,8 +1709,8 @@ async function querySearchPostings<D extends DescMessage>(
 				)
 			) {
 				// For a postings row the predicate is a fence rather than a filter
-				// — the entry already proved it — but an overflow or edited row is
-				// only a candidate, and the same call decides both.
+				// — the posting already proved it — but an overflow or edited row
+				// is only a candidate, and the same call decides both.
 				if (entry === undefined) continue;
 				if (!matches(entry.row.value, compiled.where, schema)) continue;
 				out.push(entry);
@@ -1711,26 +1723,22 @@ async function querySearchPostings<D extends DescMessage>(
 
 	let total: number | undefined;
 	if (wantTotal) {
-		// Each posting in the range is one distinct match, so the store counts
-		// the confirmed half of the total without walking it. Rows answered
+		// Each posting of the term is one distinct match, so the head's counts
+		// are the confirmed half of the total without a walk. Rows answered
 		// elsewhere keep their confirmed postings there — the overlay does not
-		// touch the search record, and a text fragment lives beside it — so
-		// each such position comes back out and the row is counted, if it still
-		// matches, from the rows read above.
+		// touch them, and a text fragment lives beside the row — so each one
+		// the row's term list places in the range comes back out, and the row
+		// is counted, if it still matches, from the rows read above.
 		let answeredInRange = 0;
-		if (answered.size > 0) {
-			const keys = [ ...answered ];
-			const records = await tx.getMany(
-				keys.map((k) => searchIndexKey(def.name, workspaceId, k)),
-			);
-			for (const record of records) {
-				for (const p of (record as SearchIndexRecord | undefined)?.ix ?? []) {
-					if (p >= lo && (hi === undefined || p < hi)) answeredInRange++;
+		if (answered.size > 0 && posted !== undefined) {
+			const lists = await tx.getMany([ ...answered ].map((k) => postingsTermsKey(base, k)));
+			for (const list of lists) {
+				for (const e of termListOf(list)) {
+					if (e >= range.lo && (range.hi === undefined || e < range.hi)) answeredInRange++;
 				}
 			}
 		}
-		total = (await tx.indexCount(lo, hi)) - answeredInRange + wholeRows.length
-			+ overlayRows.length;
+		total = (posted?.count ?? 0) - answeredInRange + wholeRows.length + overlayRows.length;
 	}
 
 	const out = [ ...pageRows, ...wholeRows, ...overlayRows ];
@@ -1749,6 +1757,72 @@ async function querySearchPostings<D extends DescMessage>(
 			hasMore: end !== undefined && (more || out.length > end),
 		},
 	};
+}
+
+/** How many leading chunks of a term hold at least `n` of its postings — all
+ * of them when the chunks hold fewer, and at least one. */
+function chunksCovering(term: TermHead, n: number): number {
+	const { counts } = term.head;
+	let sum = 0;
+	for (let i = 0; i < counts.length; i++) {
+		sum += counts[i]!;
+		if (sum >= n) return i + 1;
+	}
+	return Math.max(1, counts.length);
+}
+
+/**
+ * The postings one query term selects — the term's own, or every term a
+ * prefix term reaches — or the overflow rows', read head by head as the walk
+ * asks for more of them. A walk asks about one term several times (once per
+ * seed round, once to narrow), and each head is read once.
+ */
+class TermPostings {
+	private heads: TermHead[] = [];
+	private it: AsyncIterator<TermHead> | undefined;
+	private done = false;
+	/** Postings of the heads read so far. */
+	count = 0;
+
+	/** `term` undefined selects the overflow rows. */
+	constructor(
+		private readonly tx: KVRead,
+		private readonly base: string,
+		private readonly term: QueryTerm | undefined,
+	) {}
+
+	/** Reads terms until the count passes `limit` or there are none left. */
+	async fill(limit: number): Promise<void> {
+		while (!this.done && this.count <= limit) {
+			if (this.term === undefined || !this.term.prefix) {
+				const entry = this.term === undefined
+					? SEARCH_OVERFLOW_ENTRY
+					: searchTermRange(this.term).lo;
+				this.add(await readTerm(this.tx, this.base, entry));
+				this.done = true;
+				return;
+			}
+			if (this.it === undefined) {
+				const { lo, hi } = searchTermRange(this.term);
+				this.it = scanTerms(this.tx, this.base, lo, hi)[Symbol.asyncIterator]();
+			}
+			const next = await this.it.next();
+			if (next.done) this.done = true;
+			else this.add(next.value);
+		}
+	}
+
+	/** Every row key of the heads read so far. Only complete once fill has
+	 * read them all, which it has whenever the count is within its limit. */
+	keys(): Promise<string[]> {
+		return readAllKeys(this.tx, this.base, this.heads);
+	}
+
+	private add(head: TermHead | undefined): void {
+		if (head === undefined) return;
+		this.heads.push(head);
+		this.count += head.count;
+	}
 }
 
 /**

@@ -45,18 +45,21 @@ import {
 	metaIndexBuilt,
 	metaIndexEntityPrefix,
 	metaSnapshotGen,
+	searchIndexWsPrefix,
+	searchPostingsScope,
+	searchSpecTag,
 } from '../keys.js';
 import type { KVStore, KVWrite } from '../kv/store.js';
 import type { EntityRegistry } from '../mutations.js';
 import { upperBound } from '../query/indexkey.js';
+import { SearchPostingsWriter, specTagsUnder } from '../query/postings.js';
 import {
 	type CompiledIndex,
 	deletePrefixes,
 	type IndexCache,
 	indexedRecord,
+	recordSearchRow,
 	searchIndexOf,
-	searchPositions,
-	writeSearchRecord,
 } from './index-maintain.js';
 
 /**
@@ -65,6 +68,13 @@ import {
  * length of a full entity walk.
  */
 export const BUILD_BATCH = 200;
+
+/**
+ * Rows whose search postings a build records before it writes them, in the
+ * transaction of the batch that reaches it. See SearchPostingsWriter for why
+ * a write of more rows costs less per row.
+ */
+const BUILD_POSTINGS_ROWS = 500;
 
 /** Runs a write transaction under the store's cross-tab lock. */
 export type RunLocked = <T>(fn: () => Promise<T>) => Promise<T>;
@@ -205,6 +215,7 @@ async function buildEntity(
 	stopped?: () => boolean,
 ): Promise<BuildResult> {
 	const markers = compiled.map((idx) => metaIndexBuilt(workspaceId, entity, idx.name, idx.specHash));
+	const search = searchIndexOf(compiled);
 
 	const tx = await kv.read();
 	let allBuilt = true;
@@ -242,6 +253,12 @@ async function buildEntity(
 	// a full walk's writes each session.
 	let after = await readBuildCursor(kv, workspaceId, entity, startedAt);
 	let walked = 0;
+	// The search postings of the rows visited since the last flush, and the
+	// version each of those rows had when its batch read it. They are written
+	// every BUILD_POSTINGS_ROWS rows rather than every batch, since a write of
+	// postings costs by the distinct terms it touches; see query/postings.ts.
+	const postings = new SearchPostingsWriter();
+	const visited = new Map<string, string>();
 	for (;;) {
 		if (stopped?.()) return { rows: walked, ready: false };
 		const done = await runLocked(async () => {
@@ -272,7 +289,6 @@ async function buildEntity(
 					batch.push({ key, record: v as ConfirmedRecord });
 					if (batch.length >= BUILD_BATCH) break;
 				}
-				const search = searchIndexOf(compiled);
 				for (const { key, record } of batch) {
 					const value = fromBinary(def.schema, record.v);
 					// The row is REWRITTEN carrying the positions its current value
@@ -288,31 +304,51 @@ async function buildEntity(
 						prefix + key,
 						indexedRecord(record, compiled, entity, workspaceId, key, value, def.schema),
 					);
-					// Written rather than compared against what is stored: the walk is
-					// what MAKES the search record current, and the case that reaches
-					// here most often — an index declared but never built — has nothing
-					// stored to compare against.
+					// The postings, by contrast, are a diff against the row's term list,
+					// which is what makes a revisit free here too: a row already posted
+					// under its current terms writes nothing. The case that reaches here
+					// most often — an index declared but never built — has no term list,
+					// and the rows come in key order, so every posting appends to its
+					// term's tail.
 					if (search !== undefined) {
-						await writeSearchRecord(
-							wtx,
-							entity,
-							workspaceId,
-							key,
-							searchPositions(search, entity, workspaceId, value, def.schema),
-						);
+						recordSearchRow(postings, entity, workspaceId, search, key, value, def.schema);
 					}
 				}
 				const last = batch[batch.length - 1]?.key;
-				// The cursor commits WITH the rows it describes, so it can never
-				// name a position whose indexed rows did not make it to the store.
-				if (last !== undefined) {
+				const finished = batch.length < BUILD_BATCH;
+				const flush = search === undefined || finished || postings.rows >= BUILD_POSTINGS_ROWS;
+				if (flush && postings.rows > 0) {
+					// A row an earlier batch visited may have been rewritten or deleted
+					// since, by a writer that posted what it wrote — and that found no
+					// term list to diff against, since this one was not written yet. Its
+					// recorded terms describe a row that is no longer there.
+					const earlier = [ ...visited.keys() ];
+					const now = earlier.length === 0
+						? []
+						: await wtx.getMany(earlier.map((k) => prefix + k));
+					for (let i = 0; i < earlier.length; i++) {
+						const record = now[i] as ConfirmedRecord | undefined;
+						if (record?.ver !== visited.get(earlier[i]!)) {
+							postings.drop(entity, workspaceId, earlier[i]!);
+						}
+					}
+					await postings.flush(wtx);
+					visited.clear();
+				} else {
+					for (const { key, record } of batch) visited.set(key, record.ver);
+				}
+				// The cursor commits WITH the rows it describes and their postings,
+				// so it can never name a position whose rows did not make it to the
+				// store indexed. Between flushes it stays where the last one left
+				// it, and a walk resumed from there revisits the rows after it.
+				if (flush && last !== undefined) {
 					const cursor: IndexBuildCursor = { g: startedAt, k: last };
 					await wtx.put(metaIndexBuildCursor(workspaceId, entity), cursor);
 				}
 				await wtx.commit();
 				after = last ?? after;
 				walked += batch.length;
-				return batch.length < BUILD_BATCH;
+				return finished;
 			} catch (err) {
 				wtx.release();
 				throw err;
@@ -341,7 +377,7 @@ async function buildEntity(
 				wtx.release();
 				return false;
 			}
-			// A superseded declaration leaves a marker nothing looks up. Its
+			// A superseded declaration leaves a marker nothing looks up. Its value
 			// POSITIONS are already gone — the walk above rewrote every row with
 			// the list its current specs encode to, and that list replaces rather
 			// than extends — so only the markers are left to reclaim, here at the
@@ -352,13 +388,21 @@ async function buildEntity(
 				if (!current.has(k)) stale.push(k);
 			}
 			for (const k of stale) await wtx.del(k);
-			// The search records of the previous layout go in the same transaction
-			// as that layout's markers. Before it, a tab of that build may still
-			// trust its marker and read them; after it, no build trusts them. The
-			// walk cannot reclaim them as it reclaims a superseded spec's
-			// positions, because they sit at another key than the record it
-			// rewrites.
-			await deletePrefixes(wtx, [ legacySearchIndexWsPrefix(entity, workspaceId) ]);
+			// The search records of the previous layouts, and the postings of every
+			// search declaration but the current one, go in the same transaction
+			// as those declarations' markers. Before it, a tab of that build may
+			// still trust its marker and read them; after it, no build trusts
+			// them. The walk cannot reclaim them as it reclaims a superseded
+			// spec's value positions, because they sit at other keys than the
+			// records it rewrites.
+			const scope = searchPostingsScope(entity, workspaceId);
+			const tag = search === undefined ? undefined : searchSpecTag(search.specHash);
+			const superseded = (await specTagsUnder(wtx, scope)).filter((t) => t !== tag);
+			await deletePrefixes(wtx, [
+				legacySearchIndexWsPrefix(entity, workspaceId),
+				searchIndexWsPrefix(entity, workspaceId),
+				...superseded.map((t) => scope + t),
+			]);
 			for (const marker of markers) await wtx.put(marker, true);
 			// The walk is over, so the position is spent. Leaving it would strand a
 			// key per entity per workspace, and a later rebuild (a changed spec)

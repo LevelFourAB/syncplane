@@ -80,6 +80,7 @@ import {
 	withAccessDelta,
 } from '../optimistic/rebase.js';
 import { captureTextLogs, keepStrandedTextEdits } from '../optimistic/textlog-keep.js';
+import { SearchPostingsWriter } from '../query/postings.js';
 import { readMergedRow } from '../read.js';
 import { reportError, safeCall } from '../report.js';
 import type { StorageNames } from '../storagenames.js';
@@ -483,6 +484,17 @@ interface BootstrapChunkCommit {
  * already committed.
  */
 const MAX_INFLIGHT_BOOTSTRAP_COMMITS = 2;
+
+/**
+ * Rows a cold bootstrap records search postings for before it writes them.
+ *
+ * Writing postings costs by the distinct terms a write touches rather than by
+ * its rows (see query/postings.ts), and a text-heavy chunk touches most of a
+ * vocabulary's common terms, so writing them once per chunk would rewrite
+ * those terms' records once per chunk. Each flush is a transaction of its own
+ * outside the store mutex, like the chunks.
+ */
+const BOOTSTRAP_POSTINGS_ROWS = 4096;
 
 /**
  * Drives background sync for every workspace the client holds: drains their
@@ -2866,6 +2878,12 @@ export class Coordinator {
 		let streamMs = 0;
 		// Chunks handed to the store, oldest first.
 		const inflight: BootstrapChunkCommit[] = [];
+		// The search postings of the rows the cold path has written and not yet
+		// posted. Only the cold path indexes as it lands; the staged path leaves
+		// its rows to the build.
+		const postings = direct && this.opts.indexes !== undefined
+			? new SearchPostingsWriter()
+			: undefined;
 		// Applies what the oldest chunks carried — their rows and the entities they
 		// completed — until at most `keep` are still outstanding, waiting for each
 		// commit in turn. Every one of them is awaited even after one has failed,
@@ -2892,6 +2910,25 @@ export class Coordinator {
 				}
 			}
 			if (failure !== undefined) throw failure.err;
+		};
+		// Writes the postings recorded so far, in a transaction of their own once
+		// every chunk they describe has committed. False when another bootstrap
+		// has claimed the workspace meanwhile and owns its rows.
+		const flushPostings = async (): Promise<boolean> => {
+			await settleChunks(0);
+			const tx = await this.opts.kv.write();
+			try {
+				if (!(await this.stillCurrent(tx, workspaceId, gen))) {
+					tx.release();
+					return false;
+				}
+				await postings!.flush(tx);
+				await tx.commit();
+				return true;
+			} catch (err) {
+				tx.release();
+				throw err;
+			}
 		};
 		// Waits out every transaction still in flight without letting any of them
 		// speak: this runs on the way out with a failure already in hand.
@@ -2972,6 +3009,7 @@ export class Coordinator {
 									touched,
 									this.opts.indexes,
 									syncable,
+									postings,
 								);
 							} else {
 								await stageServerChanges(
@@ -3014,6 +3052,12 @@ export class Coordinator {
 									rows: msg.body.value.rows.length,
 									entities: msg.body.value.rows.map((r) => r.entity),
 								});
+								if (
+									postings !== undefined && postings.rows >= BOOTSTRAP_POSTINGS_ROWS
+									&& !(await flushPostings())
+								) {
+									superseded = true;
+								}
 							}
 						} catch (err) {
 							tx.release();
@@ -3032,8 +3076,11 @@ export class Coordinator {
 			}
 			streamMs += performance.now() - frameStarted;
 			// Nothing may still be in flight past here: the install below has to
-			// observe every row this snapshot wrote.
+			// observe every row this snapshot wrote, and every posting.
 			await settleChunks(0);
+			if (!superseded && postings !== undefined && postings.rows > 0 && !(await flushPostings())) {
+				superseded = true;
+			}
 		} catch (err) {
 			// Whatever is still with the store is left to finish on its own — the
 			// failure being reported is the one that got here first, and an

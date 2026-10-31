@@ -115,6 +115,7 @@ import {
 	PENDING_ROOT,
 	pendingPrefix,
 	searchIndexWsPrefix,
+	searchPostingsScope,
 	stagingWsRoot,
 	workspaceOfPendingKey,
 	wsFromSegment,
@@ -2379,10 +2380,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						doomed.push(k);
 					}
 					// The value positions ride on the confirmed rows above and are
-					// deleted with them; the search positions are records of their own
-					// and are not, in both the current layout and the one before it.
+					// deleted with them; the search postings are records of their own
+					// and are not, and neither are the search records of the layouts
+					// before them.
 					for (
 						const prefix of [
+							searchPostingsScope(entity, workspaceId),
 							searchIndexWsPrefix(entity, workspaceId),
 							legacySearchIndexWsPrefix(entity, workspaceId),
 						]

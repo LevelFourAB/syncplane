@@ -7,11 +7,10 @@
 // 	entry := 0x01 term     one per distinct term
 // 	      |  0x02          the overflow marker, alone
 //
-// An entry does not end with the row key, as a value-index entry does: every
-// search read takes the row key from the `x/` record that holds the position,
-// never from the position itself. The rows that hold one term therefore all
-// hold the same position, and the store orders such a tie by record key, so
-// the rows of one term still come out in row-key order.
+// An entry names a posting list rather than a row: the client keys a term's
+// postings by its entry and lists the row keys inside them (see
+// query/postings.ts), so entries sort by term and a prefix term brackets a
+// range of them.
 //
 // A row whose distinct terms exceed SEARCH_TERMS_PER_ROW stores the single
 // overflow marker instead, and every term probe unions the overflow rows into
@@ -29,10 +28,11 @@ import type { SearchDecl } from './match.js';
 
 /**
  * Folded into every search-index spec hash. Bumping it — for an entry-encoding
- * change, or an analyzer change that moves existing terms — invalidates every
- * stored search index, which then rebuilds.
+ * change, a change to how postings are stored, or an analyzer change that
+ * moves existing terms — invalidates every stored search index, which then
+ * rebuilds.
  */
-const SEARCH_INDEX_ENCODING_VERSION = 2;
+const SEARCH_INDEX_ENCODING_VERSION = 3;
 
 /**
  * Caps the distinct terms one row stores postings for; past it the row stores
@@ -62,7 +62,7 @@ export function searchEntries(decl: SearchDecl, value: unknown, schema: DescMess
 		if (!r.found || typeof r.value !== 'string') continue;
 		for (const t of analyze(r.value, decl.options)) {
 			if (seen.has(t)) continue;
-			if (seen.size === SEARCH_TERMS_PER_ROW) return [ String.fromCharCode(OVERFLOW_TAG) ];
+			if (seen.size === SEARCH_TERMS_PER_ROW) return [ SEARCH_OVERFLOW_ENTRY ];
 			seen.add(t);
 			terms.push(t);
 		}
@@ -101,32 +101,10 @@ export function searchTermRange(t: QueryTerm): { lo: string; hi: string | undefi
 	return { lo, hi: upperBound(lo) };
 }
 
-/**
- * The tag-and-term head an entry begins with — the part every posting of one
- * term shares — or undefined for an entry that is not a term posting.
- *
- * Two entries carry the same term exactly when this is equal, which is how a
- * prefix probe tells a range holding one stored term from one holding several:
- * the postings of one term are in row-key order, those of several by term
- * first.
- */
-export function searchPostingTerm(entry: string): string | undefined {
-	if (entry.charCodeAt(0) !== TERM_TAG) return undefined;
-	for (let i = 1; i < entry.length - 1; i++) {
-		if (entry.charCodeAt(i) !== 0x00) continue;
-		// A doubled NUL terminates the term; a NUL followed by 0xff is a NUL
-		// inside it, and appendIndexString emits no other pair opening with one.
-		if (entry.charCodeAt(i + 1) === 0x00) return entry.slice(0, i + 2);
-		i++;
-	}
-	return undefined;
-}
-
-/** Brackets the overflow markers — the rows whose term sets outgrew their
- * postings. Every term probe unions these rows into its candidates. */
-export function searchOverflowRange(): { lo: string; hi: string } {
-	return { lo: String.fromCharCode(OVERFLOW_TAG), hi: String.fromCharCode(OVERFLOW_TAG + 1) };
-}
+/** The entry the overflow rows are posted under — the rows whose term sets
+ * outgrew their postings. Every term probe unions these rows into its
+ * candidates. */
+export const SEARCH_OVERFLOW_ENTRY = String.fromCharCode(OVERFLOW_TAG);
 
 /**
  * A match condition every row satisfying the predicate must satisfy — one

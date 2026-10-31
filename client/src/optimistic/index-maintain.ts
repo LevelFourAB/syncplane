@@ -19,73 +19,75 @@
 // value out from under a confirmed-only index, since text fields cannot be
 // index components at all.
 //
-// WHERE THE POSITIONS LIVE, and what follows from it
+// WHERE THE ENTRIES LIVE, and what follows from it
 //
-// Positions are a field on a record (INDEX_FIELD, see kv/store.ts), and the KV
-// store maintains one secondary index over that field for every backend it has.
-// Maintenance is therefore not a set of writes at all — there is nothing to add
-// or delete — it is a value computed from the row and handed to a put.
+// The two kinds of index keep their entries in different places, and are
+// maintained differently because of it.
 //
-// A row splits its positions across two records:
+// - VALUE-index positions are a field on the confirmed row itself
+//   (ConfirmedRecord.ix, see kv/store.ts INDEX_FIELD), and the KV store
+//   maintains one secondary index over that field for every backend it has.
+//   Maintenance is therefore not a set of writes at all — it is a value
+//   computed from the row and handed to the put that was happening anyway.
+// - SEARCH postings are records of their own under `s/` (query/postings.ts):
+//   pages that hold the rare terms of an entry range together, a head and
+//   chunks for each common term, and a term list per row. A searchable row holds one posting per distinct term —
+//   an order of magnitude more than its value positions — and as positions
+//   each of them cost the store an index row carrying the record's key. As
+//   packed lists they cost the bytes of the row key once per term.
 //
-// - VALUE-index positions ride on the confirmed row itself
-//   (ConfirmedRecord.ix), so they cost no KV record: the put they ride on was
-//   happening anyway.
-// - SEARCH-index positions sit in the row's `x/` sibling (SearchIndexRecord),
-//   written only when the term set actually changes.
+// For value positions that collapses most of what maintenance used to be:
 //
-// The second record is there because a store rewrites every position of a
-// record it puts, changed or not, and a searchable row holds one position per
-// distinct term — typically an order of magnitude more than its value
-// positions. Sharing one record made a change to any field pay for the whole
-// term set, and most updates leave the searchable text alone. The price is one
-// read and one put on the pull path for a row whose text DID change, and one
-// extra put per searchable row during a bootstrap or a build.
-//
-// That collapses most of what maintenance used to be:
-//
-// - A DELETE drops the row's value positions with the record. Its `x/` sibling
-//   is a separate key and has to be deleted alongside — every path that removes
-//   a confirmed row removes both, or an orphaned search record would keep
-//   answering for a row that is gone.
+// - A DELETE drops the row's value positions with the record.
 // - A REWRITE needs no knowledge of where the row used to be. The position list
 //   is replaced wholesale, so nothing has to reproduce the previous value's
-//   entries in order to remove them — no per-row pointer, no decode of the bytes
-//   being replaced, and no failure mode when those bytes no longer decode.
+//   entries in order to remove them.
 // - A SUPERSEDED declaration reclaims itself. Its positions sit under a prefix
 //   carrying the old spec fingerprint, and the first rewrite of the row drops
 //   them along with every other position; the build pass rewrites every row, so
 //   a spec change reclaims its own keyspace as it rebuilds.
 //
-// It also puts one obligation on every writer, which is the price of the layout:
-// a row's positions are only as good as the last write of that row. Rewriting a
-// confirmed record without recomputing them UNINDEXES the row rather than
-// leaving a stale entry behind — and leaving its `x/` sibling alone leaves the
-// search postings describing the PREVIOUS text, which is why a writer that can
-// change the searchable fields has to decide about both records. Two
-// consequences worth stating outright:
+// Search postings are maintained by DIFF instead. A SearchPostingsWriter reads
+// the row's stored term list, compares it with the entries the new value
+// analyzes to, and changes only the postings that differ — so a write that
+// leaves the searchable text alone costs one read, and every path that writes
+// or removes a searchable confirmed row records it with a writer and flushes
+// it in the same transaction. A row removed without one leaves postings that
+// answer for a row that is gone; a row rewritten without one leaves postings
+// describing its PREVIOUS text. The sweeps of a workspace or an entity delete
+// the whole `s/` scope with the rows instead of visiting them.
 //
-// - A staged bootstrap swap promotes rows carrying no positions, since giving
-//   them any means decoding the whole snapshot inside the transaction that
-//   installs it. It claims no index-built marker and asks for a background
-//   build (index-build.ts). A cold bootstrap, whose chunks each hold a
-//   transaction of their own, does decode and does claim.
+// A superseded search declaration writes under another spec tag, so its
+// postings are unreachable from the current one. A writer removes every row it
+// records from the other tags it finds under the scope, since it cannot
+// analyze a row the way the other declaration does, and the build deletes the
+// rest when it claims its markers (see index-build.ts).
+//
+// It also puts one obligation on every writer, which is the price of the
+// layout: a row's value positions are only as good as the last write of that
+// row. Rewriting a confirmed record without recomputing them UNINDEXES the row
+// rather than leaving a stale entry behind. Two consequences worth stating
+// outright:
+//
+// - A staged bootstrap swap promotes rows carrying no positions and posted
+//   under no term, since giving them some means decoding the whole snapshot
+//   inside the transaction that installs it. The wipe before it deletes the
+//   postings of the snapshot it replaces. It claims no index-built marker and
+//   asks for a background build (index-build.ts). A cold bootstrap, whose
+//   chunks each hold a transaction of their own, does decode and does claim.
 // - A build that does not DECLARE an index does not preserve it. Where the
 //   `i/` keyspace let one tab leave another build's entries alone, a position
-//   list is replaced by whoever writes the row, so two tabs declaring different
-//   indexes over one entity invalidate each other's. The previous layout left
-//   such an index STALE in the same situation rather than incomplete, which is
-//   no more correct; neither is a state the built markers can survive, and the
-//   fix for both is that a build only trusts markers it earned itself.
+//   list is replaced by whoever writes the row, and a posting is removed by
+//   whoever writes it under another declaration, so two tabs declaring
+//   different indexes over one entity invalidate each other's. The previous
+//   layout left such an index STALE in the same situation rather than
+//   incomplete, which is no more correct; neither is a state the built markers
+//   can survive, and the fix for both is that a build only trusts markers it
+//   earned itself.
 
 import type { DescMessage } from '@bufbuild/protobuf';
 
-import {
-	type ConfirmedRecord,
-	indexPositionPrefix,
-	searchIndexKey,
-	type SearchIndexRecord,
-} from '../keys.js';
+import { type ConfirmedRecord, indexPositionPrefix } from '../keys.js';
 import type { KVWrite } from '../kv/store.js';
 import type { EntityRegistry } from '../mutations.js';
 import {
@@ -95,11 +97,8 @@ import {
 	specHash,
 } from '../query/indexkey.js';
 import { type SearchDecl, searchDeclOf } from '../query/match.js';
-import {
-	SEARCH_INDEX_NAME,
-	searchEntries,
-	searchSpecHash,
-} from '../query/searchindex.js';
+import type { SearchPostingsWriter } from '../query/postings.js';
+import { SEARCH_INDEX_NAME, searchEntries, searchSpecHash } from '../query/searchindex.js';
 import { reportError } from '../report.js';
 
 /**
@@ -223,7 +222,7 @@ function subsumedBy(lists: IndexComponent[][]): boolean[] {
 
 /**
  * The VALUE-index positions one confirmed row occupies, given its decoded
- * value. The search index is not among them — see searchPositions.
+ * value. The search index is not among them — see recordSearchRow.
  *
  * The order is by index and then by fan-out element, which is what the encoders
  * produce and not a sorted order. Nothing depends on it: the store's index sorts
@@ -261,60 +260,36 @@ export function searchIndexOf(indexes: readonly CompiledIndex[]): CompiledIndex 
 }
 
 /**
- * The SEARCH-index positions one row occupies, given its decoded value — one
- * per distinct term of its searchable fields, or the single overflow marker
- * past the per-row term cap. Empty for a row whose searchable fields analyze to
- * nothing, which is a row with no `x/` record.
+ * Records one confirmed row's search postings with `writer`: the entries its
+ * value analyzes to under `search` — one per distinct term, or the overflow
+ * marker alone past the per-row term cap — or none when `value` is undefined,
+ * for a row that is gone.
+ *
+ * `search` is the entity's search index in this build, or undefined when it
+ * declares none; the row then leaves the postings of every other declaration
+ * and gains none. `schema` decodes `value`, and is only read when both are
+ * given. The change is written when the writer flushes.
  */
-export function searchPositions(
-	idx: CompiledIndex,
+export function recordSearchRow(
+	writer: SearchPostingsWriter,
 	entity: string,
 	workspaceId: string,
-	value: unknown,
-	schema: DescMessage,
-): string[] {
-	const prefix = indexPositionPrefix(entity, idx.name, idx.specHash, workspaceId);
-	return searchEntries(idx.search!, value, schema).map((entry) => prefix + entry);
-}
-
-/**
- * Whether two position lists hold the same positions, order aside.
- *
- * Both sides are duplicate-free (one entry per distinct term), so equal lengths
- * plus containment is set equality. Order is not equality here because the
- * entries come out in first-occurrence order: reordering a sentence changes the
- * list without changing the postings it stands for.
- */
-export function samePositions(a: readonly string[], b: readonly string[]): boolean {
-	if (a.length !== b.length) return false;
-	const set = new Set(a);
-	return b.every((p) => set.has(p));
-}
-
-/**
- * Writes a row's search-index record, or deletes it when `positions` is empty.
- *
- * Unconditional: a caller holding the stored positions should compare them
- * first (see samePositions), since the store rewrites every position of a
- * record it puts.
- */
-export async function writeSearchRecord(
-	tx: KVWrite,
-	entity: string,
-	workspaceId: string,
+	search: CompiledIndex | undefined,
 	key: string,
-	positions: string[],
-): Promise<void> {
-	const k = searchIndexKey(entity, workspaceId, key);
-	if (positions.length === 0) await tx.del(k);
-	else await tx.put(k, { ix: positions } satisfies SearchIndexRecord);
+	value: unknown | undefined,
+	schema: DescMessage | undefined,
+): void {
+	const entries = search !== undefined && value !== undefined && schema !== undefined
+		? searchEntries(search.search!, value, schema)
+		: [];
+	writer.set(entity, workspaceId, search?.specHash, key, entries);
 }
 
 /**
  * `record` with its VALUE-index positions recomputed from `value` — the one
  * place a confirmed row and those positions are tied together, so a writer
- * cannot update one and forget the other. The row's search positions live in a
- * record of their own and are not touched here (see writeSearchRecord).
+ * cannot update one and forget the other. The row's search postings are
+ * records of their own and are not touched here (see recordSearchRow).
  *
  * The list is REPLACED, never merged. That is what makes a rewrite self-cleaning
  * — the previous value's positions go with it, and so do any left behind by a

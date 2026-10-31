@@ -3,9 +3,9 @@
  * so `<ws>` is a segment inside the keys rather than the name of the database:
  *
  *   c/<entity>/<ws>/<key>        confirmed (server-acked) row bytes
- *   x/<scope><key>               the confirmed row's SEARCH-index positions;
- *                                <scope> fingerprints (entity, ws), see
- *                                searchIndexWsPrefix
+ *   s/<scope><tag>...            SEARCH-index postings of one (entity, ws) and
+ *                                spec; see searchPostingsBase and
+ *                                query/postings.ts
  *   o/<entity>/<ws>/<key>        optimistic overlay (value or local tombstone)
  *   ot/<entity>/<ws>/<key>/<field>/<id>
  *                                optimistic text log (one delta-state fragment
@@ -23,23 +23,20 @@
  * `c/<entity>/<ws>/` prefix. Workspace count is the unbounded dimension, so the
  * order that keeps the unbounded fan-out to one scan wins.
  *
- * Secondary-index positions are an array field on a record rather than a
- * keyspace of their own, and the KV store maintains one index over that field
- * across every record it holds (see kv/store.ts INDEX_FIELD and
- * indexPositionPrefix below). They are split across two records per row:
+ * VALUE-index positions are an array field on the confirmed row (`c/`,
+ * ConfirmedRecord.ix) rather than a keyspace of their own, and the KV store
+ * maintains one index over that field across every record it holds (see
+ * kv/store.ts INDEX_FIELD and indexPositionPrefix below), so indexing a row
+ * costs no record of its own.
  *
- * - VALUE-index positions ride on the confirmed row (`c/`, ConfirmedRecord.ix),
- *   so indexing a row costs no record of its own.
- * - SEARCH-index positions sit beside it in `x/` (SearchIndexRecord), under
- *   the same row key, so a search record's key gives the row's key by one
- *   slice.
- *
- * The split is what keeps an ordinary field update off the search postings. A
- * store rewrites every position of a record it puts, changed or not, and a
- * searchable row holds one search position per distinct term — an order of
- * magnitude more than its value positions — so folding the two together made a
- * change to a state or a timestamp pay for the whole term set. See
- * optimistic/index-maintain.ts for what fills them and what a writer owes.
+ * SEARCH-index postings are not positions. A searchable row holds one posting
+ * per distinct term — an order of magnitude more than its value positions —
+ * and a store keeps an index row per position, with the record's key beside
+ * it, twice on WebKit. They are records under `s/` instead: pages that hold
+ * the rare terms of an entry range together, a head and chunks of a few
+ * hundred row keys for each common term, and one term list per row (see
+ * query/postings.ts). See optimistic/index-maintain.ts for what fills both and
+ * what a writer owes.
  *
  * Reads resolve overlay-first and never touch the b/ staging keyspace, so a
  * bootstrap that has a snapshot to protect streams into b/ without disturbing
@@ -50,8 +47,8 @@
  *
  * Workspace ids are percent-encoded where they appear as a key segment (see
  * `wsSegment`); row keys are NOT, since they are always last and may contain
- * slashes. The `x/` records are the exception to the spelled-out segments:
- * they spell neither the entity nor the workspace (see searchIndexWsPrefix).
+ * slashes. The `s/` records are the exception to the spelled-out segments:
+ * they spell neither the entity nor the workspace (see searchPostingsScope).
  */
 
 import { fingerprint } from './query/indexkey.js';
@@ -311,11 +308,18 @@ export const overlayKey = (entity: string, workspaceId: string, key: string): st
 	`${overlayWsPrefix(entity, workspaceId)}${key}`;
 
 /**
- * Root of every search-index record, of every entity and workspace. A record
- * key is the root, then the 8-character scope of searchIndexWsPrefix, then the
- * row key verbatim.
+ * Root of the search-index records that held a row's postings as index
+ * positions: `x/`, the 8-character scope of searchScope, then the row key.
+ * No build writes them any more; the sweeps delete them (see
+ * searchIndexWsPrefix).
  */
 export const SEARCH_INDEX_ROOT = 'x/';
+
+/**
+ * Root of the search postings (see query/postings.ts): `s/`, the 8-character
+ * scope of searchScope, a spec tag, then the record.
+ */
+export const SEARCH_POSTINGS_ROOT = 's/';
 
 /**
  * Scopes already fingerprinted, keyed by `<entity>/<workspace id>` — which is
@@ -325,16 +329,13 @@ export const SEARCH_INDEX_ROOT = 'x/';
 const searchScopes = new Map<string, string>();
 
 /**
- * One workspace's search-index records of one entity: SEARCH_INDEX_ROOT and an
- * 8-character fingerprint of the pair.
+ * The 8-character fingerprint of one (entity, workspace) pair that every
+ * search record of the pair is keyed under.
  *
- * The pair is a fingerprint rather than the parts spelled out because of what
- * a record key costs. The store's index keeps the key of the record beside
- * each position the record holds, and a searchable row holds one position per
- * distinct term, so every key character is stored once per term of the row,
- * and twice on WebKit. Spelled out, the pair is the entity name, the workspace
- * segment and two slashes: 33 characters for a five-letter entity and a
- * 26-character workspace id.
+ * A fingerprint rather than the parts spelled out because every term of the
+ * index has records under it: spelled out, the pair is the entity name, the
+ * workspace segment and two slashes, 33 characters for a five-letter entity
+ * and a 26-character workspace id.
  *
  * The fingerprint is the 64 bits of FNV-1a over `<entity>/<ws segment>`, one
  * character per byte, with the high bit of the first byte set. Every scope has
@@ -347,37 +348,64 @@ const searchScopes = new Map<string, string>();
  * workspace: each reader of these records reads one (entity, workspace) pair,
  * and a sweep of a workspace visits its entities one by one.
  */
-export const searchIndexWsPrefix = (entity: string, workspaceId: string): string => {
+const searchScope = (entity: string, workspaceId: string): string => {
 	const cacheKey = `${entity}/${workspaceId}`;
-	let prefix = searchScopes.get(cacheKey);
-	if (prefix === undefined) {
+	let scope = searchScopes.get(cacheKey);
+	if (scope === undefined) {
 		// Over the ws SEGMENT rather than the raw id: fingerprint reads only the
 		// low byte of each code unit, and the segment is ASCII.
-		const scope = fingerprintChars(`${entity}/${wsSegment(workspaceId)}`);
-		prefix = SEARCH_INDEX_ROOT
-			+ String.fromCharCode(scope.charCodeAt(0) | 0x80)
-			+ scope.slice(1);
-		searchScopes.set(cacheKey, prefix);
+		const chars = fingerprintChars(`${entity}/${wsSegment(workspaceId)}`);
+		scope = String.fromCharCode(chars.charCodeAt(0) | 0x80) + chars.slice(1);
+		searchScopes.set(cacheKey, scope);
 	}
-	return prefix;
+	return scope;
 };
 
 /**
- * The search-index positions of the confirmed row at the matching `c/` key.
- * The suffix after searchIndexWsPrefix is the row key verbatim, exactly as it
- * is under `c/`, so a search-index scan yields a key one slice away from the
- * row's.
+ * Every search posting of one entity in one workspace, under every spec tag:
+ * what a sweep of the pair deletes.
  */
-export const searchIndexKey = (entity: string, workspaceId: string, key: string): string =>
-	`${searchIndexWsPrefix(entity, workspaceId)}${key}`;
+export const searchPostingsScope = (entity: string, workspaceId: string): string =>
+	SEARCH_POSTINGS_ROOT + searchScope(entity, workspaceId);
+
+/** Characters of the spec tag after searchPostingsScope. */
+export const SEARCH_SPEC_TAG_LENGTH = 4;
+
+/**
+ * The spec tag of a search index: the first 32 bits of its spec hash, one
+ * character per byte. Postings written under one declaration are unreachable
+ * from another, and a sweep of a scope can tell the tags apart without
+ * knowing the declarations behind them (see query/postings.ts specTagsUnder).
+ */
+export const searchSpecTag = (specHash: string): string => {
+	let out = '';
+	for (let i = 0; i < SEARCH_SPEC_TAG_LENGTH * 2; i += 2) {
+		out += String.fromCharCode(Number.parseInt(specHash.slice(i, i + 2), 16));
+	}
+	return out;
+};
+
+/**
+ * The base every record of one search index is keyed under: the scope of the
+ * (entity, workspace) pair, then the tag of the spec the postings were
+ * analyzed with. See query/postings.ts for the records after it.
+ */
+export const searchPostingsBase = (entity: string, workspaceId: string, specHash: string): string =>
+	searchPostingsScope(entity, workspaceId) + searchSpecTag(specHash);
+
+/**
+ * One workspace's search-index records of one entity as position layout 4
+ * keyed them: `x/<scope><key>`, each holding its row's postings as index
+ * positions. None is reachable from the current search spec. Every sweep of a workspace or an entity deletes them, and the index
+ * build deletes the rest of its entity when it claims its markers (see
+ * index-build.ts).
+ */
+export const searchIndexWsPrefix = (entity: string, workspaceId: string): string =>
+	SEARCH_INDEX_ROOT + searchScope(entity, workspaceId);
 
 /**
  * One workspace's search-index records of one entity as position layout 3
- * keyed them: `x/<entity>/<ws>/<key>`. Only a store last written by a build of
- * that layout holds them, and none of their positions is reachable under the
- * current layout. Every sweep of a workspace or an entity deletes them with
- * the current records, and the index build deletes the rest of its entity
- * when it claims its markers (see index-build.ts).
+ * keyed them: `x/<entity>/<ws>/<key>`. Swept like searchIndexWsPrefix.
  */
 export const legacySearchIndexWsPrefix = (entity: string, workspaceId: string): string =>
 	`${SEARCH_INDEX_ROOT}${entity}/${wsSegment(workspaceId)}/`;
@@ -491,16 +519,11 @@ const textLogFieldOf = (segment: string): string =>
  * A secondary-index POSITION: `<fingerprint><entry>`, where the entry is the
  * encoded sort key (see query/indexkey.ts) and the fingerprint stands for the
  * (layout, entity, index, spec, workspace) the entry belongs to. Positions are
- * the elements of a record's INDEX_FIELD array — the confirmed row's for a
- * value index, the row's `x/` sibling for the search index — and the KV store's
+ * the elements of the confirmed row's INDEX_FIELD array, and the KV store's
  * one secondary index orders them, so position order within one prefix IS the
  * row order the index serves, and a bounded indexScan over that prefix reads
- * the slice a query names.
- *
- * The prefix also decides which record a scan's keys belong to: every position
- * under one prefix comes from one index, and an index's positions all live on
- * the same kind of record. A caller therefore knows whether an indexScan hands
- * it `c/` keys or `x/` keys from the prefix it asked for.
+ * the slice a query names. The search index holds no positions (see
+ * searchPostingsBase), so every indexScan answers with `c/` keys.
  *
  * They are not KV keys and the store never resolves one, and nothing anywhere
  * parses one back into its parts. What a position has to be is a string that
@@ -540,16 +563,6 @@ const textLogFieldOf = (segment: string): string =>
  * identical to the merged view without the index having to track uncommitted
  * state, and is also why an `o/` record must never grow an INDEX_FIELD.
  */
-/** Search-index record stored at x/ keys, beside the confirmed row it
- * describes. Holds the row's search positions and nothing else, so a row
- * rewrite that leaves its terms alone can leave this record alone too. */
-export interface SearchIndexRecord {
-	/** The search-index positions the row occupies (see indexPosition), which is
-	 * the KV store's INDEX_FIELD. Never empty: a row occupying none has no
-	 * record at all. */
-	ix: string[];
-}
-
 /**
  * Version of the position layout above. Purely client-local — it is not the
  * index spec hash, which is shared with the server — and bumping it makes every
@@ -824,8 +837,8 @@ export interface ConfirmedRecord {
 	/**
 	 * The VALUE-index positions this row occupies (see indexPosition), which is
 	 * the KV store's INDEX_FIELD — the field name is what ties the two together,
-	 * so it cannot be renamed here alone. The row's search positions are not
-	 * here; they sit in its `x/` sibling (see SearchIndexRecord).
+	 * so it cannot be renamed here alone. The row's search postings are not
+	 * here; they are records of their own (see searchPostingsBase).
 	 *
 	 * Absent means the row occupies none, which is a legitimate state rather
 	 * than a broken one: an entity that declares no index never has any, and a

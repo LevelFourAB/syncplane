@@ -7,7 +7,9 @@
 export interface LogicalBreakdown {
 	/**
 	 * Records per keyspace: the key up to its second `/` (`c/issue`, `meta/ws`),
-	 * with every `intent/<tabId>` key under `intent`.
+	 * with every `intent/<tabId>` key under `intent`, every `x/` key under `x/`,
+	 * and the `s/` keys by record kind (`s/ directory`, `s/ pages`, `s/ heads`, `s/ chunks`,
+	 * `s/ term lists`).
 	 */
 	keyspaces: Record<string, KeyspaceCounts>;
 	/** Index positions by kind: `value` on `c/` records, `search` on `x/` records. */
@@ -70,6 +72,17 @@ export async function logicalBreakdown(name: string): Promise<LogicalBreakdown> 
 		req.onerror = () => reject(req.error);
 		req.onupgradeneeded = () => reject(new Error(`database ${name} does not exist`));
 	});
+	// Mirrors client/src/keys.ts and query/postings.ts: `s/`, an 8-character
+	// scope, a 4-character spec tag, then the record kind. Spelled out because
+	// this runs in the page with no import from the client.
+	const POSTINGS_KIND_AT = 2 + 8 + 4;
+	const POSTINGS_KINDS: Record<string, string> = {
+		d: 'directory',
+		p: 'pages',
+		h: 'heads',
+		c: 'chunks',
+		r: 'term lists',
+	};
 	const keyspaces: Record<string, KeyspaceCounts> = {};
 	const positions: Record<string, PositionCounts> = {};
 
@@ -99,9 +112,15 @@ export async function logicalBreakdown(name: string): Promise<LogicalBreakdown> 
 				const first = key.indexOf('/');
 				const second = first < 0 ? -1 : key.indexOf('/', first + 1);
 				// The tab id after `intent/` is random, and would make two runs
-				// disagree.
+				// disagree. The search keyspaces carry no `/` after their root —
+				// a binary scope follows it — so they group by root, and the
+				// postings by the record kind after the scope and spec tag.
 				const space = key.startsWith('intent/')
 					? 'intent'
+					: key.startsWith('x/')
+					? 'x/'
+					: key.startsWith('s/')
+					? `s/ ${POSTINGS_KINDS[key.charAt(POSTINGS_KIND_AT)] ?? '?'}`
 					: second < 0
 					? key
 					: key.slice(0, second);
