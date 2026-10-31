@@ -65,7 +65,8 @@ func WithLogger(l *slog.Logger) Option {
 // failure. The panic is logged unless it is http.ErrAbortHandler.
 //
 // Serve blocks. Before it returns, it cancels every call in flight, waits for
-// their handlers to return and closes conn. It returns nil when the channel
+// their handlers to return and closes conn. Those calls send nothing more, so
+// the client sees them fail, not finish. It returns nil when the channel
 // reaches io.EOF or ctx ends. Otherwise it returns the error that ended it: a
 // Receive or Send failure, or an error that wraps ErrProtocol.
 func Serve(ctx context.Context, conn Conn, h http.Handler, opts ...Option) error {
@@ -241,7 +242,10 @@ func (s *server) run(c *serverCall, head *tunnelv1.RequestHead) {
 	}
 	s.mu.Unlock()
 
-	if cancelled {
+	// Once the session has ended, a clean End would tell the client that a
+	// response cut short by the shutdown is complete. The close of conn that
+	// follows fails the call on the client side instead.
+	if cancelled || s.ctx.Err() != nil {
 		return
 	}
 	if failure == "" {

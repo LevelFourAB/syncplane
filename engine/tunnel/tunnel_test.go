@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -334,6 +335,19 @@ type failSend struct {
 
 func (f *failSend) Send([]byte) error { return f.err }
 
+// heldClose is a channel end whose Close waits for release, which keeps the
+// channel open for a while after Serve starts to close it.
+type heldClose struct {
+	*memConn
+	release     chan struct{}
+	releaseOnce sync.Once
+}
+
+func (h *heldClose) Close() error {
+	<-h.release
+	return h.memConn.Close()
+}
+
 var _ = Describe("the frame protocol", func() {
 	hello := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("X-Hello", "1")
@@ -385,6 +399,45 @@ var _ = Describe("the frame protocol", func() {
 			}
 			return true
 		}, 100*time.Millisecond).Should(BeTrue())
+	})
+
+	It("sends nothing more for a call in flight when ctx ends", func() {
+		clientConn, serverConn := memPipe()
+		held := &heldClose{memConn: serverConn, release: make(chan struct{})}
+		DeferCleanup(func() {
+			held.releaseOnce.Do(func() { close(held.release) })
+			_ = clientConn.Close()
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		stopped := make(chan struct{})
+		done := make(chan error, 1)
+		go func() {
+			done <- tunnel.Serve(ctx, held, http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
+				<-req.Context().Done()
+				close(stopped)
+			}), tunnel.WithLogger(slog.New(slog.DiscardHandler)))
+		}()
+		r := &raw{conn: clientConn, done: done}
+		r.send(request(1, http.MethodGet, "/"))
+
+		// The channel stays open after ctx ends until release, so a frame the
+		// call sends once its handler returns reaches the client.
+		cancel()
+		Eventually(stopped).Should(BeClosed())
+		Consistently(func() bool {
+			select {
+			case f := <-r.conn.in:
+				Fail(fmt.Sprintf("unexpected frame %v", f))
+			default:
+			}
+			return true
+		}, 100*time.Millisecond).Should(BeTrue())
+
+		held.releaseOnce.Do(func() { close(held.release) })
+		var err error
+		Eventually(done).Should(Receive(&err))
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	It("fails a call whose target is not an absolute path", func() {
