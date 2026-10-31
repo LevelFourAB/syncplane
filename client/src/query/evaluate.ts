@@ -745,6 +745,19 @@ export function compareRows<T>(
 	orderBy: OrderKey[],
 	schema?: DescMessage,
 ): number {
+	return compareOrderKeys(a, b, orderBy, schema) || cmp(a.key, b.key);
+}
+
+/**
+ * `compareRows` without the row-key tiebreak: 0 means the two rows tie on every
+ * order key, whatever their keys.
+ */
+export function compareOrderKeys<T>(
+	a: Row<T>,
+	b: Row<T>,
+	orderBy: OrderKey[],
+	schema?: DescMessage,
+): number {
 	for (const key of orderBy) {
 		if (key.relevance) {
 			const c = cmp(relevanceRank(key, a, schema), relevanceRank(key, b, schema));
@@ -761,7 +774,7 @@ export function compareRows<T>(
 		const c = compareValues(ra.value, rb.value) ?? 0;
 		if (c !== 0) return key.dir === 'desc' ? -c : c;
 	}
-	return cmp(a.key, b.key);
+	return 0;
 }
 
 /** filter → sort → slice. Input rows are already key-ordered. */

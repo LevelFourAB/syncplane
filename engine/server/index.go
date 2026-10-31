@@ -616,6 +616,9 @@ func indexWalk(
 		scanOrder = storage.ScanDesc
 	}
 	sink := sinkFor(residual)
+	// The tie group of the entry walked last, copied out because an adapter
+	// may reuse the entry's bytes once the callback returns.
+	var lastTie []byte
 	// A union plan reads one set of ranges per branch, each from its own
 	// index; a single plan is one branch of itself. The row-key dedupe above
 	// spans branches, so a row two branches yield is offered once.
@@ -635,8 +638,12 @@ func indexWalk(
 			if err != nil {
 				return false, err
 			}
-			err = tx.ScanIndex(info.name, br.Index, lo, hi, 0, scanOrder, func(_ []byte, rowKey string) error {
+			err = tx.ScanIndex(info.name, br.Index, lo, hi, 0, scanOrder, func(entry []byte, rowKey string) error {
 				if plan.Ordered {
+					tie, err := plan.TieGroup(entry)
+					if err != nil {
+						return err
+					}
 					// want only moves during a flush, and a flush empties the
 					// sink, so this is reached with nothing buffered — which is
 					// what makes stopping here drop no row the page still wanted.
@@ -645,7 +652,19 @@ func indexWalk(
 					// remaining room would resolve rows it must then throw away.
 					room := want()
 					if room == 0 {
-						return errPageFilled
+						// A full page can still take a row of the tie group the
+						// last entry belongs to (see query.Plan.TieGroup), so the
+						// walk goes on one row at a time until the group ends.
+						// The worst row kept belongs to the last entry's group or
+						// to an earlier one, so comparing against the last entry
+						// can make the walk read on further, but never stop early.
+						if tie == nil || !bytes.Equal(tie, lastTie) {
+							return errPageFilled
+						}
+						room = 1
+					}
+					if tie != nil {
+						lastTie = append(lastTie[:0], tie...)
 					}
 					sink.hold(min(room, maxRowBatch))
 				}

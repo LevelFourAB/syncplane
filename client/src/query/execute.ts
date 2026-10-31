@@ -60,7 +60,7 @@ import type { OverlayEntry } from '../overlaycache.js';
 import { decodeWholeRow, foldTextLog, readOverlay, type Row, rowOf } from '../read.js';
 import type { QueryDeclineReason } from '../sync/events.js';
 import type { CompiledQuery, Cond, PageWindow, Path } from './ast.js';
-import { compareRows, evalCond, type Matcher, matcherOf } from './evaluate.js';
+import { compareOrderKeys, compareRows, evalCond, type Matcher, matcherOf } from './evaluate.js';
 import { facetsOf, sameFacets } from './facet.js';
 import type {
 	CompiledGroupQuery,
@@ -461,6 +461,20 @@ export async function queryByIndex<D extends DescMessage>(
 	let reads = 0;
 	// Matches past the page, which `total` still has to account for.
 	let beyond = 0;
+	// The order keys an ordered plan serves, which is every key the query asked
+	// for (orderServedBy claims no ordering for an empty one).
+	const servedOrder = compiled.orderBy ?? [];
+	// Whether the walk has read past every row that ties with the boundary row
+	// — the budget-th match in walk order — on the order keys. Until then the
+	// walk cannot settle.
+	//
+	// The scan breaks such a tie on the row key. An index whose order keys reach
+	// its last component orders the tie the same way, because every entry ends
+	// with the row key, so the boundary row is the last of its group the page
+	// can need. One with components past the order keys orders the tie by those
+	// components instead, and a later row of the group can sort before the
+	// boundary row on its key.
+	let tieClosed = plan.orderSpansIndex;
 	// How a settled walk accounts for the rest of its range, and the range's
 	// position count the decision was made from. Both are resolved at the first
 	// settled position and then hold, so the choice cannot flip mid-range and
@@ -529,8 +543,21 @@ export async function queryByIndex<D extends DescMessage>(
 				windowRejected++;
 				continue;
 			}
-			if (budget !== undefined && plan.ordered && confirmed.length >= budget) beyond++;
-			else confirmed.push(entry);
+			if (budget !== undefined && plan.ordered && confirmed.length >= budget) {
+				// Past the budget, a row that ties with the boundary row on every
+				// order key can still sort before it, on the row key, and so
+				// reach the page. Ties are contiguous in index order, so the
+				// first row that does not tie closes the group for good.
+				if (
+					!tieClosed
+					&& compareOrderKeys(entry.row, confirmed[budget - 1]!.row, servedOrder, schema) === 0
+				) {
+					confirmed.push(entry);
+					continue;
+				}
+				tieClosed = true;
+				beyond++;
+			} else confirmed.push(entry);
 		}
 	};
 
@@ -565,7 +592,7 @@ export async function queryByIndex<D extends DescMessage>(
 			// the row still decides, so only flushed rows count.
 			const inHand = confirmed.length
 				+ (plan.residual === undefined && window === undefined ? batch.length : 0);
-			const settled = budget !== undefined && plan.ordered && inHand >= budget;
+			const settled = budget !== undefined && plan.ordered && tieClosed && inHand >= budget;
 			// With nothing left for the row to decide, a position IS a match, so
 			// counting the rest of the range costs no row reads at all. A residual
 			// predicate takes that away — the row is the only thing that can

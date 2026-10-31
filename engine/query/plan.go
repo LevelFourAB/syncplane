@@ -2,6 +2,7 @@ package query
 
 import (
 	"bytes"
+	"fmt"
 	"math"
 	"math/big"
 
@@ -157,6 +158,38 @@ type Plan struct {
 	// range can yield a row that fails that branch yet matches another, so no
 	// branch-local re-check is correct.
 	Union []PlanBranch
+
+	// tieComps are the index components the equality prefix and the order keys
+	// cover, for an Ordered plan whose index carries components past them; nil
+	// otherwise. TieGroup cuts an entry at their end.
+	tieComps []IndexComponent
+}
+
+// TieGroup returns the leading bytes of entry that every entry of the plan's
+// index tying with it on the order keys shares, or nil when the plan has no
+// tie group to finish: one that is not Ordered, or whose OrderSpansIndex
+// holds. The result aliases entry.
+//
+// Past the order keys the index orders a tie by its remaining components,
+// where Order.Less orders it by row key, so the entry that follows a full page
+// in the walk can still sort before a row the page holds. A walk that stops
+// when its page is full has to read on while the next entry returns the same
+// tie group as the previous one, and can stop at the first that does not.
+//
+// It errors on bytes that are not an entry of the plan's index.
+func (p *Plan) TieGroup(entry []byte) ([]byte, error) {
+	if p.tieComps == nil {
+		return nil, nil
+	}
+	at := 0
+	for i, c := range p.tieComps {
+		n, err := componentLen(c, entry[at:])
+		if err != nil {
+			return nil, fmt.Errorf("index entry: component %d: %w", i, err)
+		}
+		at += n
+	}
+	return entry[:at], nil
 }
 
 // PlanBranch is one access path of a union plan: the index to read and the
@@ -531,8 +564,12 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 		prefix = w.prefixes[0]
 	}
 	spans := false
+	var tieComps []IndexComponent
 	if ordered {
 		spans = w.pinned+len(order.keys) == len(comps)
+		if !spans {
+			tieComps = comps[:w.pinned+len(order.keys)]
+		}
 	}
 	return &Plan{
 		Index:           idx.Name,
@@ -541,6 +578,7 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 		Ordered:         ordered,
 		Prefix:          prefix,
 		OrderSpansIndex: spans,
+		tieComps:        tieComps,
 	}, w.pinned
 }
 
