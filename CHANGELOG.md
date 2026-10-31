@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/LevelFourAB/syncplane/compare/v0.4.0...v0.4.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **client:** Stop endless pulls when the stored cursor is behind the rows already applied ([7643660](https://github.com/LevelFourAB/syncplane/commit/7643660a9295b7e644d2ed75929c2a2b75cc9b9c))
+
 ## [0.4.0](https://github.com/LevelFourAB/syncplane/compare/v0.3.0...v0.4.0) (2026-10-31)
 
 
