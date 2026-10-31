@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.4.0](https://github.com/LevelFourAB/syncplane/compare/v0.3.0...v0.4.0) (2026-10-31)
+
+
+### Features
+
+* **client:** Let a text patch name the document the editor last saw ([dec4715](https://github.com/LevelFourAB/syncplane/commit/dec4715b87147d3a388afd46f77a14a330c90fe0))
+* **engine:** Let server-side code make list order keys that match the client ([4783830](https://github.com/LevelFourAB/syncplane/commit/4783830012597db16ea97efdfa5725a831507649))
+* **engine:** Let servers delete a workspace ([ae5f336](https://github.com/LevelFourAB/syncplane/commit/ae5f336ee7c4db43f2ad469acb6e1aa6528eb374))
+* Let clients sync through a message channel instead of HTTP ([e30b89c](https://github.com/LevelFourAB/syncplane/commit/e30b89c17a8492e91060e19ec1898224e74084b8))
+
 ## [0.3.0](https://github.com/LevelFourAB/syncplane/compare/v0.2.0...v0.3.0) (2026-10-29)
 
 
