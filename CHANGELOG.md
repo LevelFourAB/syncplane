@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.4.0](https://github.com/LevelFourAB/syncplane/compare/v0.3.0...v0.4.0) (2026-10-31)
+
+
+### Features
+
+* Blob storage to support attaching binary data to rows ([737afcb](https://github.com/LevelFourAB/syncplane/commit/737afcbfed85740c2ed686127681bf2bc8878d7d))
+* **client:** Let a text patch name the document the editor last saw ([dec4715](https://github.com/LevelFourAB/syncplane/commit/dec4715b87147d3a388afd46f77a14a330c90fe0))
+* **client:** Let apps await setSubscriptions() until the new scope is local ([c2efea9](https://github.com/LevelFourAB/syncplane/commit/c2efea988a23273c6fb4a718aa589d350d20a3c2))
+* **engine:** Let server-side code make list order keys that match the client ([4783830](https://github.com/LevelFourAB/syncplane/commit/4783830012597db16ea97efdfa5725a831507649))
+* **engine:** Let servers delete a workspace ([ae5f336](https://github.com/LevelFourAB/syncplane/commit/ae5f336ee7c4db43f2ad469acb6e1aa6528eb374))
+* Let clients sync through a message channel instead of HTTP ([e30b89c](https://github.com/LevelFourAB/syncplane/commit/e30b89c17a8492e91060e19ec1898224e74084b8))
+
+
+### Bug Fixes
+
+* Return the same rows from an index as from a scan when ordered rows tie ([c9cd20e](https://github.com/LevelFourAB/syncplane/commit/c9cd20ebf32c3a792af38302abad351905b88584))
+
+
+### Performance Improvements
+
+* **client:** Cut IndexedDB storage for full-text search by about a third ([e7ca6d4](https://github.com/LevelFourAB/syncplane/commit/e7ca6d475e500fd59d0c7e29d9f4129a08416526))
+* **client:** Key search records by a short scope fingerprint instead of entity and workspace ([10523bc](https://github.com/LevelFourAB/syncplane/commit/10523bcf1e416d8db5e0410ece1d297d8a992d9c))
+* **client:** Store full-text search postings as packed term lists ([12a1b41](https://github.com/LevelFourAB/syncplane/commit/12a1b414894bd8e323340aba2a1a9944f6fa3149))
+* **engine:** Cut SQLite index storage by a third for text search ([f994128](https://github.com/LevelFourAB/syncplane/commit/f9941283e356fe34d34f34e96a798d479cc8ce2b))
+* **engine:** Cut SQLite index storage for text-heavy rows by a fifth ([3af80e4](https://github.com/LevelFourAB/syncplane/commit/3af80e44dab8084fc7f88d9960bc3db709d8b3cc))
+* **engine:** Make reference indexes sparse to cut storage for empty refs ([8111241](https://github.com/LevelFourAB/syncplane/commit/8111241aab95f93909aeb9caf72d9bf7039cd6fd))
+* **engine:** Shrink index storage with short scope ids and per-row entry lists ([d34c34c](https://github.com/LevelFourAB/syncplane/commit/d34c34c5c9208f3d3a2a920aecb30d9e80e6bae3))
+* **engine:** Shrink the SQLite search index by dropping row keys from search entries ([3a88b04](https://github.com/LevelFourAB/syncplane/commit/3a88b0419f7f0711b2aac6947bc3e27f9523d6db))
+* **query:** Serve a sort against an index's direction from the index ([e8f8671](https://github.com/LevelFourAB/syncplane/commit/e8f8671d63cf7bd48f0581da40e29bc4ef325a5c))
+
 ## [0.3.0](https://github.com/LevelFourAB/syncplane/compare/v0.2.0...v0.3.0) (2026-10-29)
 
 
