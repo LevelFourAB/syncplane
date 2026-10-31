@@ -467,10 +467,21 @@ describe.each(STORES)('postings under random writes (%s)', (_, open) => {
 					s.add(key);
 				}
 			}
-			const stored = await baseOf(kv);
-			for (const t of terms) expect(stored.get(t) ?? []).toEqual(sorted(model.get(t) ?? []));
-			for (const t of terms.slice(0, 8)) {
-				expect(await termKeysOf(kv, t)).toEqual(sorted(model.get(t) ?? []));
+			// One layout check per round, then the readTerm path against the
+			// model: termKeysOf would repeat the full layout check per term,
+			// which is most of this test's run time.
+			const tx = await kv.read();
+			try {
+				const stored = await checkedBase(tx, BASE);
+				for (const t of terms) expect(stored.get(t) ?? []).toEqual(sorted(model.get(t) ?? []));
+				for (const t of terms.slice(0, 8)) {
+					const read = await readTerm(tx, BASE, t);
+					expect(read === undefined ? [] : await readAllKeys(tx, BASE, [ read ])).toEqual(
+						sorted(model.get(t) ?? []),
+					);
+				}
+			} finally {
+				tx.release();
 			}
 		}
 		const tx = await kv.read();
