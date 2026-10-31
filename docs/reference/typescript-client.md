@@ -394,6 +394,7 @@ interface CasOptions {
 }
 interface PatchOptions extends CasOptions {
 	paths?: string[];
+	textBase?: Readonly<Record<string, Uint8Array>>; // diff base per text-field path
 }
 type UpdateOptions = CasOptions;
 ```

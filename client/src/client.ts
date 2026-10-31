@@ -156,6 +156,7 @@ import {
 	refSegmentOf,
 	stampCreatorFields,
 	takeTextStrings,
+	textBasesFor,
 	textFieldBytes,
 	textFieldInit,
 	type TextInit,
@@ -895,6 +896,28 @@ export interface CasOptions {
 export interface PatchOptions extends CasOptions {
 	/** Field mask paths to merge; defaults to the keys present in `init`. */
 	paths?: string[];
+	/**
+	 * The text documents the writer last saw, for the text fields `init` sets
+	 * from a string. Keys are dotted proto paths, the instance path for a
+	 * field inside a keyed list or map element (`'items.<key>.body'`).
+	 *
+	 * A string with a base is diffed against that document and the result is
+	 * merged with the current row, so an edit that reached the store after the
+	 * base was read survives the write. A string without a base is diffed
+	 * against the current row and removes any text the string does not hold.
+	 * Text that the current row dropped after the base (a clear or a server
+	 * compaction) stays dropped.
+	 *
+	 * The write rejects with an `Error` when a key names no field that `init`
+	 * sets from a string, or when a value is not a whole text document.
+	 *
+	 * @example
+	 * ```ts
+	 * const seen = row.body; // what the editor rendered
+	 * await client.db.doc.mutate.patch(key, { body: markdown }, { textBase: { body: seen } });
+	 * ```
+	 */
+	textBase?: Readonly<Record<string, Uint8Array>>;
 }
 
 /**
@@ -2563,6 +2586,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		): Promise<void> => {
 			const def = this.entityRegistry.bySchema(schema);
 			const { init: cleaned, texts } = extractTextStrings(schema, init);
+			const bases = textBasesFor(def.name, texts, opts?.textBase);
 			// The mask derives from the ORIGINAL init so extracted text
 			// fields keep their entry (explicit paths pass through).
 			const paths = opts?.paths ?? maskFromInit(schema, init as object);
@@ -2576,7 +2600,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				paths,
 				opts?.expectedVersion,
 			);
-			attachTextStrings(crud, texts);
+			attachTextStrings(crud, texts, bases);
 			await sink(crud);
 		};
 		return {

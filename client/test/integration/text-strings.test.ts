@@ -94,6 +94,35 @@ describe('string writes over the wire', () => {
 		await b.close();
 	});
 
+	it('a string patch against a text base keeps an edit pulled after the base', async () => {
+		const ws = freshWorkspace();
+		const a = newClient(ws);
+		const b = newClient(ws);
+		await a.start();
+		await b.start();
+
+		await a.mutate.put(WidgetSchema, { id: 'w1', body: 'hello world' });
+		await a.syncNow();
+		await b.syncNow();
+
+		// a's editor renders the row it holds now...
+		const seen = (await a.get(WidgetSchema, 'w1'))!.body;
+		// ...b's edit then reaches a's store before the editor applies it...
+		await b.mutate.patch(WidgetSchema, 'w1', { body: 'hello world there' });
+		await b.syncNow();
+		await a.syncNow();
+		// ...and the editor writes its whole text, built from what it rendered.
+		await a.mutate.patch(WidgetSchema, 'w1', { body: 'Hello world' }, { textBase: { body: seen } });
+		await a.syncNow();
+		await b.syncNow();
+
+		for (const c of [ a, b ]) {
+			expect(plainTextOf((await c.get(WidgetSchema, 'w1'))?.body)).toBe('Hello world there');
+		}
+		await a.close();
+		await b.close();
+	});
+
 	it('a PUT that carries no document keeps the text another client typed', async () => {
 		const ws = freshWorkspace();
 		const a = newClient(ws);

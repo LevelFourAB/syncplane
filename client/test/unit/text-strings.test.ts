@@ -202,6 +202,124 @@ describe('string writes to text fields', () => {
 		});
 	});
 
+	// An editor that renders a block from the row it read last, and writes the
+	// whole block back as a string, names that row's document as the diff base.
+	// An edit that reached the store between the read and the write must
+	// survive it.
+	describe('a string patch against a text base', () => {
+		const bodyOf = async (client: ReturnType<typeof newClient>): Promise<string> =>
+			decodeTextDoc((await client.db.widget.get('w1'))?.body, '').plainText();
+
+		/** Puts 'hello world', returns the document an editor read, then makes a
+		 * concurrent edit the editor never sees. */
+		async function seedWithUnseenEdit(client: ReturnType<typeof newClient>): Promise<Uint8Array> {
+			await client.db.widget.mutate.put({ id: 'w1', body: bodyDoc('seed', 'hello world') });
+			const seen = (await client.db.widget.get('w1'))!.body;
+			const other = await client.db.widget.text('w1', 'body');
+			await other.insert(11, ' there');
+			other.close();
+			return seen;
+		}
+
+		it('keeps an edit the editor did not see', async () => {
+			const client = newClient();
+			const seen = await seedWithUnseenEdit(client);
+
+			await client.db.widget.mutate.patch('w1', { body: 'Hello world' }, {
+				textBase: { body: seen },
+			});
+
+			expect(await bodyOf(client)).toBe('Hello world there');
+			await client.close();
+		});
+
+		it('without a base, diffs against the current row', async () => {
+			// The contrast case: the same write without a base removes the
+			// unseen edit, because the string does not contain it.
+			const client = newClient();
+			await seedWithUnseenEdit(client);
+
+			await client.db.widget.mutate.patch('w1', { body: 'Hello world' });
+
+			expect(await bodyOf(client)).toBe('Hello world');
+			await client.close();
+		});
+
+		it('changes nothing when the string equals the base text', async () => {
+			const client = newClient();
+			const seen = await seedWithUnseenEdit(client);
+
+			await client.db.widget.mutate.patch('w1', { body: 'hello world' }, {
+				textBase: { body: seen },
+			});
+
+			expect(await bodyOf(client)).toBe('hello world there');
+			await client.close();
+		});
+
+		it('does not bring back text that a clear removed after the base', async () => {
+			const client = newClient();
+			await client.db.widget.mutate.put({ id: 'w1', body: bodyDoc('seed', 'abc') });
+			const seen = (await client.db.widget.get('w1'))!.body;
+			// A mask naming the field with no value clears it.
+			await client.db.widget.mutate.patch('w1', {}, { paths: [ 'body' ] });
+
+			await client.db.widget.mutate.patch('w1', { body: 'abcd' }, {
+				textBase: { body: seen },
+			});
+
+			// Only the editor's own change lands on the cleared document.
+			expect(await bodyOf(client)).toBe('d');
+			await client.close();
+		});
+
+		it('undoes only the change the editor made', async () => {
+			const client = newClient({ undo: true });
+			const seen = await seedWithUnseenEdit(client);
+			await client.db.widget.mutate.patch('w1', { body: 'Hello world' }, {
+				textBase: { body: seen },
+			});
+
+			expect(await client.undo()).toBe(true);
+			expect(await bodyOf(client)).toBe('hello world there');
+			await client.close();
+		});
+
+		it('works inside transact batches', async () => {
+			const client = newClient();
+			const seen = await seedWithUnseenEdit(client);
+
+			await client.transact(async (tx) => {
+				await tx.db.widget.mutate.patch('w1', { body: 'Hello world' }, {
+					textBase: { body: seen },
+				});
+			});
+
+			expect(await bodyOf(client)).toBe('Hello world there');
+			await client.close();
+		});
+
+		it('refuses a base for a field the write gives no string', async () => {
+			const client = newClient();
+			const seen = await seedWithUnseenEdit(client);
+			await expect(
+				client.db.widget.mutate.patch('w1', { label: 'x' }, { textBase: { body: seen } }),
+			).rejects.toThrow(/textBase.*"body"/);
+			await client.close();
+		});
+
+		it('refuses a base that is not a whole document', async () => {
+			const client = newClient();
+			await seedWithUnseenEdit(client);
+			await expect(
+				client.db.widget.mutate.patch('w1', { body: 'x' }, {
+					textBase: { body: encodePlainString('hello world') },
+				}),
+			).rejects.toThrow(/textBase.*"body"/);
+			await client.close();
+		});
+	});
+
 	it('strings work inside transact batches', async () => {
 		const client = newClient();
 		await client.transact(async (tx) => {

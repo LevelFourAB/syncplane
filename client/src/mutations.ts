@@ -47,14 +47,17 @@ import {
 	validateWorkspaceId,
 } from './naming.js';
 import { RESERVED_QUERY_NAMES } from './query/proxy.js';
+import { reapplyUnseen } from './text/compact.js';
 import type { DeletedSegment, InsertedRange } from './text/doc.js';
 import {
 	decodeTextDoc,
 	encodeTextDoc,
 	isFragment,
 	isPlainString,
+	mergeInto,
 	mergeText,
 	plainString,
+	purgedByRemote,
 	TextDoc,
 } from './text/index.js';
 
@@ -2089,20 +2092,59 @@ function extractFrom(
  * stays a plain proto message — persistence and the wire never see the
  * strings, only the document bytes enqueue turns them into.
  */
-const crudTextStrings = new WeakMap<CrudMutation, ReadonlyMap<string, string>>();
+const crudTextStrings = new WeakMap<CrudMutation, PendingTexts>();
+
+/**
+ * A crud's text strings, keyed by instance path, with the diff base the
+ * caller gave for some of them (see PatchOptions.textBase).
+ */
+export interface PendingTexts {
+	strings: ReadonlyMap<string, string>;
+	bases?: ReadonlyMap<string, Uint8Array>;
+}
 
 export function attachTextStrings(
 	crud: CrudMutation,
 	texts: ReadonlyMap<string, string> | undefined,
+	bases?: ReadonlyMap<string, Uint8Array>,
 ): void {
-	if (texts !== undefined && texts.size > 0) crudTextStrings.set(crud, texts);
+	if (texts !== undefined && texts.size > 0) {
+		crudTextStrings.set(crud, bases === undefined ? { strings: texts } : { strings: texts, bases });
+	}
 }
 
 /** Removes and returns the crud's pending text strings, if any. */
-export function takeTextStrings(crud: CrudMutation): ReadonlyMap<string, string> | undefined {
+export function takeTextStrings(crud: CrudMutation): PendingTexts | undefined {
 	const texts = crudTextStrings.get(crud);
 	if (texts !== undefined) crudTextStrings.delete(crud);
 	return texts;
+}
+
+/**
+ * Checks a patch's `textBase` against the strings the patch writes, and
+ * returns the bases keyed by path. Throws when a key names a path with no
+ * string, or a value is not a whole text document — a fragment or a
+ * plain-string value names no item ids to diff against.
+ */
+export function textBasesFor(
+	entity: string,
+	texts: ReadonlyMap<string, string> | undefined,
+	textBase: Readonly<Record<string, Uint8Array>> | undefined,
+): Map<string, Uint8Array> | undefined {
+	if (textBase === undefined) return undefined;
+	const bases = new Map<string, Uint8Array>();
+	for (const [ path, bytes ] of Object.entries(textBase)) {
+		if (!texts?.has(path)) {
+			throw new Error(
+				`entity "${entity}": textBase names "${path}", which this write does not set from a string`,
+			);
+		}
+		if (!(bytes instanceof Uint8Array) || isPlainString(bytes) || isFragment(bytes)) {
+			throw new Error(`entity "${entity}": textBase for "${path}" is not a whole text document`);
+		}
+		bases.set(path, bytes);
+	}
+	return bases.size > 0 ? bases : undefined;
 }
 
 /**
@@ -2394,7 +2436,9 @@ export function crudHasPlainString(
  * Converts a crud's text strings into document bytes in place: each string is
  * diffed (multi-hunk) against the field's document in the merged row `prevRow`,
  * under the leased writer identity `peer`, and the resulting full document
- * replaces the field inside crud.value.
+ * replaces the field inside crud.value. A string with a base in `texts.bases`
+ * is diffed against that base instead, and the result is merged with the
+ * field's document in `prevRow` (see `diffAgainstBase`).
  *
  * Strings come from two places. `texts` is what the caller asked to write, and
  * a path there is added to a PATCH's mask when nothing covers it yet. The other
@@ -2419,11 +2463,11 @@ export async function applyTextStringsToCrud(
 	def: EntityDef,
 	crud: CrudMutation,
 	prevRow: () => Promise<Uint8Array | undefined>,
-	texts: ReadonlyMap<string, string> | undefined,
+	texts: PendingTexts | undefined,
 	peer: string | undefined,
 	textPaths: readonly string[],
 ): Promise<TextStringEdits | undefined> {
-	if ((texts === undefined || texts.size === 0) && textPaths.length === 0) return undefined;
+	if (texts === undefined && textPaths.length === 0) return undefined;
 
 	const value = fromBinary(def.schema, crud.value) as unknown as Rec;
 	const masked = (path: string): boolean =>
@@ -2449,7 +2493,7 @@ export async function applyTextStringsToCrud(
 			pending.set(path, plainString(current!));
 		}
 	}
-	if (texts) { for (const [ path, s ] of texts) pending.set(path, s); }
+	if (texts) { for (const [ path, s ] of texts.strings) pending.set(path, s); }
 
 	if (pending.size === 0) {
 		if (cleared) crud.value = toBinary(def.schema, value as unknown as Message);
@@ -2468,10 +2512,17 @@ export async function applyTextStringsToCrud(
 	const edits: TextStringEdits = new Map();
 	for (const [ path, s ] of pending) {
 		const steps = textFieldSteps(def.schema, path);
-		const doc = decodeTextDoc(getBytesAt(prev, steps), peer);
-		edits.set(path, doc.setString(s));
-		setBytesAt(value, steps, encodeTextDoc(doc));
-		if (crud.op === CrudOp.PATCH && crud.fieldMask && texts?.has(path)) {
+		const base = texts?.bases?.get(path);
+		if (base !== undefined) {
+			const { doc, edit } = diffAgainstBase(base, getBytesAt(prev, steps), s, peer);
+			if (edit !== undefined) edits.set(path, edit);
+			setBytesAt(value, steps, encodeTextDoc(doc));
+		} else {
+			const doc = decodeTextDoc(getBytesAt(prev, steps), peer);
+			edits.set(path, doc.setString(s));
+			setBytesAt(value, steps, encodeTextDoc(doc));
+		}
+		if (crud.op === CrudOp.PATCH && crud.fieldMask && texts?.strings.has(path)) {
 			const covered = crud.fieldMask.paths.some(
 				(p) => p === path || path.startsWith(`${p}.`),
 			);
@@ -2480,6 +2531,41 @@ export async function applyTextStringsToCrud(
 	}
 	crud.value = toBinary(def.schema, value as unknown as Message);
 	return edits;
+}
+
+/**
+ * Diffs `s` against the document `base` under `peer`, then merges the result
+ * with `current` (the field's document in the merged row), so edits that
+ * reached `current` after `base` was read survive. The client twin of the
+ * server's ApplyTextStrings with a base.
+ *
+ * `edit` is what the diff did, for a symbolic undo inverse. It is undefined
+ * when `current` dropped items that `base` still holds (a clear, a server
+ * compaction): a union would put that text back, so the document is rebuilt
+ * from `current` with only the writer's own change applied on top
+ * (see reapplyUnseen), and the diff's ids are not the ones that land.
+ */
+function diffAgainstBase(
+	base: Uint8Array,
+	current: Uint8Array | undefined,
+	s: string,
+	peer: string,
+): { doc: TextDoc; edit?: { deleted: DeletedSegment[]; inserted: InsertedRange[] } } {
+	const doc = decodeTextDoc(base, peer);
+	const cur = current !== undefined && current.length > 0 ? decodeTextDoc(current, '') : undefined;
+	// The lease guarantees `current` holds every op this peer minted before,
+	// but `base` can predate them: allocating from base's vector alone would
+	// reuse their counters.
+	if (cur !== undefined) doc.observeVersion(cur.versionVector());
+	const edit = doc.plainText() === s ? { deleted: [], inserted: [] } : doc.setString(s);
+	if (cur === undefined) return { doc, edit };
+	if (purgedByRemote(doc, cur)) {
+		const rebuilt = decodeTextDoc(current, peer);
+		reapplyUnseen(rebuilt, doc, cur.vv);
+		return { doc: rebuilt };
+	}
+	mergeInto(doc, cur);
+	return { doc, edit };
 }
 
 /**

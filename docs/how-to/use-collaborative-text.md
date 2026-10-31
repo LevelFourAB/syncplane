@@ -136,6 +136,17 @@ To update a text field without opening a live handle, pass a plain string to `mu
 - Strings with a difference exceeding the `maxDiffCost` bound (1024) fall back to a single replacement hunk.
 - The input must be valid code points. The client rejects invalid UTF-8 in Go or unpaired surrogates in JavaScript.
 
+If the string comes from an editor that renders the text it read earlier, give that document as the diff base with `textBase`. Without a base, the diff uses the current row, and the write deletes an edit that arrived after the editor read the row:
+
+```ts
+const seen = row.body; // the document the editor rendered
+await client.db.doc.mutate.patch(key, { body: markdown }, {
+	textBase: { body: seen },
+});
+```
+
+The client diffs the string against the base and merges the result with the current row. Edits that arrived after the base stay. Text that a clear or a server compaction removed after the base stays removed. The keys are field paths; use the instance path (`items.<key>.body`) for a field inside a keyed list or map element. The server-side equivalent is the `base` argument of `server.ApplyTextStrings`.
+
 If you write from the server side, pass `WithTextString(field, s)` and `WithTextPeer(peer)` to `EntityTx.Put` or `EntityTx.Patch`. The diff base is the stored document. Any text in the row that is missing from the string is deleted. For more information, see [Write from server-side code](server-side-writes.md#writing-collaborative-text).
 
 ## 6. Add annotations to text ranges
