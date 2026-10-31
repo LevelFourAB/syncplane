@@ -7,6 +7,11 @@ import { fileURLToPath } from 'node:url';
 export interface TestServer {
 	/** Base URL the server is listening on, e.g. `http://127.0.0.1:53421`. */
 	url: string;
+	/**
+	 * Address of the tunnel listener, e.g. `127.0.0.1:53422`: each TCP
+	 * connection to it is a byte stream of tunnel frames to the same handlers.
+	 */
+	tunnelAddr: string;
 	/** Kills the process. Safe to call more than once. */
 	stop(): void;
 }
@@ -41,22 +46,27 @@ export async function startTestServer(args: string[] = []): Promise<TestServer> 
 
 	const proc = spawn(bin, args, { stdio: [ 'ignore', 'pipe', 'inherit' ] });
 
-	const url = await new Promise<string>((resolve, reject) => {
-		let buf = '';
-		proc.stdout.on('data', (chunk: Buffer) => {
-			buf += chunk.toString();
-			const match = buf.match(/^LISTENING (\S+)$/m);
-			if (match?.[1]) resolve(match[1]);
-		});
-		proc.on('error', reject);
-		proc.on(
-			'exit',
-			(code) => reject(new Error(`testserver exited with ${code} before listening`)),
-		);
-	}).finally(removeBuild);
+	const { url, tunnelAddr } = await new Promise<{ url: string; tunnelAddr: string }>(
+		(resolve, reject) => {
+			let buf = '';
+			proc.stdout.on('data', (chunk: Buffer) => {
+				buf += chunk.toString();
+				const match = buf.match(/^LISTENING (\S+)$/m);
+				// The server prints TUNNEL before LISTENING.
+				const tunnel = buf.match(/^TUNNEL tcp:\/\/(\S+)$/m);
+				if (match?.[1]) resolve({ url: match[1], tunnelAddr: tunnel?.[1] ?? '' });
+			});
+			proc.on('error', reject);
+			proc.on(
+				'exit',
+				(code) => reject(new Error(`testserver exited with ${code} before listening`)),
+			);
+		},
+	).finally(removeBuild);
 
 	return {
 		url,
+		tunnelAddr,
 		stop: () => {
 			proc.kill();
 		},

@@ -1,0 +1,86 @@
+syntax = "proto3";
+
+package syncplane.tunnel.v1;
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/tunnel/v1;tunnelv1";
+
+// One message on a tunnel: a channel that carries HTTP exchanges as discrete,
+// ordered, reliable messages instead of over a socket. Each message on the
+// channel holds exactly one Frame in the binary protobuf encoding.
+//
+// A channel carries one or more calls, told apart by `call`. A client may open
+// one channel for each call or multiplex many calls over one channel; the
+// server treats both the same.
+//
+// A call runs in this order:
+//
+// 1. The client sends `request`, then zero or more `body` frames, then `end`.
+// 2. The server sends `response`, then zero or more `body` frames, then `end`.
+//
+// The server may start its half before the client finishes its own. Either
+// side may send `end` with an error at any point to fail the call. The client
+// may send `cancel` at any point after `request` to abandon the call; the
+// server then stops the handler and sends nothing more for that call, although
+// frames already in flight can still arrive. A side ignores frames for a call
+// it does not know or has finished.
+//
+// The protocol has no flow control of its own. On a multiplexed channel, a
+// receiver that stops reading stalls every call on that channel.
+message Frame {
+	// Identifies the call this frame belongs to. The client chooses it when it
+	// sends `request`. It must be non-zero and must not match any call still in
+	// flight on the same channel.
+	uint32 call = 1;
+
+	oneof kind {
+		// Opens the call. Client to server only, and only as the first frame of
+		// the call.
+		RequestHead request = 2;
+		// Carries the next chunk of the request body (client to server) or the
+		// response body (server to client). A sender should keep chunks at or
+		// below 64 KiB: some channels refuse or split larger messages.
+		bytes body = 3;
+		// Starts the response. Server to client only, before any response
+		// `body` frame.
+		ResponseHead response = 4;
+		// Ends the sender's half of the call.
+		End end = 5;
+		// Abandons the call. Client to server only.
+		Cancel cancel = 6;
+	}
+}
+
+// One HTTP header and all its values, in the order they appear.
+message Header {
+	// The header name. Case-insensitive.
+	string name = 1;
+	repeated string values = 2;
+}
+
+// The start of an HTTP request.
+message RequestHead {
+	// The HTTP method, such as "POST".
+	string method = 1;
+	// The request target: an absolute path with an optional query, such as
+	// "/syncplane.v1.SyncService/Push". It carries no scheme or host.
+	string target = 2;
+	repeated Header headers = 3;
+}
+
+// The start of an HTTP response.
+message ResponseHead {
+	// The HTTP status code, from 200 to 599.
+	uint32 status = 1;
+	repeated Header headers = 2;
+}
+
+// The end of one side of a call.
+message End {
+	// Empty when the sender's half finished normally. Otherwise a
+	// human-readable reason the call failed below HTTP, such as a handler that
+	// aborted mid-response; the receiver treats the call as a network failure.
+	string error = 1;
+}
+
+// A request to abandon a call.
+message Cancel {}

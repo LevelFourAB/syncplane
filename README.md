@@ -28,6 +28,7 @@ Syncplane is a sync engine for local-first applications. Clients read and write 
 - **Effects and connectors**: Run custom code when writes commit, and keep external systems in two-way sync.
 - **Runtime schemas**: Register application entities at runtime instead of compiling them into the binary. One server can host multiple applications.
 - **Single-node or multi-node deployments**: Start with SQLite and no extra infrastructure, or switch to PostgreSQL to run multiple nodes. Application code does not change.
+- **Tunnels**: Reach the server through a message channel instead of HTTP, such as a desktop shell's stream API, a `MessagePort`, stdio to a sidecar or a WebSocket. The engine can run in the host process or behind a proxy to a remote server.
 
 ### Tooling
 

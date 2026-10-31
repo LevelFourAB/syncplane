@@ -6,7 +6,7 @@ A background coordinator pushes the queue, pulls server changes, and rebases loc
 Reads are local and synchronous after an initial await.
 
 - The package is ESM-only (`"type": "module"`).
-- Package entry points are `.` (core) and `./react` (React hooks layer; `react` is an optional peer dependency `>=18`).
+- Package entry points are `.` (core), `./react` (React hooks layer; `react` is an optional peer dependency `>=18`), `./testing` (in-process test kit) and `./tunnel` (calls over a message channel; see the [tunnel reference](tunnel.md#typescript-syncplanetunnel)).
 - Generated Protocol Buffers descriptors are re-exported under `./gen/*`.
 - The wire contract is Protocol Buffers.
   Entities are compiled from `.proto` files using `buf` or declared in TypeScript using the `schema` builder.

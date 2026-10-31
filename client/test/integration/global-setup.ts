@@ -5,6 +5,7 @@ import { startTestServer } from '../support/testserver.js';
 declare module 'vitest' {
 	export interface ProvidedContext {
 		serverUrl: string;
+		tunnelAddr: string;
 	}
 }
 
@@ -16,5 +17,6 @@ declare module 'vitest' {
 export default async function setup(project: TestProject): Promise<() => void> {
 	const server = await startTestServer([ '-heartbeat=250ms', '-chunk-size=8' ]);
 	project.provide('serverUrl', server.url);
+	project.provide('tunnelAddr', server.tunnelAddr);
 	return () => server.stop();
 }

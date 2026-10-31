@@ -44,6 +44,7 @@ Task-oriented guides. Each guide assumes you already have a running app.
 - [Follow committed changes (change feed)](how-to/change-feed.md)
 - [Sync an external store (connectors)](how-to/sync-an-external-store.md)
 - [Host multiple apps in one process](how-to/host-multiple-apps.md)
+- [Serve sync through a tunnel (desktop shells, sidecars, WebSockets)](how-to/serve-sync-through-a-tunnel.md)
 - [Run more than one node](how-to/run-multiple-nodes.md)
 - [Deploy for high availability](how-to/deploy-for-high-availability.md)
 - [Observe the engine (OpenTelemetry)](how-to/observe-the-engine.md)
@@ -88,6 +89,8 @@ Information-oriented. Use these pages to look up facts.
   must honor to be correct.
 - [Telemetry](reference/telemetry.md) — every metric and span the engine emits,
   their attributes, and the cardinality rule they follow.
+- [Tunnel](reference/tunnel.md) — the frame protocol, `engine/tunnel` and
+  `syncplane/tunnel`: channels, adapters, options and errors.
 
 ## Explanation
 
@@ -122,5 +125,8 @@ Understanding-oriented. Read these when a behavior surprises you.
 - [Rooms: the ephemeral plane](explanation/rooms.md) — presence and broadcast,
   why the mutation log is the wrong home for them, and expiry by
   re-announcement.
+- [Tunnels](explanation/tunnels.md) — why the tunnel carries HTTP and not
+  RPCs, one channel per call or one shared channel, and what a tunnel does not
+  do.
 - [Limits and trade-offs](explanation/limits-and-trade-offs.md) — what the
   engine deliberately does not do, and what to know before adopting.

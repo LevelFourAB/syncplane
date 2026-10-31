@@ -24,6 +24,10 @@
       "types": "./dist/testing/index.d.ts",
       "default": "./dist/testing/index.js"
     },
+    "./tunnel": {
+      "types": "./dist/tunnel/index.d.ts",
+      "default": "./dist/tunnel/index.js"
+    },
     "./gen/*": "./dist/gen/*"
   },
   "files": [

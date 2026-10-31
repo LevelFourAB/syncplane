@@ -7,6 +7,10 @@
 // It also serves permissive CORS and a /debug/rpc counter endpoint so the
 // browser e2e suite can reach it from the harness origin and assert what did
 // (and did not) reach the server; see debug.go.
+//
+// A second listener answers each TCP connection as a tunnel (engine/tunnel)
+// to the same handlers, and its address is printed as "TUNNEL tcp://…" before
+// the LISTENING line.
 package main
 
 import (
@@ -25,6 +29,7 @@ import (
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
+	"github.com/levelfourab/syncplane/engine/tunnel"
 	"github.com/levelfourab/syncplane/internal/clilog"
 	"github.com/levelfourab/syncplane/internal/exampleapp"
 )
@@ -48,6 +53,8 @@ func main() {
 			"serve the access-model test schema instead of the default one; see access.go")
 		maxAccessDepth = flag.Int("max-access-depth", 0,
 			"Limits.MaxAccessDepth: the most access parent hops a permission reaches down (0 is the default)")
+		tunnelAddr = flag.String("tunnel-addr", "127.0.0.1:0",
+			"listen address for tunnel connections, each a byte stream of length-prefixed frames (empty disables)")
 	)
 	buildLogger := clilog.Flags(flag.CommandLine)
 	flag.Parse()
@@ -155,6 +162,19 @@ func main() {
 		mux.Handle("/debug/trusted", trustedWriteHandler(srv))
 	}
 
+	if *tunnelAddr != "" {
+		// The same mux over the tunnel, so a suite can drive one client through
+		// it and another over HTTP against the same store.
+		tln, err := net.Listen("tcp", *tunnelAddr)
+		if err != nil {
+			clilog.Fatal(logger, "listen for tunnels", err)
+		}
+		go serveTunnels(tln, mux)
+		// Printed before LISTENING, so it is in the output by the time the
+		// harness has seen that line.
+		fmt.Printf("TUNNEL tcp://%s\n", tln.Addr().String())
+	}
+
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
 		clilog.Fatal(logger, "listen", err)
@@ -164,6 +184,17 @@ func main() {
 	os.Stdout.Sync()
 
 	clilog.Fatal(logger, "http server stopped", http.Serve(ln, cors(mux)))
+}
+
+// serveTunnels answers every connection on ln as one tunnel to h.
+func serveTunnels(ln net.Listener, h http.Handler) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		go func() { _ = tunnel.Serve(context.Background(), tunnel.NewStreamConn(conn), h) }()
+	}
 }
 
 // defaultOptions is the schema and permission policy every suite but the

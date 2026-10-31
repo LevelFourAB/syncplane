@@ -52,7 +52,8 @@ PostgreSQL one and `prefixstore/` the workspace-id prefix a multi-app host
 partitions one adapter with), `query/` (compiler + evaluator behind
 the `Query` RPC and app-side queries), `text/` (the collaborative text CRDT),
 `fractional/` (order keys for movable lists, the Go twin of
-`client/src/fractional.ts`), `connect/` (bidirectional connectors to external stores), `effects/`
+`client/src/fractional.ts`), `tunnel/` (HTTP over a message channel — `Serve`
+answers frames with any `http.Handler`, the Go half of `client/src/tunnel/`), `connect/` (bidirectional connectors to external stores), `effects/`
 (server-side reactions to committed writes, over the change feed), `notify/`
 (shared poke fan-out for multi-node deployments; `pgnotify/` over Postgres
 `LISTEN`/`NOTIFY`), `presence/` (the ephemeral plane — rooms, presence and
@@ -80,7 +81,8 @@ also used by `engine/`), `clilog/` (flag-driven logger shared by the commands),
 (runtime schema registration over AdminService).
 
 `client/src/`: `kv/` (IndexedDB + in-memory backends, multi-tab safety via Web
-Locks), `optimistic/` (pending queue, rebase, compaction), `sync/` (background
+Locks), `tunnel/` (`syncplane/tunnel`: a `fetch` over a message channel, and
+adapters for WebSockets, MessagePorts and byte streams), `optimistic/` (pending queue, rebase, compaction), `sync/` (background
 coordinator, cross-tab poke/change sharing, and `presence.ts` for the second
 plane's own stream and leadership), `read.ts` (the merged view every reader goes
 through), `room.ts` (the `Room` handle apps hold), `text/` (TS mirror of
