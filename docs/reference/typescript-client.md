@@ -2006,7 +2006,7 @@ render their empty snapshot, since the data lives in the browser's store.
 ## Other top-level exports
 
 - `newId(): string`: Generates a time-ordered string identifier.
-- Fractional indexing: `generateKeyBetween(a, b, clientId?)`, `generateNKeysBetween(a, b, n, clientId?)`, `BASE_62_DIGITS`.
+- Fractional indexing: `generateKeyBetween(a, b)`, `generateNKeysBetween(a, b, n)`, `BASE_62_DIGITS`. A `null` bound is open. Both throw on a bound that is not an order key or when `a >= b`. The Go package `engine/fractional` makes the same keys; see [Order keys](server.md#order-keys).
 - [Custom mergers](proto-options.md#custom-mergers-for-opaque-fields): `MergerSpec`, `MergeFn`.
 - [Naming rules](naming.md): `validateEntityName`, `validateKeyField`, `validateRowKey`, `MAX_ENTITY_NAME_LENGTH`, `MAX_ROW_KEY_BYTES`.
 - [Storage names](#storage-names): `storageNames`, `DEFAULT_STORAGE_PREFIX`, `StorageNames`.

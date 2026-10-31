@@ -298,6 +298,24 @@ Key semantics:
 - Keys expire according to `WithIdempotencyRetention` (default 24 hours). Set retention above the longest retry window that callers use. A retry that arrives after key expiration executes as a new write.
 - Idempotency keys use a ledger separate from client watermarks. Client watermarks require contiguous sequence numbers and are pruned when clients go idle.
 
+## Order keys
+
+Package `github.com/levelfourab/syncplane/engine/fractional` makes the order keys that sort a movable list (`order_field`). Use it when server-side code inserts or moves a list element. It makes the same keys as the TypeScript client from the same inputs, so keys from both sides sort correctly in one list.
+
+```go
+func KeyBetween(a, b string) (string, error)
+func NKeysBetween(a, b string, n int) ([]string, error)
+func KeyBetweenFor(a, b, actor string) (string, error)
+```
+
+- An empty bound is open. `KeyBetween("", "")` returns `"a0"`, the first key of an empty list. `KeyBetween(k, "")` returns a key after `k`, and `KeyBetween("", k)` a key before `k`.
+- `KeyBetweenFor` adds a suffix derived from `actor`, the same suffix the TypeScript client adds with its client id. Two writers that insert into the same gap then get different keys. Give each server-side writer its own stable actor, such as a connector name.
+- `NKeysBetween` returns `n` ascending keys. A zero or negative `n` returns `nil`.
+- `ErrInvalidKey`: a bound is not an order key. Keys use only the 62 characters in `fractional.Digits`, start with a letter that sets the integer length, and do not end in `0`.
+- `ErrOutOfOrder`: `a` does not sort below `b`.
+
+Valid bounds always have a key between them. Keys compare as byte strings. The shared vectors in `testdata/fractional/` hold the Go and TypeScript implementations to the same output.
+
 ## Reads
 
 Execute read-only transactions with `View`:

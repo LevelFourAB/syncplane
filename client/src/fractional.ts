@@ -78,6 +78,11 @@ function validateOrderKey(key: string, digits: string): void {
 		throw new Error(`invalid order key: ${key}`);
 	}
 	const i = integerPartOf(key);
+	for (let n = 1; n < key.length; n++) {
+		if (!digits.includes(key.charAt(n))) {
+			throw new Error(`invalid order key (character outside the digits): ${key}`);
+		}
+	}
 	const f = key.slice(i.length);
 	if (f.slice(-1) === digits.charAt(0)) {
 		throw new Error(`invalid order key (trailing zero): ${key}`);
@@ -183,6 +188,12 @@ export function generateKeyBetween(
 		const res = decrementInteger(ib, digits);
 		if (res === undefined) {
 			throw new Error('cannot decrement any more');
+		}
+		if (res === SMALLEST_INTEGER) {
+			// The smallest integer is reserved and never a key on its own, so
+			// step into its fraction. b is a whole integer here, so every
+			// fraction of the smallest integer still sorts before it.
+			return res + midpoint('', '', digits);
 		}
 		return res;
 	}
