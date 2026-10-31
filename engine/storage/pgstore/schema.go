@@ -242,8 +242,9 @@ CREATE INDEX idempotency_gc ON idempotency (workspace_id, updated_at);
 
 -- k is BYTEA, which Postgres compares bytewise — the order the engine's key
 -- encoder is built for, and the reason this must never become a text column
--- whatever its collation. The key column sits in the primary key after k for
--- uniqueness only: k already ends with the row key.
+-- whatever its collation. The key column sits in the primary key after k
+-- because entries of different rows can be byte-equal: a search entry does not
+-- end with its row key.
 CREATE TABLE index_entries (
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	entity       TEXT COLLATE "C" NOT NULL,

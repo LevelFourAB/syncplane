@@ -363,7 +363,7 @@ func searchEntriesPerRow(b *testing.B, row *testdatav1.Article) float64 {
 	if err != nil {
 		b.Fatal(err)
 	}
-	return float64(len(decl.SearchEntries(row.ProtoReflect(), "probe")))
+	return float64(len(decl.SearchEntries(row.ProtoReflect())))
 }
 
 // searchRun executes one query and checks it returned the rows it claims to.

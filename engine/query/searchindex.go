@@ -6,9 +6,15 @@ package query
 // but its entries are TERMS rather than field values, so a row occupies one
 // position per distinct term its searchable fields analyze to:
 //
-//	entry    := 0x01 term rowKey     one per distinct term
-//	         |  0x02 rowKey          the overflow marker, alone
+//	entry    := 0x01 term     one per distinct term
+//	         |  0x02          the overflow marker, alone
 //	term     := CESU-8, escaped and terminated as every index string is
+//
+// An entry does not end with the row key, as a value index entry does: every
+// search read collects the SET of rows a range names and uses neither the
+// order of the entries within a term nor their bytes past it. The rows that
+// hold one term therefore all hold the same entry, which the storage contract
+// permits (see storage.IndexEntry).
 //
 // A row whose distinct terms exceed SearchTermsPerRow stores the single
 // overflow marker instead. Every term probe unions the overflow rows into its
@@ -18,8 +24,11 @@ package query
 // The index generates CANDIDATES only: matched rows are re-evaluated (and
 // ranked) from the row itself, so the index changes which rows are considered,
 // never which match — the same contract every other index honors. The
-// TypeScript client maintains the identical entries as local index positions
-// (client/src/optimistic/index-maintain.ts).
+// TypeScript client maintains its own copy of the index as local index
+// positions (client/src/optimistic/index-maintain.ts). What the two sides must
+// agree on is the analysis, the per-row term cap and the overflow rule, as
+// they decide which rows a probe finds; the entry bytes are local to each
+// side.
 
 import (
 	"fmt"
@@ -33,7 +42,7 @@ import (
 // searchIndexEncodingVersion is folded into every search-index SpecHash.
 // Bumping it — for an entry-encoding change, or an analyzer change that moves
 // existing terms — invalidates every stored search index, which then rebuilds.
-const searchIndexEncodingVersion = 1
+const searchIndexEncodingVersion = 2
 
 // SearchTermsPerRow caps the distinct terms one row stores postings for; past
 // it the row stores the overflow marker alone. It is a constant rather than a
@@ -51,7 +60,7 @@ const (
 // order, or the overflow marker alone past SearchTermsPerRow. A row whose
 // fields analyze to nothing occupies no entries — such a row can match no
 // term probe, and the overflow union covers only rows that opted out by size.
-func (d *SearchDecl) SearchEntries(msg protoreflect.Message, rowKey string) [][]byte {
+func (d *SearchDecl) SearchEntries(msg protoreflect.Message) [][]byte {
 	seen := make(map[string]struct{})
 	var terms []string
 	for _, f := range d.fields {
@@ -64,7 +73,7 @@ func (d *SearchDecl) SearchEntries(msg protoreflect.Message, rowKey string) [][]
 				continue
 			}
 			if len(seen) == SearchTermsPerRow {
-				return [][]byte{appendIndexString([]byte{searchOverflowTag}, rowKey)}
+				return [][]byte{{searchOverflowTag}}
 			}
 			seen[t] = struct{}{}
 			terms = append(terms, t)
@@ -72,8 +81,7 @@ func (d *SearchDecl) SearchEntries(msg protoreflect.Message, rowKey string) [][]
 	}
 	out := make([][]byte, 0, len(terms))
 	for _, t := range terms {
-		buf := appendIndexString([]byte{searchTermTag}, t)
-		out = append(out, appendIndexString(buf, rowKey))
+		out = append(out, appendIndexString([]byte{searchTermTag}, t))
 	}
 	return out
 }

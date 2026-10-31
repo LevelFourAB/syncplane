@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -159,6 +160,73 @@ var _ = Describe("Search", func() {
 			for _, e := range entries {
 				Expect(e[0]).To(Equal(byte(0x01)), "term entries carry the term tag")
 			}
+		})
+
+		It("stores the postings of a term without the row key, byte-equal across rows", func() {
+			entries, keys := searchEntries()
+			milk := []byte("\x01milk\x00\x00")
+			var withMilk []string
+			for i, e := range entries {
+				Expect(string(e)).NotTo(ContainSubstring(keys[i]), "an entry does not carry its row key")
+				if bytes.Equal(e, milk) {
+					withMilk = append(withMilk, keys[i])
+				}
+			}
+			Expect(withMilk).To(ConsistOf("a1", "a2", "a4"))
+
+			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			Expect(keysOf(runQuery(&syncplanev1.QueryRequest{
+				Entity:    "article",
+				Predicate: match("milk"),
+			}))).To(ConsistOf("a1", "a2", "a4"))
+		})
+
+		It("finds every overflow row from the shared overflow marker", func() {
+			oversized := func(tag string) string {
+				var b strings.Builder
+				for i := 0; i < query.SearchTermsPerRow+40; i++ {
+					fmt.Fprintf(&b, "%s%04d ", tag, i)
+				}
+				b.WriteString("needle")
+				return b.String()
+			}
+			resp, err := client.Push(ctx, connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+				putArticle(5, &testdatav1.Article{Id: "big1", Summary: oversized("first")}),
+				putArticle(6, &testdatav1.Article{Id: "big2", Summary: oversized("second")}),
+				putArticle(7, &testdatav1.Article{Id: "small", Summary: "needle"}),
+			})))
+			Expect(err).NotTo(HaveOccurred())
+			for _, r := range pushResults(resp.Msg) {
+				Expect(r.GetErrorCode()).To(BeEmpty(), r.GetErrorMessage())
+			}
+
+			entries, keys := searchEntries()
+			var overflow []string
+			for i, e := range entries {
+				if e[0] == 0x02 {
+					Expect(e).To(Equal([]byte{0x02}), "the overflow marker is the tag alone")
+					overflow = append(overflow, keys[i])
+				}
+			}
+			Expect(overflow).To(ConsistOf("big1", "big2"))
+
+			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			// "needle" is past the cap in both oversized rows, so only the
+			// overflow union finds them; "small" holds a posting for it.
+			Expect(keysOf(runQuery(&syncplanev1.QueryRequest{
+				Entity:    "article",
+				Predicate: match("needle"),
+			}))).To(ConsistOf("big1", "big2", "small"))
+			// The overflow rows are candidates of every probe, and re-checking
+			// them against the predicate drops the ones that do not match.
+			Expect(keysOf(runQuery(&syncplanev1.QueryRequest{
+				Entity:    "article",
+				Predicate: match("milk"),
+			}))).To(ConsistOf("a1", "a2", "a4"))
+			Expect(keysOf(runQuery(&syncplanev1.QueryRequest{
+				Entity:    "article",
+				Predicate: match("second0007"),
+			}))).To(ConsistOf("big2"))
 		})
 
 		It("answers from the postings index once built, identically to the scan", func() {

@@ -1,7 +1,9 @@
 // The search index: term postings derived from an entity's search
-// declaration. Mirror of engine/query/searchindex.go — the entry bytes, the
-// per-row term cap, the overflow rule and the probe ranges must agree, since
-// each side maintains its own copy of the same index over the same rows.
+// declaration. Counterpart of engine/query/searchindex.go — the analysis, the
+// per-row term cap and the overflow rule must agree, since each side maintains
+// its own copy of the index over the same rows and both must find the same
+// candidates. The entry bytes are local to each side: these entries end with
+// the row key, and the server's do not.
 //
 // 	entry := 0x01 term rowKey     one per distinct term
 // 	      |  0x02 rowKey          the overflow marker, alone
@@ -79,8 +81,9 @@ export function searchEntries(
 
 /**
  * Fingerprints everything the stored search entries depend on: the
- * declaration, the per-row term cap, and the encoding version. Identical to
- * the Go side's, so both maintain the same index under the same fingerprint.
+ * declaration, the per-row term cap, and the encoding version. It
+ * fingerprints this side's copy of the index only, so it need not equal the
+ * Go side's.
  */
 export function searchSpecHash(decl: SearchDecl): string {
 	return fingerprint(

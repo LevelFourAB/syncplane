@@ -1267,10 +1267,10 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 						})).To(Succeed())
 					}
 				})
-				var want []string
+				var all []string
 				for _, parent := range []int{2, 0, 1} {
 					for i := parent; i < extra; i += 3 {
-						want = append(want, fmt.Sprintf("%d:b%04d", parent, i))
+						all = append(all, fmt.Sprintf("%d:b%04d", parent, i))
 					}
 				}
 				ranges := []storage.IndexRange{
@@ -1279,6 +1279,19 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					{Lo: []byte{0x01}, Hi: []byte{0x02}},
 				}
 				eachTx(func(tx storage.ReadTx) {
+					// What ScanIndex yields range by range, which is the order
+					// ScanIndexRanges must keep. The rows of one range hold
+					// byte-equal entries, which come out in an order the
+					// adapter chooses, so the order is read here rather than
+					// written down.
+					var want []string
+					for _, r := range ranges {
+						Expect(tx.ScanIndex("widget", "by_parent", r.Lo, r.Hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
+							want = append(want, fmt.Sprintf("%d:%s", r.Lo[0], rowKey))
+							return nil
+						})).To(Succeed())
+					}
+					Expect(want).To(ConsistOf(all))
 					var got []string
 					Expect(tx.ScanIndexRanges("widget", "by_parent", ranges, func(i int, _ []byte, rowKey string) error {
 						// The range's parent byte, so that got reads like want.
@@ -3911,8 +3924,9 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 								entry("by_label", byte(i+1)),
 							})).To(Succeed())
 						}
-						// k0 shares k4's key, so the row key has to order the
-						// two. Its by_count entry and gadget's entry sit at keys
+						// k0 shares k4's key, so the two are byte-equal entries,
+						// which come out in an order the adapter chooses. Its
+						// by_count entry and gadget's entry sit at keys
 						// the ranges below cover, and no scan of widget's
 						// by_label may yield them.
 						Expect(tx.PutIndexEntries("widget", "k0", []storage.IndexEntry{
@@ -3924,6 +3938,20 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					})
 				})
 
+				// What ScanIndex yields range by range, as scanRanges reports
+				// it. It reads the order of k0 and k4 rather than writing it
+				// down, because the adapter chooses it.
+				scanEach := func(tx storage.ReadTx, ranges ...storage.IndexRange) []string {
+					GinkgoHelper()
+					var want []string
+					for i, r := range ranges {
+						for _, rowKey := range scan(tx, "widget", "by_label", r.Lo, r.Hi) {
+							want = append(want, fmt.Sprintf("%d:%s", i, rowKey))
+						}
+					}
+					return want
+				}
+
 				It("yields range by range in the order given, each as ScanIndex yields it", func() {
 					read("ws1", func(tx storage.ReadTx) {
 						ranges := []storage.IndexRange{
@@ -3933,13 +3961,15 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 							{Lo: []byte{0x05}, Hi: nil},
 							{Lo: nil, Hi: nil},
 						}
-						Expect(scanRanges(tx, "widget", "by_label", ranges...)).To(Equal([]string{
+						want := scanEach(tx, ranges...)
+						Expect(want).To(ConsistOf(
 							"0:k0", "0:k4", "0:k5",
 							"1:k1",
 							"2:k1",
 							"3:k5",
 							"4:k1", "4:k2", "4:k3", "4:k0", "4:k4", "4:k5",
-						}))
+						))
+						Expect(scanRanges(tx, "widget", "by_label", ranges...)).To(Equal(want))
 						for i, r := range ranges {
 							// Alone, the range is at position 0.
 							var want []string
@@ -3953,15 +3983,18 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 
 				It("yields an entry once for every range that holds it", func() {
 					read("ws1", func(tx storage.ReadTx) {
-						Expect(scanRanges(tx, "widget", "by_label",
-							storage.IndexRange{Lo: []byte{0x02}, Hi: []byte{0x04}},
-							storage.IndexRange{Lo: []byte{0x03}, Hi: []byte{0x05}},
-							storage.IndexRange{Lo: []byte{0x02}, Hi: []byte{0x04}},
-						)).To(Equal([]string{
+						ranges := []storage.IndexRange{
+							{Lo: []byte{0x02}, Hi: []byte{0x04}},
+							{Lo: []byte{0x03}, Hi: []byte{0x05}},
+							{Lo: []byte{0x02}, Hi: []byte{0x04}},
+						}
+						want := scanEach(tx, ranges...)
+						Expect(want).To(ConsistOf(
 							"0:k2", "0:k3",
 							"1:k3", "1:k0", "1:k4",
 							"2:k2", "2:k3",
-						}))
+						))
+						Expect(scanRanges(tx, "widget", "by_label", ranges...)).To(Equal(want))
 					})
 				})
 

@@ -47,6 +47,17 @@ var _ = Describe("workspace deletion coverage", func() {
 			Expect(store.read.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n)).To(Succeed())
 			return n
 		}
+		// dangling counts the entries that name a row id no row holds any
+		// more.
+		dangling := func() int {
+			GinkgoHelper()
+			var n int
+			Expect(store.read.QueryRow(`
+				SELECT COUNT(*) FROM index_entries e
+				 WHERE e.key > 0 AND NOT EXISTS (SELECT 1 FROM index_row_keys r WHERE r.id = e.key)`,
+			).Scan(&n)).To(Succeed())
+			return n
+		}
 
 		BeforeEach(func() {
 			var err error
@@ -69,12 +80,14 @@ var _ = Describe("workspace deletion coverage", func() {
 			})).To(Succeed())
 			Expect(count("index_entries")).To(Equal(4))
 			Expect(count("index_row_entries")).To(Equal(2))
+			Expect(count("index_row_keys")).To(Equal(2))
 		})
 
 		It("leaves none behind when the workspace is deleted", func() {
 			Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
 			Expect(count("index_entries")).To(BeZero())
 			Expect(count("index_row_entries")).To(BeZero())
+			Expect(count("index_row_keys")).To(BeZero())
 			Expect(count("index_scopes")).To(BeZero())
 		})
 
@@ -85,6 +98,8 @@ var _ = Describe("workspace deletion coverage", func() {
 			})).To(Succeed())
 			Expect(count("index_entries")).To(Equal(2), "a limited purge drops the entries of the rows it purged")
 			Expect(count("index_row_entries")).To(Equal(1))
+			Expect(count("index_row_keys")).To(Equal(1))
+			Expect(dangling()).To(BeZero())
 		})
 
 		It("leaves none behind when a row's entries are deleted", func() {
@@ -93,6 +108,8 @@ var _ = Describe("workspace deletion coverage", func() {
 			})).To(Succeed())
 			Expect(count("index_entries")).To(Equal(2))
 			Expect(count("index_row_entries")).To(Equal(1))
+			Expect(count("index_row_keys")).To(Equal(1))
+			Expect(dangling()).To(BeZero())
 		})
 	})
 })

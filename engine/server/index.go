@@ -238,7 +238,7 @@ func (info *entityInfo) updateRowIndexes(tx storage.WriteTx, limits Limits, key 
 		// Bounded on its own by the per-row term cap (an oversized document
 		// stores the overflow marker alone), so the shared limit below stays
 		// about value indexes plus a constant.
-		for _, k := range info.search.decl.SearchEntries(refl, key) {
+		for _, k := range info.search.decl.SearchEntries(refl) {
 			entries = append(entries, storage.IndexEntry{Index: info.search.name, Key: k})
 		}
 	}

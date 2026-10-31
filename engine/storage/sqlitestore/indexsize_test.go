@@ -31,12 +31,14 @@ func sizeKey(kind, i int) string {
 }
 
 // indexObjects names every table and b-tree that holds index entries or what
-// finds them: the entries, the per-row entry lists and the scope ids.
+// finds them: the entries, the per-row entry lists, the row ids and the scope
+// ids.
 var indexObjects = []string{
 	"index_entries",
 	"index_row_entries",
 	"index_scopes",
 	"sqlite_autoindex_index_scopes_1",
+	"index_row_keys",
 }
 
 // emptyObjectBytes is the size of a table or b-tree that holds no data: one

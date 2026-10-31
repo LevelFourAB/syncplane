@@ -788,6 +788,12 @@ type ReadTx interface {
 	// the row order it wants (engine/query.IndexEncoder), so an adapter that
 	// applies a collation instead returns rows in the wrong order.
 	//
+	// Byte-equal entries of different rows (see IndexEntry) come out in an
+	// order the adapter chooses, which is not necessarily row key order. The
+	// order must stay the same from one scan to the next while the entries do
+	// not change, and ScanDesc yields it reversed, so the limit and the two
+	// directions stay well defined.
+	//
 	// fn must not assume the row still exists: it does, within this snapshot,
 	// but the caller re-reads it anyway to apply read filters — from INSIDE
 	// this callback, which is why a scan has to tolerate re-entrant reads.
@@ -1076,10 +1082,12 @@ type WriteTx interface {
 //
 // One row may hold SEVERAL entries in the same index: an index over a repeated
 // field stores one position per element, which is what makes "some assignee is
-// Maya" a range read. So (entity, index, key) identifies an entry and (entity,
-// row key) does not — an adapter keyed on the latter would keep only the last
-// element written. Every key ends with the row key, so two entries of one row
-// are always distinct.
+// Maya" a range read. So (entity, row key) alone does not identify an entry —
+// an adapter keyed on it would keep only the last element written. Neither does
+// (entity, index, key): entries of DIFFERENT rows may be byte-equal, as every
+// row holding one search term holds the same entry. An entry is identified by
+// (entity, index, key, row key), and an adapter must store and scan back the
+// entry of each row.
 //
 // An index is DERIVED, DISPOSABLE and never on the wire. Losing every entry
 // costs a rebuild, never correctness, and nothing in a request or response
