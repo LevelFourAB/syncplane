@@ -4,9 +4,15 @@
 //
 // Chunks are Blob values, except where this IndexedDB refuses them: WebKit
 // does in an ephemeral session (Safari private browsing), with an
-// UnknownError. There the store writes the chunk's bytes instead. Every chunk
-// record is either a Blob or bytes, and readChunk tells them apart by type, so
-// a database written in one mode reads in the other.
+// UnknownError. After the first refusal the store writes the chunk's bytes
+// instead. Every chunk record is either a Blob or bytes, and readChunk tells
+// them apart by type, so a database written in one mode reads in the other.
+//
+// Nothing tests for the refusal on open. WebKit can tie a Blob record to the
+// file of another Blob that was written and deleted in one transaction: the
+// record keeps its size and reads back the other file's bytes. A test write
+// that deletes its Blob is such a transaction, and corrupts the next chunk
+// stored.
 
 import { readBlobRange } from './digest.js';
 import {
@@ -21,9 +27,6 @@ const UPLOADS = 'uploads';
 const CACHE = 'cache';
 const CHUNKS = 'chunks';
 const STAGING = 'staging';
-
-/** The key the open-time probe writes and deletes. No bytesId is ever this. */
-const PROBE_KEY = [ '\u0000probe', 0 ];
 
 interface StagingRecord {
 	bytesId: string;
@@ -48,11 +51,10 @@ function chunkRange(bytesId: string): IDBKeyRange {
 export class IDBBlobStore implements BlobStore {
 	private lost: string | undefined;
 
-	private constructor(
-		private readonly db: IDBDatabase,
-		/** Whether chunks are written as Blob values; see the file comment. */
-		private blobValues: boolean,
-	) {
+	/** Whether chunks are written as Blob values; see the file comment. */
+	private blobValues = true;
+
+	private constructor(private readonly db: IDBDatabase) {
 		// Yield to a deleteDatabase or upgrade elsewhere, as the KV store does.
 		db.onversionchange = () => this.lose('another connection is upgrading or deleting the database');
 		db.onclose = () => this.lose('the browser closed the connection');
@@ -84,7 +86,7 @@ export class IDBBlobStore implements BlobStore {
 				);
 			};
 		});
-		return new IDBBlobStore(db, await acceptsBlobs(db));
+		return new IDBBlobStore(db);
 	}
 
 	private lose(reason: string): void {
@@ -144,8 +146,8 @@ export class IDBBlobStore implements BlobStore {
 				await put(data);
 				return;
 			} catch (err) {
-				// A refusal the probe did not see. If bytes go where the Blob did
-				// not, it was the Blob, and every later chunk goes as bytes.
+				// If bytes go where the Blob did not, it was the Blob, and every
+				// later chunk goes as bytes.
 				await put(await readBlobRange(data, 0, data.size)).catch(() => {
 					throw err;
 				});
@@ -279,6 +281,17 @@ export class IDBBlobStore implements BlobStore {
 		});
 	}
 
+	async dropCached(workspaceId: string, digest: string, bytesId: string): Promise<void> {
+		await this.tx([ CACHE, CHUNKS ], 'readwrite', async (tx) => {
+			const cache = tx.objectStore(CACHE);
+			const key = [ workspaceId, digest ];
+			const rec = await request(cache.get(key) as IDBRequest<CacheRecord | undefined>);
+			if (rec?.bytesId !== bytesId) return;
+			cache.delete(key);
+			tx.objectStore(CHUNKS).delete(chunkRange(bytesId));
+		});
+	}
+
 	async addCached(rec: CacheRecord): Promise<void> {
 		await this.tx([ UPLOADS, CACHE, CHUNKS, STAGING ], 'readwrite', async (tx) => {
 			const key = [ rec.workspaceId, rec.digest ];
@@ -331,27 +344,6 @@ export class IDBBlobStore implements BlobStore {
 
 	async close(): Promise<void> {
 		this.lose('the store was closed');
-	}
-}
-
-/**
- * Whether `db` stores Blob values: writes a one-byte Blob and deletes it in
- * the same transaction, so nothing stays behind whichever way it goes.
- */
-async function acceptsBlobs(db: IDBDatabase): Promise<boolean> {
-	try {
-		await new Promise<void>((resolve, reject) => {
-			const tx = db.transaction(CHUNKS, 'readwrite');
-			tx.oncomplete = () => resolve();
-			tx.onerror = () => reject(tx.error);
-			tx.onabort = () => reject(tx.error ?? new Error('aborted'));
-			const store = tx.objectStore(CHUNKS);
-			store.put(new Blob([ new Uint8Array(1) ]), PROBE_KEY);
-			store.delete(PROBE_KEY);
-		});
-		return true;
-	} catch {
-		return false;
 	}
 }
 

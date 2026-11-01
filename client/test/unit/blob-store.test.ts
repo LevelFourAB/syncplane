@@ -117,6 +117,26 @@ describe.each(implementations)('BlobStore: %s', (_name, open) => {
 		expect(await chunkBytes(store, id, 0)).toEqual(new Uint8Array([ 9 ]));
 	});
 
+	it('drops a cached blob only under the bytesId it is cached with', async () => {
+		store = await open();
+		const id = await staged(store, [ new Uint8Array([ 3 ]) ]);
+		await store.addCached({
+			workspaceId: 'ws1',
+			digest: digest(1),
+			size: 1,
+			mediaType: '',
+			bytesId: id,
+			usedAt: 1,
+		});
+
+		await store.dropCached('ws1', digest(1), 'another-bytes-id');
+		expect((await store.cached('ws1', digest(1)))?.bytesId).toBe(id);
+
+		await store.dropCached('ws1', digest(1), id);
+		expect(await store.cached('ws1', digest(1))).toBeUndefined();
+		expect(await chunkBytes(store, id, 0)).toBeUndefined();
+	});
+
 	it('evicts the least recently used cache entries and never a queued upload', async () => {
 		store = await open();
 		const queued = await staged(store, [ new Uint8Array(100) ]);
@@ -233,26 +253,6 @@ describe('IDBBlobStore where IndexedDB refuses Blob values', () => {
 			expect(await chunkBytes(store, id, 0)).toEqual(new Uint8Array([ 1, 2, 3 ]));
 			await store.close();
 		});
-
-		it('leaves no probe data behind', async () => {
-			refuseBlobs();
-			const name = `blob-store-noblob-${dbCounter++}`;
-			const store = await IDBBlobStore.open(name);
-			await store.close();
-			IDBObjectStore.prototype.put = original;
-			const db = await new Promise<IDBDatabase>((resolve, reject) => {
-				const req = indexedDB.open(name);
-				req.onsuccess = () => resolve(req.result);
-				req.onerror = () => reject(req.error);
-			});
-			const count = await new Promise<number>((resolve, reject) => {
-				const req = db.transaction('chunks').objectStore('chunks').count();
-				req.onsuccess = () => resolve(req.result);
-				req.onerror = () => reject(req.error);
-			});
-			db.close();
-			expect(count).toBe(0);
-		});
 	});
 
 	it('reads chunks written in either mode, whichever mode it opens in', async () => {
@@ -277,7 +277,20 @@ describe('IDBBlobStore where IndexedDB refuses Blob values', () => {
 		await reopened.close();
 	});
 
-	it('switches to bytes when a put is refused after the probe passed', async () => {
+	it('writes nothing to the database when it opens', async () => {
+		// WebKit can tie the next Blob stored to the file of a Blob written and
+		// deleted in one transaction, so open() must not test with one.
+		let puts = 0;
+		IDBObjectStore.prototype.put = function(this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
+			puts++;
+			return original.call(this, value, key);
+		};
+		const store = await IDBBlobStore.open(`blob-store-open-${dbCounter++}`);
+		expect(puts).toBe(0);
+		await store.close();
+	});
+
+	it('switches to bytes when a put is refused after it opened', async () => {
 		const store = await IDBBlobStore.open(`blob-store-late-${dbCounter++}`);
 		IDBObjectStore.prototype.put = function(this: IDBObjectStore, value: unknown, key?: IDBValidKey) {
 			if (value instanceof Blob) refusals.throws!(this, value, key);

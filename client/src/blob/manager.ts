@@ -171,6 +171,14 @@ interface Watched {
 	version: number;
 }
 
+/** Where this device holds a blob's bytes, and which record owns them. */
+interface Located {
+	bytesId: string;
+	size: number;
+	/** True for a cache record, false for a queued upload. */
+	cached: boolean;
+}
+
 /** Reads one blob's chunks in order; see BlobManager.openReader. */
 interface ChunkReader {
 	count: number;
@@ -247,6 +255,11 @@ export class BlobManager {
 	private readonly complete = new Set<string>();
 	private readonly watched = new Map<string, Watched>();
 	private readonly downloads = new Map<string, Promise<Blob>>();
+	/**
+	 * Stored bytesIds whose chunks this tab has read back and found to match
+	 * the digest. The bytes under a bytesId never change, so one check holds.
+	 */
+	private readonly verified = new Set<string>();
 	/** Cached bytesIds this tab's eviction passes over, with a count of holders; see pin(). */
 	private readonly pins = new Map<string, number>();
 	private readonly unpinOnCollect = typeof FinalizationRegistry === 'undefined'
@@ -890,36 +903,49 @@ export class BlobManager {
 		store: BlobStore,
 		workspaceId: string,
 		digest: string,
-	): Promise<{ bytesId: string; size: number } | undefined> {
+	): Promise<Located | undefined> {
 		const rec = await store.upload(workspaceId, digest);
-		if (rec !== undefined) return { bytesId: rec.bytesId, size: rec.size };
+		if (rec !== undefined) return { bytesId: rec.bytesId, size: rec.size, cached: false };
 		const cached = await store.cached(workspaceId, digest);
 		if (cached === undefined) return undefined;
 		await store.touch(workspaceId, digest, Date.now());
-		return { bytesId: cached.bytesId, size: cached.size };
+		return { bytesId: cached.bytesId, size: cached.size, cached: true };
 	}
 
 	/**
-	 * The stored chunks under `bytesId` as one Blob, pinned while the Blob is
-	 * reachable, or undefined when a chunk is gone (discarded, purged or
-	 * evicted by another tab).
+	 * The stored chunks under `at.bytesId` as one Blob, pinned while the Blob is
+	 * reachable. 'missing' when a chunk is gone (discarded, purged or evicted by
+	 * another tab); 'corrupt' when the chunks do not make `digest`.
 	 */
 	private async compose(
 		store: BlobStore,
-		bytesId: string,
-		size: number,
+		at: Located,
+		digest: string,
 		mediaType: string,
-	): Promise<Blob | undefined> {
-		const release = this.pin(bytesId);
+	): Promise<Blob | 'missing' | 'corrupt'> {
+		const release = this.pin(at.bytesId);
 		try {
+			const check = !this.verified.has(at.bytesId);
 			const parts: Blob[] = [];
-			for (let i = 0; i < chunkCount(size); i++) {
-				const chunk = await store.readChunk(bytesId, i);
-				if (chunk === undefined) return undefined;
+			const hashes: Uint8Array[] = [];
+			for (let i = 0; i < chunkCount(at.size); i++) {
+				const chunk = await store.readChunk(at.bytesId, i);
+				if (chunk === undefined) return 'missing';
+				if (check) {
+					// Read the bytes rather than trust chunk.size: the WebKit fault
+					// described in idb.ts keeps the size and changes the bytes.
+					const data = await readBlobRange(chunk, 0, chunk.size);
+					if (data.length !== chunkLength(at.size, i)) return 'corrupt';
+					hashes.push(await hashChunk(data));
+				}
 				parts.push(chunk);
 			}
+			if (check) {
+				if ((await digestOf(at.size, hashes)) !== digest) return 'corrupt';
+				this.verified.add(at.bytesId);
+			}
 			const blob = new Blob(parts, { type: mediaType });
-			this.pin(bytesId, blob);
+			this.pin(at.bytesId, blob);
 			return blob;
 		} finally {
 			release();
@@ -928,10 +954,23 @@ export class BlobManager {
 
 	private async read(workspaceId: string, ref: BlobRefLike): Promise<Blob> {
 		const store = await this.store();
+		const info = { workspaceId, digest: ref.digest };
 		const local = await this.locate(store, workspaceId, ref.digest);
 		if (local !== undefined) {
-			const blob = await this.compose(store, local.bytesId, local.size, ref.mediaType);
-			if (blob !== undefined) return blob;
+			const blob = await this.compose(store, local, ref.digest, ref.mediaType);
+			if (blob instanceof Blob) return blob;
+			if (blob === 'corrupt') {
+				// A queued blob's bytes exist nowhere else; a cached one's are on
+				// the server, so its copy here is dropped and downloaded again.
+				if (!local.cached) {
+					throw new BlobError(
+						CodeBlobCorrupt,
+						`the stored bytes of queued blob ${ref.digest} do not match its digest`,
+						info,
+					);
+				}
+				await store.dropCached(workspaceId, ref.digest, local.bytesId);
+			}
 		}
 		// Download into the cache, then compose from what was stored: the parts
 		// of the result are then the stored Blobs, not chunks held in memory.
@@ -945,22 +984,30 @@ export class BlobManager {
 		// Held through finish(), whose eviction pass would otherwise be free to
 		// drop a blob larger than the budget before it is composed.
 		const hold = this.pin(reader.bytesId!);
-		let blob: Blob | undefined;
+		let at: Located | undefined;
+		let blob: Blob | 'missing' | 'corrupt' = 'missing';
 		try {
 			await reader.finish();
-			const at = await this.locate(store, workspaceId, ref.digest);
-			blob = at && (await this.compose(store, at.bytesId, at.size, ref.mediaType));
+			at = await this.locate(store, workspaceId, ref.digest);
+			if (at !== undefined) blob = await this.compose(store, at, ref.digest, ref.mediaType);
 		} finally {
 			hold();
 		}
-		if (blob === undefined) {
+		if (blob === 'corrupt') {
+			// The download matched its hashes, so the store changed the bytes.
+			// Drop the copy so the next read downloads again instead of failing.
+			if (at!.cached) await store.dropCached(workspaceId, ref.digest, at!.bytesId);
+			throw new BlobError(
+				CodeBlobCorrupt,
+				`blob ${ref.digest} reads back from the local store with other bytes`,
+				info,
+			);
+		}
+		if (blob === 'missing') {
 			throw new BlobError(
 				CodeBlobUnavailable,
 				`blob ${ref.digest} left the local store while it was read`,
-				{
-					workspaceId,
-					digest: ref.digest,
-				},
+				info,
 			);
 		}
 		return blob;

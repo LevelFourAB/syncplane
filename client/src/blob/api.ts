@@ -153,10 +153,16 @@ export interface WorkspaceBlobs {
 	 * memory; `stream` holds one chunk at a time there too. The cache does not evict a blob read in the last 10 minutes, nor,
 	 * in this tab, one whose returned Blob is still reachable.
 	 *
+	 * The first read of a stored blob in each tab reads every byte once and
+	 * checks it against the digest. A cached blob that fails the check is
+	 * dropped and downloaded again.
+	 *
 	 * Rejects with a {@link BlobError}: `blob_unavailable` when the server has
 	 * no complete blob the caller can read, `blob_corrupt` when the server's
-	 * bytes or size do not match the ref. Rejects with the `ConnectError` of a
-	 * request that failed for another reason, such as the network.
+	 * bytes or size do not match the ref, when a queued blob's stored bytes do
+	 * not match its digest, or when a download reads back from the local store
+	 * with other bytes. Rejects with the `ConnectError` of a request that
+	 * failed for another reason, such as the network.
 	 */
 	get(ref: BlobRefLike): Promise<Blob>;
 	/**

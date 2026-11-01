@@ -571,6 +571,43 @@ describe('blob downloads', () => {
 		expect(server.gets).toBe(2);
 	});
 
+	it('downloads again when the cached bytes do not match the digest', async () => {
+		// WebKit can hand back other bytes than it stored, with the size it
+		// stored: the cache must not trust what it reads.
+		const server = fakeBlobServer();
+		const data = mod251(BLOB_CHUNK_SIZE + 7);
+		await server.seed('ws1', data);
+		const store = new MemoryBlobStore();
+		const ref = await refOf(data);
+		await newManager(server, { store }).get('ws1', ref);
+		const before = (await store.cached('ws1', ref.digest))!;
+		await store.putChunk(before.bytesId, 0, blobOf(new Uint8Array(BLOB_CHUNK_SIZE)));
+
+		const m = newManager(server, { store });
+		expectBytes(await bytesOf(await m.get('ws1', ref)), data);
+		expect(server.gets).toBe(4);
+		const after = (await store.cached('ws1', ref.digest))!;
+		expect(after.bytesId).not.toBe(before.bytesId);
+		expect(await store.readChunk(before.bytesId, 1)).toBeUndefined();
+
+		await m.get('ws1', ref);
+		expect(server.gets).toBe(4);
+	});
+
+	it('refuses a queued blob whose stored bytes do not match its digest', async () => {
+		const server = fakeBlobServer();
+		const store = new MemoryBlobStore();
+		const data = mod251(100);
+		const ref = await newManager(server, { store }).put('ws1', blobOf(data));
+		const rec = (await store.upload('ws1', ref.digest))!;
+		await store.putChunk(rec.bytesId, 0, blobOf(new Uint8Array(100)));
+
+		await expect(newManager(server, { store }).get('ws1', ref)).rejects.toMatchObject({
+			code: CodeBlobCorrupt,
+		});
+		expect(await store.upload('ws1', ref.digest)).toBeDefined();
+	});
+
 	it('refuses a ref whose size disagrees with the server', async () => {
 		const server = fakeBlobServer();
 		const data = mod251(100);

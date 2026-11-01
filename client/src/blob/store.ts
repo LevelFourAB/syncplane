@@ -18,6 +18,9 @@
 // disk and hands back a disk-backed Blob on read, so composing the stored
 // chunks into one Blob for the app costs about one chunk of memory however
 // large the blob is.
+//
+// A backend can hand back other bytes than it stored (see idb.ts), so a reader
+// checks what it reads against the digest before it trusts it.
 
 /** A failure, in the form the queue persists and tabs exchange. */
 export interface StoredBlobError {
@@ -80,6 +83,11 @@ export interface BlobStore {
 	removeUpload(workspaceId: string, digest: string): Promise<boolean>;
 	cached(workspaceId: string, digest: string): Promise<CacheRecord | undefined>;
 	touch(workspaceId: string, digest: string, usedAt: number): Promise<void>;
+	/**
+	 * Deletes a cached blob and its bytes. No-op when the blob is not cached
+	 * under `bytesId`, so a caller that read a stale record deletes nothing.
+	 */
+	dropCached(workspaceId: string, digest: string, bytesId: string): Promise<void>;
 	/**
 	 * Caches a download whose bytes are staged under `rec.bytesId`. Drops the
 	 * staged bytes instead when the blob is already queued or cached.
@@ -215,6 +223,13 @@ export class MemoryBlobStore implements BlobStore {
 	async touch(workspaceId: string, digest: string, usedAt: number): Promise<void> {
 		const rec = this.cache.get(blobKey(workspaceId, digest));
 		if (rec !== undefined) rec.usedAt = usedAt;
+	}
+
+	async dropCached(workspaceId: string, digest: string, bytesId: string): Promise<void> {
+		const key = blobKey(workspaceId, digest);
+		if (this.cache.get(key)?.bytesId !== bytesId) return;
+		this.cache.delete(key);
+		this.chunks.delete(bytesId);
 	}
 
 	async addCached(rec: CacheRecord): Promise<void> {
