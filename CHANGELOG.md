@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/LevelFourAB/syncplane/compare/v0.4.1...v0.5.0) (2026-11-01)
+
+
+### Features
+
+* **client:** Ability to save an undo scope for later use ([f656d07](https://github.com/LevelFourAB/syncplane/commit/f656d07dd2b2c4a65e143ff174504f0104618d1a))
+* **client:** Let React tabs and pages keep their undo history after they unmount ([71f208c](https://github.com/LevelFourAB/syncplane/commit/71f208c84a972d659864e3467d539524de5f6768))
+
+
+### Bug Fixes
+
+* **client:** Download a cached blob again when its stored bytes do not match its digest ([3d0b4c7](https://github.com/LevelFourAB/syncplane/commit/3d0b4c7e81109369360411452f9a629abee29c60))
+
 ## [0.4.1](https://github.com/LevelFourAB/syncplane/compare/v0.4.0...v0.4.1) (2026-10-31)
 
 
