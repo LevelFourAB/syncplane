@@ -81,6 +81,7 @@ import {
 	withAccessDelta,
 } from '../optimistic/rebase.js';
 import { captureTextLogs, keepStrandedTextEdits } from '../optimistic/textlog-keep.js';
+import { savedUndoRefTokens } from '../optimistic/undosaved.js';
 import { SearchPostingsWriter } from '../query/postings.js';
 import { readMergedRow } from '../read.js';
 import { reportError, safeCall } from '../report.js';
@@ -273,7 +274,12 @@ export interface CoordinatorOptions {
 	 */
 	onAccessStored?: (workspaceId: string, access: DecodedAccess) => void;
 	status: StatusTracker;
-	onMutationRejected?: (info: RejectionInfo) => void;
+	/**
+	 * Called for each rejected or dead-lettered mutation, after its rollback
+	 * committed. `undoTokens` are the undo tokens the dropped entry carried (see
+	 * metaUndoTokens); [] when it carried none.
+	 */
+	onMutationRejected?: (info: RejectionInfo, undoTokens: readonly bigint[]) => void;
 	/** Observability seam; see sync/events.ts. */
 	onSyncEvent?: SyncEventHandler;
 	/** Fallback poll interval; 0 disables polling. Default 60s. */
@@ -351,17 +357,11 @@ export interface CoordinatorOptions {
 	 */
 	onSchemaSkew?: (info: { client: string; server: string }) => SchemaSkewAction;
 	/**
-	 * Mutation ids the undo/redo stacks of one workspace still reference.
-	 * Compaction treats them as barriers so the inverses stay valid. Omitted when
-	 * undo is disabled.
+	 * Undo tokens the undo/redo stacks of one workspace reference with a
+	 * snapshot inverse. Compaction keeps the mutations that carry them from
+	 * folding, so the inverses stay valid. Omitted when undo is disabled.
 	 */
-	undoRefIds?: (workspaceId: string) => ReadonlySet<bigint>;
-	/**
-	 * Notified whenever a workspace's queued mutation ids are renumbered — by
-	 * compaction folding its never-pushed tail, or by a resequence closing a
-	 * mutation-id hole — so undo bookkeeping can remap the ids it references.
-	 */
-	onCompacted?: (workspaceId: string, remap: ReadonlyMap<bigint, bigint>) => void;
+	undoRefTokens?: (workspaceId: string) => ReadonlySet<bigint>;
 	/**
 	 * Cross-tab intent registry (see sync/intent.ts). When present, sync
 	 * cycles run with the union of all live tabs' workspaces and subscriptions,
@@ -778,7 +778,7 @@ export class Coordinator {
 		await this.initPushedThrough([ ...this.workspaces.keys() ]);
 		const refs = new Map<string, ReadonlySet<bigint>>();
 		for (const ws of this.workspaces.keys()) {
-			refs.set(ws, this.opts.undoRefIds?.(ws) ?? EMPTY_IDS);
+			refs.set(ws, this.opts.undoRefTokens?.(ws) ?? EMPTY_IDS);
 		}
 		await this.opts.intent?.seed(this.ownScopes(), refs);
 		this.syncSoon();
@@ -1739,8 +1739,9 @@ export class Coordinator {
 					list.push(r.mutationId);
 					byWorkspace.set(r.workspaceId, list);
 				}
+				const undoTokens = new Map<string, ReadonlyMap<bigint, readonly bigint[]>>();
 				for (const [ ws, ids ] of byWorkspace) {
-					await this.rollbackPending(ws, ids, restored.rows.get(ws));
+					undoTokens.set(ws, await this.rollbackPending(ws, ids, restored.rows.get(ws)));
 				}
 				for (const [ ws, rows ] of recovered.rows) {
 					try {
@@ -1756,7 +1757,10 @@ export class Coordinator {
 				}
 				for (const info of rejections) {
 					if (recovered.handled.has(`${info.workspaceId} ${info.mutationId}`)) continue;
-					this.opts.onMutationRejected?.(info);
+					this.opts.onMutationRejected?.(
+						info,
+						undoTokens.get(info.workspaceId)?.get(info.mutationId) ?? [],
+					);
 				}
 			}
 			// After the rollback, so no rebase can drop a rejected mutation before
@@ -1874,30 +1878,34 @@ export class Coordinator {
 		// enqueue persisted that id to the intent record in its own transaction,
 		// and the union below picks it up. The snapshot only ever ADDS ids the
 		// record may not carry yet, which over-protects at worst.
-		const own = this.opts.undoRefIds?.(workspaceId) ?? EMPTY_IDS;
+		const own = this.opts.undoRefTokens?.(workspaceId) ?? EMPTY_IDS;
 		const intent = this.opts.intent;
 		const result = await this.opts.kvMutex.run(() =>
-			compactPending(this.opts.kv, this.opts.registry, this.opts.mirrors, workspaceId, (tx) =>
-				// The undo-ref union — every live tab's record, this one included — is
-				// read INSIDE the compaction transaction: atomic with the renumber, so
-				// referenced mutations are never folded or renumbered out from under
-				// any tab's stacks.
-				intent ? intent.unionUndoRefIds(tx, workspaceId, own) : own)
+			compactPending(
+				this.opts.kv,
+				this.opts.registry,
+				this.opts.mirrors,
+				workspaceId,
+				async (tx) => {
+					// The undo-ref union — every live tab's record, this one included,
+					// and every saved undo scope, which no tab may hold open — is read
+					// INSIDE the compaction transaction: atomic with the fold, so
+					// referenced mutations are never folded out from under any stack.
+					const live = intent ? await intent.unionUndoRefTokens(tx, workspaceId, own) : own;
+					const saved = await savedUndoRefTokens(tx, workspaceId);
+					if (saved.size === 0) return live;
+					return new Set([ ...live, ...saved ]);
+				},
+			)
 		);
 		if (result.changed) {
-			this.opts.onCompacted?.(workspaceId, result.remap);
 			this.opts.status.setPendingCount(workspaceId, result.pendingCount);
-			// The own record's ref ids are stale after the renumber; onCompacted
-			// above already remapped the in-memory stacks, so refresh from those.
-			void intent?.updateRefs(workspaceId, this.opts.undoRefIds?.(workspaceId) ?? EMPTY_IDS);
 		}
 	}
 
 	/**
-	 * Renumbers a workspace's queue to resume at `firstId` and carries the
-	 * bookkeeping that names mutation ids across the move: the undo stacks (via
-	 * onCompacted, which exists for exactly this remap) and this tab's intent
-	 * record. Returns whether anything moved.
+	 * Renumbers a workspace's queue to resume at `firstId`. Returns whether
+	 * anything moved.
 	 *
 	 * Only ever called with an id the server has provably not taken — the id a
 	 * failed push dropped, or the watermark a pull just reported — because
@@ -1921,17 +1929,11 @@ export class Coordinator {
 
 	/**
 	 * The in-memory half of a renumber, once its transaction has committed: the
-	 * status count, and — when ids actually moved — the bookkeeping that names
-	 * them (the undo stacks via onCompacted, this tab's intent record) plus the
-	 * event.
+	 * status count, and — when ids actually moved — the event.
 	 */
 	private afterResequence(workspaceId: string, firstId: bigint, result: ResequenceResult): void {
 		this.opts.status.setPendingCount(workspaceId, result.pendingCount);
 		if (!result.changed) return;
-		this.opts.onCompacted?.(workspaceId, result.remap);
-		// The record's ref ids name the old numbering; onCompacted above already
-		// remapped the in-memory stacks, so refresh from those.
-		void this.opts.intent?.updateRefs(workspaceId, this.opts.undoRefIds?.(workspaceId) ?? EMPTY_IDS);
 		this.emit({
 			type: 'resequence',
 			workspaceId,
@@ -2347,20 +2349,21 @@ export class Coordinator {
 	/**
 	 * Drops the given pending mutations of a workspace and replays the rest.
 	 * `restores` go into the store in the same transaction, for
-	 * applyTextRestores to re-apply.
+	 * applyTextRestores to re-apply. Returns the undo tokens of each dropped
+	 * mutation, by mutation id.
 	 */
 	private async rollbackPending(
 		workspaceId: string,
 		ids: bigint[],
 		restores?: readonly TextRestoreRow[],
-	): Promise<void> {
+	): Promise<ReadonlyMap<bigint, readonly bigint[]>> {
 		const store = restores && restores.length > 0
 			? async (tx: KVWrite) => {
 				const prior = (await tx.get(metaTextRestores(workspaceId))) as TextRestoreRow[] | undefined;
 				await tx.put(metaTextRestores(workspaceId), [ ...(prior ?? []), ...restores ]);
 			}
 			: undefined;
-		const { touched, pendingCount } = await this.opts.kvMutex.run(() =>
+		const { touched, pendingCount, undoTokens } = await this.opts.kvMutex.run(() =>
 			rollbackRejected(
 				this.opts.kv,
 				this.opts.registry,
@@ -2373,6 +2376,7 @@ export class Coordinator {
 		if (store) this.textRestores.add(workspaceId);
 		this.opts.status.setPendingCount(workspaceId, pendingCount);
 		await this.opts.notify(touched);
+		return undoTokens;
 	}
 
 	/**
@@ -2463,7 +2467,7 @@ export class Coordinator {
 			errorCode: CodePoisonDropped,
 			errorMessage: failure,
 			...describeMutation(m),
-		});
+		}, result.undoTokens);
 	}
 
 	private async doPull(workspaceId: string, subs: Subscription[]): Promise<void> {

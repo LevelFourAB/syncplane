@@ -1,7 +1,7 @@
 // In-memory undo/redo bookkeeping, every local CRUD mutation records its inverse;
 // undo/redo enqueue those inverses as real mutations through the normal pipeline
-// (pushed, idempotent, rebased). Nothing here is persisted — stacks die with
-// the page, by design.
+// (pushed, idempotent, rebased). Nothing here is persisted: a saved undo scope
+// writes snapshot() to the store and load()s it back (see undo-persist.ts).
 //
 // Semantics the tests pin down:
 //   - PUT      → inverse PUT(prev) or DELETE when the row did not exist
@@ -26,11 +26,20 @@
 //   - undoing a row a peer edited concurrently clobbers the peer's fields
 //     named in the inverse mask — accepted per-field LWW semantics
 //   - a rejected mutation drops its whole containing group from both stacks
-//     (a rejected batch shares one mutation_id, so its group drops whole)
+//     (a rejected batch carries one undo token, so its group drops whole)
+//   - entries name their forward mutation by UNDO TOKEN, not mutation id:
+//     compaction and resequencing renumber pending mutations, in any tab, and
+//     can mint an old id again; a token moves with its mutation and is never
+//     minted again (see metaUndoTokens in keys.ts), so no stack in any tab
+//     needs to hear about a renumber
+//   - custom mutations and rejections that ANOTHER tab handled reach these
+//     stacks through the undo journal in the store (optimistic/undojournal.ts):
+//     reconcile() drops the groups the journal voids
 
 import { create } from '@bufbuild/protobuf';
 
 import { type CrudMutation, CrudMutationSchema, CrudOp } from './gen/syncplane/v1/mutation_pb.js';
+import { type UndoJournal, voidsToken } from './optimistic/undojournal.js';
 import { safeInvoke } from './report.js';
 import type { TextInverseOp } from './text/undo-ops.js';
 
@@ -62,6 +71,29 @@ export interface UndoOptions {
 	enabled?: boolean;
 	/** Maximum undo groups kept; oldest evict first. Default 100. */
 	maxDepth?: number;
+	/** Limits on the saved undo scopes of restoreUndoScope(). */
+	persist?: UndoPersistOptions;
+}
+
+/** Limits on saved undo scopes (see WorkspaceClient.restoreUndoScope). */
+export interface UndoPersistOptions {
+	/**
+	 * Most saved scopes kept per workspace. When a save goes past it, the least
+	 * recently saved scopes are deleted, also a scope that is open. An open
+	 * scope writes its record again when it closes.
+	 *
+	 * @defaultValue 20
+	 */
+	maxScopes?: number;
+	/**
+	 * Age in ms past which a saved undo step is dropped, on restore and on save.
+	 * Values above 7 days are treated as 7 days. See
+	 * docs/explanation/limits-and-trade-offs.md, "A saved undo step can be days
+	 * old".
+	 *
+	 * @defaultValue 86_400_000 (24 hours)
+	 */
+	maxAgeMs?: number;
 }
 
 /** Options for a nested undo scope (see WorkspaceClient.undoScope). */
@@ -74,10 +106,13 @@ export interface UndoScopeOptions {
 	maxDepth?: number;
 }
 
-interface UndoEntry {
+/** One recorded inverse on an undo or redo stack. */
+export interface UndoEntry {
 	groupId: number;
-	/** Id of the forward mutation this entry inverts (rejection wiring). */
-	mutationId: bigint;
+	/** Undo token of the forward mutation this entry inverts (rejection wiring). */
+	token: bigint;
+	/** When the entry was recorded, in epoch ms. */
+	at: number;
 	inverse: Inverse;
 }
 
@@ -192,8 +227,8 @@ export class UndoManager {
 	 * sub-mutation of a batch) as ONE undo group, after its transaction
 	 * committed. Inverses are pushed in application order; takeGroup pops them
 	 * newest-first, so a batch replays in reverse — the order an undo needs.
-	 * All entries share the forward mutation_id so a rejection drops the whole
-	 * group.
+	 * All entries share the forward mutation's undo token so a rejection drops
+	 * the whole group.
 	 *
 	 * `captureStack` is the stack to route to while undo()/redo() replays
 	 * inverses: 'redo' for undo's replay, 'undo' for redo's. It is passed in by
@@ -210,7 +245,7 @@ export class UndoManager {
 	 * edit).
 	 */
 	recordGroup(
-		mutationId: bigint,
+		token: bigint,
 		inverses: (Inverse | undefined)[],
 		captureStack?: StackName,
 		coalesce?: boolean,
@@ -232,8 +267,9 @@ export class UndoManager {
 		const groupId = coalesce && captureStack === undefined && top !== undefined
 			? top.groupId
 			: this.nextGroupId++;
+		const at = Date.now();
 		for (const inverse of defined) {
-			stack.push({ groupId, mutationId, inverse });
+			stack.push({ groupId, token, at, inverse });
 		}
 		if (target === 'undo') {
 			this.trim();
@@ -292,18 +328,85 @@ export class UndoManager {
 	}
 
 	/**
-	 * A rejected mutation never applied on the server: its containing groups
-	 * drop from both stacks so undo/redo cannot replay state that builds on
-	 * the rejected change.
+	 * A rejected mutation never applied on the server: every group that
+	 * references one of its undo tokens drops from both stacks, so undo/redo
+	 * cannot replay state that builds on the rejected change. A compacted
+	 * mutation carries the tokens of every mutation folded into it.
 	 */
-	onRejected(mutationId: bigint): void {
-		this.undoStack = dropContainingGroup(this.undoStack, mutationId);
-		this.redoStack = dropContainingGroup(this.redoStack, mutationId);
+	onRejected(tokens: readonly bigint[]): void {
+		if (tokens.length === 0) return;
+		const dead = new Set(tokens);
+		this.undoStack = dropContainingGroups(this.undoStack, dead);
+		this.redoStack = dropContainingGroups(this.redoStack, dead);
 		this.emit();
 	}
 
 	/**
-	 * Mutation ids whose forward mutation pending-queue compaction must keep as
+	 * Drops from both stacks every group that has an entry the journal voids:
+	 * recorded before the workspace's last custom mutation, or naming a
+	 * mutation that died. Listeners fire only when a group dropped.
+	 */
+	reconcile(journal: UndoJournal): void {
+		const voided = (e: UndoEntry): boolean => voidsToken(journal, e.token);
+		const undo = dropGroupsWhere(this.undoStack, voided);
+		const redo = dropGroupsWhere(this.redoStack, voided);
+		if (undo === this.undoStack && redo === this.redoStack) return;
+		this.undoStack = undo;
+		this.redoStack = redo;
+		this.emit();
+	}
+
+	/** Whether either stack holds an entry. */
+	isEmpty(): boolean {
+		return this.undoStack.length === 0 && this.redoStack.length === 0;
+	}
+
+	/**
+	 * Drops from both stacks every group with an entry recorded before `cutoff`
+	 * (epoch ms). Listeners fire only when a group dropped.
+	 */
+	dropRecordedBefore(cutoff: number): void {
+		const old = (e: UndoEntry): boolean => e.at < cutoff;
+		const undo = dropGroupsWhere(this.undoStack, old);
+		const redo = dropGroupsWhere(this.redoStack, old);
+		if (undo === this.undoStack && redo === this.redoStack) return;
+		this.undoStack = undo;
+		this.redoStack = redo;
+		this.emit();
+	}
+
+	/**
+	 * Both stacks, bottom first. The arrays are copies; the entries are the
+	 * manager's own and must not be changed.
+	 */
+	snapshot(): { undo: readonly UndoEntry[]; redo: readonly UndoEntry[] } {
+		return { undo: [ ...this.undoStack ], redo: [ ...this.redoStack ] };
+	}
+
+	/**
+	 * Replaces both stacks with `undo` and `redo`, bottom first, as snapshot()
+	 * returns them. Entries that share a `groupId` stay one group; the manager
+	 * gives each group a fresh id, so the ids of another manager cannot collide
+	 * with its own. The undo stack is trimmed to `maxDepth`.
+	 */
+	load(undo: readonly UndoEntry[], redo: readonly UndoEntry[]): void {
+		const ids = new Map<number, number>();
+		const renumber = (e: UndoEntry): UndoEntry => {
+			let id = ids.get(e.groupId);
+			if (id === undefined) {
+				id = this.nextGroupId++;
+				ids.set(e.groupId, id);
+			}
+			return { ...e, groupId: id };
+		};
+		this.undoStack = undo.map(renumber);
+		this.redoStack = redo.map(renumber);
+		this.trim();
+		this.emit();
+	}
+
+	/**
+	 * Undo tokens whose forward mutation pending-queue compaction must keep as
 	 * its own slot. Only SNAPSHOT inverses need that: they restore the row as it
 	 * was before one specific mutation, so that mutation has to stay the thing
 	 * the queue replays.
@@ -315,23 +418,24 @@ export class UndoManager {
 	 * per keystroke, each with an inverse — compact at all; every keystroke
 	 * being its own barrier is what left an offline burst growing without bound.
 	 *
-	 * Ids the stacks merely reference are still tracked (see remapIds and
-	 * onRejected): a folded slot's rejection must still drop every group that
-	 * folded into it. Which ids may be folded and which ids must be heard about
-	 * are different questions, and this answers only the first.
+	 * Tokens the stacks merely reference are still tracked (see onRejected): a
+	 * folded slot carries the tokens of every mutation folded into it, so its
+	 * rejection still drops every group that folded into it. Which mutations may
+	 * be folded and which tokens must be heard about are different questions,
+	 * and this answers only the first.
 	 */
-	foldBarrierIds(): Set<bigint> {
-		const ids = new Set<bigint>();
+	foldBarrierTokens(): Set<bigint> {
+		const tokens = new Set<bigint>();
 		for (const stack of [ this.undoStack, this.redoStack ]) {
 			for (const e of stack) {
-				if (e.inverse.kind !== 'text') ids.add(e.mutationId);
+				if (e.inverse.kind !== 'text') tokens.add(e.token);
 			}
 		}
-		return ids;
+		return tokens;
 	}
 
 	/**
-	 * Predicts what foldBarrierIds() will return AFTER recordGroup (or barrier)
+	 * Predicts what foldBarrierTokens() will return AFTER recordGroup (or barrier)
 	 * runs for the mutation currently being enqueued. The enqueue transaction
 	 * persists the cross-tab intent record, but recordGroup only runs once that
 	 * transaction has committed — so the in-transaction write must compute the
@@ -341,50 +445,30 @@ export class UndoManager {
 	 *  - a plain edit (captureStack undefined) clears the redo stack → current
 	 *    undo-stack ids only;
 	 *  - an undo/redo replay (captureStack set) keeps both stacks;
-	 *  - the new mutation's own id joins when it captured a snapshot inverse.
+	 *  - the new mutation's own token joins when it captured a snapshot inverse.
 	 *
-	 * Deliberately ignores maxDepth trimming, so it may over-include ids a
+	 * Deliberately ignores maxDepth trimming, so it may over-include tokens a
 	 * recordGroup-side trim would evict — over-protection only ever costs
 	 * compaction efficiency, never correctness.
 	 */
-	predictedBarrierIds(
-		mutationId: bigint,
+	predictedBarrierTokens(
+		token: bigint,
 		hasSnapshotInverse: boolean,
 		captureStack: StackName | undefined,
 		isBarrier: boolean,
 	): Set<bigint> {
 		if (isBarrier) return new Set();
-		const ids = new Set<bigint>();
+		const tokens = new Set<bigint>();
 		for (const e of this.undoStack) {
-			if (e.inverse.kind !== 'text') ids.add(e.mutationId);
+			if (e.inverse.kind !== 'text') tokens.add(e.token);
 		}
 		if (captureStack !== undefined) {
 			for (const e of this.redoStack) {
-				if (e.inverse.kind !== 'text') ids.add(e.mutationId);
+				if (e.inverse.kind !== 'text') tokens.add(e.token);
 			}
 		}
-		if (hasSnapshotInverse) ids.add(mutationId);
-		return ids;
-	}
-
-	/**
-	 * Rewrites the forward-mutation ids both stacks reference after compaction
-	 * renumbered the pending queue. Entries whose id is absent from the map keep
-	 * it (the pushed prefix is never renumbered); every folded id maps to the
-	 * slot that absorbed it, so no entry is ever left dangling. Several entries
-	 * landing on one id is normal — a typing burst folds to a single slot — and
-	 * is exactly what keeps a rejection of that slot dropping all of them.
-	 */
-	remapIds(remap: ReadonlyMap<bigint, bigint>): void {
-		for (const stack of [ this.undoStack, this.redoStack ]) {
-			for (const e of stack) {
-				const next = remap.get(e.mutationId);
-				if (next !== undefined) e.mutationId = next;
-			}
-		}
-		// Renumbering does not change canUndo/canRedo, but a listener deriving a
-		// primitive snapshot will simply no-op; emit for completeness.
-		this.emit();
+		if (hasSnapshotInverse) tokens.add(token);
+		return tokens;
 	}
 
 	private trim(): void {
@@ -409,8 +493,13 @@ function takeGroup(stack: UndoEntry[]): UndoEntry[] {
 	return group;
 }
 
-function dropContainingGroup(stack: UndoEntry[], mutationId: bigint): UndoEntry[] {
-	const doomed = new Set(stack.filter((e) => e.mutationId === mutationId).map((e) => e.groupId));
+function dropContainingGroups(stack: UndoEntry[], dead: ReadonlySet<bigint>): UndoEntry[] {
+	return dropGroupsWhere(stack, (e) => dead.has(e.token));
+}
+
+/** `stack` without every group that has an entry matching `doom`; `stack` itself when none does. */
+function dropGroupsWhere(stack: UndoEntry[], doom: (e: UndoEntry) => boolean): UndoEntry[] {
+	const doomed = new Set(stack.filter(doom).map((e) => e.groupId));
 	if (doomed.size === 0) {
 		return stack;
 	}

@@ -4,9 +4,9 @@ import { describe, expect, it } from 'vitest';
 import { CrudMutationSchema, CrudOp } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import { type Inverse, UndoManager } from '../../src/undo.js';
 
-// Compaction renumbers the never-pushed tail, so the undo manager must expose
-// which ids may not be folded away (compaction protects them) and remap them
-// afterwards.
+// Compaction renumbers the never-pushed tail, so the undo manager names
+// forward mutations by undo token: it exposes which tokens compaction must
+// keep from folding, and a rejection names the tokens the dead entry carried.
 
 function inverse(key: string): Inverse {
 	return {
@@ -33,17 +33,17 @@ function keyOf(inv: Inverse): string {
 }
 
 describe('UndoManager compaction hooks', () => {
-	it('reports ids referenced by both stacks', () => {
+	it('reports tokens referenced by both stacks', () => {
 		const mgr = new UndoManager();
 		mgr.recordGroup(1n, [ inverse('a') ]);
 		mgr.recordGroup(2n, [ inverse('b') ]);
-		// Undo moves group 2 to the redo stack (capturing under a new forward id).
+		// Undo moves group 2 to the redo stack (capturing under a new token).
 		const group = mgr.takeUndoGroup();
-		expect(group[0]!.mutationId).toBe(2n);
+		expect(group[0]!.token).toBe(2n);
 		mgr.recordGroup(3n, [ inverse('b') ], 'redo');
 
-		// undo stack still has id 1; redo stack has id 3.
-		expect(mgr.foldBarrierIds()).toEqual(new Set([ 1n, 3n ]));
+		// undo stack still has token 1; redo stack has token 3.
+		expect(mgr.foldBarrierTokens()).toEqual(new Set([ 1n, 3n ]));
 	});
 
 	it('does not pin a text edit, whose inverse is replayed not restored', () => {
@@ -54,35 +54,27 @@ describe('UndoManager compaction hooks', () => {
 
 		// Only the snapshot inverse pins its mutation; a typing burst is free to
 		// fold, which is what keeps an offline burst from growing without bound.
-		expect(mgr.foldBarrierIds()).toEqual(new Set([ 1n ]));
+		expect(mgr.foldBarrierTokens()).toEqual(new Set([ 1n ]));
 
-		// Folding both text edits onto one slot keeps undo exact: the entries stay
-		// separate and both now point at the slot, so its rejection drops both.
-		mgr.remapIds(new Map([ [ 2n, 2n ], [ 3n, 2n ] ]));
+		// Folding both text edits onto one slot gives the slot both tokens, so
+		// its rejection drops both groups and keeps the other one.
 		expect(mgr.canUndo()).toBe(true);
-		mgr.onRejected(2n);
-		expect(mgr.takeUndoGroup().map((e) => e.mutationId)).toEqual([ 1n ]);
+		mgr.onRejected([ 2n, 3n ]);
+		expect(mgr.takeUndoGroup().map((e) => e.token)).toEqual([ 1n ]);
 		expect(mgr.canUndo()).toBe(false);
 	});
 
-	it('remaps referenced ids across both stacks', () => {
+	it('drops only the groups whose tokens a rejection names', () => {
 		const mgr = new UndoManager();
 		mgr.recordGroup(5n, [ inverse('a') ]);
 		mgr.recordGroup(6n, [ inverse('b') ]);
 
-		mgr.remapIds(new Map([ [ 6n, 2n ] ]));
-		expect(mgr.foldBarrierIds()).toEqual(new Set([ 5n, 2n ]));
+		mgr.onRejected([ 6n, 99n ]);
+		expect(mgr.foldBarrierTokens()).toEqual(new Set([ 5n ]));
 
-		// A rejection of the remapped id now drops the right group.
-		mgr.onRejected(2n);
-		expect(mgr.foldBarrierIds()).toEqual(new Set([ 5n ]));
-	});
-
-	it('leaves ids absent from the remap untouched', () => {
-		const mgr = new UndoManager();
-		mgr.recordGroup(5n, [ inverse('a') ]);
-		mgr.remapIds(new Map([ [ 99n, 1n ] ]));
-		expect(mgr.foldBarrierIds()).toEqual(new Set([ 5n ]));
+		// A rejection that carried no tokens drops nothing.
+		mgr.onRejected([]);
+		expect(mgr.foldBarrierTokens()).toEqual(new Set([ 5n ]));
 	});
 
 	it('restores a claimed group when the replay fails, preserving replay order', () => {

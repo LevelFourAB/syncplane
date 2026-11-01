@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
 import { CompleteAllArgsSchema, TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
-import { INTENT_PREFIX } from '../../src/keys.js';
+import { INTENT_PREFIX, metaUndoTokens } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { IntentRecord } from '../../src/sync/intent.js';
 
@@ -220,23 +220,35 @@ describe('undo scopes', () => {
 		await c.mutate.put(TodoSchema, { id: 't1', title: 'board' }); // id 1
 		const dialog = c.undoScope();
 		await dialog.mutate.put(TodoSchema, { id: 't2', title: 'dialog' }); // id 2
-		expect(await refIds(kv)).toEqual([ '1', '2' ]);
+		expect(await refIds(kv)).toEqual(await tokensOf(kv, [ 1n, 2n ]));
 
 		// Closing the dialog releases its pins; the workspace's own stay.
 		dialog.close();
 		await c.mutate.put(TodoSchema, { id: 't3', title: 'board again' }); // id 3
-		expect(await refIds(kv)).toEqual([ '1', '3' ]);
+		expect(await refIds(kv)).toEqual(await tokensOf(kv, [ 1n, 3n ]));
 		await c.close();
 	});
 });
 
-/** The undo-ref ids this tab published for its (single) workspace. */
+/** The undo tokens the pending mutations at `ids` carry, sorted. */
+async function tokensOf(kv: MemoryKVStore, ids: bigint[]): Promise<string[]> {
+	const tx = await kv.read();
+	try {
+		const tokens: string[] = [];
+		for (const id of ids) tokens.push(...((await tx.get(metaUndoTokens('ws-undo', id))) as string[]));
+		return tokens.sort();
+	} finally {
+		tx.release();
+	}
+}
+
+/** The undo tokens this tab published for its (single) workspace. */
 async function refIds(kv: MemoryKVStore): Promise<string[]> {
 	const tx = await kv.read();
 	try {
 		const ids: string[] = [];
 		for await (const [ , value ] of tx.scan(INTENT_PREFIX)) {
-			for (const list of Object.values((value as IntentRecord).undoRefIds)) ids.push(...list);
+			for (const list of Object.values((value as IntentRecord).undoRefTokens)) ids.push(...list);
 		}
 		return ids.sort();
 	} finally {

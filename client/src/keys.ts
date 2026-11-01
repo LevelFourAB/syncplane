@@ -14,6 +14,13 @@
  *   p/<ws>/<paddedId>            pending mutation queue (binary Mutation envelope)
  *   meta/ws/<ws>/<name>          cursor, lastMutationId, serverSeq, ackedSeq,
  *                                bootstrapGen, pushedThrough — all per workspace
+ *   meta/ws/<ws>/undoTokens/<paddedId>
+ *                                undo tokens of one pending mutation (see
+ *                                metaUndoTokens)
+ *   meta/ws/<ws>/undoBarrier, meta/ws/<ws>/undoDead
+ *                                the undo journal every tab's stacks check
+ *                                (see optimistic/undojournal.ts)
+ *   meta/ws/<ws>/undoScope/<key> one saved undo scope (see optimistic/undosaved.ts)
  *   meta/<name>                  clientId, formatVersion, entities — account-wide
  *   intent/<tabId>               per-tab sync intent (subscriptions, undo refs, heartbeat)
  *
@@ -145,6 +152,51 @@ export const metaUnresolvedPush = (workspaceId: string): string =>
  */
 export const metaTextRestores = (workspaceId: string): string =>
 	`${metaWsPrefix(workspaceId)}textRestores`;
+/**
+ * The last undo token minted for one workspace (decimal string). An undo token
+ * names one forward mutation for the undo stacks of every tab. Unlike a
+ * mutation id it is never renumbered and never minted again: compaction and
+ * resequencing move a mutation to a new id, and can mint its old id again for
+ * a later write. See mintUndoToken.
+ */
+export const metaUndoTokenCounter = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}undoToken`;
+/**
+ * The undo token minted for the last custom mutation of one workspace (decimal
+ * string). A custom mutation cannot be inverted, so every undo group with a
+ * lower token is void in every tab. See optimistic/undojournal.ts.
+ */
+export const metaUndoBarrier = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}undoBarrier`;
+/**
+ * The undo tokens of one workspace's mutations that died (rejected, or dropped
+ * as poison), as `[token, diedAtMs]` pairs. An undo group that references one is
+ * void in every tab. See optimistic/undojournal.ts.
+ */
+export const metaUndoDead = (workspaceId: string): string => `${metaWsPrefix(workspaceId)}undoDead`;
+/** The saved undo scopes of one workspace. */
+export const metaUndoScopePrefix = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}undoScope/`;
+/**
+ * The saved undo scope an app opened under `key` in one workspace. The key is
+ * percent-encoded, so a `/` in it cannot add a segment. See
+ * optimistic/undosaved.ts for the record.
+ */
+export const metaUndoScope = (workspaceId: string, key: string): string =>
+	`${metaUndoScopePrefix(workspaceId)}${encodeURIComponent(key)}`;
+/** The undo-token lists of one workspace's pending mutations. */
+export const metaUndoTokensPrefix = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}undoTokens/`;
+/**
+ * The undo tokens of the pending mutation at `mutationId`, as an array of
+ * decimal strings: the token minted for it, or, after compaction folded several
+ * mutations into one, the tokens of all of them. Absent when no undo stack can
+ * reference the mutation. Written, moved and deleted in the transactions that
+ * write, renumber and delete the pending entry itself.
+ */
+export function metaUndoTokens(workspaceId: string, mutationId: bigint): string {
+	return `${metaUndoTokensPrefix(workspaceId)}${mutationId.toString().padStart(PAD, '0')}`;
+}
 /**
  * Monotonic bootstrap generation for one workspace. A bootstrap bumps it before
  * streaming and stages under that generation; at swap time a mismatch means

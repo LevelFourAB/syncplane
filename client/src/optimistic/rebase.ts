@@ -85,12 +85,16 @@ import {
 import {
 	dropAcked,
 	enqueuePending,
+	moveUndoTokens,
 	readPending,
+	readUndoTokens,
 	readUnresolvedPush,
 	recountPendingAccess,
+	takeUndoTokens,
 	writePushedThrough,
 } from './queue.js';
 import { captureTextLogs, keepStrandedTextEdits } from './textlog-keep.js';
+import { noteDeadUndoTokens } from './undojournal.js';
 
 /**
  * Typed storage facade custom-mutation mirrors run against. Reads resolve
@@ -1194,6 +1198,9 @@ export async function finalizeRebase(
  * replays the rest on the current confirmed state. Run under the kv mutex.
  * `beforeCommit` writes more state into the same transaction, so that state
  * commits with the rollback or not at all.
+ *
+ * The result's `undoTokens` holds, per dropped mutation id, the undo tokens
+ * the dropped entry carried.
  */
 export async function rollbackRejected(
 	kv: KVStore,
@@ -1202,16 +1209,18 @@ export async function rollbackRejected(
 	workspaceId: string,
 	rejectedIds: bigint[],
 	beforeCommit?: (tx: KVWrite) => Promise<void>,
-): Promise<RebaseResult> {
+): Promise<RebaseResult & { undoTokens: Map<bigint, bigint[]> }> {
 	const rejected = new Set(rejectedIds);
 	const touched = new TouchSet();
 	const tx = await kv.write();
 	try {
 		const remaining: Mutation[] = [];
 		const dropped: Mutation[] = [];
+		const undoTokens = new Map<bigint, bigint[]>();
 		for (const m of await readPending(tx, workspaceId)) {
 			if (rejected.has(m.mutationId)) {
 				await tx.del(pendingKey(workspaceId, m.mutationId));
+				undoTokens.set(m.mutationId, await takeUndoTokens(tx, workspaceId, m.mutationId));
 				dropped.push(m);
 			} else {
 				remaining.push(m);
@@ -1219,10 +1228,13 @@ export async function rollbackRejected(
 		}
 		touchPendingAccess(touched, registry, workspaceId, dropped);
 		if (dropped.length > 0) await recountPendingAccess(tx, registry, workspaceId, remaining);
+		// In the store, not only in this tab's memory: the tab whose undo stack
+		// recorded a dropped mutation may not be the tab running this rollback.
+		await noteDeadUndoTokens(tx, workspaceId, [ ...undoTokens.values() ].flat());
 		await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched);
 		await beforeCommit?.(tx);
 		await tx.commit();
-		return { touched, pendingCount: remaining.length };
+		return { touched, pendingCount: remaining.length, undoTokens };
 	} catch (err) {
 		tx.release();
 		throw err;
@@ -1464,7 +1476,7 @@ export function withAccessDelta(raw: Uint8Array, delta: CallerAccessDelta): Deco
 
 /** Outcome of resequencePending. */
 export interface ResequenceResult extends RebaseResult {
-	/** Old mutation id → new id, for remapping undo bookkeeping. */
+	/** Old mutation id → new id. */
 	remap: ReadonlyMap<bigint, bigint>;
 	/** False when the queue already started at the requested id. */
 	changed: boolean;
@@ -1511,6 +1523,8 @@ export interface DropResult extends ResequenceResult {
 	 * acked, dropped or renumbered it first. Nothing was written then.
 	 */
 	dropped: boolean;
+	/** The undo tokens the dropped entry carried; [] when nothing dropped. */
+	undoTokens: bigint[];
 }
 
 /**
@@ -1570,14 +1584,19 @@ async function runResequence(
 					remap: new Map(),
 					changed: false,
 					dropped: false,
+					undoTokens: [],
 				};
 			}
 		}
 		const survivors: Mutation[] = [];
 		let dropped = false;
+		let undoTokens: bigint[] = [];
 		for (const m of pending) {
 			if (m.mutationId === drop?.mutationId) {
 				await tx.del(pendingKey(workspaceId, m.mutationId));
+				undoTokens = await takeUndoTokens(tx, workspaceId, m.mutationId);
+				// See rollbackRejected: other tabs' stacks learn of the drop here.
+				await noteDeadUndoTokens(tx, workspaceId, undoTokens);
 				touchPendingAccess(touched, registry, workspaceId, [ m ]);
 				dropped = true;
 			} else {
@@ -1596,7 +1615,14 @@ async function runResequence(
 			} else {
 				tx.release();
 			}
-			return { touched, pendingCount: survivors.length, remap: new Map(), changed: false, dropped };
+			return {
+				touched,
+				pendingCount: survivors.length,
+				remap: new Map(),
+				changed: false,
+				dropped,
+				undoTokens,
+			};
 		}
 		// Every old key goes before any new one is written: the ranges overlap
 		// whenever the queue is longer than the hole, and a write-then-delete
@@ -1613,6 +1639,7 @@ async function runResequence(
 			nextId += 1n;
 		}
 		for (const m of renumbered) await enqueuePending(tx, workspaceId, m);
+		await moveUndoTokens(tx, workspaceId, await readUndoTokens(tx, workspaceId), remap);
 		// The counter follows the queue down even when the queue is empty: it is
 		// what the next local write mints from, and an id above the watermark gaps
 		// the workspace again on the very next edit.
@@ -1633,6 +1660,7 @@ async function runResequence(
 			remap,
 			changed: renumbered.length > 0,
 			dropped,
+			undoTokens,
 		};
 	} catch (err) {
 		tx.release();

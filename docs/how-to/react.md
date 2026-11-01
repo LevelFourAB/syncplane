@@ -189,34 +189,42 @@ Writes under the provider record to the isolated scope stack. Reads are shared w
 
 ## Keeping undo history when a view unmounts
 
-An `<UndoScopeProvider>` without props drops its stack when it unmounts. For tabs or pages that unmount and mount again, create the scopes yourself and give one to the provider with `scope`. The provider never closes a scope that it gets this way.
+An `<UndoScopeProvider>` without props drops its stack when it unmounts. For tabs or pages that unmount and mount again, open the scopes yourself and give one to the provider with `scope`. The provider never closes a scope that it gets this way.
 
-Keep one scope for each page, and close the oldest scope when you keep too many:
+Open each page's scope with `restoreUndoScope()`. The scope saves its stacks in the local store, so the history also stays after a reload. Keep a small number of scopes open, and close the oldest one when you keep too many. A closed scope keeps its saved stacks, so the page gets its history back when the user opens it again:
 
 ```tsx
 const KEEP = 10;
 // Map order is insertion order, so the first key is the page used least recently.
-const scopes = new Map<string, UndoScope>();
+const scopes = new Map<string, Promise<UndoScope>>();
 
-function scopeFor(ws: WorkspaceClient, pageId: string): UndoScope {
+function scopeFor(ws: WorkspaceClient, pageId: string): Promise<UndoScope> {
 	let scope = scopes.get(pageId);
 	if (scope !== undefined) {
 		scopes.delete(pageId);
 	} else {
-		scope = ws.undoScope();
+		scope = ws.restoreUndoScope(`page:${pageId}`);
 	}
 	scopes.set(pageId, scope);
 	if (scopes.size > KEEP) {
 		const [ oldest, evicted ] = scopes.entries().next().value!;
 		scopes.delete(oldest);
-		evicted.close();
+		void evicted.then((s) => s.close());
 	}
 	return scope;
 }
 
 function PageTab({ pageId }: { pageId: string }) {
 	const ws = useWorkspaceScope();
-	const scope = useMemo(() => scopeFor(ws, pageId), [ ws, pageId ]);
+	const [ scope, setScope ] = useState<UndoScope>();
+	useEffect(() => {
+		let live = true;
+		void scopeFor(ws, pageId).then((s) => live && setScope(s));
+		return () => {
+			live = false;
+		};
+	}, [ ws, pageId ]);
+	if (scope === undefined) return <Loading />;
 	return (
 		<UndoScopeProvider scope={ scope }>
 			<PageEditor pageId={ pageId } />
@@ -225,9 +233,16 @@ function PageTab({ pageId }: { pageId: string }) {
 }
 ```
 
-Key the map by page, not by tab. Two tabs that show the same page then share one history, and a page that the user opens again gets its history back.
+Key the scopes by page, not by tab. Two tabs of the app that show the same page then share one history.
 
-Each open scope keeps up to `maxDepth` undo groups in memory. A custom mutation clears every scope in the workspace, including scopes that no tab shows. The stacks are not saved, so a page reload clears all of them.
+To delete a page's history, for example when the page itself is deleted, call `discard()` on its open scope, or `ws.discardUndoScope(key)` when no scope is open.
+
+Things to know:
+
+- One browser tab at a time holds a key. In a second browser tab, `restoreUndoScope()` returns a scope with `saved: false` and empty stacks. Its undo still works, but it is not saved.
+- A step that no longer applies is dropped on restore: the server rejected its write, a custom mutation came after it, or it is older than `undo.persist.maxAgeMs` (default 24 hours).
+- A restored step writes its saved values, so it overwrites what peers wrote since. The older the step, the more likely that is.
+- Each open scope keeps up to `maxDepth` undo groups in memory. The store keeps at most `undo.persist.maxScopes` saved scopes per workspace (default 20).
 
 ## Editing a row outside the subscription scope
 

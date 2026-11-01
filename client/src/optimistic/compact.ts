@@ -30,8 +30,10 @@ import { isFragment, mergeFragments, mergeText } from '../text/index.js';
 import { TouchSet } from '../touch.js';
 import {
 	enqueuePending,
+	moveUndoTokens,
 	readPending,
 	readPushedThrough,
+	readUndoTokens,
 	recountPendingAccess,
 } from './queue.js';
 import { clearOverlayAndReplay, type MirrorMap } from './rebase.js';
@@ -503,7 +505,7 @@ function unionPaths(a: string[], b: string[]): string[] {
 }
 
 export interface CompactionResult {
-	/** Old tail mutation id → new id, for remapping undo bookkeeping. */
+	/** Old tail mutation id → new id. */
 	remap: ReadonlyMap<bigint, bigint>;
 	/** Pending-queue length after compaction. */
 	pendingCount: number;
@@ -520,24 +522,33 @@ export interface CompactionResult {
  * watermark inside this transaction is what makes the safety invariant hold
  * across tabs: a peer that advanced it (before its own push) is observed here,
  * so we never renumber ids the server may already have seen. The protected
- * (undo-referenced) ids are resolved through `readProtectedIds` INSIDE the
- * same transaction for the same reason: the cross-tab union of every tab's
- * undo refs (IntentRegistry.unionUndoRefIds) is then atomic with the
- * renumber. Run under the kv mutex. Returns the undo id remap so the caller
- * can keep undo bookkeeping consistent.
+ * undo tokens are resolved through `readProtectedTokens` INSIDE the same
+ * transaction for the same reason: the cross-tab union of every tab's undo
+ * refs (IntentRegistry.unionUndoRefTokens) is then atomic with the fold. A
+ * pending mutation is protected, and kept as its own slot, when it carries any
+ * of those tokens. Every token of a folded mutation moves to the slot that
+ * absorbed it, so an undo stack never has to learn the new ids. Run under the
+ * kv mutex.
  */
 export async function compactPending(
 	kv: KVStore,
 	registry: EntityRegistry,
 	mirrors: MirrorMap,
 	workspaceId: string,
-	readProtectedIds: (tx: KVRead) => ReadonlySet<bigint> | Promise<ReadonlySet<bigint>>,
+	readProtectedTokens: (tx: KVRead) => ReadonlySet<bigint> | Promise<ReadonlySet<bigint>>,
 ): Promise<CompactionResult> {
 	const tx = await kv.write();
 	try {
 		const pending = await readPending(tx, workspaceId);
 		const pushedThrough = await readPushedThrough(tx, workspaceId);
-		const protectedIds = await readProtectedIds(tx);
+		const protectedTokens = await readProtectedTokens(tx);
+		const tokens = await readUndoTokens(tx, workspaceId);
+		const protectedIds = new Set<bigint>();
+		if (protectedTokens.size > 0) {
+			for (const [ id, list ] of tokens) {
+				if (list.some((t) => protectedTokens.has(t))) protectedIds.add(id);
+			}
+		}
 		const plan = planCompaction(registry, pending, pushedThrough, protectedIds);
 		if (!plan.changed) {
 			tx.release();
@@ -545,6 +556,7 @@ export async function compactPending(
 		}
 		for (const m of pending) await tx.del(pendingKey(workspaceId, m.mutationId));
 		for (const m of plan.mutations) await enqueuePending(tx, workspaceId, m);
+		await moveUndoTokens(tx, workspaceId, tokens, plan.remap);
 		const maxId = plan.mutations.length
 			? plan.mutations[plan.mutations.length - 1]!.mutationId
 			: pushedThrough;

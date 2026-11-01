@@ -51,6 +51,17 @@ export interface OpenOptions {
 	 * access-model testserver. Default unset: the todo/widget schema, anonymous.
 	 */
 	user?: string;
+	/** Turns on the client's `undo` option. Default false. */
+	undo?: boolean;
+}
+
+/** One undo scope the harness holds open, as a spec sees it. */
+export interface UndoScopeView {
+	key: string | null;
+	saved: boolean;
+	closed: boolean;
+	canUndo: boolean;
+	canRedo: boolean;
 }
 
 export interface TodoView {
@@ -366,6 +377,27 @@ export interface HarnessApi {
 	 * drives the API the client actually reads.
 	 */
 	setVisibility(state: 'visible' | 'hidden'): Promise<void>;
+
+	/**
+	 * Saved undo scopes. Requires open({ undo: true }). A scope is a number for
+	 * the same reason a text handle is: the scope object is not JSON.
+	 * restoreUndoScope returns the number the other calls take.
+	 */
+	restoreUndoScope(key: string): Promise<number>;
+	undoScope(scope: number): Promise<UndoScopeView>;
+	putTodoIn(scope: number, id: string, title: string): Promise<void>;
+	patchTodoIn(scope: number, id: string, fields: Partial<Omit<TodoView, 'id'>>): Promise<void>;
+	/** Resolves false when there is nothing to undo. */
+	undoIn(scope: number): Promise<boolean>;
+	redoIn(scope: number): Promise<boolean>;
+	/** Closes the scope; its saved stacks stay. */
+	closeUndoScope(scope: number): Promise<void>;
+	/** Closes the scope and deletes its saved stacks. */
+	discardUndoScope(scope: number): Promise<void>;
+	/** discardUndoScope(key) on the client: false when an open scope holds the key. */
+	discardSavedUndo(key: string): Promise<boolean>;
+	/** Issues custom mutation `name` with a todo `{ id }` as its args. */
+	customMutation(name: string, id: string): Promise<void>;
 }
 
 declare global {

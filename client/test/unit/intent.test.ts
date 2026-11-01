@@ -65,7 +65,7 @@ describe('IntentRegistry', () => {
 		const rec = await h.readRecord(reg.tabId);
 		expect(rec).toBeDefined();
 		expect(rec!.subs).toEqual({ [WS]: [ toBinary(SubscriptionSchema, sub('todo')) ] });
-		expect([ ...rec!.undoRefIds[WS]! ].sort()).toEqual([ '12', '7' ]);
+		expect([ ...rec!.undoRefTokens[WS]! ].sort()).toEqual([ '12', '7' ]);
 		expect(rec!.updatedAt).toBe(h.clock.now());
 	});
 
@@ -82,7 +82,7 @@ describe('IntentRegistry', () => {
 
 		const rec = (await h.readRecord(reg.tabId))!;
 		expect(rec.subs).toEqual({ [WS]: [ toBinary(SubscriptionSchema, sub('todo')) ] });
-		expect(rec.undoRefIds).toEqual({ [WS]: [ '3' ] });
+		expect(rec.undoRefTokens).toEqual({ [WS]: [ '3' ] });
 		expect(rec.updatedAt).toBe(seededAt + 1234);
 	});
 
@@ -145,7 +145,7 @@ describe('IntentRegistry', () => {
 
 		const tx = await h.kv.read();
 		try {
-			const refs = await a.unionUndoRefIds(tx, WS, new Set([ 1n ]));
+			const refs = await a.unionUndoRefTokens(tx, WS, new Set([ 1n ]));
 			expect(refs).toEqual(new Set([ 1n, 42n ]));
 		} finally {
 			tx.release();
@@ -163,7 +163,7 @@ describe('IntentRegistry', () => {
 		// The expired record no longer protects refs...
 		const tx = await h.kv.read();
 		try {
-			expect(await a.unionUndoRefIds(tx, WS, new Set())).toEqual(new Set());
+			expect(await a.unionUndoRefTokens(tx, WS, new Set())).toEqual(new Set());
 		} finally {
 			tx.release();
 		}
@@ -244,7 +244,7 @@ describe('IntentRegistry', () => {
 		expect(entities(await a.unionScopes(scope([ sub('todo') ])))).toEqual([ 'todo' ]);
 		const read = await h.kv.read();
 		try {
-			expect(await a.unionUndoRefIds(read, WS, new Set([ 5n ]))).toEqual(new Set([ 5n ]));
+			expect(await a.unionUndoRefTokens(read, WS, new Set([ 5n ]))).toEqual(new Set([ 5n ]));
 		} finally {
 			read.release();
 		}

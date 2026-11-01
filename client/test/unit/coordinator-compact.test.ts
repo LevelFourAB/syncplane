@@ -127,7 +127,6 @@ describe('coordinator push: compaction + chunking', () => {
 	function newCoordinator(t: Transport, opts: Partial<CoordinatorOptions> = {}): Coordinator {
 		const kvMutex = opts.kvMutex ?? createKvMutex('test');
 		const hub = new WatcherHub(kv, registry, kvMutex);
-		const remaps: ReadonlyMap<bigint, bigint>[] = [];
 		const coord = new Coordinator({
 			transport: t,
 			kv,
@@ -141,10 +140,8 @@ describe('coordinator push: compaction + chunking', () => {
 			scopes: new Map([ [ WS, [] ] ]),
 			streamEnabled: false,
 			pollIntervalMs: 0,
-			onCompacted: (_ws, remap) => remaps.push(remap),
 			...opts,
 		});
-		(coord as unknown as { remaps: ReadonlyMap<bigint, bigint>[] }).remaps = remaps;
 		return coord;
 	}
 
@@ -174,9 +171,6 @@ describe('coordinator push: compaction + chunking', () => {
 		expect(pushes).toHaveLength(1);
 		expect(pushes[0]).toHaveLength(1);
 		expect(await pendingIds()).toEqual([ 1n ]);
-		const remaps = (coord as unknown as { remaps: ReadonlyMap<bigint, bigint>[] }).remaps;
-		expect(remaps).toHaveLength(1);
-		expect(remaps[0]!.get(5n)).toBe(1n);
 
 		await coord.stop();
 	});
@@ -263,8 +257,6 @@ describe('coordinator push: compaction + chunking', () => {
 		expect(await pendingIds()).toEqual([ 1n, 2n ]);
 		// The new edit actually reached the server on its own id; it was not lost.
 		expect(pushes.at(-1)!.map((m) => m.mutationId)).toEqual([ 1n, 2n ]);
-		const remaps = (coord as unknown as { remaps: ReadonlyMap<bigint, bigint>[] }).remaps;
-		expect(remaps).toHaveLength(0);
 
 		await coord.stop();
 	});
@@ -537,8 +529,6 @@ describe('coordinator push: compaction + chunking', () => {
 
 		// Neither folded nor renumbered: both ids ship as they stand.
 		expect(await pendingIds()).toEqual([ 1n, 2n ]);
-		const remaps = (coord as unknown as { remaps: ReadonlyMap<bigint, bigint>[] }).remaps;
-		expect(remaps).toHaveLength(0);
 		expect(pushes.at(-1)!.map((m) => m.mutationId)).toEqual([ 1n, 2n ]);
 
 		await coord.stop();
@@ -553,9 +543,6 @@ describe('coordinator push: compaction + chunking', () => {
 		await coord.syncNow(); // compacts 2 → 1, pushes it, advances pushedThrough
 		await coord.syncNow(); // pushedThrough now covers id 1: nothing to compact
 
-		// First cycle compacted (one remap); the second produced none.
-		const remaps = (coord as unknown as { remaps: ReadonlyMap<bigint, bigint>[] }).remaps;
-		expect(remaps).toHaveLength(1);
 		// Both cycles re-push the same single (idempotent) mutation; never the
 		// original two.
 		expect(pushes.map((p) => p.length)).toEqual([ 1, 1 ]);

@@ -338,6 +338,16 @@ The pending mutation queue is shared across browser tabs within a workspace. If 
 
 Skipping replay prevents workspace stalls during pulls, rollbacks, and bootstrap operations. The mutation remains in the queue until the push handler acknowledges, rejects, or dead-letters it (after `poisonThreshold` consecutive failures). The tab displays confirmed server state until the mutation resolves.
 
+## A saved undo step can be days old
+
+A [saved undo scope](../reference/typescript-client.md#saved-undo-scopes) keeps its stacks in the local store, so an undo can replay a step that was recorded before a reload. Undo follows per-field last-writer-wins: a step for a non-text field writes the values it saved, and overwrites what peers wrote to those fields since. In a live session, that window is minutes. For a saved step, it can be days. Text-field steps do not have this problem, because they name only the local edits and leave peers' text in place.
+
+A saved step must also know whether its write still stands. The server can reject the write while no tab has the scope open, or a custom mutation can come after it, and the tab that hears about it is not always the tab that recorded the step. Every tab therefore writes these events to a journal in the shared store, and a restore checks its steps against the journal. The journal forgets a rejection after seven days, which is why `undo.persist.maxAgeMs` cannot go above seven days: an older step could replay a write that the server refused. The same limit applies to every undo stack, also a stack in a tab that stays open for more than seven days: an undo or redo drops the steps that are older. The journal also keeps a maximum number of rejections. When a workspace has more rejections than that within seven days, the journal forgets the oldest rejections and voids every step recorded before them. Those steps are lost, but no step can replay a refused write.
+
+During a rolling upgrade, a tab that runs an older client build can share the store with a tab that runs a newer build. The older build does not know the undo tokens that link a step to its pending write, so its compaction can leave a token next to a different write. Until every tab runs the newer build, a rejection can then drop the wrong undo step, or fail to drop the correct one.
+
+Only one open scope at a time can hold a saved key. If two browser tabs restored the same stacks, each could replay the same step, and a text step replayed twice puts the text back twice. A tab that finds the key held gets a scope that is not saved, and its undo history ends with that tab.
+
 ## A local write is not pushed immediately
 
 Client writes wait for a debounce interval (`pushDebounceMs`, default 50ms; capped by `pushMaxDelayMs`, default 250ms) before pushing to the server. Rapid consecutive edits reset the debounce timer up to the maximum delay ceiling.

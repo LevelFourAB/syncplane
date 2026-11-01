@@ -40,6 +40,7 @@ describe('storageNames', () => {
 			presenceLock: 'sync:presencelock:acct',
 			presenceChannel: 'sync:presence:acct',
 			textPeerLocks: 'sync:textpeer',
+			undoScopeLocks: 'sync:undoscope:acct',
 			blobStore: 'sync:blobs:acct',
 			blobLock: 'sync:bloblock:acct',
 			blobChannel: 'sync:blob:acct',

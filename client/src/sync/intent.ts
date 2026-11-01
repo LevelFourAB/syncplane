@@ -8,7 +8,7 @@ import type { Mutex } from '../mutex.js';
 /**
  * Cross-tab sync intent. Every tab sharing a KV store writes a small record at
  * `intent/<tabId>` describing what it needs from sync — which workspaces it
- * holds, each one's subscription set, and the mutation ids its undo/redo stacks
+ * holds, each one's subscription set, and the undo tokens its undo/redo stacks
  * still reference — plus a heartbeat timestamp. Each tab then syncs with the
  * UNION of all live tabs' intent:
  *
@@ -17,11 +17,12 @@ import type { Mutex } from '../mutex.js';
  *    alternating scopes against the one shared cursor (the delta-resync-forever
  *    subscription thrash), and the single leader stream carries every workspace
  *    any tab needs rather than only the leader's own.
- *  - Union undo refs: compaction — whichever tab runs it — protects every
- *    tab's undo-referenced mutations, not just its own, read atomically
- *    inside the compaction transaction. A peer's referenced ids are simply
- *    never renumbered, so no cross-tab remap protocol is needed. Ids are
- *    counted per workspace, so the union is taken per workspace too.
+ *  - Union undo refs: compaction — whichever tab runs it — keeps every tab's
+ *    undo-referenced mutations from folding, not just its own, read atomically
+ *    inside the compaction transaction. The refs are undo tokens, not mutation
+ *    ids: compaction still renumbers a protected mutation, and its tokens move
+ *    with it (see metaUndoTokens), so no tab has to learn the new ids. Tokens
+ *    are minted per workspace, so the union is taken per workspace too.
  *
  * Liveness is heartbeat-TTL based — no locks, no channels, no leader — so
  * this works identically in browsers and Node. A stale record only ever
@@ -64,8 +65,8 @@ export type ScopeMap = ReadonlyMap<string, Subscription[]>;
 export interface IntentRecord {
 	/** Workspace id → wire-encoded Subscriptions (toBinary each). Empty = full sync. */
 	subs: Record<string, Uint8Array[]>;
-	/** Workspace id → undo/redo-referenced mutation ids as decimal strings. */
-	undoRefIds: Record<string, string[]>;
+	/** Workspace id → undo tokens the tab's stacks reference, as decimal strings. */
+	undoRefTokens: Record<string, string[]>;
 	/** Heartbeat (epoch ms); drives the TTLs above. */
 	updatedAt: number;
 }
@@ -151,8 +152,7 @@ export class IntentRegistry {
 
 	/**
 	 * Persists a workspace's new undo-ref set in its own transaction — for stack
-	 * changes outside an enqueue (a rejection dropping groups, a compaction
-	 * remap).
+	 * changes outside an enqueue (a rejection dropping groups).
 	 */
 	async updateRefs(workspaceId: string, refs: ReadonlySet<bigint>): Promise<void> {
 		if (!this.seeded || this.deleted) return;
@@ -249,28 +249,28 @@ export class IntentRegistry {
 	 * The undo-ref union compaction of `workspaceId` must protect: the given own
 	 * in-memory set unioned with every record younger than GC_TTL_MS. MUST run
 	 * inside the caller's open compaction transaction so the union is atomic with
-	 * the renumber — a peer's reference written after this scan only concerns
-	 * mutations enqueued after it, which get ids above the renumbered range.
+	 * the fold — a peer's reference written after this scan only concerns
+	 * mutations enqueued after it, which this compaction does not see.
 	 */
-	async unionUndoRefIds(
+	async unionUndoRefTokens(
 		tx: KVRead,
 		workspaceId: string,
 		own: ReadonlySet<bigint>,
 	): Promise<Set<bigint>> {
 		const now = this.now();
-		const ids = new Set(own);
+		const tokens = new Set(own);
 		for await (const [ , v ] of tx.scan(INTENT_PREFIX)) {
 			const rec = asIntentRecord(v);
 			if (!rec || now - rec.updatedAt > this.gcTtlMs) continue;
-			for (const raw of rec.undoRefIds[workspaceId] ?? []) {
+			for (const raw of rec.undoRefTokens[workspaceId] ?? []) {
 				try {
-					ids.add(BigInt(raw));
+					tokens.add(BigInt(raw));
 				} catch {
-					// malformed id in a peer record: skip
+					// malformed token in a peer record: skip
 				}
 			}
 		}
-		return ids;
+		return tokens;
 	}
 
 	/**
@@ -337,7 +337,7 @@ export class IntentRegistry {
 	private async putRecord(tx: KVWrite): Promise<void> {
 		const record: IntentRecord = {
 			subs: this.ownSubs,
-			undoRefIds: this.ownRefs,
+			undoRefTokens: this.ownRefs,
 			updatedAt: this.now(),
 		};
 		this.lastWriteAt = record.updatedAt;
@@ -407,11 +407,16 @@ function asIntentRecord(v: unknown): IntentRecord | undefined {
 	const rec = v as Partial<IntentRecord>;
 	if (
 		typeof rec.subs !== 'object' || rec.subs === null || Array.isArray(rec.subs)
-		|| typeof rec.undoRefIds !== 'object' || rec.undoRefIds === null
-		|| Array.isArray(rec.undoRefIds)
 		|| typeof rec.updatedAt !== 'number'
 	) {
 		return undefined;
+	}
+	// A record without valid tokens still counts for its subscriptions. A tab
+	// of an earlier build writes mutation ids under another field name; this
+	// build cannot use them, and protects nothing for that tab.
+	const tokens = rec.undoRefTokens;
+	if (typeof tokens !== 'object' || tokens === null || Array.isArray(tokens)) {
+		return { ...rec, undoRefTokens: {} } as IntentRecord;
 	}
 	return rec as IntentRecord;
 }

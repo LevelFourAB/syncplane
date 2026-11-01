@@ -75,7 +75,7 @@ The `SyncClientOptions<E extends readonly DescMessage[]>` interface accepts the 
 | `bootstrapPriority`       | `readonly DescMessage[]`                       | Optional | None                                    | Priority order for entities delivered during the first snapshot.                                                                                                |
 | `schemaRevision`          | `string`                                       | Optional | None                                    | Opaque token matched against the server schema for skew negotiation.                                                                                            |
 | `onSchemaSkew`            | `(info: {client, server}) => SchemaSkewAction` | Optional | `'warn'` when `schemaRevision` is set   | Handler returning `'ignore'`, `'warn'`, `'block'`, or `'resync'`.                                                                                               |
-| `undo`                    | `UndoOptions`                                  | Optional | None                                    | Enables in-memory undo and redo stacks.                                                                                                                         |
+| `undo`                    | `UndoOptions`                                  | Optional | None                                    | Enables undo and redo stacks.                                                                                                                                   |
 | `debugVerifyTouches`      | `boolean`                                      | Optional | `SYNC_DEBUG_VERIFY_TOUCHES` value       | Cross-checks maintained watch results against full scans and throws on divergence.                                                                              |
 | `debugVerifyIndexReads`   | `boolean`                                      | Optional | `SYNC_DEBUG_VERIFY_TOUCHES` value       | Cross-checks index queries against scans and throws on divergence.                                                                                              |
 
@@ -1009,14 +1009,22 @@ Rules:
 
 ## Undo and redo
 
-Configure in-memory undo and redo stacks through the `undo` client option:
+Configure undo and redo stacks through the `undo` client option:
 
 ```ts
 interface UndoOptions {
 	enabled?: boolean;
 	maxDepth?: number;
+	persist?: UndoPersistOptions;
+}
+
+interface UndoPersistOptions {
+	maxScopes?: number; // default 20
+	maxAgeMs?: number; // default 24 hours, at most 7 days
 }
 ```
+
+`persist` sets the limits of [saved undo scopes](#saved-undo-scopes).
 
 Undo and redo methods:
 
@@ -1058,6 +1066,49 @@ Scope rules:
 - Custom mutations clear all undo stacks across the workspace.
 - `close()` clears the scope's stacks without merging them into the parent workspace.
 - Calling `undo()` on a closed scope returns `false`.
+
+### Saved undo scopes
+
+A saved scope keeps its undo and redo stacks in the local store, so they stay after a reload:
+
+```ts
+restoreUndoScope(key: string, opts?: UndoScopeOptions): Promise<UndoScope>
+discardUndoScope(key: string): Promise<boolean>
+```
+
+Both methods are on a `WorkspaceClient` and on the client (for the default workspace). `restoreUndoScope()` requires the `undo` option and rejects without it.
+
+```ts
+const page = await client.ws('w1').restoreUndoScope(`page:${pageId}`);
+await page.db.block.mutate.patch(blockId, { text: 'edited' });
+page.close(); // the stacks stay saved
+
+const again = await client.ws('w1').restoreUndoScope(`page:${pageId}`);
+await again.undo(); // undoes the patch, also after a reload
+```
+
+`UndoScope` members for saved scopes:
+
+| Member      | Description                                                                                        |
+| ----------- | -------------------------------------------------------------------------------------------------- |
+| `key`       | The key given to `restoreUndoScope()`. `undefined` for `undoScope()`.                              |
+| `saved`     | `true` when the scope holds its key and saves its stacks.                                          |
+| `close()`   | Saves the stacks as they are at the call, then frees the key. The saved stacks stay.               |
+| `discard()` | Closes the scope and deletes its saved stacks. Resolves when they are deleted and the key is free. |
+
+Saved scope rules:
+
+- One open scope at a time holds a key, across all tabs of the browser. If another scope holds the key, in this tab or another, `restoreUndoScope()` returns an unsaved scope with empty stacks and `saved: false`.
+- A browser without the Web Locks API cannot claim a key. All its restored scopes have `saved: false`.
+- A restore of a key that this tab is closing waits until the close has saved the stacks.
+- A scope saves its stacks shortly after each change, and when the scope or the client closes.
+- A restore drops each step that no longer applies: a step whose write the server rejected, a step recorded before a later custom mutation, and a step older than `persist.maxAgeMs`. The same rules apply in every tab.
+- An undo or redo in any scope, saved or not, drops the steps older than seven days first.
+- A restored step writes its saved values. It overwrites the values that peers wrote since the step was recorded.
+- `discardUndoScope(key)` returns `false` when an open scope holds the key. Use that scope's `discard()`.
+- When a save makes a workspace hold more than `persist.maxScopes` saved scopes, the least recently saved scopes are deleted. A deleted scope that is open writes its stacks again when it closes.
+- On a server runtime (Node, SSR), claims are per `KVStore` object: clients that share one store object exclude each other, and clients on different store objects do not.
+- `removeWorkspace({ purge: true })` and `purgeLocalData()` delete the saved scopes. `removeWorkspace()` without `purge` closes them and keeps their stacks.
 
 ## Sync status
 

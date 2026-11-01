@@ -110,6 +110,7 @@ import {
 	metaLastMutationId,
 	metaPendingAccess,
 	metaPushedThrough,
+	metaUndoTokenCounter,
 	metaWsPrefix,
 	overlayGeneration,
 	overlayGenerationFor,
@@ -177,9 +178,12 @@ import { buildIndexes } from './optimistic/index-build.js';
 import { IndexCache } from './optimistic/index-maintain.js';
 import {
 	enqueuePending,
+	mintUndoToken,
 	notePendingAppended,
 	pendingAccessOf,
 	readPending,
+	readUndoTokens,
+	writeUndoTokens,
 } from './optimistic/queue.js';
 import {
 	applyCrudLocally,
@@ -187,6 +191,17 @@ import {
 	type MirrorMap,
 	type MutatorMirror,
 } from './optimistic/rebase.js';
+import {
+	DEAD_TOKEN_TTL_MS,
+	decodeUndoJournal,
+	readUndoJournal,
+	StaleUndoGroupError,
+	type UndoJournal,
+	undoJournalKeys,
+	voidsToken,
+	writeUndoBarrier,
+} from './optimistic/undojournal.js';
+import { deleteSavedUndo, readSavedUndo } from './optimistic/undosaved.js';
 import { generateKeyBetween, newElementId, orderFieldOf, sortOrderedFields } from './ordering.js';
 import {
 	cursorFromBytes,
@@ -296,10 +311,12 @@ import { openTextHandle, type TextHandle } from './text/handle.js';
 import { createPeerLeases, type PeerLease, type PeerLeases } from './text/peer.js';
 import { applyTextInverse, reinsertOp, type TextInverseOp } from './text/undo-ops.js';
 import { TouchSet } from './touch.js';
+import { claimUndoKey, UndoSaver } from './undo-persist.js';
 import {
 	type Inverse,
 	invertCrud,
 	type StackName,
+	type UndoEntry,
 	UndoManager,
 	type UndoOptions,
 	UndoRefusedError,
@@ -1207,6 +1224,10 @@ interface ScopeWaiter {
 }
 
 const DEFAULT_HOLD_GRACE_MS = 30_000;
+/** See UndoPersistOptions.maxScopes. */
+const DEFAULT_SAVED_UNDO_SCOPES = 20;
+/** See UndoPersistOptions.maxAgeMs. */
+const DEFAULT_SAVED_UNDO_AGE_MS = 24 * 60 * 60_000;
 
 /**
  * A hold on one row (see WorkspaceClient.hold). The row stays in scope until
@@ -1417,6 +1438,38 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 	 * the parent.
 	 */
 	undoScope(opts?: UndoScopeOptions): UndoScope<E>;
+	/**
+	 * Opens the nested undo scope saved under `key`, with the stacks it held
+	 * when it was last saved, or empty stacks when nothing is saved. The scope
+	 * saves its stacks to the local store as they change, so they survive a
+	 * reload; `close()` keeps the saved stacks and `discard()` deletes them.
+	 * Rejects with an Error when the client has no `undo` option.
+	 *
+	 * One open scope at a time holds a key, across every tab. When another scope
+	 * holds it — in this tab or another — or the browser has no lock manager,
+	 * the result is an ordinary unsaved scope with `saved` false and empty
+	 * stacks. Restoring a key whose scope this tab is closing waits for that
+	 * close to finish saving.
+	 *
+	 * A restored step that no longer applies is dropped, not replayed: one whose
+	 * write the server rejected, one recorded before a later custom mutation, and
+	 * one older than `undo.persist.maxAgeMs`. A restored step that does apply
+	 * writes its saved values, which overwrites values peers wrote since.
+	 *
+	 * @example
+	 * ```ts
+	 * const page = await client.ws('w1').restoreUndoScope(`page:${pageId}`);
+	 * await page.db.block.mutate.patch(blockId, { text: 'edited' });
+	 * page.close(); // the stacks stay saved
+	 * ```
+	 */
+	restoreUndoScope(key: string, opts?: UndoScopeOptions): Promise<UndoScope<E>>;
+	/**
+	 * Deletes the stacks saved under `key`. Resolves true when they are gone (or
+	 * there were none), and false when an open scope holds the key; call that
+	 * scope's `discard()` instead.
+	 */
+	discardUndoScope(key: string): Promise<boolean>;
 }
 
 /**
@@ -1435,9 +1488,25 @@ export interface UndoScope<E extends readonly DescMessage[] = readonly DescMessa
 	 * The object stays usable afterwards (reads and writes still work), it
 	 * simply records nothing and reports `canUndo()`/`canRedo()` false, so a
 	 * late callback firing after teardown is not an error.
+	 *
+	 * A saved scope (`saved` true) keeps its saved stacks: they are written to
+	 * the store, then the key is released for the next restoreUndoScope().
 	 */
 	close(): void;
+	/**
+	 * Closes the scope, and for a saved scope also deletes its saved stacks.
+	 * Resolves once they are deleted and the key is free.
+	 */
+	discard(): Promise<void>;
 	readonly closed: boolean;
+	/** The key passed to restoreUndoScope(); undefined for undoScope(). */
+	readonly key: string | undefined;
+	/**
+	 * Whether this scope holds its key and saves its stacks. False for
+	 * undoScope(), and for a restoreUndoScope() whose key another open scope
+	 * holds.
+	 */
+	readonly saved: boolean;
 }
 
 /**
@@ -1545,6 +1614,14 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 
 	undoScope(opts?: UndoScopeOptions): UndoScope<E> {
 		return new NestedUndoScope<E>(this, opts);
+	}
+
+	restoreUndoScope(key: string, opts?: UndoScopeOptions): Promise<UndoScope<E>> {
+		return this.client.restoreUndoScopeIn(this.root, key, opts);
+	}
+
+	discardUndoScope(key: string): Promise<boolean> {
+		return this.client.discardUndoScopeIn(this.workspaceId, key);
 	}
 
 	/** @internal detaches a closing fork; see NestedUndoScope.close. */
@@ -1885,8 +1962,14 @@ class NestedUndoScope<E extends readonly DescMessage[]> extends WorkspaceScope<E
 	implements UndoScope<E>
 {
 	private closedFlag = false;
+	/** Set while this scope holds its saved key; see adoptSaved. */
+	private claim?: { saver: UndoSaver; release: () => void; done: (p: Promise<void>) => void };
 
-	constructor(parent: WorkspaceScope<E>, opts?: UndoScopeOptions) {
+	constructor(
+		parent: WorkspaceScope<E>,
+		opts?: UndoScopeOptions,
+		readonly key: string | undefined = undefined,
+	) {
 		const base = parent.client.undoOptions;
 		super(
 			parent.client,
@@ -1905,8 +1988,33 @@ class NestedUndoScope<E extends readonly DescMessage[]> extends WorkspaceScope<E
 		return this.closedFlag;
 	}
 
+	get saved(): boolean {
+		return this.claim !== undefined;
+	}
+
+	/**
+	 * @internal Fills the stack with saved stacks and starts saving it. `release`
+	 * frees the claimed key; `done` is told the promise that settles once the
+	 * last save is written and the key is free.
+	 */
+	adoptSaved(
+		stacks: { undo: UndoEntry[]; redo: UndoEntry[]; dropped: boolean },
+		saver: (mgr: UndoManager) => UndoSaver,
+		release: () => void,
+		done: (p: Promise<void>) => void,
+	): void {
+		const mgr = this.mgr!;
+		mgr.load(stacks.undo, stacks.redo);
+		this.claim = { saver: saver(mgr), release, done };
+		// The stored record still holds what the load dropped.
+		if (stacks.dropped) this.claim.saver.schedule();
+	}
+
 	close(): void {
 		if (this.closedFlag) return;
+		const claim = this.claim;
+		// Before the clear below, which would otherwise be saved as empty stacks.
+		const last = claim?.saver.close();
 		this.closedFlag = true;
 		this.root.dropFork(this);
 		// Clear before dropping the manager so subscribers still attached to it
@@ -1914,6 +2022,42 @@ class NestedUndoScope<E extends readonly DescMessage[]> extends WorkspaceScope<E
 		// itself rather than holding a stale "can undo".
 		this.mgr?.barrier();
 		this.mgr = undefined;
+		if (claim !== undefined && last !== undefined) {
+			claim.done(last.finally(claim.release));
+		}
+	}
+
+	/**
+	 * @internal Closes the scope without writing its stacks, for a purge that
+	 * deletes them. Settles once no save of this scope can still commit.
+	 */
+	async abandon(): Promise<void> {
+		const claim = this.claim;
+		claim?.saver.detach();
+		this.claim = undefined;
+		this.close();
+		if (claim === undefined) return;
+		const idle = claim.saver.idle().finally(claim.release);
+		claim.done(idle);
+		await idle;
+	}
+
+	async discard(): Promise<void> {
+		const claim = this.claim;
+		if (claim === undefined) {
+			this.close();
+			return;
+		}
+		// Detached first, so neither close() nor a pending save writes the stacks
+		// back after the delete.
+		claim.saver.detach();
+		this.claim = undefined;
+		this.close();
+		const gone = claim.saver.idle()
+			.then(() => this.client.deleteSavedUndoScope(this.workspaceId, this.key!))
+			.finally(claim.release);
+		claim.done(gone.catch(() => {}));
+		await gone;
 	}
 }
 
@@ -2143,6 +2287,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	private hubInstance?: WatcherHub;
 	private hubPromise?: Promise<WatcherHub>;
 	private changeShare?: ChangeShare;
+	/** Set while a scheduleUndoReconcile pass waits to read the journal. */
+	private undoReconcileQueued = false;
+	/** Saved undo scopes open in this client; close() closes them. */
+	private savedUndoScopes = new Set<NestedUndoScope<E>>();
+	/**
+	 * By claim name, the last close of a saved scope in this client: settles once
+	 * its stacks are written and its key is free. A restore of the same key waits
+	 * for it, so close-then-restore in one tab finds the key free.
+	 */
+	private undoClaimsClosing = new Map<string, Promise<void>>();
 	/** onAccessChange listeners; see fireAccessChange. */
 	private accessListeners = new Set<(workspaceId: string) => void>();
 	/** onEntitiesChange listeners; see fireAccessChange. */
@@ -2365,7 +2519,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			this.defaultWorkspaceId = undefined;
 			this.statusTracker.setDefaultWorkspace(undefined);
 		}
-		if (!opts?.purge) return { removed: true, purged: false, discarded: [] };
+		if (!opts?.purge) {
+			for (const scope of this.savedUndoScopesIn(workspaceId)) scope.close();
+			return { removed: true, purged: false, discarded: [] };
+		}
+		// A save that commits after the purge would write the stacks back.
+		await Promise.all(this.savedUndoScopesIn(workspaceId).map((scope) => scope.abandon()));
 		const discarded = await this.purgeWorkspace(workspaceId);
 		if (!this.closed) await this.blobManager().clear(workspaceId);
 		return { removed: true, purged: true, discarded };
@@ -2455,6 +2614,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		await this.notifyChange(touched);
 		// After the commit and the notify: apps observe the rows as already gone,
 		// exactly as they do for a rejection rolled back before its callback.
+		// No undo tokens: the workspace's scope, and every stack in it, went
+		// before the purge.
 		for (const d of discarded) {
 			this.reportRejection({
 				workspaceId,
@@ -2462,7 +2623,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				errorCode: CodeWorkspacePurged,
 				errorMessage: `workspace ${workspaceId} was purged locally`,
 				...describeMutation(d.mutation),
-			});
+			}, []);
 		}
 		return discarded;
 	}
@@ -3041,12 +3202,57 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				const touched = TouchSet.fromTokens(tokens);
 				void hub.notify(touched);
 				this.fireAccessChange(touched);
+				// A peer's rollback or custom mutation broadcasts its rows; it may
+				// also have voided groups on our stacks.
+				this.scheduleUndoReconcile();
 				// A peer tab's pull may have brought the row whose blob completed.
 				this.blobMgr?.noteSync();
 			});
 			return hub;
 		})();
 		return this.hubPromise;
+	}
+
+	/**
+	 * Drops the undo groups another tab voided (see optimistic/undojournal.ts) in
+	 * the background, so canUndo() and canRedo() follow a peer's rejection or
+	 * custom mutation without waiting for the next undo. Best-effort: undo() and
+	 * redo() check the journal again in the replay's own transaction, which is
+	 * what keeps a voided group from replaying. Coalesces calls that arrive
+	 * while a pass is queued.
+	 */
+	private scheduleUndoReconcile(): void {
+		if (!this.opts.undo || this.undoReconcileQueued || this.closed) return;
+		this.undoReconcileQueued = true;
+		void (async () => {
+			try {
+				const kv = await this.kv();
+				await this.kvMutex.runShared(async () => {
+					// Cleared inside the section: a broadcast that arrives after the
+					// read below queues a pass of its own.
+					this.undoReconcileQueued = false;
+					const tx = await kv.read();
+					try {
+						for (const [ workspaceId, root ] of this.scopes) {
+							const managers = root.undoManagers().filter((m) => !m.isEmpty());
+							if (managers.length === 0) continue;
+							const journal = await readUndoJournal(tx, workspaceId);
+							const cutoff = Date.now() - DEAD_TOKEN_TTL_MS;
+							for (const mgr of managers) {
+								mgr.reconcile(journal);
+								mgr.dropRecordedBefore(cutoff);
+							}
+						}
+					} finally {
+						tx.release();
+					}
+				});
+			} catch {
+				// The replay-time check still holds; a missed pass only leaves
+				// canUndo() true until the next undo attempt.
+				this.undoReconcileQueued = false;
+			}
+		})();
 	}
 
 	/**
@@ -3185,7 +3391,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			priorityEntities: this.opts.bootstrapPriority?.map(
 				(schema) => this.entityRegistry.bySchema(schema).name,
 			),
-			onMutationRejected: (info) => this.reportRejection(info),
+			onMutationRejected: (info, undoTokens) => this.reportRejection(info, undoTokens),
 			onSyncEvent: this.dispatchSyncEvent,
 			pollIntervalMs: this.opts.pollIntervalMs,
 			pushDebounceMs: this.opts.pushDebounceMs,
@@ -3195,16 +3401,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			poisonThreshold: this.opts.poisonThreshold,
 			maxMutationsPerPush: this.opts.maxMutationsPerPush,
 			maxWorkspacesPerRequest: this.opts.maxWorkspacesPerRequest,
-			// Undo references forward mutation ids; let compaction protect the ones
-			// whose inverse is a snapshot of one specific mutation, and remap them
-			// all, so squashing a queue never corrupts that workspace's undo stacks.
-			undoRefIds: this.opts.undo
-				? (ws) => unionOf(this.undoManagersOf(ws).map((m) => m.foldBarrierIds()))
-				: undefined,
-			onCompacted: this.opts.undo
-				? (ws, remap) => {
-					for (const mgr of this.undoManagersOf(ws)) mgr.remapIds(remap);
-				}
+			// Undo references forward mutations by undo token; let compaction keep
+			// the ones whose inverse is a snapshot of one specific mutation from
+			// folding. Tokens move with renumbered mutations, so squashing a queue
+			// never corrupts that workspace's undo stacks.
+			undoRefTokens: this.opts.undo
+				? (ws) => unionOf(this.undoManagersOf(ws).map((m) => m.foldBarrierTokens()))
 				: undefined,
 			clientRevision: this.opts.schemaRevision,
 			onSchemaSkew: this.opts.onSchemaSkew,
@@ -3361,23 +3563,25 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * The single exit for "this mutation is dead" — server rejection, poison
 	 * drop, purge or format upgrade all land here, so every one of them trims the
 	 * undo stacks before the app sees it. Callers invoke it only after the local
-	 * state has been rolled back or deleted.
+	 * state has been rolled back or deleted, and pass the undo tokens the dead
+	 * entry carried (see metaUndoTokens).
 	 */
-	private reportRejection(info: RejectionInfo): void {
+	private reportRejection(info: RejectionInfo, undoTokens: readonly bigint[]): void {
 		// The undo stacks must not replay state that builds on the dead mutation.
 		// Every stack in the workspace, not just the workspace's own: an open
 		// dialog's scope can hold a group built on the very mutation that died.
 		// A purge removes the scope first, so its stacks are gone already.
 		const managers = this.undoManagersOf(info.workspaceId);
-		for (const mgr of managers) mgr.onRejected(info.mutationId);
+		for (const mgr of managers) mgr.onRejected(undoTokens);
 		// Refresh this tab's intent record from the trimmed stacks. Own-tab
-		// only: a peer tab whose stacks reference the rejected mutation never
-		// hears about it — reaching it would need a broadcast channel, and its
-		// record merely over-protects until then.
+		// only: a peer tab whose stacks reference the rejected mutation learns of
+		// it from the undo journal the rollback wrote (see
+		// optimistic/undojournal.ts), and its record merely over-protects until
+		// it reconciles.
 		if (managers.length > 0) {
 			void this.intentReg?.updateRefs(
 				info.workspaceId,
-				unionOf(managers.map((m) => m.foldBarrierIds())),
+				unionOf(managers.map((m) => m.foldBarrierTokens())),
 			);
 		}
 		// Isolated: the rollback has already landed, and the coordinator reports a
@@ -4781,6 +4985,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// entries the push did not carry: those go back to phase 2 rather than
 		// into the wipe.
 		let pending: Map<string, Mutation[]> | undefined = snapshot.pending;
+		// Undo tokens of the queues the wipe deletes, by workspace and mutation id:
+		// read in the wipe's own transaction, since the wipe deletes them too.
+		const tokensOf = new Map<string, Map<bigint, bigint[]>>();
 		for (let round = 1; pending !== undefined; round++) {
 			if (pending.size > 0) await salvage(pending);
 			pending = await this.kvMutex.run(async () => {
@@ -4804,6 +5011,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					for (const [ workspaceId, mutations ] of late.pending) {
 						for (const m of mutations) {
 							lost.push({ workspaceId, mutationId: m.mutationId, mutation: m });
+						}
+					}
+					// Only this tab's stacks hear of these: the wipe below deletes the
+					// undo journal with everything else, and no other tab of this build
+					// can hold a stack over the old format, since it would have upgraded
+					// the store itself when it opened.
+					for (const { workspaceId } of [ ...lost, ...refused ]) {
+						if (!tokensOf.has(workspaceId)) {
+							tokensOf.set(workspaceId, await readUndoTokens(tx, workspaceId));
 						}
 					}
 					await this.wipeForFormat(tx, undecodable + lost.length === 0);
@@ -4832,10 +5048,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					errorCode: CodeFormatUpgraded,
 					errorMessage: 'dropped by a local store format upgrade',
 					...describeMutation(m.mutation),
-				});
+				}, tokensOf.get(m.workspaceId)?.get(m.mutationId) ?? []);
 			}
 		}
-		for (const info of refused) this.reportRejection(info);
+		for (const info of refused) {
+			this.reportRejection(info, tokensOf.get(info.workspaceId)?.get(info.mutationId) ?? []);
+		}
 	}
 
 	/**
@@ -4961,7 +5179,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// undo stacks; the registry has to go first, or that refresh writes a
 		// record back into the emptied store.
 		this.intentReg = undefined;
+		// Likewise for saved undo scopes: a save that commits after the wipe, or
+		// the one close() would run, writes the stacks back.
+		await Promise.all([ ...this.savedUndoScopes ].map((scope) => scope.abandon()));
 		const discarded = await this.wipeAccount();
+		// No undo tokens: the close() below drops every stack anyway.
 		for (const d of discarded) {
 			this.reportRejection({
 				workspaceId: d.workspaceId,
@@ -4969,7 +5191,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				errorCode: CodeWorkspacePurged,
 				errorMessage: "the account's local data was purged",
 				...describeMutation(d.mutation),
-			});
+			}, []);
 		}
 		await this.close();
 		return discarded;
@@ -5044,6 +5266,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	async close(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true;
+		// Before the store closes: each close writes what its scope has not saved
+		// yet, and frees its key.
+		for (const scope of [ ...this.savedUndoScopes ]) scope.close();
+		await Promise.all(this.undoClaimsClosing.values());
 		for (const ws of [ ...this.holds.keys(), ...this.scopeWaiters.keys() ]) this.dropHolds(ws);
 		await this.coordinator?.stop();
 		await this.presence?.stop();
@@ -6362,6 +6588,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			overrides?: (Inverse | undefined)[];
 			/** Join the previous undo group (typing coalescence). */
 			coalesce?: boolean;
+			/**
+			 * Undo tokens of the group an undo or redo replays. The write is
+			 * refused with StaleUndoGroupError, before anything is written, when
+			 * the workspace's undo journal voids any of them.
+			 */
+			guard?: readonly bigint[];
 		},
 	): Promise<void> {
 		this.assertOpen();
@@ -6383,7 +6615,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		let undoBarrier = false;
 		/** Set when the hub took the commit's rows; delivers its callbacks. */
 		let deliver: (() => Promise<void>) | undefined;
-		let capturedId: bigint | undefined;
+		let capturedToken: bigint | undefined;
 		const capturedInverses: (Inverse | undefined)[] = [];
 		const payloadCruds = payload.case === 'crud'
 			? [ payload.value ]
@@ -6427,11 +6659,31 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					// A backend answers a getMany in ONE transaction where per-key gets
 					// each open their own (kv/idb.ts), and those transactions are most
 					// of what a local write costs.
+					const pendingAccessAt = 1 + (plan?.keys.length ?? 0);
+					// A custom mutation always takes a token: it is the undo barrier
+					// every tab's stacks check, whether or not this client keeps one.
+					const mintsToken = payloadCruds === undefined || undoMgr !== undefined;
+					const guard = undoOpts?.guard;
 					const pre = await tx.getMany([
 						metaLastMutationId(workspaceId),
 						...(plan?.keys ?? []),
 						metaPendingAccess(workspaceId),
+						...(mintsToken ? [ metaUndoTokenCounter(workspaceId) ] : []),
+						...(guard ? undoJournalKeys(workspaceId) : []),
 					]);
+					const counterRaw = mintsToken ? pre[pendingAccessAt + 1] : undefined;
+					if (guard) {
+						// Checked here, in the replay's own transaction under the kv
+						// mutex, and not in a read before it: a rejection or custom
+						// mutation that another tab commits between such a read and this
+						// write would otherwise go unseen. Whichever commits first wins,
+						// exactly as a rejection racing an undo in one tab does.
+						const at = pendingAccessAt + (mintsToken ? 2 : 1);
+						const journal = decodeUndoJournal(pre[at], pre[at + 1]);
+						if (guard.some((token) => voidsToken(journal, token))) {
+							throw new StaleUndoGroupError(journal);
+						}
+					}
 					const lastRaw = pre[0] as string | undefined;
 					const mutationId = (lastRaw ? BigInt(lastRaw) : 0n) + 1n;
 					const mutation = create(MutationSchema, { clientId, mutationId });
@@ -6441,7 +6693,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						// Capture-then-apply each sub-mutation in turn: a later inverse (and
 						// a later expansion's `prev`) must see the overlay left by earlier
 						// sub-mutations of the same batch.
-						if (undoMgr) capturedId = mutationId;
+						if (undoMgr) {
+							capturedToken = await mintUndoToken(tx, workspaceId, counterRaw);
+						}
 						let crudIndex = -1;
 						for (const crud of cruds) {
 							crudIndex++;
@@ -6583,10 +6837,19 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						}
 						// Persist AFTER the loop so the queued+pushed mask is the expanded one.
 						await enqueuePending(tx, workspaceId, mutation);
+						if (capturedToken !== undefined) {
+							await writeUndoTokens(tx, workspaceId, mutationId, [ capturedToken ]);
+						}
 						touchPendingAccess(touched, this.entityRegistry, workspaceId, [ mutation ]);
 					} else {
-						// Custom mutation: an undo barrier, applied in one shot.
+						// Custom mutation: an undo barrier, applied in one shot. The
+						// journal carries it to the stacks of every other tab.
 						undoBarrier = true;
+						await writeUndoBarrier(
+							tx,
+							workspaceId,
+							await mintUndoToken(tx, workspaceId, counterRaw),
+						);
 						await enqueuePending(tx, workspaceId, mutation);
 						await applyMutationLocally(
 							tx,
@@ -6601,7 +6864,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						tx,
 						this.entityRegistry,
 						workspaceId,
-						{ record: pre[pre.length - 1], lastMutationId: lastRaw },
+						{ record: pre[pendingAccessAt], lastMutationId: lastRaw },
 						[ mutation ],
 						mutationId,
 					);
@@ -6609,7 +6872,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						// Persist the PREDICTED post-commit fold-barrier set in this same
 						// transaction: recordGroup below only runs after the commit, so
 						// the intent record is computed from the inputs it will receive
-						// (see UndoManager.predictedBarrierIds). Keeps a peer tab's
+						// (see UndoManager.predictedBarrierTokens). Keeps a peer tab's
 						// compaction from ever folding a mutation these stacks pin.
 						//
 						// The record covers the whole workspace, so the writing scope's
@@ -6622,14 +6885,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 							? new Set<bigint>()
 							: unionOf(
 								scope.undoManagers().map((m) =>
-									m === undoMgr
-										? m.predictedBarrierIds(
-											mutationId,
+									m === undoMgr && capturedToken !== undefined
+										? m.predictedBarrierTokens(
+											capturedToken,
 											capturedInverses.some((i) => i !== undefined && i.kind !== 'text'),
 											captureStack,
 											false,
 										)
-										: m.foldBarrierIds()
+										: m.foldBarrierTokens()
 								),
 							);
 						await this.intentReg.writeRefs(tx, workspaceId, refs);
@@ -6653,10 +6916,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		if (undoBarrier) {
 			// Workspace-wide: a custom mutation is opaque and may have touched
 			// anything, so no stack in this workspace can claim to invert what came
-			// before it — not the one that issued it, and not a dialog's.
+			// before it — not the one that issued it, and not a dialog's. Other
+			// tabs' stacks drop theirs through the barrier written above.
 			for (const mgr of scope.undoManagers()) mgr.barrier();
-		} else if (undoMgr && capturedId !== undefined) {
-			undoMgr.recordGroup(capturedId, capturedInverses, captureStack, undoOpts?.coalesce);
+		} else if (undoMgr && capturedToken !== undefined) {
+			undoMgr.recordGroup(capturedToken, capturedInverses, captureStack, undoOpts?.coalesce);
 		}
 		this.statusTracker.incrementPending(workspaceId);
 		await this.notifyChange(touched, deliver);
@@ -6786,21 +7050,33 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// a keybinding can fire while the dialog that owned it is unmounting.
 		if (scope.closed) return false;
 		const mgr = requireUndo(scope);
-		const group = mgr.takeUndoGroup();
-		if (group.length === 0) return false;
 		// The group is claimed (popped) up front so two racing undo() calls take
 		// distinct groups; if the replay never commits we put it back rather than
 		// lose the step. Routing to 'redo' is passed into this one enqueue, not set
 		// on the manager, so a user mutation committing during the await below is
 		// recorded as a normal edit instead of being misrouted onto the redo stack.
-		try {
-			await this.enqueueInverses(scope, group.map((entry) => entry.inverse), 'redo');
-		} catch (err) {
-			// A refused step can never replay, so it stays used up.
-			if (!(err instanceof UndoRefusedError)) mgr.restoreUndoGroup(group);
-			throw err;
+		// The journal forgets a death after DEAD_TOKEN_TTL_MS (see undojournal.ts),
+		// so a group this old may build on a write the server rejected.
+		mgr.dropRecordedBefore(Date.now() - DEAD_TOKEN_TTL_MS);
+		for (;;) {
+			const group = mgr.takeUndoGroup();
+			if (group.length === 0) return false;
+			try {
+				await this.enqueueInverses(scope, group, 'redo');
+				return true;
+			} catch (err) {
+				// Another tab voided the group (see undojournal.ts): it is gone for
+				// good, and so is every other group the same journal voids. The
+				// step below it is the one to replay.
+				if (err instanceof StaleUndoGroupError) {
+					mgr.reconcile(err.journal);
+					continue;
+				}
+				// A refused step can never replay, so it stays used up.
+				if (!(err instanceof UndoRefusedError)) mgr.restoreUndoGroup(group);
+				throw err;
+			}
 		}
-		return true;
 	}
 
 	/** Inverse of undo(). Returns false when there is nothing to redo. */
@@ -6813,15 +7089,23 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		this.assertOpen();
 		if (scope.closed) return false;
 		const mgr = requireUndo(scope);
-		const group = mgr.takeRedoGroup();
-		if (group.length === 0) return false;
-		try {
-			await this.enqueueInverses(scope, group.map((entry) => entry.inverse), 'undo');
-		} catch (err) {
-			if (!(err instanceof UndoRefusedError)) mgr.restoreRedoGroup(group);
-			throw err;
+		mgr.dropRecordedBefore(Date.now() - DEAD_TOKEN_TTL_MS);
+		for (;;) {
+			const group = mgr.takeRedoGroup();
+			if (group.length === 0) return false;
+			try {
+				await this.enqueueInverses(scope, group, 'undo');
+				return true;
+			} catch (err) {
+				// See undoIn.
+				if (err instanceof StaleUndoGroupError) {
+					mgr.reconcile(err.journal);
+					continue;
+				}
+				if (!(err instanceof UndoRefusedError)) mgr.restoreRedoGroup(group);
+				throw err;
+			}
 		}
-		return true;
 	}
 
 	/**
@@ -6835,9 +7119,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 */
 	private async enqueueInverses(
 		scope: WorkspaceScope<E>,
-		inverses: Inverse[],
+		group: readonly { inverse: Inverse; token: bigint }[],
 		captureStack: StackName,
 	): Promise<void> {
+		const inverses = group.map((entry) => entry.inverse);
+		const guard = group.map((entry) => entry.token);
 		// Re-inserting deleted content and restoring marks mint new items, so a
 		// replay carrying text needs a writer identity of its own — held until the
 		// replay's mutation is in the store, so the slot cannot be recycled onto a
@@ -6846,7 +7132,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			? await (await this.textPeerLeases()).acquire()
 			: undefined;
 		try {
-			await this.replayInverses(scope, inverses, captureStack, lease?.peer ?? '');
+			await this.replayInverses(scope, inverses, guard, captureStack, lease?.peer ?? '');
 		} finally {
 			lease?.release();
 		}
@@ -6855,6 +7141,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	private async replayInverses(
 		scope: WorkspaceScope<E>,
 		inverses: Inverse[],
+		guard: readonly bigint[],
 		captureStack: StackName,
 		peer: string,
 	): Promise<void> {
@@ -6867,7 +7154,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// same counters twice for different content.
 		const docs = new Map<string, TextDoc>();
 		for (const inverse of inverses) {
-			if (inverse.kind === 'refused') throw new UndoRefusedError(inverse.reason);
+			if (inverse.kind === 'refused') {
+				// A step another tab voided is skipped, not refused: the caller then
+				// replays the step below it, as for any other voided group.
+				const journal = await this.readUndoJournalOf(scope.workspaceId);
+				if (guard.some((token) => voidsToken(journal, token))) {
+					throw new StaleUndoGroupError(journal);
+				}
+				throw new UndoRefusedError(inverse.reason);
+			}
 			if (inverse.kind === 'crud') {
 				cruds.push(inverse.crud);
 				overrides.push(undefined);
@@ -6887,13 +7182,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		if (cruds.length === 1) {
 			await this.enqueue(scope, { case: 'crud', value: cruds[0]! }, captureStack, {
 				overrides,
+				guard,
 			});
 		} else {
 			await this.enqueue(
 				scope,
 				{ case: 'batch', value: buildBatch(cruds) },
 				captureStack,
-				{ overrides },
+				{ overrides, guard },
 			);
 		}
 	}
@@ -6958,6 +7254,150 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 */
 	undoScope(opts?: UndoScopeOptions): UndoScope<E> {
 		return this.defaultScope().undoScope(opts);
+	}
+
+	/**
+	 * Opens the saved undo scope `key` of the default workspace (see
+	 * WorkspaceClient.restoreUndoScope).
+	 */
+	restoreUndoScope(key: string, opts?: UndoScopeOptions): Promise<UndoScope<E>> {
+		return this.defaultScope().restoreUndoScope(key, opts);
+	}
+
+	/**
+	 * Deletes the saved undo scope `key` of the default workspace (see
+	 * WorkspaceClient.discardUndoScope).
+	 */
+	discardUndoScope(key: string): Promise<boolean> {
+		return this.defaultScope().discardUndoScope(key);
+	}
+
+	/** The saved undo scopes open in `workspaceId`. */
+	private savedUndoScopesIn(workspaceId: string): NestedUndoScope<E>[] {
+		return [ ...this.savedUndoScopes ].filter((scope) => scope.workspaceId === workspaceId);
+	}
+
+	/** The Web Lock name that claims saved key `key` of `workspaceId`. */
+	private undoClaimName(workspaceId: string, key: string): string {
+		return `${this.storageNames.undoScopeLocks}:${encodeURIComponent(workspaceId)}:${
+			encodeURIComponent(key)
+		}`;
+	}
+
+	/** The persist limits in force, with their defaults filled in. */
+	private undoPersistLimits(): { maxScopes: number; maxAgeMs: number } {
+		const persist = this.opts.undo?.persist;
+		return {
+			maxScopes: Math.max(1, persist?.maxScopes ?? DEFAULT_SAVED_UNDO_SCOPES),
+			// The journal forgets a dead write after DEAD_TOKEN_TTL_MS, so an older
+			// step could replay a write the server rejected.
+			maxAgeMs: Math.min(persist?.maxAgeMs ?? DEFAULT_SAVED_UNDO_AGE_MS, DEAD_TOKEN_TTL_MS),
+		};
+	}
+
+	/** @internal see WorkspaceClient.restoreUndoScope. */
+	async restoreUndoScopeIn(
+		root: WorkspaceScope<E>,
+		key: string,
+		opts?: UndoScopeOptions,
+	): Promise<UndoScope<E>> {
+		this.assertOpen();
+		const undo = this.opts.undo;
+		if (!undo || undo.enabled === false) {
+			throw new Error("syncplane: restoreUndoScope() needs the client's `undo` option");
+		}
+		const workspaceId = root.workspaceId;
+		const name = this.undoClaimName(workspaceId, key);
+		await this.undoClaimsClosing.get(name);
+		const kv = await this.kv();
+		const release = await claimUndoKey(kv, name);
+		if (release === undefined) return new NestedUndoScope<E>(root, opts, key);
+		try {
+			const limits = this.undoPersistLimits();
+			const stacks = await this.kvMutex.runShared(async () => {
+				const tx = await kv.read();
+				try {
+					return await readSavedUndo(tx, workspaceId, key, Date.now() - limits.maxAgeMs);
+				} finally {
+					tx.release();
+				}
+			});
+			this.assertOpen();
+			// Registered after the read: a rejection this tab handles in between
+			// misses the new stack, and the journal check at replay and at save
+			// drops the group instead.
+			const scope = new NestedUndoScope<E>(root, opts, key);
+			scope.adoptSaved(
+				stacks,
+				(mgr) =>
+					new UndoSaver({
+						kv,
+						mutex: this.kvMutex,
+						workspaceId,
+						key,
+						mgr,
+						...limits,
+					}),
+				() => {
+					this.savedUndoScopes.delete(scope);
+					release();
+				},
+				(closing) => {
+					this.undoClaimsClosing.set(name, closing);
+					void closing.finally(() => {
+						if (this.undoClaimsClosing.get(name) === closing) this.undoClaimsClosing.delete(name);
+					});
+				},
+			);
+			this.savedUndoScopes.add(scope);
+			return scope;
+		} catch (err) {
+			release();
+			throw err;
+		}
+	}
+
+	/** @internal see WorkspaceClient.discardUndoScope. */
+	async discardUndoScopeIn(workspaceId: string, key: string): Promise<boolean> {
+		this.assertOpen();
+		const name = this.undoClaimName(workspaceId, key);
+		await this.undoClaimsClosing.get(name);
+		const release = await claimUndoKey(await this.kv(), name);
+		if (release === undefined) return false;
+		try {
+			await this.deleteSavedUndoScope(workspaceId, key);
+			return true;
+		} finally {
+			release();
+		}
+	}
+
+	/** Reads the undo journal of `workspaceId` in a read transaction of its own. */
+	private async readUndoJournalOf(workspaceId: string): Promise<UndoJournal> {
+		const kv = await this.kv();
+		return this.kvMutex.runShared(async () => {
+			const tx = await kv.read();
+			try {
+				return await readUndoJournal(tx, workspaceId);
+			} finally {
+				tx.release();
+			}
+		});
+	}
+
+	/** @internal deletes the saved stacks at `key` in a transaction of their own. */
+	async deleteSavedUndoScope(workspaceId: string, key: string): Promise<void> {
+		const kv = await this.kv();
+		await this.kvMutex.run(async () => {
+			const tx = await kv.write();
+			try {
+				await deleteSavedUndo(tx, workspaceId, key);
+				await tx.commit();
+			} catch (err) {
+				tx.release();
+				throw err;
+			}
+		});
 	}
 
 	canUndo(): boolean {

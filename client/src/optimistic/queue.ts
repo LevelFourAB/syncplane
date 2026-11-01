@@ -6,6 +6,9 @@ import {
 	metaLastMutationId,
 	metaPendingAccess,
 	metaPushedThrough,
+	metaUndoTokenCounter,
+	metaUndoTokens,
+	metaUndoTokensPrefix,
 	metaUnresolvedPush,
 	pendingKey,
 	pendingPrefix,
@@ -37,6 +40,125 @@ export async function readPending(tx: KVRead, workspaceId: string): Promise<Muta
 		result.push(fromBinary(MutationSchema, v as Uint8Array));
 	}
 	return result;
+}
+
+/**
+ * Mints the next undo token of a workspace in `tx` and returns it. `stored` is
+ * the value `tx` read at metaUndoTokenCounter; `now` is the clock in epoch ms.
+ *
+ * A token is above every token minted before it from the same store, also
+ * after a purge or a format upgrade deleted the counter: the next token is at
+ * least `now * 1024`, so a deleted counter restarts above every token that a
+ * stack in memory can still hold, unless the store minted more than 1024 tokens
+ * in one millisecond or the clock went back.
+ */
+export async function mintUndoToken(
+	tx: KVWrite,
+	workspaceId: string,
+	stored: unknown,
+	now: number = Date.now(),
+): Promise<bigint> {
+	// A counter that does not decode reads as absent; the floor below still keeps
+	// the next token above the ones minted before.
+	const last = tokenOf(stored) ?? 0n;
+	const floor = BigInt(Math.floor(now)) * 1024n;
+	const token = last + 1n > floor ? last + 1n : floor;
+	await tx.put(metaUndoTokenCounter(workspaceId), token.toString());
+	return token;
+}
+
+/**
+ * Stores the undo tokens of the pending mutation at `mutationId`. An empty
+ * list deletes the entry.
+ */
+export async function writeUndoTokens(
+	tx: KVWrite,
+	workspaceId: string,
+	mutationId: bigint,
+	tokens: readonly bigint[],
+): Promise<void> {
+	if (tokens.length === 0) {
+		await tx.del(metaUndoTokens(workspaceId, mutationId));
+		return;
+	}
+	await tx.put(metaUndoTokens(workspaceId, mutationId), tokens.map((t) => t.toString()));
+}
+
+/**
+ * Reads and deletes the undo tokens of the pending mutation at `mutationId`;
+ * [] when it has none. Call it in the transaction that deletes the pending
+ * entry.
+ */
+export async function takeUndoTokens(
+	tx: KVWrite,
+	workspaceId: string,
+	mutationId: bigint,
+): Promise<bigint[]> {
+	const key = metaUndoTokens(workspaceId, mutationId);
+	const raw = await tx.get(key);
+	if (raw === undefined) return [];
+	await tx.del(key);
+	return decodeTokens(raw);
+}
+
+/**
+ * Reads the undo tokens of every pending mutation of a workspace that has any,
+ * keyed by mutation id.
+ */
+export async function readUndoTokens(
+	tx: KVRead,
+	workspaceId: string,
+): Promise<Map<bigint, bigint[]>> {
+	const prefix = metaUndoTokensPrefix(workspaceId);
+	const out = new Map<bigint, bigint[]>();
+	for await (const [ k, v ] of tx.scan(prefix)) {
+		const id = tokenOf(k.slice(prefix.length));
+		if (id !== undefined) out.set(id, decodeTokens(v));
+	}
+	return out;
+}
+
+/**
+ * Moves the undo tokens of a workspace's renumbered mutations to their new
+ * ids, in the transaction that renumbers them. `remap` maps each old id to its
+ * new id; several old ids that map to one new id give it the union of their
+ * tokens. `tokens` is what readUndoTokens returned before the renumber.
+ */
+export async function moveUndoTokens(
+	tx: KVWrite,
+	workspaceId: string,
+	tokens: ReadonlyMap<bigint, readonly bigint[]>,
+	remap: ReadonlyMap<bigint, bigint>,
+): Promise<void> {
+	const moved = new Map<bigint, bigint[]>();
+	for (const [ from, to ] of remap) {
+		const list = tokens.get(from);
+		if (list === undefined) continue;
+		// Every old entry goes before any new one is written: the old and new id
+		// ranges overlap.
+		await tx.del(metaUndoTokens(workspaceId, from));
+		const into = moved.get(to) ?? [];
+		into.push(...list);
+		moved.set(to, into);
+	}
+	for (const [ id, list ] of moved) await writeUndoTokens(tx, workspaceId, id, list);
+}
+
+/** A stored token list; a list or an element that does not decode holds no token. */
+function decodeTokens(raw: unknown): bigint[] {
+	if (!Array.isArray(raw)) return [];
+	const out: bigint[] = [];
+	for (const t of raw) {
+		const token = tokenOf(t);
+		if (token !== undefined) out.push(token);
+	}
+	return out;
+}
+
+/** A bigint stored as its decimal string, or undefined when `raw` is not one. */
+function tokenOf(raw: unknown): bigint | undefined {
+	if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return undefined;
+	return BigInt(raw);
 }
 
 /**
@@ -99,6 +221,7 @@ export async function dropAcked(
 	for (const m of await readPending(tx, workspaceId)) {
 		if (m.mutationId <= acked) {
 			await tx.del(pendingKey(workspaceId, m.mutationId));
+			await tx.del(metaUndoTokens(workspaceId, m.mutationId));
 			dropped.push(m);
 		} else {
 			remaining.push(m);

@@ -14,6 +14,7 @@ import type {
 	PeerView,
 	StatusView,
 	TodoView,
+	UndoScopeView,
 	WriteBytesView,
 } from './harness-api.js';
 
@@ -404,6 +405,65 @@ export class Tab {
 
 	setVisibility(state: 'visible' | 'hidden'): Promise<void> {
 		return this.page.evaluate((s) => window.harness.setVisibility(s), state);
+	}
+
+	restoreUndoScope(key: string): Promise<number> {
+		return this.page.evaluate((k) => window.harness.restoreUndoScope(k), key);
+	}
+
+	undoScope(scope: number): Promise<UndoScopeView> {
+		return this.page.evaluate((s) => window.harness.undoScope(s), scope);
+	}
+
+	putTodoIn(scope: number, id: string, title: string): Promise<void> {
+		return this.page.evaluate(
+			(a) => window.harness.putTodoIn(a.scope, a.id, a.title),
+			{ scope, id, title },
+		);
+	}
+
+	patchTodoIn(scope: number, id: string, fields: Partial<Omit<TodoView, 'id'>>): Promise<void> {
+		return this.page.evaluate(
+			(a) => window.harness.patchTodoIn(a.scope, a.id, a.fields),
+			{ scope, id, fields },
+		);
+	}
+
+	undoIn(scope: number): Promise<boolean> {
+		return this.page.evaluate((s) => window.harness.undoIn(s), scope);
+	}
+
+	redoIn(scope: number): Promise<boolean> {
+		return this.page.evaluate((s) => window.harness.redoIn(s), scope);
+	}
+
+	closeUndoScope(scope: number): Promise<void> {
+		return this.page.evaluate((s) => window.harness.closeUndoScope(s), scope);
+	}
+
+	discardUndoScope(scope: number): Promise<void> {
+		return this.page.evaluate((s) => window.harness.discardUndoScope(s), scope);
+	}
+
+	discardSavedUndo(key: string): Promise<boolean> {
+		return this.page.evaluate((k) => window.harness.discardSavedUndo(k), key);
+	}
+
+	customMutation(name: string, id: string): Promise<void> {
+		return this.page.evaluate(
+			(a) => window.harness.customMutation(a.name, a.id),
+			{ name, id },
+		);
+	}
+
+	/**
+	 * Reloads the page without closing the client first — the page goes away the
+	 * way a browser refresh takes it — and opens a new client with `opts`.
+	 */
+	async reload(opts: OpenOptions): Promise<void> {
+		await this.page.reload();
+		await this.page.waitForFunction(() => window.harness !== undefined);
+		await this.page.evaluate((o) => window.harness.open(o), opts);
 	}
 
 	/** Closes the client, then the tab — how a user closes a tab, in order. */

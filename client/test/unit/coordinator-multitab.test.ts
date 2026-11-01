@@ -20,7 +20,7 @@ import { intentKey, metaCursor, metaLastMutationId, metaServerSeq } from '../../
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { ChainMutex } from '../../src/mutex.js';
-import { enqueuePending, readPending } from '../../src/optimistic/queue.js';
+import { enqueuePending, readPending, writeUndoTokens } from '../../src/optimistic/queue.js';
 import { readMergedRow } from '../../src/read.js';
 import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator, type CoordinatorOptions } from '../../src/sync/coordinator.js';
@@ -122,9 +122,13 @@ describe('coordinator multi-tab (shared store, intent union)', () => {
 			});
 		}
 
+		/** Queues `mutations`; each carries its own mutation id as its undo token. */
 		async function seed(mutations: Mutation[] = []): Promise<void> {
 			const tx = await kv.write();
-			for (const m of mutations) await enqueuePending(tx, WS, m);
+			for (const m of mutations) {
+				await enqueuePending(tx, WS, m);
+				await writeUndoTokens(tx, WS, m.mutationId, [ m.mutationId ]);
+			}
 			await tx.put(metaCursor(WS), new Uint8Array([ 1 ]));
 			if (mutations.length > 0) {
 				await tx.put(
@@ -258,10 +262,8 @@ describe('coordinator multi-tab (shared store, intent union)', () => {
 		await regA.seed(scope([]), new Map());
 		await regB.seed(scope([]), new Map([ [ WS, new Set([ 2n ]) ] ]));
 
-		const remaps: ReadonlyMap<bigint, bigint>[] = [];
 		const tabA = h.tab(h.transport([]), {
 			intent: regA,
-			onCompacted: (_ws, remap) => remaps.push(remap),
 		});
 
 		// A compacts before pushing; B's ref acts as a barrier, so neither
@@ -269,7 +271,6 @@ describe('coordinator multi-tab (shared store, intent union)', () => {
 		// stays valid.
 		await tabA.syncNow();
 		expect(await h.pendingIds()).toEqual([ 1n, 2n ]);
-		expect(remaps).toHaveLength(0);
 		expect(h.pushes.at(-1)!.map((m) => m.mutationId)).toEqual([ 1n, 2n ]);
 
 		await tabA.stop();
@@ -288,23 +289,20 @@ describe('coordinator multi-tab (shared store, intent union)', () => {
 		// mutex is FIFO, so it lands first) and still returns the pre-enqueue set.
 		// The union read INSIDE the compaction transaction is what closes the gap.
 		let raced = false;
-		const remaps: ReadonlyMap<bigint, bigint>[] = [];
 		const tabA = h.tab(h.transport([]), {
 			intent: regA,
-			undoRefIds: () => {
+			undoRefTokens: () => {
 				if (!raced) {
 					raced = true;
 					void regA.updateRefs(WS, new Set([ 2n ]));
 				}
 				return new Set();
 			},
-			onCompacted: (_ws, remap) => remaps.push(remap),
 		});
 
 		await tabA.syncNow();
 		expect(raced).toBe(true);
 		expect(await h.pendingIds()).toEqual([ 1n, 2n ]);
-		expect(remaps).toHaveLength(0);
 		expect(h.pushes.at(-1)!.map((m) => m.mutationId)).toEqual([ 1n, 2n ]);
 
 		await tabA.stop();

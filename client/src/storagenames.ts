@@ -88,6 +88,11 @@ export interface StorageNames {
 	 */
 	readonly textPeerLocks: string;
 	/**
+	 * Stem of the per-key Web Locks that let one open undo scope at a time hold
+	 * a saved key (see undo-persist.ts).
+	 */
+	readonly undoScopeLocks: string;
+	/**
 	 * IndexedDB database holding the blob upload queue and download cache. Apart
 	 * from `store`, so blob bytes never share a transaction with the rows.
 	 */
@@ -109,6 +114,7 @@ export function storageNames(prefix: string, accountId: string): StorageNames {
 		presenceLock: `${prefix}:presencelock:${accountId}`,
 		presenceChannel: `${prefix}:presence:${accountId}`,
 		textPeerLocks: `${prefix}:textpeer`,
+		undoScopeLocks: `${prefix}:undoscope:${accountId}`,
 		blobStore: `${prefix}:blobs:${accountId}`,
 		blobLock: `${prefix}:bloblock:${accountId}`,
 		blobChannel: `${prefix}:blob:${accountId}`,

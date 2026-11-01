@@ -2,7 +2,7 @@
 // optimistically and queue, which is exactly what undo manipulates.
 
 import { create } from '@bufbuild/protobuf';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
@@ -14,6 +14,7 @@ import {
 	CrudOp,
 } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
+import { DEAD_TOKEN_TTL_MS } from '../../src/optimistic/undojournal.js';
 import { type Inverse, invertCrud, UndoManager } from '../../src/undo.js';
 
 function newLocalClient(undo: { enabled?: boolean; maxDepth?: number } | undefined = {}) {
@@ -241,6 +242,27 @@ describe('undo/redo', () => {
 	});
 });
 
+describe('undo of an old step', () => {
+	it('does not replay a step older than the undo journal remembers deaths', async () => {
+		const c = newLocalClient();
+		await c.mutate.put(TodoSchema, { id: 't1', title: 'v1' });
+		await c.mutate.put(TodoSchema, { id: 't1', title: 'v2' });
+		const later = Date.now() + DEAD_TOKEN_TTL_MS + 60_000;
+		const now = vi.spyOn(Date, 'now').mockReturnValue(later);
+		try {
+			await c.mutate.put(TodoSchema, { id: 't1', title: 'v3' });
+			// The v3 step is recent; the two before it are past the window.
+			expect(await c.undo()).toBe(true);
+			expect((await c.get(TodoSchema, 't1'))?.title).toBe('v2');
+			expect(await c.undo()).toBe(false);
+			expect((await c.get(TodoSchema, 't1'))?.title).toBe('v2');
+		} finally {
+			now.mockRestore();
+			await c.close();
+		}
+	});
+});
+
 describe('UndoManager.predictedRefIds', () => {
 	function inverse(key: string): Inverse {
 		return {
@@ -259,34 +281,34 @@ describe('UndoManager.predictedRefIds', () => {
 
 	it('a plain edit drops the redo stack and adds its own id', () => {
 		const mgr = seeded();
-		const predicted = mgr.predictedBarrierIds(3n, true, undefined, false);
+		const predicted = mgr.predictedBarrierTokens(3n, true, undefined, false);
 		expect(predicted).toEqual(new Set([ 1n, 3n ]));
 		// The prediction must equal what referencedIds() reports post-commit.
 		mgr.recordGroup(3n, [ inverse('t3') ]);
-		expect(mgr.foldBarrierIds()).toEqual(predicted);
+		expect(mgr.foldBarrierTokens()).toEqual(predicted);
 	});
 
 	it('an undo replay (captureStack set) keeps both stacks', () => {
 		const mgr = seeded();
-		const predicted = mgr.predictedBarrierIds(3n, true, 'redo', false);
+		const predicted = mgr.predictedBarrierTokens(3n, true, 'redo', false);
 		expect(predicted).toEqual(new Set([ 1n, 2n, 3n ]));
 		mgr.recordGroup(3n, [ inverse('t3') ], 'redo');
-		expect(mgr.foldBarrierIds()).toEqual(predicted);
+		expect(mgr.foldBarrierTokens()).toEqual(predicted);
 	});
 
 	it('a barrier (custom mutation) predicts the empty set', () => {
 		const mgr = seeded();
-		const predicted = mgr.predictedBarrierIds(3n, false, undefined, true);
+		const predicted = mgr.predictedBarrierTokens(3n, false, undefined, true);
 		expect(predicted).toEqual(new Set());
 		mgr.barrier();
-		expect(mgr.foldBarrierIds()).toEqual(predicted);
+		expect(mgr.foldBarrierTokens()).toEqual(predicted);
 	});
 
 	it('a mutation without inverses does not add its own id', () => {
 		const mgr = seeded();
-		const predicted = mgr.predictedBarrierIds(3n, false, undefined, false);
+		const predicted = mgr.predictedBarrierTokens(3n, false, undefined, false);
 		expect(predicted).toEqual(new Set([ 1n ]));
 		mgr.recordGroup(3n, [ undefined ]);
-		expect(mgr.foldBarrierIds()).toEqual(predicted);
+		expect(mgr.foldBarrierTokens()).toEqual(predicted);
 	});
 });

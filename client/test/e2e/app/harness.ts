@@ -39,6 +39,7 @@ import {
 	textMarksOf,
 	textOf,
 	type TextSpan,
+	type UndoScope,
 } from '../../../src/index.js';
 import { confirmedKey, type ConfirmedRecord, pendingPrefix } from '../../../src/keys.js';
 import { IDBKVStore } from '../../../src/kv/idb.js';
@@ -86,6 +87,9 @@ const rejections: string[] = [];
 /** Open text handles, keyed by the number the spec holds (handles are not JSON). */
 const textHandles = new Map<number, TextHandle>();
 let nextTextHandle = 1;
+/** Open undo scopes, keyed the same way. */
+const undoScopes = new Map<number, UndoScope>();
+let nextUndoScope = 1;
 /** Live holds, keyed the same way. */
 const holds = new Map<number, HoldHandle>();
 let nextHold = 1;
@@ -121,6 +125,12 @@ function text(handle: number): TextHandle {
 	const h = textHandles.get(handle);
 	if (h === undefined) throw new Error(`harness: no text handle ${handle}`);
 	return h;
+}
+
+function undoScopeOf(handle: number): UndoScope {
+	const scope = undoScopes.get(handle);
+	if (scope === undefined) throw new Error(`harness: no undo scope ${handle}`);
+	return scope;
 }
 
 function roomOf(handle: number): { room: Room<string>; received: string[] } {
@@ -326,6 +336,7 @@ const harness: HarnessApi = {
 			onMutationRejected: (info) => {
 				rejections.push(`${info.errorCode}: ${info.errorMessage}`);
 			},
+			undo: opts.undo === true ? {} : undefined,
 		});
 		client = opened;
 		workspaceId = opts.workspaceId;
@@ -369,6 +380,8 @@ const harness: HarnessApi = {
 		// go at once rather than waiting out the expiry window.
 		for (const entry of rooms.values()) await entry.room.close();
 		rooms.clear();
+		// The client's close() writes and frees the saved ones.
+		undoScopes.clear();
 		await client?.close();
 		client = undefined;
 		workspaceId = undefined;
@@ -716,6 +729,56 @@ const harness: HarnessApi = {
 			get: () => state,
 		});
 		document.dispatchEvent(new Event('visibilitychange'));
+	},
+
+	async restoreUndoScope(key) {
+		const scope = await current().restoreUndoScope(key);
+		const handle = nextUndoScope++;
+		undoScopes.set(handle, scope);
+		return handle;
+	},
+
+	async undoScope(handle) {
+		const scope = undoScopeOf(handle);
+		return {
+			key: scope.key ?? null,
+			saved: scope.saved,
+			closed: scope.closed,
+			canUndo: scope.canUndo(),
+			canRedo: scope.canRedo(),
+		};
+	},
+
+	async putTodoIn(handle, id, title) {
+		await undoScopeOf(handle).mutate.put(TodoSchema, { id, title });
+	},
+
+	async patchTodoIn(handle, id, fields) {
+		await undoScopeOf(handle).mutate.patch(TodoSchema, id, fields);
+	},
+
+	undoIn(handle) {
+		return undoScopeOf(handle).undo();
+	},
+
+	redoIn(handle) {
+		return undoScopeOf(handle).redo();
+	},
+
+	async closeUndoScope(handle) {
+		undoScopeOf(handle).close();
+	},
+
+	async discardUndoScope(handle) {
+		await undoScopeOf(handle).discard();
+	},
+
+	discardSavedUndo(key) {
+		return current().discardUndoScope(key);
+	},
+
+	async customMutation(name, id) {
+		await current().mutate.custom(name, TodoSchema, { id });
 	},
 };
 
