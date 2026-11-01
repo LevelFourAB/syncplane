@@ -75,7 +75,11 @@ export type {
 	UseWorkspaceOptions,
 } from './types.js';
 export { UndoScopeProvider, useUndoScope } from './undo-scope.js';
-export type { UndoScopeProviderProps } from './undo-scope.js';
+export type {
+	BorrowedUndoScopeProviderProps,
+	OwnedUndoScopeProviderProps,
+	UndoScopeProviderProps,
+} from './undo-scope.js';
 export { WorkspaceProvider } from './workspace.js';
 export type { WorkspaceProviderProps } from './workspace.js';
 

@@ -2015,10 +2015,16 @@ useBlob(ref: BlobRefLike | undefined | null, opts?: UseBlobOptions): UseBlobResu
 <SyncProvider options={SyncClientOptions} />
 <SyncProvider client={SyncClient} />
 <WorkspaceProvider workspaceId={string} />
-<UndoScopeProvider maxDepth?={number} />
+<UndoScopeProvider maxDepth?={number} workspaceId?={string} />
+<UndoScopeProvider scope={UndoScope} />
 ```
 
-`<UndoScopeProvider>` opens a [nested undo scope](#nested-undo-scopes) for its subtree.
+`<UndoScopeProvider>` gives its subtree a [nested undo scope](#nested-undo-scopes):
+
+- Without `scope`, it opens a scope on mount and closes it on unmount. `maxDepth` and `workspaceId` apply to that scope.
+- With `scope`, it provides that scope and never closes it. The stack stays after unmount, and the caller closes the scope. The scope must come from the client of the enclosing `<SyncProvider>`. A different `scope` moves every hook below the provider to it on the next render.
+- `scope` cannot be combined with `maxDepth` or `workspaceId`.
+
 `<SyncProvider>` accepts either `options` (constructing and managing a `SyncClient`) or an existing `client` instance.
 Passing both or neither throws an error.
 

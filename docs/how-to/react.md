@@ -187,6 +187,48 @@ function TaskDialogBody({ id }: { id: string }) {
 
 Writes under the provider record to the isolated scope stack. Reads are shared with the workspace's subscriptions, store, and queue. When the dialog unmounts, the scope stack is discarded without altering the workspace history. Outside React, use `useUndoScope()` or `client.ws(id).undoScope()`.
 
+## Keeping undo history when a view unmounts
+
+An `<UndoScopeProvider>` without props drops its stack when it unmounts. For tabs or pages that unmount and mount again, create the scopes yourself and give one to the provider with `scope`. The provider never closes a scope that it gets this way.
+
+Keep one scope for each page, and close the oldest scope when you keep too many:
+
+```tsx
+const KEEP = 10;
+// Map order is insertion order, so the first key is the page used least recently.
+const scopes = new Map<string, UndoScope>();
+
+function scopeFor(ws: WorkspaceClient, pageId: string): UndoScope {
+	let scope = scopes.get(pageId);
+	if (scope !== undefined) {
+		scopes.delete(pageId);
+	} else {
+		scope = ws.undoScope();
+	}
+	scopes.set(pageId, scope);
+	if (scopes.size > KEEP) {
+		const [ oldest, evicted ] = scopes.entries().next().value!;
+		scopes.delete(oldest);
+		evicted.close();
+	}
+	return scope;
+}
+
+function PageTab({ pageId }: { pageId: string }) {
+	const ws = useWorkspaceScope();
+	const scope = useMemo(() => scopeFor(ws, pageId), [ ws, pageId ]);
+	return (
+		<UndoScopeProvider scope={ scope }>
+			<PageEditor pageId={ pageId } />
+		</UndoScopeProvider>
+	);
+}
+```
+
+Key the map by page, not by tab. Two tabs that show the same page then share one history, and a page that the user opens again gets its history back.
+
+Each open scope keeps up to `maxDepth` undo groups in memory. A custom mutation clears every scope in the workspace, including scopes that no tab shows. The stacks are not saved, so a page reload clears all of them.
+
 ## Editing a row outside the subscription scope
 
 A row found by `queryServer`, or opened from a link, is outside every declared subscription. Pass `{ hold: true }` to keep it in scope while the component is mounted:

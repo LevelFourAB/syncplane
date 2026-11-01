@@ -64,8 +64,8 @@ export function useNearestUndoScope(): UndoScope | undefined {
  * The returned scope is a long-lived object — the client's for the workspace,
  * the provider's for an undo scope — so it is referentially stable and safe as
  * a hook dependency. A new one appears only if the workspace is removed and
- * added back, or the provider remounts, which is exactly when a watch should be
- * re-established.
+ * added back, the provider remounts, or the provider is handed another `scope`,
+ * which is exactly when a watch should be re-established.
  */
 export function useWorkspaceScope(workspaceId?: string, undo?: UndoTarget): WorkspaceClient {
 	const client = useSyncClient();

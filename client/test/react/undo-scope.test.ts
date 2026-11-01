@@ -176,4 +176,159 @@ describe('UndoScopeProvider', () => {
 		expect(openScopeCount(client)).toBe(0);
 		await client.close();
 	});
+
+	describe('with a scope it is handed', () => {
+		it('records on that scope and leaves it open when the subtree unmounts', async () => {
+			const client = newClient();
+			const scope = client.ws('ws1').undoScope();
+			let mutate: ReturnType<typeof db.todo.useMutate> | undefined;
+			let scoped: ReturnType<typeof useUndo> | undefined;
+			function Page(): null {
+				mutate = db.todo.useMutate();
+				scoped = useUndo();
+				return null;
+			}
+			const tree = createElement(UndoScopeProvider, { scope }, createElement(Page));
+			const first = render(tree, { wrapper: providerWrapper(client) });
+			// The provider opened nothing of its own.
+			expect(openScopeCount(client)).toBe(1);
+
+			await act(async () => {
+				await mutate!.put({ id: 't1', title: 'on the page' });
+			});
+			expect(scope.canUndo()).toBe(true);
+			expect(client.canUndo()).toBe(false);
+
+			first.unmount();
+			expect(scope.closed).toBe(false);
+			expect(scope.canUndo()).toBe(true);
+
+			// Coming back to the page gets its history back.
+			render(tree, { wrapper: providerWrapper(client) });
+			expect(scoped!.canUndo).toBe(true);
+			await act(async () => {
+				await scoped!.undo();
+			});
+			expect(await client.get(TodoSchema, 't1')).toBeUndefined();
+			scope.close();
+			await client.close();
+		});
+
+		it('keeps the scope open under StrictMode', async () => {
+			const client = newClient();
+			const scope = client.ws('ws1').undoScope();
+			const view = render(
+				createElement(UndoScopeProvider, { scope }, null),
+				{ wrapper: providerWrapper(client, true) },
+			);
+			view.unmount();
+			expect(scope.closed).toBe(false);
+			expect(openScopeCount(client)).toBe(1);
+			scope.close();
+			await client.close();
+		});
+
+		it('moves every hook below it to a new scope when the prop changes', async () => {
+			const client = newClient();
+			const a = client.ws('ws1').undoScope();
+			const b = client.ws('ws1').undoScope();
+			let mutate: ReturnType<typeof db.todo.useMutate> | undefined;
+			let scoped: ReturnType<typeof useUndo> | undefined;
+			function Page(): null {
+				mutate = db.todo.useMutate();
+				scoped = useUndo();
+				return null;
+			}
+			const view = render(
+				createElement(UndoScopeProvider, { scope: a }, createElement(Page)),
+				{ wrapper: providerWrapper(client) },
+			);
+			await act(async () => {
+				await mutate!.put({ id: 't1', title: 'page a' });
+			});
+			expect(scoped!.canUndo).toBe(true);
+
+			view.rerender(createElement(UndoScopeProvider, { scope: b }, createElement(Page)));
+			// b has no history yet, and a write now lands on b, not a.
+			expect(scoped!.canUndo).toBe(false);
+			await act(async () => {
+				await mutate!.put({ id: 't2', title: 'page b' });
+			});
+			expect(scoped!.canUndo).toBe(true);
+			await act(async () => {
+				await scoped!.undo();
+			});
+			expect(await client.get(TodoSchema, 't2')).toBeUndefined();
+			expect(await client.get(TodoSchema, 't1')).toBeDefined();
+			expect(a.canUndo()).toBe(true);
+			expect(b.canUndo()).toBe(false);
+
+			view.unmount();
+			expect(a.closed).toBe(false);
+			expect(b.closed).toBe(false);
+			a.close();
+			b.close();
+			await client.close();
+		});
+
+		it('closes its own scope when handed one, and opens a new one when it is taken away', async () => {
+			const client = newClient();
+			const borrowed = client.ws('ws1').undoScope();
+			const view = render(createElement(UndoScopeProvider, null), {
+				wrapper: providerWrapper(client),
+			});
+			expect(openScopeCount(client)).toBe(2);
+
+			view.rerender(createElement(UndoScopeProvider, { scope: borrowed }));
+			expect(openScopeCount(client)).toBe(1);
+			expect(borrowed.closed).toBe(false);
+
+			view.rerender(createElement(UndoScopeProvider, null));
+			expect(openScopeCount(client)).toBe(2);
+			expect(borrowed.closed).toBe(false);
+
+			view.unmount();
+			expect(openScopeCount(client)).toBe(1);
+			borrowed.close();
+			await client.close();
+		});
+
+		it('cannot also take the options of a scope it would open', async () => {
+			const client = newClient();
+			const scope = client.ws('ws1').undoScope();
+			// @ts-expect-error a handed scope already has its depth
+			createElement(UndoScopeProvider, { scope, maxDepth: 5 });
+			// @ts-expect-error a handed scope already has its workspace
+			createElement(UndoScopeProvider, { scope, workspaceId: 'ws1' });
+			scope.close();
+			await client.close();
+		});
+
+		it('renders in a client with several workspaces and no default', async () => {
+			const client = new SyncClient({
+				workspaces: [ 'ws1', 'ws2' ],
+				accountId: 'acct',
+				kvStore: new MemoryKVStore(),
+				entities: [ TodoSchema ],
+				streamEnabled: false,
+				pollIntervalMs: 0,
+				undo: {},
+			});
+			const scope = client.ws('ws2').undoScope();
+			let scoped: ReturnType<typeof useUndo> | undefined;
+			function Page(): null {
+				scoped = useUndo({ workspaceId: 'ws2' });
+				return null;
+			}
+			render(createElement(UndoScopeProvider, { scope }, createElement(Page)), {
+				wrapper: providerWrapper(client),
+			});
+			await act(async () => {
+				await scope.mutate.put(TodoSchema, { id: 't1', title: 'x' });
+			});
+			expect(scoped!.canUndo).toBe(true);
+			scope.close();
+			await client.close();
+		});
+	});
 });
