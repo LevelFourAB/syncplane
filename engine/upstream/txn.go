@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -562,6 +563,15 @@ func (t *txn) drop(e *entry, rej *rejection) error {
 	ev := verdictEvent{ref: e.ref, localSeq: e.localSeq}
 	if rej != nil {
 		ev.err = &RejectedError{Rejection: rej.public(t.w.id)}
+		// The downstream client was acked when the entry was captured; this
+		// tells it, in the transaction that reverts its rows. The origin
+		// always names a code, and RejectLate refuses an empty one, which
+		// would fail the whole transaction.
+		if e.origin != nil {
+			if err := t.rtx.RejectLate(*e.origin, cmp.Or(rej.code, server.CodeInternal), rej.message); err != nil {
+				return err
+			}
+		}
 	}
 	t.res.verdicts = append(t.res.verdicts, ev)
 	t.res.dropped = append(t.res.dropped, e.ref)

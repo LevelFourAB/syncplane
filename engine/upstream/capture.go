@@ -91,6 +91,11 @@ func (l *Link) capture(ctx context.Context, cw *server.CapturedWrite) error {
 	}
 
 	e := &entry{localSeq: cw.Seq}
+	if cw.Origin != nil {
+		o := *cw.Origin
+		o.Targets = slices.Clone(o.Targets)
+		e.origin = &o
+	}
 	if cw.Custom != nil {
 		e.custom = proto.Clone(cw.Custom).(*syncplanev1.CustomMutation)
 	}

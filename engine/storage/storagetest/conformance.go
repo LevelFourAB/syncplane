@@ -2426,6 +2426,25 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		It("keeps every field of a late rejection", func() {
+			late := []storage.ClientRejection{
+				{MutationID: 2, Code: "conflict"},
+				{
+					MutationID: 3, Code: "permission_denied", Message: "not yours", Seq: 41,
+					Targets: []storage.RejectionTarget{{Entity: "todo", Key: "a"}, {Entity: "todo", Key: "b"}},
+				},
+				{MutationID: 4, Code: "invalid_argument", Seq: 42, Mutator: "completeAll"},
+			}
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientRejections("c1", late)).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientRejections("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(Equal(late))
+			})
+		})
+
 		It("keeps a client's watermark and its rejections independent", func() {
 			write("ws1", func(tx storage.WriteTx) {
 				Expect(tx.SetClientLastMutationID("c1", 3)).To(Succeed())

@@ -216,7 +216,7 @@ describe('forwarded sync', () => {
 		await origin.close();
 	});
 
-	it('reverts a write the origin rejects after the local engine applied it', async () => {
+	it('reverts and reports a write the origin rejects after the local engine applied it', async () => {
 		const ws = await linkedWorkspace();
 		const rejections: RejectionInfo[] = [];
 		const local = await localClient(ws, { onMutationRejected: (info) => rejections.push(info) });
@@ -241,11 +241,18 @@ describe('forwarded sync', () => {
 		const st = await status(ws);
 		expect(st.rejections.map((r) => r.code)).toEqual([ CodePermissionDenied, CodePermissionDenied ]);
 
-		// The link's revert reaches the browser as an ordinary server change.
+		// The link's revert reaches the browser as an ordinary server change,
+		// and the origin's verdict as a late rejection of each write.
 		await settled(local, () => local.get(TodoSchema, 'bad'), (t) => t === undefined);
 		await settled(local, () => local.get(TodoSchema, 't1'), (t) => t?.title === 'ok');
-		// The browser saw an APPLIED ack and then a revert, never a rejection.
-		expect(rejections).toEqual([]);
+		expect(rejections.map((r) => ({ code: r.errorCode, targets: r.targets, late: r.late }))).toEqual([
+			{ code: CodePermissionDenied, targets: [ { entity: 'todo', key: 'bad' } ], late: true },
+			{ code: CodePermissionDenied, targets: [ { entity: 'todo', key: 't1' } ], late: true },
+		]);
+		expect(rejections.map((r) => r.workspaceId)).toEqual([ ws, ws ]);
+		// Pulling again does not report them again.
+		await local.syncNow();
+		expect(rejections).toHaveLength(2);
 
 		await origin.syncNow();
 		expect(await origin.get(TodoSchema, 'bad')).toBeUndefined();

@@ -1985,7 +1985,9 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   not resubscribe. Only the hook's resolved workspace is delivered by default;
   pass `{ allWorkspaces: true }` for an app-wide surface. A rejection whose push
   response was lost arrives a cycle late — see
-  [Handle failures](../how-to/handle-failures.md).
+  [Handle failures](../how-to/handle-failures.md). `info.late` is `true` for a
+  mutation that a forwarding server acked and its origin rejected later; see
+  [Chained sync](../explanation/chained-sync.md#a-rejection-becomes-a-revert).
 
 - **`useText(key, field, opts?)`** — see
   [Use collaborative text](../how-to/use-collaborative-text.md). Pass

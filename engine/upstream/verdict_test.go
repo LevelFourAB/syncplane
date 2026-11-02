@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
@@ -87,6 +88,66 @@ var _ = Describe("Verdicts", func() {
 			Expect(n.rejected()[0].Rows).To(Equal([]upstream.RowRef{{Entity: "todo", Key: "t2"}}))
 			Expect(n.todo("t2")).To(BeNil())
 			Expect(title(o.todo("t3"))).To(Equal("fine"))
+		})
+
+		It("is reported to the downstream client that pushed it", func() {
+			pullAs := func(clientID string, cursor []byte) *syncplanev1.PullResponse {
+				GinkgoHelper()
+				resp, err := n.srv.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+					WorkspaceId: ws, ClientId: clientID, Cursor: cursor,
+				}))
+				Expect(err).NotTo(HaveOccurred())
+				return resp.Msg
+			}
+			n.part.Cut()
+			value, err := proto.Marshal(&todov1.Todo{Id: "t2", Title: "forbidden"})
+			Expect(err).NotTo(HaveOccurred())
+			resp, err := n.srv.Push(ctx, connect.NewRequest(&syncplanev1.PushRequest{
+				Batches: []*syncplanev1.WorkspaceBatch{{WorkspaceId: ws, Mutations: []*syncplanev1.Mutation{{
+					ClientId: "browser", MutationId: 1,
+					Payload: &syncplanev1.Mutation_Crud{Crud: &syncplanev1.CrudMutation{
+						Entity: "todo", Key: "t2", Op: syncplanev1.CrudOp_CRUD_OP_PUT, Value: value,
+					}},
+				}}}},
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetResults()[0].GetResults()[0].GetStatus()).
+				To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+			before := pullAs("browser", nil)
+			Expect(before.GetLateRejections()).To(BeEmpty())
+
+			n.part.Heal()
+			n.flush()
+			page := pullAs("browser", before.GetNextCursor())
+			Expect(page.GetLateRejections()).To(HaveLen(1))
+			late := page.GetLateRejections()[0]
+			Expect(late.GetMutationId()).To(BeEquivalentTo(1))
+			Expect(late.GetErrorCode()).To(Equal(server.CodePermissionDenied))
+			Expect(late.GetTargets()).To(HaveLen(1))
+			Expect(late.GetTargets()[0].GetKey()).To(Equal("t2"))
+			Expect(page.GetPatch().GetChanges()).To(ContainElement(Satisfy(func(rc *syncplanev1.RowChange) bool {
+				return rc.GetKey() == "t2" && rc.GetTombstone()
+			})))
+			Expect(pullAs("other", before.GetNextCursor()).GetLateRejections()).To(BeEmpty())
+
+			n.restart()
+			n.flush()
+			Expect(pullAs("browser", page.GetNextCursor()).GetLateRejections()).To(BeEmpty())
+		})
+
+		It("is not reported downstream when no client pushed it", func() {
+			n.part.Cut()
+			n.put(&todov1.Todo{Id: "t2", Title: "forbidden"})
+			resp, err := n.srv.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: ws, ClientId: "browser"}))
+			Expect(err).NotTo(HaveOccurred())
+			n.part.Heal()
+			n.flush()
+			Expect(n.rejected()).To(HaveLen(1))
+			page, err := n.srv.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+				WorkspaceId: ws, ClientId: "browser", Cursor: resp.Msg.GetNextCursor(),
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(page.Msg.GetLateRejections()).To(BeEmpty())
 		})
 
 		It("leaves the writes queued after it to apply", func() {

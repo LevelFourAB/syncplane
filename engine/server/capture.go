@@ -49,6 +49,10 @@ type CapturedWrite struct {
 	Custom *syncplanev1.CustomMutation
 	// Ops are the row writes the mutation made, in the order they were made.
 	Ops []CapturedOp
+	// Origin is the client mutation this write applied, nil for a write that
+	// did not come from a client push (Apply, Mutate, Invoke and their
+	// idempotent forms).
+	Origin *MutationOrigin
 	// Tx is the mutation's write transaction. What the capture writes through
 	// it commits or rolls back with the mutation. A row written through it
 	// skips every derived structure the engine keeps, so use it for consumer
@@ -148,7 +152,7 @@ func (l *writeLog) invoked(name string, args proto.Message) error {
 // runCapture hands one mutation's log to the WriteCapture. A log with no
 // writes and no custom mutation is a call that did nothing, and is not
 // captured.
-func (s *Server) runCapture(ctx context.Context, ws string, tx storage.WriteTx, l *writeLog, seq uint64) error {
+func (s *Server) runCapture(ctx context.Context, ws string, tx storage.WriteTx, l *writeLog, seq uint64, origin *MutationOrigin) error {
 	if l == nil || (len(l.ops) == 0 && l.custom == nil) {
 		return nil
 	}
@@ -162,6 +166,7 @@ func (s *Server) runCapture(ctx context.Context, ws string, tx storage.WriteTx, 
 		Actor:     actor,
 		Custom:    l.custom,
 		Ops:       l.ops,
+		Origin:    origin,
 		Tx:        tx,
 	})
 }

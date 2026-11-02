@@ -311,7 +311,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 				if seq, err = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i], guarded, log); err != nil {
 					return err
 				}
-				return s.runCapture(ctx, ws, tx, log, seq)
+				return s.runCapture(ctx, ws, tx, log, seq, originOf(key, m))
 			}
 			var applyErr error
 			if guarded {
@@ -480,7 +480,10 @@ const maxRejectionRecordBytes = 64 << 10
 // findRejection looks a mutation id up among a client's recorded verdicts.
 func findRejection(recs []storage.ClientRejection, mutationID uint64) (storage.ClientRejection, bool) {
 	for _, r := range recs {
-		if r.MutationID == mutationID {
+		// A late rejection (Seq set) followed an APPLIED ack, and reaches the
+		// client on a pull; answering a resend with it as well would report
+		// the mutation twice.
+		if r.MutationID == mutationID && r.Seq == 0 {
 			return r, true
 		}
 	}

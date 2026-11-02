@@ -139,6 +139,9 @@ type entry struct {
 	// reminted records that the entry's text was written afresh after the
 	// origin refused its text ids (see txn.remint).
 	reminted bool
+	// origin is the downstream client mutation the entry captured, nil for a
+	// write no client pushed. A rejection is reported back to that client.
+	origin *server.MutationOrigin
 }
 
 type entryOp struct {
@@ -491,6 +494,19 @@ func (e *entry) encode() ([]byte, error) {
 		}
 		w.bytes(3, b)
 	}
+	if o := e.origin; o != nil {
+		oe := &enc{}
+		oe.str(1, o.Client)
+		oe.uint(2, o.MutationID)
+		oe.str(3, o.Mutator)
+		for _, t := range o.Targets {
+			te := &enc{}
+			te.str(1, t.Entity)
+			te.str(2, t.Key)
+			oe.bytes(4, te.b)
+		}
+		w.bytes(7, oe.b)
+	}
 	for _, op := range e.ops {
 		o := &enc{}
 		o.str(1, op.entity)
@@ -540,6 +556,10 @@ func decodeEntry(b []byte) (*entry, error) {
 		case 3:
 			e.custom = &syncplanev1.CustomMutation{}
 			return proto.Unmarshal(bs, e.custom)
+		case 7:
+			o, err := decodeOrigin(bs)
+			e.origin = o
+			return err
 		case 4:
 			var op entryOp
 			if err := fields(bs, func(n protowire.Number, v uint64, b []byte) error {
@@ -590,6 +610,36 @@ func decodeEntry(b []byte) (*entry, error) {
 		return nil, err
 	}
 	return e, nil
+}
+
+func decodeOrigin(b []byte) (*server.MutationOrigin, error) {
+	o := &server.MutationOrigin{}
+	err := fields(b, func(n protowire.Number, v uint64, bs []byte) error {
+		switch n {
+		case 1:
+			o.Client = string(bs)
+		case 2:
+			o.MutationID = v
+		case 3:
+			o.Mutator = string(bs)
+		case 4:
+			var t storage.RejectionTarget
+			if err := fields(bs, func(n protowire.Number, _ uint64, b []byte) error {
+				switch n {
+				case 1:
+					t.Entity = string(b)
+				case 2:
+					t.Key = string(b)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			o.Targets = append(o.Targets, t)
+		}
+		return nil
+	})
+	return o, err
 }
 
 func (r *rejection) encode() []byte {

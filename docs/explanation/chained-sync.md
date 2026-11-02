@@ -43,7 +43,17 @@ The local engine gives each write its own sequence. A row's version in the local
 
 The default write mode is **write-behind**. A local write commits at once in the local engine, and the link pushes it to the origin later. When the origin rejects it, the write has already committed locally, and downstream clients may have seen it.
 
-The link then drops the write from the pending writes and replays the rest. Each row the write touched goes back to "confirmed plus the remaining pending writes". The link writes that result as a new local change. A downstream client sees this change in its next pull, as any other change from the server. The client got `APPLIED` for its push from the local engine, so it never sees a rejection. Its row changes back.
+The link then drops the write from the pending writes and replays the rest. Each row the write touched goes back to "confirmed plus the remaining pending writes". The link writes that result as a new local change. A downstream client sees this change in its next pull, as any other change from the server.
+
+The client got `APPLIED` for its push from the local engine, so the local engine reports the verdict separately. In the transaction that reverts the rows, the link records a late rejection for the client and the mutation id that pushed the write (`ReplicaTx.RejectLate`). The page that carries the revert, or a later page, carries it as a `LateRejection`. The TypeScript client then calls `onMutationRejected` with the origin's code and `late: true`.
+
+Some limits apply to late rejections:
+
+- They reach only the client id and the caller that pushed the write. A write that no client pushed, such as one from `Apply` or an effect, is reported only through `OnRejected`.
+- The local engine keeps them with the client's other rejection records, and expires them with those records. A client that pulls after that, or bootstraps again, sees only the revert.
+- A client that pulls again from an earlier cursor receives them again.
+- The TypeScript client fires the callback in the tab that applies the page, which is not always the tab that made the write.
+- A late rejection that the local engine itself receives from its origin, in a chain of more than two servers, is not passed on.
 
 The Go app learns about the rejection through `Config.OnRejected`. The `Rejection` names the workspace, the origin's code and message, the mutator for a custom mutation, and the rows the link reverted. Use it to tell the user, to log, or to make a corrected write.
 

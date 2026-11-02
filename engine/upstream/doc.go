@@ -12,7 +12,8 @@
 // the semantics the origin applies them with: per-field last-writer-wins for
 // PATCH, a union for collaborative text, and the origin's arrival order
 // deciding between concurrent writes. A write the origin rejects is reverted
-// locally and reported through Config.OnRejected.
+// locally and reported through Config.OnRejected, and, when a downstream
+// client pushed it, to that client as a late rejection on its next pull.
 //
 // Every local write to a bound entity is captured, whichever path made it: a
 // downstream client's push, server.Apply, Mutate and Invoke, mutators, effects

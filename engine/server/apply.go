@@ -250,7 +250,7 @@ func (s *Server) apply(
 				return err
 			}
 		}
-		if err := s.runCapture(ctx, workspaceID, tx, etx.log, etx.Seq()); err != nil {
+		if err := s.runCapture(ctx, workspaceID, tx, etx.log, etx.Seq(), nil); err != nil {
 			return err
 		}
 		if key != "" {

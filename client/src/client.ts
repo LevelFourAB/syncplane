@@ -746,6 +746,14 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 * A rejection whose push response was lost is not dropped: the server records
 	 * the verdict with the watermark it bumps and replays it to the resend, so
 	 * this fires a sync cycle later than it otherwise would.
+	 *
+	 * A server that forwards writes to an origin (a local engine linked to it in
+	 * write-behind mode) acks a mutation before the origin decides it. When the
+	 * origin rejects it, this fires with `late: true` on the pull or stream page
+	 * that reverts its rows. Such a report has no undo effect: the mutation left
+	 * the queue at its ack. A page that the client receives again after it
+	 * applied it, for example after a crash before the cursor was stored,
+	 * reports it again.
 	 */
 	onMutationRejected?: (info: RejectionInfo) => void;
 	/** Called whenever the sync status changes (also available via onStatusChange). */

@@ -108,7 +108,7 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 		if etx.spoiled {
 			return errNeedsSavepoints
 		}
-		if err := s.runCapture(ctx, workspaceID, tx, etx.log, etx.Seq()); err != nil {
+		if err := s.runCapture(ctx, workspaceID, tx, etx.log, etx.Seq(), nil); err != nil {
 			return err
 		}
 		wrote = etx.wrote

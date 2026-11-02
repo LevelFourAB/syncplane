@@ -275,6 +275,23 @@ type ClientRejection struct {
 	Code string
 	// Message is the human-readable reason, as the rejecting hook worded it.
 	Message string
+	// Seq is the workspace sequence of a late rejection: a mutation the
+	// server acknowledged as applied and that another server rejected later
+	// (see server.ReplicaTx.RejectLate). 0 for a rejection the push itself
+	// reported.
+	Seq uint64 `json:",omitempty"`
+	// Targets are the rows a late rejection's mutation named. Empty for a
+	// rejection the push itself reported.
+	Targets []RejectionTarget `json:",omitempty"`
+	// Mutator is the name of a late rejection's custom mutation, "" for a
+	// CRUD or batch mutation and for a rejection the push itself reported.
+	Mutator string `json:",omitempty"`
+}
+
+// RejectionTarget is one row a rejected mutation named.
+type RejectionTarget struct {
+	Entity string
+	Key    string
 }
 
 // ConsumerPosition is one effect consumer's durable progress through a

@@ -169,7 +169,7 @@ func (s *Server) mutateIdempotent(
 		if etx.spoiled {
 			return errNeedsSavepoints
 		}
-		if err := s.runCapture(ctx, workspaceID, tx, etx.log, etx.Seq()); err != nil {
+		if err := s.runCapture(ctx, workspaceID, tx, etx.log, etx.Seq(), nil); err != nil {
 			return err
 		}
 		if max := s.limits.MaxValueBytes; len(result) > max {

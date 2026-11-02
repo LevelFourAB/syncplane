@@ -138,7 +138,7 @@ Before you start, make sure that you have:
 
 ## Choose the write mode
 
-The default, `upstream.ModeWriteBehind`, commits a browser's write at once and forwards it later. The site keeps working while the origin is down. When the origin rejects a write, the browser sees its row change back, and `OnRejected` reports it.
+The default, `upstream.ModeWriteBehind`, commits a browser's write at once and forwards it later. The site keeps working while the origin is down. When the origin rejects a write, the browser sees its row change back, and its `onMutationRejected` runs with `late: true` and the origin's code. `OnRejected` reports the same rejection to the Go app.
 
 Set `Config.WriteMode` to `upstream.ModeWriteThrough` when browsers must get the origin's verdict on each push. A browser's push then fails with the origin's code when the origin rejects it. While the origin cannot be reached, every push fails with `internal`. The browser keeps its writes queued and retries with backoff. Each write holds the local store's write lock for a round trip to the origin, so writes to the site wait for each other.
 
