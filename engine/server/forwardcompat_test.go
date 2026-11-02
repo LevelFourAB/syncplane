@@ -15,24 +15,27 @@ import (
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
+	"github.com/levelfourab/syncplane/engine/server"
 )
 
 // Schema evolution is additive, and PATCH is what keeps a field this server's
 // schema does not know yet: a newer writer's field travels as unknown bytes,
 // and a masked merge must carry them along wherever they sit — top level, in a
 // nested message, or in a keyed-list element. A PUT that carries them keeps
-// them too. Field numbers 900+ stand in for fields a newer schema added.
+// them too, and a PUT that does not carry them keeps the stored ones at the top
+// level. Field numbers 900+ stand in for fields a newer schema added.
 var _ = Describe("Fields a newer schema wrote, through an older server", func() {
 	const wsID = "ws-unknown"
 
 	var (
 		ctx    context.Context
+		srv    *server.Server
 		client syncplanev1connect.SyncServiceClient
 	)
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		srv := newTestServer()
+		srv = newTestServer()
 		path, handler := srv.Handler()
 		mux := http.NewServeMux()
 		mux.Handle(path, handler)
@@ -160,4 +163,74 @@ var _ = Describe("Fields a newer schema wrote, through an older server", func() 
 		Expect(w.GetMembers()[0].GetName()).To(Equal("bob"))
 		Expect(futureOf(w.GetMembers()[0].ProtoReflect(), 902)).To(Equal("element"))
 	})
+
+	// When an older client PUTs the row without the top-level unknown
+	// field, Then the stored one stays: the client could not see it, so it
+	// could not have meant to clear it. Must NOT: drop it as a PUT drops a
+	// known field the value leaves out.
+	It("keeps stored top-level unknown fields through a PUT that does not carry them", func() {
+		seed()
+		push(putMutation("older", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Label: "replaced"}))
+		w := stored("w1")
+		Expect(w.GetLabel()).To(Equal("replaced"))
+		Expect(w.GetSettings()).To(BeNil(), "known fields the PUT leaves out are cleared")
+		Expect(futureOf(w.ProtoReflect(), 900)).To(Equal("top"))
+	})
+
+	// When a newer client PUTs the row with its own value for the field,
+	// Then its value replaces the stored one, once.
+	It("lets a PUT that carries an unknown field replace the stored one", func() {
+		seed()
+		w := &testdatav1.Widget{Id: "w1", Label: "replaced"}
+		future(w.ProtoReflect(), 900, "newer")
+		push(putMutation("newer", 2, "widget", "w1", w))
+		got := stored("w1")
+		Expect(futureOf(got.ProtoReflect(), 900)).To(Equal("newer"))
+		Expect(unknownCount(got.ProtoReflect(), 900)).To(Equal(1))
+	})
+
+	// When a trusted write PUTs the row through Apply, Then the same rule
+	// holds as for a client PUT.
+	It("keeps stored top-level unknown fields through an Apply PUT", func() {
+		seed()
+		Expect(srv.Apply(ctx, wsID, func(tx *server.ApplyTx) error {
+			return tx.Put(&testdatav1.Widget{Id: "w1", Label: "trusted"})
+		})).To(Succeed())
+		w := stored("w1")
+		Expect(w.GetLabel()).To(Equal("trusted"))
+		Expect(futureOf(w.ProtoReflect(), 900)).To(Equal("top"))
+	})
+
+	// When the row was deleted before the PUT, Then nothing comes back
+	// from the tombstone.
+	It("carries nothing into a PUT that recreates a deleted row", func() {
+		seed()
+		push(deleteMutation("older", 1, "widget", "w1"))
+		push(putMutation("older", 2, "widget", "w1", &testdatav1.Widget{Id: "w1", Label: "again"}))
+		Expect(futureOf(stored("w1").ProtoReflect(), 900)).To(BeEmpty())
+	})
 })
+
+// unknownCount returns how many times field num occurs in m's unknown fields.
+func unknownCount(m protoreflect.Message, num protowire.Number) int {
+	var count int
+	for _, n := range unknownNumbersOf(m.GetUnknown()) {
+		if n == num {
+			count++
+		}
+	}
+	return count
+}
+
+func unknownNumbersOf(b []byte) []protowire.Number {
+	var out []protowire.Number
+	for len(b) > 0 {
+		n, typ, l := protowire.ConsumeTag(b)
+		Expect(l).To(BeNumerically(">", 0))
+		vl := protowire.ConsumeFieldValue(n, typ, b[l:])
+		Expect(vl).To(BeNumerically(">", 0))
+		out = append(out, n)
+		b = b[l+vl:]
+	}
+	return out
+}

@@ -234,7 +234,7 @@ func recordResults(st stateTx, q *queueMeta, bt batch, wr *syncplanev1.Workspace
 func (w *workspace) push(ctx context.Context) error {
 	pulled := false
 	for {
-		if !w.ackKnown.Load() {
+		if !w.ackKnown.Load() || w.blocked() {
 			return nil
 		}
 		var bt batch
@@ -416,11 +416,16 @@ func (l *Link) readWatermark(ctx context.Context, ws, clientID string, cursor []
 	return resp.Msg.GetLastAckedMutationId(), nil
 }
 
-// observeRevision records the origin's schema revision. It reports no
-// status change itself: it runs inside a write-through capture, where a
-// status callback must not run. The next status change carries it.
+// observeRevision records the origin's schema revision, and wakes the worker
+// to decide on a skew when it changed. It reports no status change itself: it
+// runs inside a write-through capture, where a status callback must not run.
+// The next status change carries it.
 func (w *workspace) observeRevision(rev string) {
 	w.vmu.Lock()
+	changed := w.st.revision != rev
 	w.st.revision = rev
 	w.vmu.Unlock()
+	if changed {
+		w.kick()
+	}
 }

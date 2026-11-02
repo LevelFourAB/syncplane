@@ -68,6 +68,15 @@ type Config struct {
 	OnAccessRevoked func(workspace string)
 	// OnStatus is called with a workspace's status each time it changes.
 	OnStatus func(Status)
+	// OnSchemaSkew decides how a workspace reacts when the local engine's
+	// schema revision (server.WithSchemaRevision) differs from the one the
+	// origin advertises. It is called once per workspace for each new pair
+	// of revisions, before the workspace next forwards local writes. The link
+	// compares the revisions before each round of forwarding: after a local
+	// write, a Flush, a retry, or a change of the origin's revision. nil
+	// means SkewWarn for every pair. The link compares nothing when either
+	// side advertises no revision.
+	OnSchemaSkew func(workspace, local, origin string) SkewAction
 	// DeleteOnRevoke deletes the local rows of the bound entities of a
 	// workspace the origin revoked, as RemoveWorkspace with
 	// RemoveOptions.DeleteRows does.

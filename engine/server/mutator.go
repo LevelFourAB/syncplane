@@ -566,7 +566,12 @@ func (e *EntityTx) GetMeta(dst proto.Message, key string) (found bool, meta RowM
 // value carries the writer's view of the document; replacing wholesale would
 // silently drop every concurrent edit the writer had not seen, so Put reads
 // the live row and unions each text field (when both sides carry one) before
-// writing. Every other field keeps replace semantics.
+// writing.
+//
+// A top-level field the stored row holds and the schema does not declare keeps
+// its stored value unless msg carries that field number itself: a newer schema
+// wrote it, and msg could not express a clear of it. Fields inside nested
+// messages are replaced. Every other field keeps replace semantics.
 //
 // Text fields can also be written from plain strings — WithTextString plus
 // WithTextPeer — which diffs the string against the stored document under the
@@ -655,82 +660,83 @@ func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 		return err
 	}
 	var submitted []byte
-	if len(info.textFields) > 0 || len(o.texts) > 0 || info.history != nil || o.expected != nil ||
-		len(protected) > 0 || aw != nil || e.log != nil {
-		if _, _, err := currentRow(); err != nil {
-			return err
-		}
-		// WithExpectedVersion turns the write into a compare-and-swap, checked
-		// before any merge so a stale write conflicts deterministically. Mirrors
-		// Patch: an absent or deleted row reads as version 0.
-		if o.expected != nil {
-			var current uint64
-			if live {
-				current = row.Version
-			}
-			if current != *o.expected {
-				return Reject(CodeConflict, fmt.Sprintf(
-					"entity %q: expected version %d but row %q is at version %d", info.name, *o.expected, key, current))
-			}
-		}
-		var base proto.Message
+	// Every PUT reads the stored row, also when nothing else needs it: only the
+	// stored row tells whether a newer schema wrote fields that this schema
+	// does not declare (see carryUnknownFields).
+	if _, _, err := currentRow(); err != nil {
+		return err
+	}
+	// WithExpectedVersion turns the write into a compare-and-swap, checked
+	// before any merge so a stale write conflicts deterministically. Mirrors
+	// Patch: an absent or deleted row reads as version 0.
+	if o.expected != nil {
+		var current uint64
 		if live {
-			// A stored row that will not decode (see poison.go) is no base: Put
-			// replaces whole rows, so this write is the repair that clears the
-			// quarantine. Mirrors the client PUT path.
-			if decoded, decErr := info.decode(row.Value); decErr != nil {
-				e.srv.reportPoison(e.ctx, e.ws, row, decErr)
-			} else {
-				base = decoded
-				prevText = info.textSnapshot(base)
-				prevRead = readInputsOf(e.srv.catalogPtr().access, info, base)
-			}
+			current = row.Version
 		}
-		// Clone so the caller's message is not mutated by the merges.
-		msg = proto.Clone(msg)
-		// Before the text handling, so a plain-string value in a protected text
-		// field is replaced by the stored document rather than resolved into an
-		// edit against it.
-		if err := carryProtectedFields(info, protected, base, msg); err != nil {
+		if current != *o.expected {
+			return Reject(CodeConflict, fmt.Sprintf(
+				"entity %q: expected version %d but row %q is at version %d", info.name, *o.expected, key, current))
+		}
+	}
+	var base proto.Message
+	if live {
+		// A stored row that will not decode (see poison.go) is no base: Put
+		// replaces whole rows, so this write is the repair that clears the
+		// quarantine. Mirrors the client PUT path.
+		if decoded, decErr := info.decode(row.Value); decErr != nil {
+			e.srv.reportPoison(e.ctx, e.ws, row, decErr)
+		} else {
+			base = decoded
+			prevText = info.textSnapshot(base)
+			prevRead = readInputsOf(e.srv.catalogPtr().access, info, base)
+		}
+	}
+	// Clone so the caller's message is not mutated by the merges.
+	msg = proto.Clone(msg)
+	// Before the text handling, so a plain-string value in a protected text
+	// field is replaced by the stored document rather than resolved into an
+	// edit against it.
+	if err := carryProtectedFields(info, protected, base, msg); err != nil {
+		return err
+	}
+	if base == nil && e.gate != nil && len(info.creatorFields) > 0 {
+		stampCreatorFields(info, msg, e.gate.creatorSubject())
+	}
+	named := make([]string, 0, len(o.texts))
+	for path := range o.texts {
+		named = append(named, protectedHead(path))
+	}
+	if err := aw.carryGuarded(e.tx, msg, named); err != nil {
+		return err
+	}
+	carryUnknownFields(base, msg)
+	texts, err := takePlainStrings(info, msg, nil, o)
+	if err != nil {
+		return err
+	}
+	if len(texts) > 0 {
+		// Diff each string against the stored document (ancestor = cur):
+		// the union below is then a no-op for these fields, but it still
+		// covers text fields the caller set as raw bytes.
+		if err := ApplyTextStrings(msg, nil, base, texts, o.peer); err != nil {
 			return err
 		}
-		if base == nil && e.gate != nil && len(info.creatorFields) > 0 {
-			stampCreatorFields(info, msg, e.gate.creatorSubject())
-		}
-		named := make([]string, 0, len(o.texts))
-		for path := range o.texts {
-			named = append(named, protectedHead(path))
-		}
-		if err := aw.carryGuarded(e.tx, msg, named); err != nil {
-			return err
-		}
-		texts, err := takePlainStrings(info, msg, nil, o)
+	}
+	// What the capture reports as submitted: the value once the engine has
+	// replaced what the caller may not write and the fields the schema does
+	// not know, and resolved plain strings, but before the text union, which
+	// the stored value carries.
+	if submitted, err = marshalIfLogged(e.log, msg); err != nil {
+		return err
+	}
+	if base != nil {
+		tw, err := info.textWriteFor(e.srv, e.ws, e.tx, key)
 		if err != nil {
 			return err
 		}
-		if len(texts) > 0 {
-			// Diff each string against the stored document (ancestor = cur):
-			// the union below is then a no-op for these fields, but it still
-			// covers text fields the caller set as raw bytes.
-			if err := ApplyTextStrings(msg, nil, base, texts, o.peer); err != nil {
-				return err
-			}
-		}
-		// What the capture reports as submitted: the value once the engine has
-		// replaced what the caller may not write and resolved plain strings,
-		// but before the text union, which the stored value carries. A capture
-		// always takes this branch (see the condition above).
-		if submitted, err = marshalIfLogged(e.log, msg); err != nil {
-			return err
-		}
-		if base != nil {
-			tw, err := info.textWriteFor(e.srv, e.ws, e.tx, key)
-			if err != nil {
-				return err
-			}
-			if err := info.mergeTextFields(base.ProtoReflect(), msg.ProtoReflect(), tw); err != nil {
-				return rejectTextWrite(err)
-			}
+		if err := info.mergeTextFields(base.ProtoReflect(), msg.ProtoReflect(), tw); err != nil {
+			return rejectTextWrite(err)
 		}
 	}
 	// A reference stores only its target's key fields, and the workspace a

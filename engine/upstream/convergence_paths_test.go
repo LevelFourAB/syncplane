@@ -6,12 +6,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	"github.com/levelfourab/syncplane/engine/client"
@@ -143,80 +146,106 @@ var _ = Describe("Origin answers", Label("convergence"), func() {
 	})
 
 	It("reports the origin's schema revision and keeps the fields its newer schema adds", func() {
-		newer := server.DynamicEntity{
-			Name: "gadget", Package: "conv.skew", KeyFields: []string{"id"},
-			Fields: []server.DynamicField{
-				{Name: "id", Number: 1, Kind: protoreflect.StringKind},
-				{Name: "name", Number: 2, Kind: protoreflect.StringKind},
-				{Name: "extra", Number: 3, Kind: protoreflect.Int64Kind},
-			},
-		}
-		older := newer
-		older.Fields = newer.Fields[:2]
-		newerType, err := server.BuildDynamicMessageType(newer)
-		Expect(err).NotTo(HaveOccurred())
-		olderType, err := server.BuildDynamicMessageType(older)
-		Expect(err).NotTo(HaveOccurred())
-		gadget := func(mt protoreflect.MessageType, id, name string, extra int64) proto.Message {
-			m := dynamicpb.NewMessage(mt.Descriptor())
-			fs := mt.Descriptor().Fields()
-			m.Set(fs.ByName("id"), protoreflect.ValueOfString(id))
-			if name != "" {
-				m.Set(fs.ByName("name"), protoreflect.ValueOfString(name))
-			}
-			if extra != 0 {
-				m.Set(fs.ByName("extra"), protoreflect.ValueOfInt64(extra))
-			}
-			return m
-		}
-
-		o := newCOrigin(server.WithSchemaRevision("r2"))
-		Expect(o.srv.RegisterDynamicEntity(newer)).To(Succeed())
-		n := newCNodeWith(o, "n0", func(c *upstream.Config) {
-			c.Bindings = append(c.Bindings, upstream.Binding{Entity: "gadget"})
-		}, func(srv *server.Server) {
-			Expect(srv.RegisterDynamicEntity(older)).To(Succeed())
-		}, server.WithSchemaRevision("r1"))
-		Expect(o.srv.Apply(ctx, convWS, func(tx *server.ApplyTx) error {
-			return tx.Put(gadget(newerType, "g1", "a", 7))
-		})).To(Succeed())
-		addConv(n)
+		sk := newSkew()
+		o, n := sk.link()
 		Expect(n.status().SchemaRevision).To(Equal("r2"))
+		Expect(n.status().SchemaSkew).To(Equal(&upstream.SchemaSkew{Local: "r1", Origin: "r2", Action: upstream.SkewWarn}))
 
 		// A local PATCH of the field both schemas know, then a concurrent
 		// origin edit of the field only the origin knows.
-		_, err = n.ws().Patch(ctx, gadget(olderType, "g1", "b", 0), []string{"name"}, nil)
+		_, err := n.ws().Patch(ctx, sk.older("g1", "b"), []string{"name"}, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(n.flush(5 * time.Second)).To(Succeed())
 		n.part.Cut()
 		Expect(o.srv.Apply(ctx, convWS, func(tx *server.ApplyTx) error {
-			return tx.Patch(gadget(newerType, "g1", "", 8), []string{"extra"}, nil)
+			return tx.Patch(sk.newer("g1", "", 8), []string{"extra"}, nil)
 		})).To(Succeed())
-		_, err = n.ws().Patch(ctx, gadget(olderType, "g1", "c", 0), []string{"name"}, nil)
+		_, err = n.ws().Patch(ctx, sk.older("g1", "c"), []string{"name"}, nil)
 		Expect(err).NotTo(HaveOccurred())
 		n.part.Heal()
 		Expect(n.flush(10 * time.Second)).To(Succeed())
 
-		read := func(srv *server.Server, url string) proto.Message {
-			GinkgoHelper()
-			c, err := client.New(url)
-			Expect(err).NotTo(HaveOccurred())
-			snap, err := c.Workspace(convWS).Bootstrap(ctx)
-			Expect(err).NotTo(HaveOccurred())
-			var got proto.Message
-			for rc, err := range snap.Rows() {
-				Expect(err).NotTo(HaveOccurred())
-				if rc.GetEntity() == "gadget" && rc.GetKey() == "g1" {
-					got = dynamicpb.NewMessage(newerType.Descriptor())
-					Expect(proto.Unmarshal(rc.GetValue(), got)).To(Succeed())
-				}
+		want := sk.newer("g1", "c", 8)
+		sk.expectRow(o.ts.URL, want, "origin")
+		sk.expectRow(n.ts.URL, want, "local")
+	})
+
+	It("keeps the fields only the origin's newer schema knows across a local PUT", func() {
+		sk := newSkew()
+		o, n := sk.link()
+
+		_, err := n.ws().Put(ctx, sk.older("g1", "b"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(n.flush(5 * time.Second)).To(Succeed())
+
+		want := sk.newer("g1", "b", 7)
+		sk.expectRow(o.ts.URL, want, "origin")
+		sk.expectRow(n.ts.URL, want, "local")
+	})
+
+	It("holds local writes while OnSchemaSkew blocks, and forwards them once the revisions agree", func() {
+		sk := newSkew()
+		o := newCOrigin()
+		_, err := o.srv.RegisterDescriptorSet(dynamicSet(sk.ents[0]))
+		Expect(err).NotTo(HaveOccurred())
+		var (
+			mu    sync.Mutex
+			asked []string
+		)
+		n := newCNodeWith(o, "n0", func(c *upstream.Config) {
+			c.Bindings = append(c.Bindings, upstream.Binding{Entity: "gadget"})
+			c.OnSchemaSkew = func(ws, local, origin string) upstream.SkewAction {
+				mu.Lock()
+				defer mu.Unlock()
+				asked = append(asked, ws+" "+local+" "+origin)
+				return upstream.SkewBlock
 			}
-			return got
-		}
-		want := gadget(newerType, "g1", "c", 8)
-		Expect(proto.Equal(read(o.srv, o.ts.URL), want)).To(BeTrue(), "origin row %v", read(o.srv, o.ts.URL))
-		local := read(n.srv, n.ts.URL)
-		Expect(proto.Equal(local, want)).To(BeTrue(), "local row %v, want %v", local, want)
+		}, func(srv *server.Server) {
+			_, err := srv.RegisterDescriptorSet(dynamicSet(sk.ents[1]))
+			Expect(err).NotTo(HaveOccurred())
+		})
+		addConv(n)
+		local, origin := n.srv.SchemaRevision(), o.srv.SchemaRevision()
+		Expect(local).NotTo(Equal(origin))
+		Expect(n.status().SchemaSkew).To(Equal(&upstream.SchemaSkew{Local: local, Origin: origin, Action: upstream.SkewBlock}))
+
+		_, err = n.ws().Put(ctx, sk.older("g2", "held"))
+		Expect(err).NotTo(HaveOccurred())
+		Consistently(func() proto.Message { return sk.readKey(o.ts.URL, "g2") }).
+			WithTimeout(500*time.Millisecond).Should(BeNil(), "a blocked workspace forwards nothing")
+		Expect(n.status().Pending).To(Equal(1))
+		_, err = n.ws().Put(upstream.WriteThrough(ctx), sk.older("g3", "through"))
+		Expect(err).To(MatchError(upstream.ErrSchemaSkew))
+
+		// The local engine moves to the origin's schema.
+		_, err = n.srv.RegisterDescriptorSet(dynamicSet(sk.ents[0]))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(n.srv.SchemaRevision()).To(Equal(origin))
+		Expect(n.flush(10 * time.Second)).To(Succeed())
+		Expect(sk.readKey(o.ts.URL, "g2")).NotTo(BeNil())
+		Expect(sk.readKey(o.ts.URL, "g3")).To(BeNil(), "the refused write-through write committed nothing")
+		Expect(n.status().SchemaSkew).To(BeNil())
+		mu.Lock()
+		defer mu.Unlock()
+		Expect(asked).To(Equal([]string{convWS + " " + local + " " + origin}))
+	})
+
+	It("lets OnSchemaSkew ignore a skew", func() {
+		sk := newSkew()
+		o := newCOrigin(server.WithSchemaRevision("r2"))
+		Expect(o.srv.RegisterDynamicEntity(sk.ents[0])).To(Succeed())
+		n := newCNodeWith(o, "n0", func(c *upstream.Config) {
+			c.Bindings = append(c.Bindings, upstream.Binding{Entity: "gadget"})
+			c.OnSchemaSkew = func(string, string, string) upstream.SkewAction { return upstream.SkewIgnore }
+		}, func(srv *server.Server) {
+			Expect(srv.RegisterDynamicEntity(sk.ents[1])).To(Succeed())
+		}, server.WithSchemaRevision("r1"))
+		addConv(n)
+		_, err := n.ws().Put(ctx, sk.older("g2", "sent"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(n.flush(5 * time.Second)).To(Succeed())
+		Expect(sk.readKey(o.ts.URL, "g2")).NotTo(BeNil())
+		Expect(n.status().SchemaSkew).To(BeNil())
 	})
 
 	It("reconnects a live stream that went silent before the link saw a heartbeat", func() {
@@ -323,4 +352,126 @@ func copyFile(src, dst string) {
 	defer out.Close()
 	_, err = io.Copy(out, in)
 	Expect(err).NotTo(HaveOccurred())
+}
+
+// skew is a gadget entity in two schema revisions: the origin registers the
+// newer one, with the extra field, and the linked node the older one.
+type skew struct {
+	newerType, olderType protoreflect.MessageType
+	ents                 [2]server.DynamicEntity
+}
+
+func newSkew() *skew {
+	GinkgoHelper()
+	newer := server.DynamicEntity{
+		Name: "gadget", Package: "conv.skew", KeyFields: []string{"id"},
+		Fields: []server.DynamicField{
+			{Name: "id", Number: 1, Kind: protoreflect.StringKind},
+			{Name: "name", Number: 2, Kind: protoreflect.StringKind},
+			{Name: "extra", Number: 3, Kind: protoreflect.Int64Kind},
+		},
+	}
+	older := newer
+	older.Fields = newer.Fields[:2]
+	newerType, err := server.BuildDynamicMessageType(newer)
+	Expect(err).NotTo(HaveOccurred())
+	olderType, err := server.BuildDynamicMessageType(older)
+	Expect(err).NotTo(HaveOccurred())
+	return &skew{newerType: newerType, olderType: olderType, ents: [2]server.DynamicEntity{newer, older}}
+}
+
+// link starts an origin at revision r2 holding gadget g1 {name a, extra 7}
+// and a node at revision r1 linked to it and caught up.
+func (sk *skew) link() (*corigin, *cnode) {
+	GinkgoHelper()
+	o := newCOrigin(server.WithSchemaRevision("r2"))
+	Expect(o.srv.RegisterDynamicEntity(sk.ents[0])).To(Succeed())
+	n := newCNodeWith(o, "n0", func(c *upstream.Config) {
+		c.Bindings = append(c.Bindings, upstream.Binding{Entity: "gadget"})
+	}, func(srv *server.Server) {
+		Expect(srv.RegisterDynamicEntity(sk.ents[1])).To(Succeed())
+	}, server.WithSchemaRevision("r1"))
+	Expect(o.srv.Apply(context.Background(), convWS, func(tx *server.ApplyTx) error {
+		return tx.Put(sk.newer("g1", "a", 7))
+	})).To(Succeed())
+	addConv(n)
+	return o, n
+}
+
+func (sk *skew) newer(id, name string, extra int64) proto.Message {
+	return gadget(sk.newerType, id, name, extra)
+}
+
+func (sk *skew) older(id, name string) proto.Message {
+	return gadget(sk.olderType, id, name, 0)
+}
+
+// read returns gadget g1 as the server at url serves it, decoded with the
+// newer schema so that fields the server does not know show up too.
+func (sk *skew) read(url string) proto.Message {
+	GinkgoHelper()
+	return sk.readKey(url, "g1")
+}
+
+// readKey returns the gadget key names as the server at url serves it, nil
+// when it serves none.
+func (sk *skew) readKey(url, key string) proto.Message {
+	GinkgoHelper()
+	c, err := client.New(url)
+	Expect(err).NotTo(HaveOccurred())
+	snap, err := c.Workspace(convWS).Bootstrap(context.Background())
+	Expect(err).NotTo(HaveOccurred())
+	var got proto.Message
+	for rc, err := range snap.Rows() {
+		Expect(err).NotTo(HaveOccurred())
+		if rc.GetEntity() == "gadget" && rc.GetKey() == key {
+			got = dynamicpb.NewMessage(sk.newerType.Descriptor())
+			Expect(proto.Unmarshal(rc.GetValue(), got)).To(Succeed())
+		}
+	}
+	return got
+}
+
+func (sk *skew) expectRow(url string, want proto.Message, side string) {
+	GinkgoHelper()
+	got := sk.read(url)
+	Expect(proto.Equal(got, want)).To(BeTrue(), "%s row %v, want %v", side, got, want)
+}
+
+// dynamicSet returns a descriptor set holding spec's file and every file it
+// imports, imports first.
+func dynamicSet(spec server.DynamicEntity) []byte {
+	GinkgoHelper()
+	fd, err := server.BuildDynamicFile(spec)
+	Expect(err).NotTo(HaveOccurred())
+	set := &descriptorpb.FileDescriptorSet{}
+	seen := map[string]bool{}
+	var add func(protoreflect.FileDescriptor)
+	add = func(f protoreflect.FileDescriptor) {
+		if seen[f.Path()] {
+			return
+		}
+		seen[f.Path()] = true
+		for i := range f.Imports().Len() {
+			add(f.Imports().Get(i).FileDescriptor)
+		}
+		set.File = append(set.File, protodesc.ToFileDescriptorProto(f))
+	}
+	add(fd)
+	raw, err := proto.Marshal(set)
+	Expect(err).NotTo(HaveOccurred())
+	return raw
+}
+
+func gadget(mt protoreflect.MessageType, id, name string, extra int64) proto.Message {
+	m := dynamicpb.NewMessage(mt.Descriptor())
+	fs := mt.Descriptor().Fields()
+	m.Set(fs.ByName("id"), protoreflect.ValueOfString(id))
+	if name != "" {
+		m.Set(fs.ByName("name"), protoreflect.ValueOfString(name))
+	}
+	if extra != 0 {
+		m.Set(fs.ByName("extra"), protoreflect.ValueOfInt64(extra))
+	}
+	return m
 }

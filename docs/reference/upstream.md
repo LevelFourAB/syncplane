@@ -68,6 +68,7 @@ Shut down in this order: cancel the context of `blobbridge`'s `Run` and wait for
 | `OnReset`                         | none                   | Called after the link replaced a workspace's rows with a fresh snapshot, for a reason other than the first sync.                                                                                                                                                        |
 | `OnAccessRevoked`                 | none                   | Called when the origin refused a workspace for good. The link stops syncing it and refuses local writes to its bound entities.                                                                                                                                          |
 | `OnStatus`                        | none                   | Called with a workspace's status each time it changes.                                                                                                                                                                                                                  |
+| `OnSchemaSkew`                    | `SkewWarn`             | Decides how a workspace reacts when the local engine's schema revision differs from the origin's. See [Schema skew](#schema-skew).                                                                                                                                      |
 | `DeleteOnRevoke`                  | false                  | Deletes the local rows of the bound entities of a revoked workspace, as `RemoveOptions.DeleteRows` does.                                                                                                                                                                |
 | `RetryMin`, `RetryMax`            | 1s, 30s                | Backoff after a failed call to the origin: a random wait up to a window that doubles from `RetryMin` to `RetryMax`. 0 keeps the default.                                                                                                                                |
 | `ConcurrentSyncs`                 | 4                      | How many workspaces bootstrap or catch up at once; the others wait.                                                                                                                                                                                                     |
@@ -116,6 +117,7 @@ The callbacks run on the link's goroutines, and two of them can run at the same 
 | `OnReset`         | After the fresh snapshot is applied.                                                                                                                                                                                                                                                                                                                                                       |
 | `OnAccessRevoked` | When the origin refused the workspace for good.                                                                                                                                                                                                                                                                                                                                            |
 | `OnStatus`        | Each time the workspace's status changes.                                                                                                                                                                                                                                                                                                                                                  |
+| `OnSchemaSkew`    | On the workspace's worker, once for each new pair of local and origin revisions, before the workspace next forwards local writes.                                                                                                                                                                                                                                                          |
 
 ### `Rejection`
 
@@ -133,14 +135,15 @@ The callbacks run on the link's goroutines, and two of them can run at the same 
 
 ## `Status`
 
-| Field            | Meaning                                                                                                                                                      |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `Workspace`      | The workspace id.                                                                                                                                            |
-| `State`          | See below. `State.String()` gives the lowercase name in the second column.                                                                                   |
-| `Pending`        | Local writes the origin has not confirmed through a pull yet, those it applied but did not send back included. A write counts from shortly after it commits. |
-| `OriginSeq`      | The origin sequence the confirmed rows are current through.                                                                                                  |
-| `SchemaRevision` | The schema revision the origin advertised last, `""` when none.                                                                                              |
-| `LastError`      | The last failure; `nil` after the next success.                                                                                                              |
+| Field            | Meaning                                                                                                                                                          |
+| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Workspace`      | The workspace id.                                                                                                                                                |
+| `State`          | See below. `State.String()` gives the lowercase name in the second column.                                                                                       |
+| `Pending`        | Local writes the origin has not confirmed through a pull yet, those it applied but did not send back included. A write counts from shortly after it commits.     |
+| `OriginSeq`      | The origin sequence the confirmed rows are current through.                                                                                                      |
+| `SchemaRevision` | The schema revision the origin advertised last, `""` when none.                                                                                                  |
+| `SchemaSkew`     | The standing skew (`*SchemaSkew{Local, Origin, Action}`), `nil` when the revisions agree, when either side advertises none, or when the answer was `SkewIgnore`. |
+| `LastError`      | The last failure; `nil` after the next success.                                                                                                                  |
 
 | `State`              | Name            | Meaning                                                                                                                         |
 | -------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------- |
@@ -151,6 +154,20 @@ The callbacks run on the link's goroutines, and two of them can run at the same 
 | `StateNoAccess`      | `no_access`     | The origin grants the link's caller no permission in the workspace yet. The link asks again with backoff; local writes queue.   |
 | `StateRevoked`       | `revoked`       | The origin refused the workspace for good. The link no longer syncs it.                                                         |
 | `StateFailed`        | `failed`        | The link cannot sync the workspace: its link state does not load, or it was deleted from the local store. `LastError` says why. |
+
+## Schema skew
+
+The link compares the local engine's revision (`server.WithSchemaRevision`, or the hash of a registered descriptor set) with the revision the origin advertises. It compares before each round of forwarding: after a local write, a `Flush`, a retry, or a change of the origin's revision. When either side advertises no revision, the link does not compare.
+
+For each new pair of revisions, the link calls `Config.OnSchemaSkew(workspace, local, origin)` and applies the `SkewAction` it returns:
+
+| `SkewAction` | Behavior                                                                                                                                                                                                                                                                                           |
+| ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SkewWarn`   | The default. `Status.SchemaSkew` reports the skew, and the workspace keeps syncing.                                                                                                                                                                                                                |
+| `SkewIgnore` | The workspace keeps syncing, and `Status.SchemaSkew` stays `nil`.                                                                                                                                                                                                                                  |
+| `SkewBlock`  | `Status.SchemaSkew` reports the skew, and the link stops forwarding local writes. Pulls continue. Local writes queue, and `Flush` waits. A write-through write fails with `ErrSchemaSkew`. The block lifts when the revisions agree, or when `OnSchemaSkew` answers another action for a new pair. |
+
+Downstream clients compare their revision with the revision of the local engine, not of the origin.
 
 ## `Workspace`
 
@@ -191,6 +208,7 @@ Calls authorize against `ctx` as `server.Apply` and `server.View` do; mark `ctx`
 | `ErrNotLinked`         | A workspace the link does not sync.                                                                                                                                                      |
 | `ErrRevoked`           | `Flush`, `Await` and `Receipt.Wait` for a workspace the origin refused for good.                                                                                                         |
 | `ErrUnknownWrite`      | `Await` and `Receipt.Wait` for a write with no record: a write that forwarded nothing, one confirmed before the process started, or one confirmed long enough ago to be forgotten.       |
+| `ErrSchemaSkew`        | A write-through write to a workspace that `SkewBlock` holds. The write did not commit locally and did not reach the origin.                                                              |
 | `ErrOriginUnavailable` | Wrapped by the error of a write-through write when the origin did not answer. The write did not commit locally; the origin may have applied it, and then it arrives back through a pull. |
 | `*RejectedError`       | `Await` and `Receipt.Wait` for a write the origin rejected.                                                                                                                              |
 

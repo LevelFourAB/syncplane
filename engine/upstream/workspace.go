@@ -264,6 +264,9 @@ func (w *workspace) step(ctx context.Context) error {
 		w.mu.Unlock()
 		w.l.kickStreams()
 	}
+	// After the catch-up, which learns the origin's revision, and before
+	// anything is forwarded under a pair no one decided on.
+	w.checkSkew()
 	return w.push(ctx)
 }
 
@@ -355,7 +358,15 @@ func (w *workspace) update(fn func(*status)) {
 
 func sameStatus(a, b Status) bool {
 	return a.State == b.State && a.Pending == b.Pending && a.OriginSeq == b.OriginSeq &&
-		a.SchemaRevision == b.SchemaRevision && errors.Is(a.LastError, b.LastError) && errors.Is(b.LastError, a.LastError)
+		a.SchemaRevision == b.SchemaRevision && sameSkew(a.SchemaSkew, b.SchemaSkew) &&
+		errors.Is(a.LastError, b.LastError) && errors.Is(b.LastError, a.LastError)
+}
+
+func sameSkew(a, b *SchemaSkew) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func (w *workspace) statusLocked() Status {
@@ -369,8 +380,54 @@ func (w *workspace) statusLocked() Status {
 		Pending:        len(w.pend),
 		OriginSeq:      w.st.originSeq,
 		SchemaRevision: w.st.revision,
+		SchemaSkew:     w.st.reportedSkew(),
 		LastError:      lastErr,
 	}
+}
+
+// reportedSkew is the skew Status reports: a copy of the decided one, nil
+// when there is none or the answer was SkewIgnore.
+func (s *status) reportedSkew() *SchemaSkew {
+	if s.skew == nil || s.skew.Action == SkewIgnore {
+		return nil
+	}
+	sk := *s.skew
+	return &sk
+}
+
+// checkSkew compares the local engine's schema revision with the origin's
+// and asks Config.OnSchemaSkew about a pair it has not decided yet. It runs
+// on the worker, which holds no lock a callback could wait for.
+func (w *workspace) checkSkew() {
+	local := w.l.bind.Load().srv.SchemaRevision()
+	w.vmu.Lock()
+	origin, prev := w.st.revision, w.st.skew
+	w.vmu.Unlock()
+	if local == "" || origin == "" || local == origin {
+		if prev != nil {
+			w.update(func(s *status) { s.skew = nil })
+		}
+		return
+	}
+	if prev != nil && prev.Local == local && prev.Origin == origin {
+		return
+	}
+	action := SkewWarn
+	if fn := w.l.cfg.OnSchemaSkew; fn != nil {
+		action = fn(w.id, local, origin)
+	}
+	w.update(func(s *status) { s.skew = &SchemaSkew{Local: local, Origin: origin, Action: action} })
+	if action == SkewBlock {
+		w.logger().LogAttrs(context.Background(), slog.LevelWarn, "schema revision differs from the origin's; holding local writes",
+			slog.String("local", local), slog.String("origin", origin))
+	}
+}
+
+// blocked reports whether SkewBlock holds the workspace's local writes.
+func (w *workspace) blocked() bool {
+	w.vmu.Lock()
+	defer w.vmu.Unlock()
+	return w.st.skew != nil && w.st.skew.Action == SkewBlock
 }
 
 func (w *workspace) snapshot() Status {

@@ -326,11 +326,28 @@ access.
 
 ## Schema evolution is additive
 
-`PUT` operations replace entire rows. Stale writers—such as older client builds
-or server components deserializing into outdated message definitions—silently
-drop unknown fields when overwriting rows. To prevent data loss, use `PATCH`
-with field masks for partial updates, and design entity schema changes to be
-additive.
+`PUT` operations replace entire rows. A server keeps one class of field across
+a `PUT`: a top-level field that the stored row holds and that the server's
+schema does not declare. A newer schema wrote that field, and a writer on the
+server's schema could not see it, so the server does not take its absence as a
+clear. This protects a node that runs an older build during a rolling deploy,
+and a [linked local engine](chained-sync.md) with an older schema than its
+origin.
+
+The rule has limits:
+
+- It applies to top-level fields only. A field that a newer schema added inside
+  a nested message or a keyed-list element is lost when a `PUT` replaces that
+  message.
+- The server can only keep fields it does not know. An older client that writes
+  to a newer server sends a row without the newer field, and the server cannot
+  tell that absence from a clear. The `PUT` clears the field.
+- A writer on a newer schema than the server's cannot clear such a field with a
+  `PUT`. It sends no bytes for a cleared field, and the server keeps the stored
+  value. A `PATCH` that names the field clears it.
+
+To prevent data loss, use `PATCH` with field masks for partial updates, and
+design entity schema changes to be additive.
 
 A client that reads a row, modifies a single field, and writes back the entire
 row overwrites concurrent changes to other fields. To prevent this, the

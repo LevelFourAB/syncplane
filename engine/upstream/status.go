@@ -65,8 +65,50 @@ type Status struct {
 	// SchemaRevision is the schema revision the origin advertised last, ""
 	// when it advertises none.
 	SchemaRevision string
+	// SchemaSkew is the standing difference between the local engine's
+	// schema revision and the origin's, nil when they agree, when either
+	// side advertises none, or when Config.OnSchemaSkew answered SkewIgnore.
+	SchemaSkew *SchemaSkew
 	// LastError is the last failure, nil after the next success.
 	LastError error
+}
+
+// SchemaSkew is a difference between the schema revision of the local engine
+// (server.WithSchemaRevision) and the one the origin advertises.
+type SchemaSkew struct {
+	Local  string
+	Origin string
+	// Action is what Config.OnSchemaSkew answered for this pair of
+	// revisions.
+	Action SkewAction
+}
+
+// SkewAction is how a workspace reacts to a schema skew.
+type SkewAction int
+
+const (
+	// SkewWarn reports the skew in Status and keeps syncing.
+	SkewWarn SkewAction = iota
+	// SkewIgnore keeps syncing and reports nothing.
+	SkewIgnore
+	// SkewBlock reports the skew in Status and stops forwarding local writes
+	// to the origin. Pulls continue. Local writes queue and are forwarded
+	// once the revisions agree, or once Config.OnSchemaSkew answers another
+	// action for a new pair. A write-through write fails with ErrSchemaSkew
+	// and commits nothing.
+	SkewBlock
+)
+
+func (a SkewAction) String() string {
+	switch a {
+	case SkewWarn:
+		return "warn"
+	case SkewIgnore:
+		return "ignore"
+	case SkewBlock:
+		return "block"
+	}
+	return fmt.Sprintf("SkewAction(%d)", int(a))
 }
 
 // status is the mutable status of a workspace runtime. Its fields are
@@ -85,6 +127,10 @@ type status struct {
 	originSeq uint64
 	revision  string
 	lastErr   error
+	// skew is the pair of revisions Config.OnSchemaSkew decided last and its
+	// answer, nil when the revisions agree. It stays until the worker decides
+	// again, so a block holds while a new pair waits for its answer.
+	skew *SchemaSkew
 }
 
 func (s *status) state() State {

@@ -968,9 +968,8 @@ func (s *Server) applyCrud(
 	// each has to treat an absent row and a tombstone alike; one fetch behind
 	// one `live` flag is what keeps that handling from drifting apart between
 	// them. Nothing here writes the row before the op switch's final
-	// PutRow/DeleteRow, so the memo cannot go stale. Lazy, so a DELETE (or an
-	// unguarded PUT of an entity that has neither text fields nor history)
-	// still reads nothing unless the entity has a row check.
+	// PutRow/DeleteRow, so the memo cannot go stale. Lazy, so a DELETE still
+	// reads nothing unless the entity has a row check.
 	var (
 		cachedRow  storage.Row
 		cachedLive bool
@@ -1085,8 +1084,18 @@ func (s *Server) applyCrud(
 		if err := aw.carryGuarded(tx, msg, nil); err != nil {
 			return err
 		}
+		// Every PUT reads the stored row for this, also when nothing else needs
+		// it: only the stored row tells whether a newer schema wrote fields that
+		// this schema does not declare.
+		base, baseErr := currentBase()
+		if baseErr != nil {
+			return baseErr
+		}
+		carryUnknownFields(base, msg)
 		// What the capture reports as submitted: the fields the caller may not
-		// write are replaced by now, and the text union is still to come.
+		// write and the fields the schema does not know are replaced by now, and
+		// the text union is still to come. A linked engine forwards this value,
+		// so the origin keeps the fields this server could not see.
 		submitted, err := marshalIfLogged(log, msg)
 		if err != nil {
 			return err

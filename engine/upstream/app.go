@@ -258,7 +258,8 @@ func (w *Workspace) Watch(ctx context.Context, from *server.Cursor) iter.Seq2[Ch
 // It returns ErrNotLinked for a workspace the link does not sync, the
 // status's LastError for a StateFailed one (ErrNotLinked when its link state
 // was deleted), ErrRevoked once the origin revoked it, and ctx's error when
-// ctx ends first.
+// ctx ends first. While SkewBlock holds local writes, Flush waits for the
+// block to lift.
 func (l *Link) Flush(ctx context.Context, workspaceID string) error {
 	w := l.workspace(workspaceID)
 	if w == nil {
@@ -267,6 +268,9 @@ func (l *Link) Flush(ctx context.Context, workspaceID string) error {
 	if err := w.refresh(ctx); err != nil {
 		return err
 	}
+	// A round of the worker compares the schema revisions again, which is
+	// how a block lifts after the local engine registered a new schema.
+	w.kick()
 	return w.waitView(ctx, func() (bool, error) {
 		switch w.st.state() {
 		case StateFailed:

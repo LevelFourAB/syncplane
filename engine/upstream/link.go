@@ -44,6 +44,10 @@ var (
 	// no record of: a write that forwarded nothing, one confirmed before the
 	// process started, or one confirmed long enough ago to be forgotten.
 	ErrUnknownWrite = errors.New("upstream: no record of the write")
+	// ErrSchemaSkew is returned by a write-through write to a workspace that
+	// SkewBlock holds. The write did not commit locally and did not reach the
+	// origin.
+	ErrSchemaSkew = errors.New("upstream: schema revision differs from the origin's; forwarding is blocked")
 )
 
 // Link keeps the bound entities of a local engine converged with an origin

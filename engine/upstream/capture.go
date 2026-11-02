@@ -127,6 +127,9 @@ func (l *Link) capture(ctx context.Context, cw *server.CapturedWrite) error {
 		if w == nil {
 			return fmt.Errorf("upstream: workspace %q is not running; write-through needs a started link", cw.Workspace)
 		}
+		if w.blocked() {
+			return ErrSchemaSkew
+		}
 		if !w.ackKnown.Load() {
 			if err := l.learnWatermark(ctx, w, st, &q); err != nil {
 				return err
