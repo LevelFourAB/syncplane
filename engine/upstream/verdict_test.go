@@ -224,6 +224,30 @@ var _ = Describe("Verdicts", func() {
 			Expect(title(o.todo("t7"))).To(Equal("b"))
 		})
 
+		It("made against a pending write whose push response was lost is rejected with conflict when the origin row changed after that write", func() {
+			n.part.blockPush.Store(true)
+			n.put(&todov1.Todo{Id: "t8", Title: "a"})
+			v := version("t8")
+			_, err := n.ws().Patch(ctx, &todov1.Todo{Id: "t8", Title: "b"}, []string{"title"}, &v)
+			Expect(err).NotTo(HaveOccurred())
+			// Another writer changes the row after the origin applied the base
+			// write and before the link learns of it.
+			theirs := func() { o.patch(&todov1.Todo{Id: "t8", Title: "theirs"}, "title") }
+			n.part.onLost.Store(&theirs)
+			n.part.blockReads.Store(true)
+			n.part.Cut()
+			n.part.Heal()
+			n.part.losePushes.Store(1)
+			n.part.blockPush.Store(false)
+			Eventually(n.part.pushes.Load).Should(BeNumerically(">=", 2))
+			n.part.blockReads.Store(false)
+			n.flush()
+			Expect(n.rejected()).To(HaveLen(1))
+			Expect(n.rejected()[0].Code).To(Equal(server.CodeConflict))
+			Expect(title(o.todo("t8"))).To(Equal("theirs"))
+			Expect(title(n.todo("t8"))).To(Equal("theirs"))
+		})
+
 		It("made against a pending write the origin rejects is rejected with conflict", func() {
 			n.part.Cut()
 			n.put(&todov1.Todo{Id: "t6", Title: "forbidden"})

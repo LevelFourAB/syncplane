@@ -346,15 +346,6 @@ func (l *Link) writeThrough(ctx context.Context, w *workspace, b *bound, st stat
 		if err != nil {
 			return err
 		}
-		if bt.held != 0 {
-			// Only a pull releases the held entry, and a pull cannot run
-			// inside this local transaction. The worker pulls for a held
-			// entry in the queue. When the held entry is e, which this
-			// transaction discards, the next page the link applies releases
-			// its base.
-			w.kick()
-			return throughErr(fmt.Errorf("mutation %d waits for a pull to confirm the write it was made against", bt.held))
-		}
 		if len(bt.ents) == 0 {
 			return fmt.Errorf("upstream: write-through: nothing to push for mutation %d", e.id)
 		}

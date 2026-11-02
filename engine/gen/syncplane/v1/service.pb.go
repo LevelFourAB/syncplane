@@ -266,8 +266,12 @@ type MutationResult struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	MutationId uint64                 `protobuf:"varint,1,opt,name=mutation_id,json=mutationId,proto3" json:"mutation_id,omitempty"`
 	Status     MutationStatus         `protobuf:"varint,2,opt,name=status,proto3,enum=syncplane.v1.MutationStatus" json:"status,omitempty"`
-	// Workspace sequence assigned when status is APPLIED; 0 otherwise. This is
-	// the only in-band way a writer learns the sequence its own write took,
+	// Workspace sequence the mutation was applied at. Set when status is
+	// APPLIED. Set when status is ALREADY_APPLIED and the mutation was in the
+	// client's latest push that applied something, which covers the resend of
+	// a push whose response was lost; 0 for an older mutation. 0 when status
+	// is REJECTED. This is the only in-band way a writer learns the sequence
+	// its own write took,
 	// without waiting for the row to come back down a pull as
 	// RowChange.version. A REJECTED mutation reports 0 because it consumes no
 	// sequence — its savepoint rolled back — which is what makes rejections

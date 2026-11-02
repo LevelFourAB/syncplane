@@ -19,10 +19,6 @@ import (
 type batch struct {
 	muts []*syncplanev1.Mutation
 	ents []*entry
-	// held is the id of the entry at the head of the queue when it cannot be
-	// sent until a pull retires its compare-and-swap base, and 0 otherwise.
-	// The batch is then empty.
-	held uint64
 }
 
 // batchLimits bound one push.
@@ -37,9 +33,7 @@ type batchLimits struct {
 // buildBatch collects the entries the origin has not answered, from the head
 // of the queue in id order. It stops before an entry whose compare-and-swap
 // base is in the batch: that entry's expected version is the origin sequence
-// its base is applied at, which only the base's answer tells. It also stops
-// before an entry whose base was answered without a sequence (see
-// baseVersion), and sets held when that entry is the head.
+// its base is applied at, which only the base's answer tells.
 func buildBatch(b *bound, st stateTx, q queueMeta, clientID string, lim batchLimits) (batch, error) {
 	var out batch
 	size := 0
@@ -60,15 +54,9 @@ func buildBatch(b *bound, st stateTx, q queueMeta, clientID string, lim batchLim
 		} else if answered {
 			continue
 		}
-		m, wait, held, err := mutationOf(b, st, e, in)
+		m, wait, err := mutationOf(b, st, e, in)
 		if err != nil {
 			return batch{}, err
-		}
-		if held {
-			if len(out.ents) == 0 {
-				out.held = id
-			}
-			break
 		}
 		if wait && len(out.ents) > 0 {
 			break
@@ -90,13 +78,12 @@ func buildBatch(b *bound, st stateTx, q queueMeta, clientID string, lim batchLim
 }
 
 // mutationOf builds the wire mutation of an entry. wait reports a
-// compare-and-swap base still unanswered in the batch, and held a base whose
-// version only a pull can tell.
-func mutationOf(b *bound, st stateTx, e *entry, inBatch map[uint64]bool) (_ *syncplanev1.Mutation, wait, held bool, _ error) {
+// compare-and-swap base still unanswered in the batch.
+func mutationOf(b *bound, st stateTx, e *entry, inBatch map[uint64]bool) (_ *syncplanev1.Mutation, wait bool, _ error) {
 	m := &syncplanev1.Mutation{MutationId: e.id}
 	if e.custom != nil {
 		m.Payload = &syncplanev1.Mutation_Custom{Custom: e.custom}
-		return m, false, false, nil
+		return m, false, nil
 	}
 	cruds := make([]*syncplanev1.CrudMutation, 0, len(e.ops))
 	for _, op := range e.ops {
@@ -123,14 +110,13 @@ func mutationOf(b *bound, st stateTx, e *entry, inBatch map[uint64]bool) (_ *syn
 			v := op.cas.version
 			crud.ExpectedVersion = &v
 		case casBase:
-			v, w, h, err := baseVersion(st, op)
+			v, w, err := baseVersion(st, op)
 			if err != nil {
-				return nil, false, false, err
+				return nil, false, err
 			}
 			if w || inBatch[op.cas.base] {
 				wait = true
 			}
-			held = held || h
 			crud.ExpectedVersion = &v
 		}
 		cruds = append(cruds, crud)
@@ -140,51 +126,42 @@ func mutationOf(b *bound, st stateTx, e *entry, inBatch map[uint64]bool) (_ *syn
 	} else {
 		m.Payload = &syncplanev1.Mutation_Batch{Batch: &syncplanev1.BatchMutation{Mutations: cruds}}
 	}
-	return m, wait, held, nil
+	return m, wait, nil
 }
 
 // baseVersion resolves a compare-and-swap whose base is another entry: the
-// sequence the origin applied the base at, impossibleVersion when it
-// rejected it, and the confirmed version when neither is known. wait reports
-// a base the origin has not answered. held reports a base the origin applied
-// at a sequence it did not say, above the stored watermark: an
-// ALREADY_APPLIED answer carries no sequence, and the confirmed version
-// predates the base until a pull brings it in. drop then resolves the
-// compare-and-swap from the confirmed row that includes the base. A base at
-// or below the watermark is in the confirmed row already, which resolves it
-// here the same way.
-func baseVersion(st stateTx, op entryOp) (version uint64, wait, held bool, err error) {
+// sequence the origin applied the base at, and impossibleVersion when it
+// rejected the base or did not say the sequence. wait reports a base the
+// origin has not answered; the version is then a placeholder.
+//
+// The confirmed version is no substitute for an unknown sequence: it includes
+// every write to the row after the base, so a compare-and-swap made against
+// the base would apply over a change it never saw. An origin that predates
+// sequences on ALREADY_APPLIED, or that no longer holds the sequence, leaves
+// it unknown.
+func baseVersion(st stateTx, op entryOp) (version uint64, wait bool, err error) {
 	r, ok, err := st.result(op.cas.base)
 	if err != nil {
-		return 0, false, false, err
+		return 0, false, err
 	}
 	switch {
-	case ok && r.status == syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED:
-		return impossibleVersion, false, false, nil
-	case ok && r.seq != 0:
-		return r.seq, false, false, nil
+	case !ok:
+		return 0, true, nil
+	case r.status == syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED:
+		return impossibleVersion, false, nil
 	default:
-		e, err := st.entry(op.cas.base)
-		if err != nil {
-			return 0, false, false, err
-		}
-		switch {
-		case e == nil:
-		case !ok:
-			wait = true
-		default:
-			// A write-through capture records an answer without the settle
-			// that retires an answered entry the watermark covers, so such
-			// an entry can still be here.
-			meta, err := st.sync()
-			if err != nil {
-				return 0, false, false, err
-			}
-			held = meta.lastAcked < op.cas.base
-		}
+		return casVersionOf(r), false, nil
 	}
-	c, _, err := st.confirmed(op.entity, op.key)
-	return c.version, wait, held, err
+}
+
+// casVersionOf is the version a compare-and-swap based on an applied entry
+// expects: the sequence the origin applied it at, or impossibleVersion when
+// the answer did not say.
+func casVersionOf(r resultRecord) uint64 {
+	if r.seq == 0 {
+		return impossibleVersion
+	}
+	return r.seq
 }
 
 // recordResults stores the origin's verdicts on a pushed batch. A resend
@@ -227,12 +204,8 @@ func recordResults(st stateTx, q *queueMeta, bt batch, wr *syncplanev1.Workspace
 	return evs, ackedSeq, advancePushFrom(st, q)
 }
 
-// push sends the queue to the origin until nothing unanswered is left. An
-// entry held for its compare-and-swap base (see baseVersion) makes it pull
-// once; a pull that does not release the entry returns an error, so the
-// worker tries again after a backoff.
+// push sends the queue to the origin until nothing unanswered is left.
 func (w *workspace) push(ctx context.Context) error {
-	pulled := false
 	for {
 		if !w.ackKnown.Load() || w.blocked() {
 			return nil
@@ -248,20 +221,9 @@ func (w *workspace) push(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("upstream: read queue: %w", err)
 		}
-		if bt.held != 0 {
-			if pulled {
-				return fmt.Errorf("upstream: mutation %d waits for a pull to confirm the write it was made against", bt.held)
-			}
-			pulled = true
-			if err := w.pullDrain(ctx); err != nil {
-				return err
-			}
-			continue
-		}
 		if len(bt.muts) == 0 {
 			return nil
 		}
-		pulled = false
 		wr, err := w.send(ctx, bt)
 		if err != nil {
 			// A failure the link resolved (a realigned queue, a dropped

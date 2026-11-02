@@ -2426,6 +2426,59 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		It("records applied mutations apart from the watermark and the rejections, and replaces them wholesale", func() {
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientLastMutationID("c1", 7)).To(Succeed())
+				Expect(tx.SetClientRejections("c1", []storage.ClientRejection{{MutationID: 5, Code: "conflict"}})).To(Succeed())
+				Expect(tx.SetClientAppliedMutations("c1", []storage.AppliedMutation{
+					{MutationID: 6, Seq: 40},
+					{MutationID: 7, Seq: 41},
+				})).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientAppliedMutations("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(Equal([]storage.AppliedMutation{{MutationID: 6, Seq: 40}, {MutationID: 7, Seq: 41}}))
+
+				last, err := tx.ClientLastMutationID("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(last).To(BeEquivalentTo(7))
+				rejs, err := tx.ClientRejections("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rejs).To(HaveLen(1))
+
+				recs, err = tx.ClientAppliedMutations("never-seen")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(BeEmpty(), "an unknown client has none, and that is not an error")
+			})
+			read("ws2", func(tx storage.ReadTx) {
+				recs, err := tx.ClientAppliedMutations("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(BeEmpty(), "records are per workspace")
+			})
+
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientAppliedMutations("c1", []storage.AppliedMutation{{MutationID: 8, Seq: 50}})).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientAppliedMutations("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(Equal([]storage.AppliedMutation{{MutationID: 8, Seq: 50}}))
+			})
+
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientAppliedMutations("c1", nil)).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientAppliedMutations("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(BeEmpty())
+				last, err := tx.ClientLastMutationID("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(last).To(BeEquivalentTo(7), "clearing the records keeps the watermark")
+			})
+		})
+
 		It("keeps every field of a late rejection", func() {
 			late := []storage.ClientRejection{
 				{MutationID: 2, Code: "conflict"},

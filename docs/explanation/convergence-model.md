@@ -176,6 +176,14 @@ The server retains rejection verdicts within the following limits:
   pushed within the tombstone retention. The watermark stays. A later resend
   returns `ALREADY_APPLIED` and the server does not apply the mutation.
 
+A resend of an applied mutation also gets back the sequence the mutation was
+applied at, in `MutationResult.seq`. A client needs that sequence to make a
+compare-and-swap against its own earlier write: the version of the row is not a
+replacement, because it includes every later write to the row by other clients.
+The server keeps the sequences of the client's latest push that applied
+something. A resend of an older mutation returns `ALREADY_APPLIED` with
+sequence `0`.
+
 ## Atomic batches
 
 You can bundle multiple CRUD mutations into a single transaction using

@@ -598,18 +598,11 @@ func (t *txn) drop(e *entry, rej *rejection) error {
 					continue
 				}
 				changed = true
-				switch {
-				case rej != nil:
-					op.cas = casRef{mode: casVersion, version: impossibleVersion}
-				case hasResult && r.seq != 0:
-					op.cas = casRef{mode: casVersion, version: r.seq}
-				default:
-					_, c, err := t.confirmedRow(RowRef{Entity: op.entity, Key: op.key})
-					if err != nil {
-						return err
-					}
-					op.cas = casRef{mode: casVersion, version: c.version}
+				version := uint64(impossibleVersion)
+				if rej == nil && hasResult {
+					version = casVersionOf(r)
 				}
+				op.cas = casRef{mode: casVersion, version: version}
 			}
 			if changed {
 				if err := t.st.putEntry(d); err != nil {

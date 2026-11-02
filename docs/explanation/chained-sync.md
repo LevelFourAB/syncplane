@@ -105,7 +105,7 @@ In write-through mode both kinds wait for the origin's verdict before they commi
 A compare-and-swap (`expected` on `Patch`, or `WithExpectedVersion`) runs twice:
 
 1. **Locally**, against the local version of the row. A stale guard fails at once with `conflict`, as on any server.
-2. **At the origin**, against a version the link translates. When no pending write touches the row, the link sends the origin version of the confirmed row. When a pending write touches it, the link sends the origin sequence that write was applied at. When the origin rejected that earlier write, the guarded write fails with `conflict` too.
+2. **At the origin**, against a version the link translates. When no pending write touches the row, the link sends the origin version of the confirmed row. When a pending write touches it, the link sends the origin sequence that write was applied at. When the origin rejected that earlier write, the guarded write fails with `conflict` too. When the origin applied that earlier write but its answer does not give the sequence, the guarded write also fails with `conflict`. This occurs when an origin that does not return the sequence on `ALREADY_APPLIED` answers a resend. The link does not use the confirmed version of the row in place of the sequence, because that version can include a later write by another client, and the guarded write would then overwrite it.
 
 The result is the same as a compare-and-swap made directly against the origin at the moment the write arrives there. A guard that passes locally can still fail at the origin, because another writer changed the row there first. In write-behind mode, that failure is a revert with code `conflict`.
 

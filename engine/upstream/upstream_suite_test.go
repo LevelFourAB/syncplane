@@ -56,6 +56,9 @@ type partition struct {
 	// losePushes is how many Push responses to lose: the origin handles the
 	// request, and the link sees a failure in transit.
 	losePushes atomic.Int64
+	// onLost runs after the origin handled a Push whose response is lost,
+	// before the link sees the failure.
+	onLost atomic.Pointer[func()]
 	// breakBootstrap ends the next Bootstrap response after this many bytes.
 	breakBootstrap atomic.Int64
 	// bootstraps counts Bootstrap requests.
@@ -88,6 +91,9 @@ func (p *partition) RoundTrip(req *http.Request) (*http.Response, error) {
 	if filepath.Base(req.URL.Path) == "Push" && p.losePushes.Add(-1) >= 0 {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
+		if f := p.onLost.Load(); f != nil {
+			(*f)()
+		}
 		return nil, errors.New("response lost")
 	}
 	if filepath.Base(req.URL.Path) == "Bootstrap" {

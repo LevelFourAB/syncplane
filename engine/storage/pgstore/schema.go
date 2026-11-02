@@ -35,7 +35,16 @@ var migrations = []migration{
 	{additive: true, sql: baselineSchema},
 	{additive: true, sql: fixed(seqLineageDDL)},
 	{additive: true, sql: fixed(deletedWorkspacesDDL)},
+	{additive: true, sql: fixed(clientsAppliedDDL)},
 }
+
+// clientsAppliedDDL is migration 4: the sequences of each client's latest
+// applied mutations (see storage.AppliedMutation). NULL until the client's
+// first push after the upgrade. A column added to a partitioned parent reaches
+// every partition, so the step does not depend on the layout.
+const clientsAppliedDDL = `
+ALTER TABLE clients ADD COLUMN applied BYTEA;
+`
 
 // deletedWorkspacesDDL is migration 3: one row per workspace DeleteWorkspace
 // removed and RestoreWorkspace has not lifted since (see storage.Adapter).

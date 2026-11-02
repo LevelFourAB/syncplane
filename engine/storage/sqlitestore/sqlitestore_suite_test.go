@@ -60,7 +60,12 @@ var _ = Describe("SQLite schema versioning", func() {
 	const baselineVersion = 1
 	// The version a database this binary creates or upgrades ends at: the
 	// baseline plus every migration since. Bump it with each migration added.
-	const latestVersion = 7
+	const latestVersion = 8
+
+	// noApplied takes the clients table back to its shape before migration 8,
+	// which every rewind below needs.
+	const noApplied = `
+		ALTER TABLE clients DROP COLUMN applied;`
 
 	// oldIndexTables puts the index entry tables back in the shape every
 	// version before 4 has, so a test can rewind a database past migration 4.
@@ -146,7 +151,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// lineage table existed.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldIndexTables + fmt.Sprintf("\nDROP TABLE seq_lineage;\nDROP TABLE deleted_workspaces;\nPRAGMA user_version = %d;", baselineVersion))
+		_, err = db.Exec(noApplied + oldIndexTables + fmt.Sprintf("\nDROP TABLE seq_lineage;\nDROP TABLE deleted_workspaces;\nPRAGMA user_version = %d;", baselineVersion))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db.Close()).To(Succeed())
 
@@ -178,7 +183,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// a workspace whose build mark says it is up to date.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldIndexTables + `
+		_, err = db.Exec(noApplied + oldIndexTables + `
 			INSERT INTO index_entries VALUES ('ws1', 'widget', 'by_label', x'01', 'k1');
 			INSERT INTO index_state (workspace_id, entity, idx, spec_hash, ready)
 				VALUES ('ws1', 'widget', 'by_label', 'h1', 1);
@@ -241,7 +246,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// a ready index and a workspace whose build mark says it is up to date.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(`
+		_, err = db.Exec(noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -324,7 +329,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		var scope int
 		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
 		Expect(scope).To(Equal(1))
-		_, err = db.Exec(`
+		_, err = db.Exec(noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -411,7 +416,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		var scope int
 		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
 		Expect(scope).To(Equal(1))
-		_, err = db.Exec(`
+		_, err = db.Exec(noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
