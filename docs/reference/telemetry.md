@@ -265,6 +265,20 @@ at-least-once, redelivered changes increment the counter again.
 `syncplane.connect.tracked` measures the number of workspaces that the engine
 currently converges.
 
+### Upstream link
+
+| Instrument                      | Type    | Unit          | Attributes       |
+| ------------------------------- | ------- | ------------- | ---------------- |
+| `syncplane.upstream.pushes`     | counter | `{push}`      | `outcome`        |
+| `syncplane.upstream.pages`      | counter | `{page}`      | `outcome`        |
+| `syncplane.upstream.bootstraps` | counter | `{bootstrap}` | `outcome`        |
+| `syncplane.upstream.rejections` | counter | `{mutation}`  | `rejection_code` |
+| `syncplane.upstream.pending`    | gauge   | `{mutation}`  | —                |
+
+`syncplane.upstream.pending` measures the local writes the origin has not
+confirmed, summed over every linked workspace. Per-workspace state is in
+`Link.Status` and `Config.OnStatus`, not in a metric.
+
 ## Spans
 
 | Span                              | Emitted by  | Notable attributes         |
@@ -273,6 +287,9 @@ currently converges.
 | `syncplane.storage.tx.read/write` | `otelstore` | `tx_kind`, `workspace_id`  |
 | `syncplane.effects.pass`          | `effects`   | `consumer`, `workspace_id` |
 | `syncplane.connect.pass`          | `connect`   | `workspace_id`             |
+| `syncplane.upstream.push`         | `upstream`  | `workspace_id`             |
+| `syncplane.upstream.apply_page`   | `upstream`  | `workspace_id`             |
+| `syncplane.upstream.bootstrap`    | `upstream`  | `workspace_id`             |
 
 Effect and connector passes serve as trace roots because the initiating write
 committed in an earlier request.

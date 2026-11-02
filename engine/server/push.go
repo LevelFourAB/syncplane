@@ -301,16 +301,23 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			}
 
 			var seq uint64
-			var applyErr error
 			rows.at = i
-			if guarded {
-				applyErr = tx.InSavepoint(func() error {
-					var err error
-					seq, err = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i], true)
+			// The capture runs inside the mutation's savepoint, so a capture
+			// that rejects rolls the mutation back like any other rejection, and
+			// a rejected mutation leaves nothing of what it captured.
+			run := func() error {
+				log := s.newWriteLog()
+				var err error
+				if seq, err = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i], guarded, log); err != nil {
 					return err
-				})
+				}
+				return s.runCapture(ctx, ws, tx, log, seq)
+			}
+			var applyErr error
+			if guarded {
+				applyErr = tx.InSavepoint(run)
 			} else {
-				seq, applyErr = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i], false)
+				applyErr = run()
 			}
 
 			var result *syncplanev1.MutationResult
@@ -811,6 +818,7 @@ func (s *Server) applyMutation(
 	m *syncplanev1.Mutation,
 	authErr error,
 	guarded bool,
+	log *writeLog,
 ) (uint64, error) {
 	if err := s.checkLimits(m); err != nil {
 		return 0, err
@@ -835,11 +843,11 @@ func (s *Server) applyMutation(
 	switch payload := m.GetPayload().(type) {
 	case *syncplanev1.Mutation_Crud:
 		w := Write{ClientId: m.GetClientId(), MutationId: m.GetMutationId(), Crud: payload.Crud}
-		if err := s.applyCrud(ctx, ws, tx, rows, g, w, seq, actor); err != nil {
+		if err := s.applyCrud(ctx, ws, tx, rows, g, w, seq, actor, log); err != nil {
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Custom:
-		if err := s.applyCustom(ctx, ws, tx, g, m.GetMutationId(), payload.Custom, seq, actor, guarded); err != nil {
+		if err := s.applyCustom(ctx, ws, tx, g, m.GetMutationId(), payload.Custom, seq, actor, guarded, log); err != nil {
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Batch:
@@ -851,7 +859,7 @@ func (s *Server) applyMutation(
 		// checkLimits, above.
 		for _, crud := range payload.Batch.GetMutations() {
 			w := Write{ClientId: m.GetClientId(), MutationId: m.GetMutationId(), Crud: crud}
-			if err := s.applyCrud(ctx, ws, tx, rows, g, w, seq, actor); err != nil {
+			if err := s.applyCrud(ctx, ws, tx, rows, g, w, seq, actor, log); err != nil {
 				return 0, err
 			}
 		}
@@ -907,6 +915,7 @@ func (s *Server) applyCrud(
 	w Write,
 	seq uint64,
 	actor storage.Actor,
+	log *writeLog,
 ) error {
 	crud := w.Crud
 	info, ok := s.catalogPtr().entities[crud.GetEntity()]
@@ -1073,6 +1082,12 @@ func (s *Server) applyCrud(
 		if err := aw.carryGuarded(tx, msg, nil); err != nil {
 			return err
 		}
+		// What the capture reports as submitted: the fields the caller may not
+		// write are replaced by now, and the text union is still to come.
+		submitted, err := marshalIfLogged(log, msg)
+		if err != nil {
+			return err
+		}
 		var prevText map[string][]byte
 		if len(info.textFields) > 0 {
 			// Ingress guard: text bytes a client sends must decode as full
@@ -1170,10 +1185,22 @@ func (s *Server) applyCrud(
 		if err := s.recordAccessMove(ctx, ws, tx, info, crud.GetKey(), currentRow, msg, seq, actor); err != nil {
 			return err
 		}
+		var prev uint64
+		if log != nil {
+			row, live, err := currentRow()
+			if err != nil {
+				return err
+			}
+			prev = liveVersion(row, live)
+		}
 		if err := tx.PutRow(info.name, crud.GetKey(), value, seq, actor); err != nil {
 			return err
 		}
 		g.accessOf().noteWrite(info)
+		log.add(CapturedOp{
+			Entity: info.name, Key: crud.GetKey(), Op: crud.GetOp(), Value: submitted,
+			ExpectedVersion: crud.ExpectedVersion, PrevVersion: prev, After: value,
+		})
 		return nil
 
 	case syncplanev1.CrudOp_CRUD_OP_PATCH:
@@ -1322,6 +1349,11 @@ func (s *Server) applyCrud(
 			return err
 		}
 		g.accessOf().noteWrite(info)
+		log.add(CapturedOp{
+			Entity: info.name, Key: crud.GetKey(), Op: crud.GetOp(), Value: crud.GetValue(),
+			Mask: crud.GetFieldMask().GetPaths(), ExpectedVersion: crud.ExpectedVersion,
+			PrevVersion: row.Version, After: value,
+		})
 		return nil
 
 	case syncplanev1.CrudOp_CRUD_OP_DELETE:
@@ -1359,10 +1391,22 @@ func (s *Server) applyCrud(
 		if err := s.recordAccessMove(ctx, ws, tx, info, crud.GetKey(), currentRow, nil, seq, actor); err != nil {
 			return err
 		}
+		var prev uint64
+		if log != nil {
+			row, live, err := currentRow()
+			if err != nil {
+				return err
+			}
+			prev = liveVersion(row, live)
+		}
 		if err := tx.DeleteRow(info.name, crud.GetKey(), seq, actor); err != nil {
 			return err
 		}
 		g.accessOf().noteWrite(info)
+		log.add(CapturedOp{
+			Entity: info.name, Key: crud.GetKey(), Op: crud.GetOp(),
+			ExpectedVersion: crud.ExpectedVersion, PrevVersion: prev,
+		})
 		return nil
 
 	default:
@@ -1413,10 +1457,14 @@ func (s *Server) applyCustom(
 	seq uint64,
 	actor storage.Actor,
 	guarded bool,
+	log *writeLog,
 ) error {
-	mi, ok := s.mutators[custom.GetName()]
+	mi, ok := s.mutatorNamed(custom.GetName())
 	if !ok {
 		return Reject(CodeInvalidArgument, fmt.Sprintf("unknown mutator %q", custom.GetName()))
+	}
+	if log != nil {
+		log.custom = custom
 	}
 	var args proto.Message
 	if mi.args != nil {
@@ -1434,7 +1482,7 @@ func (s *Server) applyCustom(
 	}
 	etx := &EntityTx{
 		srv: s, ctx: ctx, ws: ws, tx: tx, seq: seq, actor: actor, access: g.accessOf(), caller: g,
-		guarded: guarded,
+		guarded: guarded, log: log,
 	}
 	err := mi.fn(markWriteTx(ctx), etx, args)
 	if err == nil && etx.spoiled {

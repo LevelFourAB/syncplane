@@ -41,6 +41,9 @@ type mutatorInfo struct {
 	fn   MutatorFunc
 	// access is the MutatorAccess the declaration carried, nil when none.
 	access *MutatorAccess
+	// forwarded marks a mutator WithUnknownMutatorForwarding stands in for:
+	// no declaration exists, so its args have no type to check against.
+	forwarded bool
 }
 
 // pendingMutator is one WithMutator declaration, held until New has built the
@@ -138,6 +141,47 @@ func (s *Server) registerMutator(name string, argsPrototype proto.Message, fn Mu
 	return nil
 }
 
+// WithUnknownMutatorForwarding makes a custom mutation whose name no
+// WithMutator declares apply as a mutator that writes nothing, instead of
+// being rejected with CodeInvalidArgument. It is for a server that forwards
+// such mutations to another server through its WriteCapture.
+//
+// Such a mutation is authorized by Permissions.CanMutate as any custom
+// mutation is, and in a schema that uses the access model every caller
+// admitted to the workspace may invoke it, as with MutatorAccess{Admitted:
+// true}. Its args are not decoded. On a client push it is APPLIED: it advances
+// the client's watermark and takes a sequence like any applied mutation.
+// Invoke and InvokeIdempotent accept it too, with args of any type, and like
+// any call that writes nothing they take no sequence. The WriteCapture
+// receives it with CapturedWrite.Custom set and no Ops.
+//
+// Because the mutation writes nothing here, a client that pushed it gets its
+// ack before the rows it changes arrive from the server that runs it: the
+// client drops its optimistic state for the mutation at once, and its rows
+// can show the state without the mutation until those rows arrive.
+func WithUnknownMutatorForwarding() Option {
+	return func(s *Server) error {
+		s.forwardUnknown = true
+		return nil
+	}
+}
+
+// mutatorNamed resolves a mutator by name: a declared one, or, under
+// WithUnknownMutatorForwarding, one that writes nothing.
+func (s *Server) mutatorNamed(name string) (*mutatorInfo, bool) {
+	if mi, ok := s.mutators[name]; ok {
+		return mi, true
+	}
+	if !s.forwardUnknown || name == "" {
+		return nil, false
+	}
+	return &mutatorInfo{name: name, fn: forwardedMutator, access: &MutatorAccess{Admitted: true}, forwarded: true}, true
+}
+
+// forwardedMutator is the body of a mutation WithUnknownMutatorForwarding
+// accepts. The server that declares the mutator runs it.
+func forwardedMutator(context.Context, *EntityTx, proto.Message) error { return nil }
+
 // EntityTx is the typed storage facade mutators run against. Entity identity
 // comes from the message type passed in; keys derive from key_fields.
 //
@@ -219,6 +263,9 @@ type EntityTx struct {
 	// reads is what the reads of a transaction with a write gate apply, nil
 	// until its first read and on every transaction without one.
 	reads *callerReads
+	// log records each write for the WriteCapture, nil when none is
+	// installed. Shared with the AsCaller view.
+	log *writeLog
 }
 
 // callerReads is the caller's read gate (see Server.readGate) that the reads
@@ -437,13 +484,14 @@ func (e *EntityTx) atomically(write func() error) error {
 		}
 		return err
 	}
-	seq, wrote := root.seq, root.wrote
+	seq, wrote, logged := root.seq, root.wrote, e.log.mark()
 	err := e.tx.InSavepoint(write)
 	if err != nil {
 		// The rewind gave the sequence back if this write allocated it. writes
 		// stays counted: it only invalidates bound reads, and one extra rebind
 		// is harmless.
 		root.seq, root.wrote = seq, wrote
+		e.log.rewind(logged)
 		e.access.invalidate()
 	}
 	return err
@@ -606,8 +654,9 @@ func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 	if err != nil {
 		return err
 	}
+	var submitted []byte
 	if len(info.textFields) > 0 || len(o.texts) > 0 || info.history != nil || o.expected != nil ||
-		len(protected) > 0 || aw != nil {
+		len(protected) > 0 || aw != nil || e.log != nil {
 		if _, _, err := currentRow(); err != nil {
 			return err
 		}
@@ -666,6 +715,13 @@ func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 			if err := ApplyTextStrings(msg, nil, base, texts, o.peer); err != nil {
 				return err
 			}
+		}
+		// What the capture reports as submitted: the value once the engine has
+		// replaced what the caller may not write and resolved plain strings,
+		// but before the text union, which the stored value carries. A capture
+		// always takes this branch (see the condition above).
+		if submitted, err = marshalIfLogged(e.log, msg); err != nil {
+			return err
 		}
 		if base != nil {
 			tw, err := info.textWriteFor(e.srv, e.ws, e.tx, key)
@@ -735,7 +791,20 @@ func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 		return err
 	}
 	e.access.noteWrite(info)
+	e.log.add(CapturedOp{
+		Entity: info.name, Key: key, Op: syncplanev1.CrudOp_CRUD_OP_PUT, Value: submitted,
+		ExpectedVersion: o.expected, PrevVersion: liveVersion(row, live), After: value,
+	})
 	return nil
+}
+
+// liveVersion is a row's version as a compare-and-swap reads it: 0 for an
+// absent or deleted row.
+func liveVersion(row storage.Row, live bool) uint64 {
+	if !live {
+		return 0
+	}
+	return row.Version
 }
 
 // Patch merges only the masked fields of msg onto the stored row, honoring
@@ -872,6 +941,10 @@ func (e *EntityTx) patch(msg proto.Message, mask []string, expected *uint64, opt
 			}
 		}
 	}
+	submitted, err := marshalIfLogged(e.log, msg)
+	if err != nil {
+		return err
+	}
 	mergers := info.mergers
 	if live && len(info.textFields) > 0 {
 		tw, err := info.textWriteFor(e.srv, e.ws, e.tx, key)
@@ -965,6 +1038,10 @@ func (e *EntityTx) patch(msg proto.Message, mask []string, expected *uint64, opt
 		return err
 	}
 	e.access.noteWrite(info)
+	e.log.add(CapturedOp{
+		Entity: info.name, Key: key, Op: syncplanev1.CrudOp_CRUD_OP_PATCH, Value: submitted,
+		Mask: slices.Clone(mask), ExpectedVersion: expected, PrevVersion: row.Version, After: value,
+	})
 	return nil
 }
 
@@ -995,6 +1072,14 @@ func (e *EntityTx) delete(prototype proto.Message, key string) error {
 	if _, err := e.gate.beginAccessWrite(e.tx, info, key, syncplanev1.CrudOp_CRUD_OP_DELETE, nil,
 		func() (storage.Row, bool, error) { return e.liveRow(info, key) }); err != nil {
 		return err
+	}
+	var prev uint64
+	if e.log != nil {
+		row, live, err := e.liveRow(info, key)
+		if err != nil {
+			return err
+		}
+		prev = liveVersion(row, live)
 	}
 	seq, err := e.writeSeq()
 	if err != nil {
@@ -1034,6 +1119,7 @@ func (e *EntityTx) delete(prototype proto.Message, key string) error {
 		return err
 	}
 	e.access.noteWrite(info)
+	e.log.add(CapturedOp{Entity: info.name, Key: key, Op: syncplanev1.CrudOp_CRUD_OP_DELETE, PrevVersion: prev})
 	return nil
 }
 

@@ -77,6 +77,8 @@ The following table lists configuration options for `server.New`:
 | `WithRoomAnnounce(d)`                       | 5s           | Sets the interval for re-announcing active presence records. Sessions disappear after three missed intervals. See [Rooms](#rooms).                                                                                                                                             |
 | `WithBlobStore(st)`                         | —            | Keeps blobs in `st` and serves `BlobService` from it. Without it, every `BlobService` call fails with `unimplemented`. The server does not close `st`. One store may be shared by every app a `Manager` hosts. See [Blobs](#blobs).                                            |
 | `WithBlobRetention(d)`                      | 30d          | Sets how long blob GC keeps a committed blob that no live row names, and a staged upload that has not completed. Takes effect only with `WithBlobStore` and `WithGC`. Zero or negative keeps the default. See [Blobs](#blobs).                                                 |
+| `WithWriteCapture(c)`                       | —            | Calls `c` for every mutation the server applies, inside its write transaction, before it commits. A server has one; a later option replaces an earlier one. See [Chained sync](#chained-sync).                                                                                 |
+| `WithUnknownMutatorForwarding()`            | off          | Accepts a custom mutation whose name no `WithMutator` declares, as a mutator that writes nothing, instead of rejecting it with `invalid_argument`. See [Chained sync](#chained-sync).                                                                                          |
 
 ### Limits
 
@@ -546,6 +548,10 @@ func (s *Server) PendingWorkspaces(ctx, consumer string) iter.Seq2[string, error
 
 `ConsumerPendingWorkspaces` returns workspace IDs with unprocessed changes for a consumer, paginated after an exclusive `after` workspace ID. `PendingWorkspaces` yields all of them in ID order and reads one page at a time. Each page is a separate snapshot.
 
+Every method that takes a consumer name refuses one that starts with `ReservedConsumerPrefix` (`syncplane.`). The engine keeps its own state under such names.
+
+Workspaces whose id starts with `ReservedWorkspacePrefix` (`#syncplane.`) hold only engine state, such as a replication link's list of linked workspaces. `WorkspaceIDs`, `ConsumerPendingWorkspaces` and `PendingWorkspaces` leave them out, and the wire API refuses their ids, as it refuses every id that is not a valid workspace id.
+
 `ResetConsumer` removes stored positions and shadow states for a consumer. Consumers below the tombstone horizon are pruned by garbage collection. See [the effects runtime](../how-to/react-to-changes.md).
 
 ## Permissions and identity
@@ -855,6 +861,8 @@ A caller can read a blob when at least one live row it can read names the digest
 | `internal`            | The blob store failed (`the blob store failed`; the server logs the details), or `CanUploadBlob` returned an error without a Connect code. An error with a Connect code reaches the client unchanged.                                                                                                                                   |
 | `permission_denied`   | The workspace gate refused the caller, with the same codes as the sync service. A `WatchBlobs` stream runs the gate again at each heartbeat, and ends with this error when the caller is no longer admitted. Or `CanUploadBlob` returned a `Rejection`: its code is under `ErrorCodeMetadataKey`, and its message is the error message. |
 
+`ReferencedBlobs(ctx, workspaceID, want, entity)` returns the digests of `want` that a live row of the workspace names in a `BlobRef` field: the rule blob GC keeps a blob by. It applies no access rule and counts the rows of server-only entities. A non-nil `entity` func limits the check to the entities it accepts. It runs in one read transaction and costs one index probe per digest and entity, or a read of every row of an entity that no index serves. It fails for an invalid workspace id.
+
 ### Upload policy
 
 Every caller admitted to the workspace can upload a blob up to `Limits.MaxBlobBytes`. To decide more, implement `BlobPermissions` on the `Permissions` passed to `WithPermissions`. The server detects it by type assertion.
@@ -895,6 +903,83 @@ See [Blob stores](storage-adapter.md#blob-stores) for the contract.
 A `Manager` that passes one store to every app (`WithServerOptions(server.WithBlobStore(st))`) keeps the apps apart: each app names its workspaces in the store with its own prefix, and each app's GC pass collects its own workspaces only.
 
 `syncplaned -blob-dir <dir>` opens an `fsstore` over `<dir>` and passes it to every hosted app this way. Without the flag, `BlobService` answers `unimplemented`. `syncplaned` has no GC flags, so it runs no blob GC, and the blobs it stores are never deleted.
+
+## Chained sync
+
+These hooks let a link keep this server's workspaces converged with another server. Package `engine/upstream` uses them; see the [upstream reference](upstream.md) and [Chained sync](../explanation/chained-sync.md). Application code rarely calls them.
+
+### Write capture
+
+```go
+type WriteCapture func(ctx context.Context, w *CapturedWrite) error
+func WithWriteCapture(c WriteCapture) Option
+```
+
+The capture sees every mutation the server applies, inside the write transaction, after the mutation's writes and before it commits:
+
+- It runs once for each mutation of a client push, and once for each `Apply`, `ApplyIdempotent`, `Mutate`, `MutateIdempotent`, `Invoke` and `InvokeIdempotent` call that writes a row or invokes a mutator.
+- It does not run for a mutation that is rejected or fails before it, for a replayed idempotent call, or for a `Replicate` write.
+- A `Rejection` it returns rejects the mutation: nothing the mutation wrote commits, a push reports it `REJECTED` with that code, and the other entry points return the error. Any other error fails the write as a storage error does; a push fails the workspace's batch with `internal`.
+- It runs while the workspace's write lock is held, and can run more than once for one mutation when the transaction runs again. Only what it writes through `CapturedWrite.Tx` is kept from a run that does not commit. A write call made with its `ctx` fails rather than deadlocks.
+
+`CapturedWrite` and the slices it holds are valid only during the call:
+
+| Field       | Meaning                                                                                                                                                                                               |
+| ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Workspace` | The workspace written to.                                                                                                                                                                             |
+| `Seq`       | The sequence the mutation's rows took; 0 when it wrote none.                                                                                                                                          |
+| `Actor`     | Who the rows are attributed to.                                                                                                                                                                       |
+| `Custom`    | The custom mutation that was invoked; `nil` for a CRUD write. `Ops` then holds the rows its mutator wrote, and is empty for a forwarded unknown mutation.                                             |
+| `Ops`       | The row writes, in the order they were made.                                                                                                                                                          |
+| `Tx`        | The write transaction. What the capture writes through it commits or rolls back with the mutation. Use it for consumer shadows, not for rows: a row written through it skips every derived structure. |
+
+Each `CapturedOp` has `Entity`, `Key`, `Op`, and:
+
+| Field             | Meaning                                                                                                                                                                                                                                                    |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Value`           | The submitted value, encoded; `nil` for a DELETE. For a PUT, each field the caller may not write holds its stored value, and each plain-string text value is resolved to a document. A text field holds the submitted document or fragment, not the union. |
+| `Mask`            | The PATCH field mask; `nil` for PUT and DELETE.                                                                                                                                                                                                            |
+| `ExpectedVersion` | The version the write required; `nil` for an unguarded write.                                                                                                                                                                                              |
+| `PrevVersion`     | The row's version before the write; 0 when absent or deleted.                                                                                                                                                                                              |
+| `After`           | The stored value after the write; `nil` when the write deleted the row.                                                                                                                                                                                    |
+
+### Forwarded mutations
+
+`WithUnknownMutatorForwarding()` makes a custom mutation with an undeclared name a mutator that writes nothing. `Permissions.CanMutate` authorizes it as any custom mutation; in a schema that uses the access model, every caller admitted to the workspace may invoke it. Its args are not decoded. On a push it is `APPLIED`: it advances the client's watermark and takes a sequence. `Invoke` and `InvokeIdempotent` accept it with args of any type, and take no sequence. The write capture gets it with `Custom` set and no `Ops`.
+
+The client gets its ack before the rows the mutation changes arrive from the server that runs it, so its rows can show the state without the mutation in between.
+
+### Replicated writes
+
+```go
+func (s *Server) Replicate(ctx context.Context, workspaceID string, fn func(tx *ReplicaTx) error) error
+func (s *Server) ReadState(ctx context.Context, workspaceID string, fn func(tx storage.ReadTx) error) error
+```
+
+`Replicate` runs `fn` in a write transaction that stores rows exactly as given. No permission hook runs, no compare-and-swap applies, a collaborative-text field is replaced rather than unioned, and a field the caller may not write or a creator field keeps the value written. Indexes, search, the text delta log, field history, the access model and the change feed with its client notifications stay current, as after any write.
+
+- All writes of one call take one sequence, allocated on the first write. A call that writes nothing takes none and notifies nobody.
+- Rows are attributed to `Actor{System: name}` for a context marked with `TrustedAs(ctx, name)`, and to `Actor{System: "upstream"}` otherwise.
+- `Replicate` writes never reach the write capture.
+- `fn` can run more than once. An error from `fn` rolls back and is returned. Calling `Replicate` or another write call from inside `fn` deadlocks.
+
+`ReplicaTx` is valid only during `fn` and is not safe for concurrent use:
+
+| Method                    | Behavior                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Get(entity, key)`        | The stored row as it stands in this transaction. A tombstone is found, with `Deleted` set; a collected one is not.                                                                                                                                                                                                                                                                                                        |
+| `Put(entity, key, value)` | Stores `value`. Writing the bytes the live row holds does nothing. Fails for an unregistered entity, a value that does not decode, or key fields that do not derive `key`. Returns a `Rejection` for a key the naming rules refuse, and for a row the server cannot store: a keyed list with one key twice, an invalid grant row, an access chain past `MaxAccessDepth` or `MaxAccessParents`, or too many index entries. |
+| `Delete(entity, key)`     | Writes a tombstone. Deleting an absent or deleted row does nothing. Fails for an unregistered entity; returns a `Rejection` for a refused key.                                                                                                                                                                                                                                                                            |
+| `Tx()`                    | The storage transaction, for state kept beside the rows, such as consumer shadows. It commits or rolls back with the call.                                                                                                                                                                                                                                                                                                |
+| `Workspace()`, `Seq()`    | The workspace, and the sequence the writes take (0 before the first write).                                                                                                                                                                                                                                                                                                                                               |
+
+A failed `Put` or `Delete` writes nothing.
+
+`ReadState` runs `fn` once in a read-only snapshot, without permission hooks or read rules. `fn` must not start a write.
+
+### Entity metadata
+
+`Entity(name)` and `Entities()` return `EntityMeta`. Besides `Name`, `Descriptor`, `KeyFields` and `Managed`, it carries `Type`, the message type the server decodes rows as, and `Mergers`, a copy of the `WithMerger` hooks keyed by field path (`nil` when the entity declares none).
 
 ## Hosting many apps
 

@@ -12,6 +12,10 @@
 // default one carries the entities that refer to them (blob_holder,
 // blob_tree, blob_ledger).
 //
+// With -forward it runs two engines in one process: an origin with the
+// default schema on its own listener, and a local engine linked to it through
+// engine/upstream, served on the LISTENING address; see forward.go.
+//
 // A second listener answers each TCP connection as a tunnel (engine/tunnel)
 // to the same handlers, and its address is printed as "TUNNEL tcp://…" before
 // the LISTENING line.
@@ -19,6 +23,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"net"
@@ -64,6 +69,8 @@ func main() {
 			"how long blob GC keeps an unreferenced blob or a staged upload (0 is the default, 30 days); /debug/gc runs a pass")
 		tunnelAddr = flag.String("tunnel-addr", "127.0.0.1:0",
 			"listen address for tunnel connections, each a byte stream of length-prefixed frames (empty disables)")
+		forward = flag.Bool("forward", false,
+			"serve an origin engine with the default schema and a local engine linked to it through engine/upstream; see forward.go")
 	)
 	buildLogger := clilog.Flags(flag.CommandLine)
 	flag.Parse()
@@ -94,12 +101,17 @@ func main() {
 	}
 	defer store.Close()
 
-	opts := []server.Option{
+	// shared is what the forwarding mode's local engine runs with too: the
+	// wire timing and the identity rules, without the schema, the blobs or
+	// the garbage collection.
+	shared := []server.Option{
 		server.WithHeartbeat(*heartbeat),
 		server.WithRoomAnnounce(*roomAnnounce),
 		server.WithNotifyCoalescing(*notifyWindow),
 		server.WithChunkSize(*chunkSize),
 		server.WithLogger(logger),
+	}
+	opts := []server.Option{
 		server.WithLimits(server.Limits{MaxAccessDepth: *maxAccessDepth, MaxBlobBytes: *maxBlobBytes}),
 		server.WithBlobStore(memstore.New()),
 		server.WithBlobRetention(*blobRetention),
@@ -117,9 +129,9 @@ func main() {
 		// in reach of it.
 		opts = append(opts, server.WithGC(time.Millisecond, 0))
 	}
-	opts = append(opts,
+	opts = append(opts, server.WithTextCompaction(*gcTextPurge))
+	shared = append(shared,
 		server.WithTextDeltaRetention(*gcTextDelta),
-		server.WithTextCompaction(*gcTextPurge),
 		// One record per write, rather than the five-minute default that folds a
 		// run of writes to one row into one. A suite's writes all land inside any
 		// realistic window and under one actor, so the default would collapse
@@ -142,6 +154,14 @@ func main() {
 				return server.Principal{Subject: subject}, nil
 			})),
 	)
+	opts = append(opts, shared...)
+	if *forward {
+		if *access {
+			clilog.Fatal(logger, "flags", errors.New("-forward and -access cannot be combined"))
+		}
+		runForward(logger, store, *dbPath+".local", opts, shared, *addr, *tunnelAddr)
+		return
+	}
 	srv, err := server.New(store, opts...)
 	if err != nil {
 		clilog.Fatal(logger, "create server", err)
@@ -150,25 +170,7 @@ func main() {
 
 	stats := newRPCStats()
 	mux := http.NewServeMux()
-	// Every service, each behind the stats wrapper: it keys on the last path
-	// segment, so mounting the presence service here is what makes Watch and
-	// Publish visible to /debug/rpc.
-	for path, handler := range srv.Handlers() {
-		mux.Handle(path, stats.wrap(handler))
-	}
-	// Server-side view of what the clients are doing, for the multi-tab e2e
-	// suite; see rpcStats.
-	mux.Handle("/debug/rpc", stats)
-	// Trusted server-side string writes to Widget text fields, so the
-	// integration suite can exercise cross-language convergence of the
-	// string-boundary write path.
-	mux.Handle("/debug/textstring", textStringHandler(srv))
-	// One garbage-collection pass on demand, so suites can decide when
-	// collaborative-text compaction happens.
-	mux.Handle("/debug/gc", gcHandler(srv))
-	// Workspace deletion on demand, so suites can watch a syncing client meet
-	// the denial a deleted workspace answers with.
-	mux.Handle("/debug/delete-workspace", deleteWorkspaceHandler(srv))
+	mountEngine(mux, srv, stats)
 	if *access {
 		mux.Handle("/debug/trusted", trustedWriteHandler(srv))
 	}
@@ -206,6 +208,30 @@ func serveTunnels(ln net.Listener, h http.Handler) {
 		}
 		go func() { _ = tunnel.Serve(context.Background(), tunnel.NewStreamConn(conn), h) }()
 	}
+}
+
+// mountEngine mounts srv's services and the debug endpoints every schema
+// serves on mux.
+func mountEngine(mux *http.ServeMux, srv *server.Server, stats *rpcStats) {
+	// Every service, each behind the stats wrapper: it keys on the last path
+	// segment, so mounting the presence service here is what makes Watch and
+	// Publish visible to /debug/rpc.
+	for path, handler := range srv.Handlers() {
+		mux.Handle(path, stats.wrap(handler))
+	}
+	// Server-side view of what the clients are doing, for the multi-tab e2e
+	// suite; see rpcStats.
+	mux.Handle("/debug/rpc", stats)
+	// Trusted server-side string writes to Widget text fields, so the
+	// integration suite can exercise cross-language convergence of the
+	// string-boundary write path.
+	mux.Handle("/debug/textstring", textStringHandler(srv))
+	// One garbage-collection pass on demand, so suites can decide when
+	// collaborative-text compaction happens.
+	mux.Handle("/debug/gc", gcHandler(srv))
+	// Workspace deletion on demand, so suites can watch a syncing client meet
+	// the denial a deleted workspace answers with.
+	mux.Handle("/debug/delete-workspace", deleteWorkspaceHandler(srv))
 }
 
 // defaultOptions is the schema and permission policy every suite but the

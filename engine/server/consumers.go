@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"iter"
+	"slices"
+	"strings"
 
 	"github.com/levelfourab/syncplane/engine/storage"
 )
@@ -13,6 +15,23 @@ import (
 // what keeps a caller-supplied string from becoming unbounded storage. It is
 // generous against anything a human names a consumer.
 const MaxConsumerNameBytes = 128
+
+// ReservedConsumerPrefix starts the consumer names the engine keeps for its own
+// state. Every method that takes a consumer name refuses one that starts with
+// it.
+const ReservedConsumerPrefix = "syncplane."
+
+// ReservedWorkspacePrefix starts the ids of workspaces that hold only the
+// engine's own state, such as a replication link's list of linked workspaces.
+// WorkspaceIDs, ConsumerPendingWorkspaces and PendingWorkspaces leave them out,
+// and the wire API refuses them, as it refuses every id that is not a valid
+// workspace id.
+const ReservedWorkspacePrefix = "#syncplane."
+
+// withoutReserved drops the ids that start with ReservedWorkspacePrefix.
+func withoutReserved(ids []string) []string {
+	return slices.DeleteFunc(ids, func(id string) bool { return strings.HasPrefix(id, ReservedWorkspacePrefix) })
+}
 
 // ConsumerShadowWrite is one row's shadow update produced by a drained page: the
 // snapshot a consumer wants to remember for (Entity, Key), or a deletion when
@@ -103,7 +122,26 @@ func (s *Server) ConsumerPendingWorkspaces(ctx context.Context, consumer, after 
 	if limit <= 0 {
 		return nil, fmt.Errorf("server: limit must be positive, got %d", limit)
 	}
-	return s.store.ListPendingWorkspaceIDs(ctx, consumer, storage.Range{After: after}, limit)
+	// The reserved ids are dropped after the store's limit, so a page that
+	// held one is topped up from after its last id: callers take a short page
+	// as the last one.
+	var out []string
+	for len(out) < limit {
+		want := limit - len(out)
+		ids, err := s.store.ListPendingWorkspaceIDs(ctx, consumer, storage.Range{After: after}, want)
+		if err != nil {
+			return nil, err
+		}
+		if len(ids) > 0 {
+			after = ids[len(ids)-1]
+		}
+		exhausted := len(ids) < want
+		out = append(out, withoutReserved(ids)...)
+		if exhausted {
+			break
+		}
+	}
+	return out, nil
 }
 
 // pendingPage is how many workspaces PendingWorkspaces asks the store for per
@@ -121,14 +159,21 @@ const pendingPage = 512
 // stops. Each page is one store query, run when the loop reaches it.
 func (s *Server) PendingWorkspaces(ctx context.Context, consumer string) iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
+		if err := validateConsumerName(consumer); err != nil {
+			yield("", err)
+			return
+		}
 		after := ""
 		for {
-			ids, err := s.ConsumerPendingWorkspaces(ctx, consumer, after, pendingPage)
+			ids, err := s.store.ListPendingWorkspaceIDs(ctx, consumer, storage.Range{After: after}, pendingPage)
 			if err != nil {
 				yield("", err)
 				return
 			}
 			for _, id := range ids {
+				if strings.HasPrefix(id, ReservedWorkspacePrefix) {
+					continue
+				}
 				if !yield(id, nil) {
 					return
 				}
@@ -231,6 +276,9 @@ func validateConsumerName(consumer string) error {
 	}
 	if len(consumer) > MaxConsumerNameBytes {
 		return fmt.Errorf("server: consumer name is %d bytes, limit is %d", len(consumer), MaxConsumerNameBytes)
+	}
+	if strings.HasPrefix(consumer, ReservedConsumerPrefix) {
+		return fmt.Errorf("server: consumer name %q starts with %q, which the engine reserves", consumer, ReservedConsumerPrefix)
 	}
 	return nil
 }

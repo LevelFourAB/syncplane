@@ -243,11 +243,15 @@ func (s *Server) apply(
 		if err := gate.accessOf().begin(tx); err != nil {
 			return err
 		}
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, gate: gate, actor: actor, access: gate.accessOf()}
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, gate: gate, actor: actor, access: gate.accessOf(),
+			log: s.newWriteLog()}
 		for _, in := range atx.intents {
 			if err := in.apply(etx); err != nil {
 				return err
 			}
+		}
+		if err := s.runCapture(ctx, workspaceID, tx, etx.log, etx.Seq()); err != nil {
+			return err
 		}
 		if key != "" {
 			if err := tx.PutIdempotencyRecord(key, storage.IdempotencyRecord{Seq: etx.Seq(), Result: result}); err != nil {

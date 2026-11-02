@@ -754,15 +754,15 @@ func (e *rowEmitter) emitChange(tx storage.ReadTx, row storage.Row) (*syncplanev
 	}
 	var deltas []*syncplanev1.FieldDelta
 	for _, tf := range info.textFields {
-		for _, ti := range tf.instances(msg.ProtoReflect()) {
-			cur := ti.bytes()
+		for _, ti := range tf.Instances(msg.ProtoReflect()) {
+			cur := ti.Bytes()
 			if len(cur) == 0 {
 				continue // nothing to save, and nothing the recipient must keep
 			}
 			// The log — and so FieldDelta.field — is keyed by instance path:
 			// each element of a keyed list or map is its own document with its
 			// own span of entries.
-			frags, complete, err := tx.FieldDeltas(row.Entity, row.Key, ti.path, e.deltaAfter)
+			frags, complete, err := tx.FieldDeltas(row.Entity, row.Key, ti.Path, e.deltaAfter)
 			if err != nil {
 				return nil, err
 			}
@@ -780,8 +780,8 @@ func (e *rowEmitter) emitChange(tx storage.ReadTx, row storage.Row) (*syncplanev
 			if len(folded) > 0 && float64(len(folded)) >= float64(len(cur))*fragmentSizeRatio {
 				continue
 			}
-			deltas = append(deltas, &syncplanev1.FieldDelta{Field: ti.path, Fragment: folded})
-			ti.clear()
+			deltas = append(deltas, &syncplanev1.FieldDelta{Field: ti.Path, Fragment: folded})
+			ti.Clear()
 		}
 	}
 	if len(deltas) == 0 {

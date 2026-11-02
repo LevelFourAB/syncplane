@@ -29,6 +29,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/internal/pubsub"
 	"github.com/levelfourab/syncplane/engine/internal/telemetry"
+	"github.com/levelfourab/syncplane/engine/internal/textpath"
 	"github.com/levelfourab/syncplane/engine/lease"
 	"github.com/levelfourab/syncplane/engine/presence"
 	"github.com/levelfourab/syncplane/engine/query"
@@ -47,7 +48,7 @@ type entityInfo struct {
 	// nested, discovered at registration. Each gets the built-in text merger
 	// auto-installed in mergers, and EntityTx.Put merges them read-modify-
 	// write instead of replacing.
-	textFields []textField
+	textFields []textpath.Field
 	// keyedLists reports whether a row can hold a keyed list, which is what
 	// puts checkItemKeys on the write path.
 	keyedLists bool
@@ -163,138 +164,6 @@ func refCasePath(ref *lww.Ref) string {
 		return string(ref.Field.Name()) + "." + string(ref.Value.Name())
 	}
 	return string(ref.Field.Name())
-}
-
-// textField is one collaborative-text field: its dotted proto path and the
-// steps leading to it. A path may cross keyed message lists and message-valued
-// maps, in which case the field holds one document PER ELEMENT rather than one
-// per row; such a field is nested, and everything that consumes it enumerates
-// instances (see instances) instead of walking a fixed chain.
-type textField struct {
-	path  string
-	steps []textStep
-	// fds are the step descriptors, in order. Held once so instance tails can
-	// be subslices instead of per-call rebuilds.
-	fds []protoreflect.FieldDescriptor
-	// nested reports whether any step is a container. A fixed field has
-	// exactly one instance per row, present or not, which is what the
-	// pre-container behavior was.
-	nested bool
-}
-
-// textStep is one segment of a text field's path: the field walked through,
-// plus the element identity when that field is a keyed message list. A map
-// step is recognized by fd.IsMap(); any other step is a singular descent.
-type textStep struct {
-	fd        protoreflect.FieldDescriptor
-	keyFields []protoreflect.FieldDescriptor
-}
-
-func (st textStep) container() bool { return st.fd.IsMap() || len(st.keyFields) > 0 }
-
-func newTextField(path string, steps []textStep) textField {
-	tf := textField{path: path, steps: steps}
-	tf.fds = make([]protoreflect.FieldDescriptor, len(steps))
-	for i, st := range steps {
-		tf.fds[i] = st.fd
-		if st.container() {
-			tf.nested = true
-		}
-	}
-	return tf
-}
-
-// textInstance is one document position of a text field within one row: the
-// message holding the leaf's remaining singular chain, plus the instance path
-// — the schema path with the item keys the enumeration crossed, which is
-// exactly the mask form addressing this document ("items.<key>.body"). The
-// instance path is the identity every per-document side table keys on: the
-// delta log, compaction floors, the decoded-document cache and the wire's
-// FieldDelta.field all carry it.
-type textInstance struct {
-	path   string
-	holder protoreflect.Message
-	tail   []protoreflect.FieldDescriptor
-}
-
-func (ti textInstance) bytes() []byte { return chainGetBytes(ti.holder, ti.tail) }
-func (ti textInstance) set(b []byte)  { chainSetBytes(ti.holder, ti.tail, b) }
-func (ti textInstance) clear()        { chainClearBytes(ti.holder, ti.tail) }
-
-// instances returns every position of tf that msg carries, in walk order (list
-// order; map entries sorted by encoded key, so the order is deterministic). A
-// fixed field yields exactly one instance whether or not the leaf is set —
-// mirroring the plain chain walk — while a nested field yields one per element
-// reachable through present containers, so zero when a container is absent.
-//
-// Holders of returned instances are obtained mutably, so set/clear write
-// through to msg; enumeration itself materializes nothing, because it only
-// descends into fields msg already has.
-func (tf textField) instances(msg protoreflect.Message) []textInstance {
-	if !tf.nested {
-		return []textInstance{{path: tf.path, holder: msg, tail: tf.fds}}
-	}
-	var out []textInstance
-	tf.walkInstances(msg, 0, "", &out)
-	return out
-}
-
-func (tf textField) walkInstances(cur protoreflect.Message, from int, prefix string, out *[]textInstance) {
-	next := -1
-	for i := from; i < len(tf.steps); i++ {
-		if tf.steps[i].container() {
-			next = i
-			break
-		}
-	}
-	if next == -1 {
-		// No container remains: the rest of the path is a fixed chain from cur.
-		path := prefix
-		for i := from; i < len(tf.steps); i++ {
-			if i > from {
-				path += "."
-			}
-			path += string(tf.steps[i].fd.Name())
-		}
-		*out = append(*out, textInstance{path: path, holder: cur, tail: tf.fds[from:]})
-		return
-	}
-	// Singular descent to the container; an absent intermediate holds no
-	// elements, and neither does an absent container.
-	for i := from; i < next; i++ {
-		if !cur.Has(tf.steps[i].fd) {
-			return
-		}
-		cur = cur.Mutable(tf.steps[i].fd).Message()
-		prefix += string(tf.steps[i].fd.Name()) + "."
-	}
-	st := tf.steps[next]
-	if !cur.Has(st.fd) {
-		return
-	}
-	prefix += string(st.fd.Name()) + "."
-	if st.fd.IsMap() {
-		mm := cur.Mutable(st.fd).Map()
-		segs := make([]string, 0, mm.Len())
-		keys := make(map[string]protoreflect.MapKey, mm.Len())
-		mm.Range(func(mk protoreflect.MapKey, _ protoreflect.Value) bool {
-			seg := lww.EncodeMapKeySegment(st.fd, mk)
-			segs = append(segs, seg)
-			keys[seg] = mk
-			return true
-		})
-		sort.Strings(segs)
-		for _, seg := range segs {
-			tf.walkInstances(mm.Mutable(keys[seg]).Message(), next+1, prefix+seg+".", out)
-		}
-		return
-	}
-	list := cur.Mutable(st.fd).List()
-	for j := 0; j < list.Len(); j++ {
-		elem := list.Get(j).Message()
-		seg := lww.EncodeItemKey(elem, st.keyFields)
-		tf.walkInstances(elem, next+1, prefix+seg+".", out)
-	}
 }
 
 // refField is a reference field of an entity together with the key fields of
@@ -891,6 +760,11 @@ type Server struct {
 	// strictAccess is WithStrictAccess: registration refuses an entity outside
 	// the access model in a schema that uses it.
 	strictAccess bool
+	// capture is the WithWriteCapture hook, nil when not installed. Fixed once
+	// New returns.
+	capture WriteCapture
+	// forwardUnknown is WithUnknownMutatorForwarding. Fixed once New returns.
+	forwardUnknown bool
 }
 
 // catalogPtr returns the current immutable catalog snapshot.
@@ -1597,7 +1471,7 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	// Discover (syncplane.v1.field_behavior).text fields and auto-install the
 	// built-in convergent-text merger for each — no RegisterMerger call
 	// needed, and PATCHes to the field merge instead of replacing.
-	if err := collectTextFields(desc, "", "", "", nil, &info.textFields); err != nil {
+	if info.textFields, err = textpath.Collect(desc, checkTextField); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
 	info.keyedLists = lww.HoldsKeyedList(desc)
@@ -1610,7 +1484,7 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 			// full-state value — but a delta-state fragment MUST be decoded and
 			// applied rather than stored raw, and "the row has no document yet"
 			// is exactly when a self-contained fragment arrives.
-			info.mergers[tf.path] = lww.Merger{Fn: text.Merge, MergeAbsentBase: true}
+			info.mergers[tf.Path] = lww.Merger{Fn: text.Merge, MergeAbsentBase: true}
 		}
 	}
 	if info.creatorFields, err = creatorFieldsOf(desc, info.keyFields); err != nil {
@@ -1756,120 +1630,36 @@ func creatorFieldsOf(desc protoreflect.MessageDescriptor, keyFields []protorefle
 	return out, nil
 }
 
-// collectTextFields walks a message's fields (descending through singular,
-// non-opaque, non-reference message fields, keyed message lists and
-// message-valued maps) and records every text field, validating its shape: a
-// singular bytes field without key_field/order_field. steps is the path walked
-// so far (cycle guard — a recursive message type cannot carry a text field
-// through itself anyway).
+// checkTextField refuses a text field the engine cannot keep a document in: one
+// that is not a singular bytes field or combines with key_field/order_field,
+// and one inside a oneof or an unkeyed message list, where its merger could
+// never fire, because a oneof is replaced whole, and an element no mask can
+// address is too.
 //
 // A text field below a keyed list or map is accepted: the element identity —
 // the list key or the map key — is stable, a mask path can address the element
 // ("items.<key>.body"), and the merge descends into it, so the merger fires per
 // element and the field holds one document per element.
-//
-// oneof names the group crossed on the way here, and unkeyed the message list
-// with no element identity (both empty when none). The walk still descends
-// through oneof members and unkeyed list elements so that a text field below
-// one is reported rather than quietly skipped: its merger could never fire,
-// because a oneof is replaced whole, and an element no mask can address is too.
-func collectTextFields(
-	desc protoreflect.MessageDescriptor,
-	prefix string,
-	oneof string,
-	unkeyed string,
-	steps []textStep,
-	out *[]textField,
-) error {
-	fields := desc.Fields()
-	for i := 0; i < fields.Len(); i++ {
-		fd := fields.Get(i)
-		behavior := fieldBehaviorOf(fd)
-		memberOf := oneof
-		if od := lww.OneofOf(fd); od != nil {
-			memberOf = string(od.Name())
-		}
-		if behavior.GetText() {
-			if fd.IsList() || fd.IsMap() || fd.Kind() != protoreflect.BytesKind {
-				return fmt.Errorf("text field %q must be a singular bytes field", prefix+string(fd.Name()))
-			}
-			if len(behavior.GetKeyField()) > 0 || behavior.GetOrderField() != "" {
-				return fmt.Errorf("text field %q cannot combine with key_field/order_field", prefix+string(fd.Name()))
-			}
-			if memberOf != "" {
-				return fmt.Errorf("text field %q is inside oneof %q; a oneof is replaced whole, "+
-					"so the text merger could never run", prefix+string(fd.Name()), memberOf)
-			}
-			if unkeyed != "" {
-				return fmt.Errorf("text field %q is inside %s, whose elements have no identity; "+
-					"an element is replaced whole, so the text merger could never run — "+
-					"give the list a key_field to hold one document per element",
-					prefix+string(fd.Name()), unkeyed)
-			}
-			fieldSteps := make([]textStep, len(steps)+1)
-			copy(fieldSteps, steps)
-			fieldSteps[len(steps)] = textStep{fd: fd}
-			*out = append(*out, newTextField(prefix+string(fd.Name()), fieldSteps))
-			continue
-		}
-		// Descend into embedded sub-messages and collection elements — unkeyed
-		// list elements purely to refuse text there. Opaque messages are
-		// skipped either way: they are replaced whole, so a nested merger could
-		// never fire — and references, which project down to key fields.
-		// Recursive types terminate because a message cannot contain itself as
-		// a required finite path — guard by refusing to re-enter a type already
-		// on the descent path.
-		var sub protoreflect.MessageDescriptor
-		enclosing := unkeyed
-		step := textStep{fd: fd}
-		switch {
-		case behavior.GetOpaque() || lww.IsRef(fd):
-		case fd.IsMap():
-			if fd.MapValue().Kind() == protoreflect.MessageKind {
-				sub = fd.MapValue().Message()
-			}
-		case fd.IsList():
-			if fd.Kind() == protoreflect.MessageKind {
-				sub = fd.Message()
-				step.keyFields = lww.KeyFieldsFor(fd)
-				if len(step.keyFields) == 0 {
-					enclosing = fmt.Sprintf("repeated field %q", prefix+string(fd.Name()))
-				}
-			}
-		case fd.Kind() == protoreflect.MessageKind:
-			sub = fd.Message()
-		}
-		if sub == nil || onChain(steps, sub.FullName()) {
-			continue
-		}
-		if err := collectTextFields(sub, prefix+string(fd.Name())+".",
-			memberOf, enclosing, append(steps, step), out); err != nil {
-			return err
-		}
+func checkTextField(c textpath.Candidate) error {
+	fd := c.Field
+	behavior := fieldBehaviorOf(fd)
+	if fd.IsList() || fd.IsMap() || fd.Kind() != protoreflect.BytesKind {
+		return fmt.Errorf("text field %q must be a singular bytes field", c.Path)
+	}
+	if len(behavior.GetKeyField()) > 0 || behavior.GetOrderField() != "" {
+		return fmt.Errorf("text field %q cannot combine with key_field/order_field", c.Path)
+	}
+	if c.Oneof != "" {
+		return fmt.Errorf("text field %q is inside oneof %q; a oneof is replaced whole, "+
+			"so the text merger could never run", c.Path, c.Oneof)
+	}
+	if c.UnkeyedList != "" {
+		return fmt.Errorf("text field %q is inside repeated field %q, whose elements have no identity; "+
+			"an element is replaced whole, so the text merger could never run — "+
+			"give the list a key_field to hold one document per element",
+			c.Path, c.UnkeyedList)
 	}
 	return nil
-}
-
-// onChain reports whether a message type is already being descended through.
-// The type compared is the one the walk enters: a map field's value message,
-// not its synthetic entry message.
-func onChain(steps []textStep, name protoreflect.FullName) bool {
-	for _, st := range steps {
-		fd := st.fd
-		var md protoreflect.MessageDescriptor
-		switch {
-		case fd.IsMap():
-			if fd.MapValue().Kind() == protoreflect.MessageKind {
-				md = fd.MapValue().Message()
-			}
-		case fd.Kind() == protoreflect.MessageKind:
-			md = fd.Message()
-		}
-		if md != nil && md.FullName() == name {
-			return true
-		}
-	}
-	return false
 }
 
 // fieldBehaviorOf reads the (syncplane.v1.field_behavior) extension, or nil.
@@ -1985,8 +1775,11 @@ func fieldIsOpaque(fd protoreflect.FieldDescriptor) bool {
 // may be boundedly stale (an adapter may answer it from a read replica): a
 // just-written workspace appears on a later call, so poll rather than assume
 // one call is exhaustive.
+//
+// It leaves out the workspaces whose id starts with ReservedWorkspacePrefix.
 func (s *Server) WorkspaceIDs(ctx context.Context) ([]string, error) {
-	return s.store.ListWorkspaceIDs(ctx, storage.Range{})
+	ids, err := s.store.ListWorkspaceIDs(ctx, storage.Range{})
+	return withoutReserved(ids), err
 }
 
 // EntityKey derives the wire entity name and row key from a registered
@@ -2014,6 +1807,9 @@ type EntityMeta struct {
 	// Descriptor is the entity message's descriptor, the basis for a generic
 	// reflective form/renderer.
 	Descriptor protoreflect.MessageDescriptor
+	// Type is the message type the server decodes the entity's rows as. Its
+	// Descriptor is Descriptor.
+	Type protoreflect.MessageType
 	// KeyFields are the fields (in order) whose values form the row key. They
 	// are identity, so an editor renders them read-only on edit.
 	KeyFields []protoreflect.FieldDescriptor
@@ -2025,6 +1821,9 @@ type EntityMeta struct {
 	// of a value the row no longer carries. A browser may still read them, and
 	// the RPC surface refuses client writes of them outright.
 	Managed bool
+	// Mergers holds the merge hooks WithMerger declared for the entity, keyed
+	// by field path, or nil when it declares none. The map is a copy.
+	Mergers map[string]MergeFunc
 }
 
 // Entities returns metadata for every registered entity, sorted by name.
@@ -2053,9 +1852,27 @@ func entityMeta(info *entityInfo) EntityMeta {
 	return EntityMeta{
 		Name:       info.name,
 		Descriptor: info.msgType.Descriptor(),
+		Type:       info.msgType,
 		KeyFields:  info.keyFields,
 		Managed:    info.name == historyEntityName,
+		Mergers:    declaredMergers(info.mergers),
 	}
+}
+
+// declaredMergers returns the WithMerger hooks of mergers. The engine's own
+// collaborative-text mergers are the ones that run on an absent base.
+func declaredMergers(mergers lww.Mergers) map[string]MergeFunc {
+	var out map[string]MergeFunc
+	for path, m := range mergers {
+		if m.MergeAbsentBase || m.Fn == nil {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]MergeFunc)
+		}
+		out[path] = MergeFunc(m.Fn)
+	}
+	return out
 }
 
 // RefKeyFields classifies a field as a typed reference to one entity: it
@@ -2372,37 +2189,9 @@ func (info *entityInfo) mergeTextFields(
 	base, next protoreflect.Message,
 	tw *textWrite,
 ) error {
-	for _, tf := range info.textFields {
-		var baseByPath map[string][]byte
-		for _, bi := range tf.instances(base) {
-			if b := bi.bytes(); len(b) > 0 {
-				if baseByPath == nil {
-					baseByPath = make(map[string][]byte)
-				}
-				if _, ok := baseByPath[bi.path]; !ok {
-					baseByPath[bi.path] = b
-				}
-			}
-		}
-		if baseByPath == nil {
-			continue
-		}
-		for _, ni := range tf.instances(next) {
-			baseBytes := baseByPath[ni.path]
-			nextBytes := ni.bytes()
-			if len(baseBytes) == 0 {
-				continue
-			}
-			if len(nextBytes) == 0 {
-				ni.set(baseBytes)
-				continue
-			}
-			merged, err := tw.mergeField(ni.path, baseBytes, nextBytes)
-			if err != nil {
-				return fmt.Errorf("server: entity %q text field %q: %w", info.name, ni.path, err)
-			}
-			ni.set(merged)
-		}
+	if err := textpath.Union(info.textFields, base, next, tw.mergeField); err != nil {
+		// No colon: the error opens with `text field "<path>":`.
+		return fmt.Errorf("server: entity %q %w", info.name, err)
 	}
 	return nil
 }
@@ -2438,80 +2227,35 @@ func (info *entityInfo) canonicalizeTextFields(
 	fragmentOK func(path string) bool,
 ) error {
 	for _, tf := range info.textFields {
-		for _, ti := range tf.instances(msg) {
-			b := ti.bytes()
+		for _, ti := range tf.Instances(msg) {
+			b := ti.Bytes()
 			if len(b) == 0 {
 				continue
 			}
 			if text.IsPlainString(b) {
-				return fmt.Errorf("entity %q text field %q: %w", info.name, ti.path,
+				return fmt.Errorf("entity %q text field %q: %w", info.name, ti.Path,
 					text.ErrPlainStringUnresolved)
 			}
 			if text.IsFragment(b) {
-				if fragmentOK == nil || !fragmentOK(ti.path) {
+				if fragmentOK == nil || !fragmentOK(ti.Path) {
 					return fmt.Errorf("entity %q text field %q: %w: not a mergeable position",
-						info.name, ti.path, text.ErrFragmentUnusable)
+						info.name, ti.Path, text.ErrFragmentUnusable)
 				}
 				f, err := text.DecodeFragment(b)
 				if err != nil {
-					return fmt.Errorf("entity %q text field %q: %w", info.name, ti.path, err)
+					return fmt.Errorf("entity %q text field %q: %w", info.name, ti.Path, err)
 				}
-				ti.set(f.Encode())
+				ti.Set(f.Encode())
 				continue
 			}
 			d, err := text.Decode(b, "")
 			if err != nil {
-				return fmt.Errorf("entity %q text field %q: %v", info.name, ti.path, err)
+				return fmt.Errorf("entity %q text field %q: %v", info.name, ti.Path, err)
 			}
-			ti.set(d.Encode())
+			ti.Set(d.Encode())
 		}
 	}
 	return nil
-}
-
-// chainGetBytes walks a descriptor chain and returns the leaf bytes value,
-// or nil when an intermediate message is unset.
-func chainGetBytes(msg protoreflect.Message, chain []protoreflect.FieldDescriptor) []byte {
-	cur := msg
-	for i, fd := range chain {
-		if i == len(chain)-1 {
-			return cur.Get(fd).Bytes()
-		}
-		if !cur.Has(fd) {
-			return nil
-		}
-		cur = cur.Get(fd).Message()
-	}
-	return nil
-}
-
-// chainClearBytes unsets the leaf bytes value, leaving intermediates alone.
-// Unlike chainSetBytes it materializes nothing: an unset intermediate already
-// means the leaf is unset.
-func chainClearBytes(msg protoreflect.Message, chain []protoreflect.FieldDescriptor) {
-	cur := msg
-	for i, fd := range chain {
-		if i == len(chain)-1 {
-			cur.Clear(fd)
-			return
-		}
-		if !cur.Has(fd) {
-			return
-		}
-		cur = cur.Mutable(fd).Message()
-	}
-}
-
-// chainSetBytes writes the leaf bytes value, materializing intermediates.
-func chainSetBytes(msg protoreflect.Message, chain []protoreflect.FieldDescriptor, value []byte) {
-	cur := msg
-	for i, fd := range chain {
-		if i == len(chain)-1 {
-			cur.Set(fd, protoreflect.ValueOfBytes(value))
-			return
-		}
-		cur = cur.Mutable(fd).Message()
-	}
 }
 
 // adopt returns msg as a message of the registered type. The catalog matches

@@ -7,6 +7,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	"github.com/levelfourab/syncplane/engine/internal/lww"
+	"github.com/levelfourab/syncplane/engine/internal/textpath"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/text"
 )
@@ -123,12 +124,12 @@ func (info *entityInfo) mergersFor(tw *textWrite) lww.Mergers {
 		out[path] = m
 	}
 	for _, tf := range info.textFields {
-		m, ok := out[tf.path]
+		m, ok := out[tf.Path]
 		if !ok {
 			continue
 		}
 		m.FnAt = tw.mergeField
-		out[tf.path] = m
+		out[tf.Path] = m
 	}
 	return out
 }
@@ -138,7 +139,7 @@ func (info *entityInfo) mergersFor(tw *textWrite) lww.Mergers {
 // without looking at the row.
 func (info *entityInfo) hasNestedText() bool {
 	for _, tf := range info.textFields {
-		if tf.nested {
+		if tf.Nested() {
 			return true
 		}
 	}
@@ -154,20 +155,20 @@ func (info *entityInfo) textStatePaths(msg protoreflect.Message) []string {
 	var paths []string
 	seen := make(map[string]bool, len(info.textFields))
 	for _, tf := range info.textFields {
-		if !tf.nested {
-			if !seen[tf.path] {
-				seen[tf.path] = true
-				paths = append(paths, tf.path)
+		if !tf.Nested() {
+			if !seen[tf.Path] {
+				seen[tf.Path] = true
+				paths = append(paths, tf.Path)
 			}
 			continue
 		}
 		if msg == nil {
 			continue
 		}
-		for _, ti := range tf.instances(msg) {
-			if !seen[ti.path] {
-				seen[ti.path] = true
-				paths = append(paths, ti.path)
+		for _, ti := range tf.Instances(msg) {
+			if !seen[ti.Path] {
+				seen[ti.Path] = true
+				paths = append(paths, ti.Path)
 			}
 		}
 	}
@@ -200,23 +201,9 @@ func (info *entityInfo) clearTextFloors(tx storage.WriteTx, key string, paths []
 // It also keeps the ids of the cleared text distinct from new text on a field
 // that was never compacted.
 func (info *entityInfo) keepClearedTextVersions(prev map[string][]byte, next protoreflect.Message) error {
-	if len(prev) == 0 {
-		return nil
-	}
-	for _, tf := range info.textFields {
-		for _, ti := range tf.instances(next) {
-			before := prev[ti.path]
-			if len(before) == 0 || len(ti.bytes()) > 0 {
-				continue
-			}
-			d, err := text.Decode(before, "")
-			if err != nil {
-				return fmt.Errorf("server: entity %q text field %q: stored document: %w", info.name, ti.path, err)
-			}
-			empty := text.New("")
-			empty.ObserveVersion(d.VersionVector())
-			ti.set(empty.Encode())
-		}
+	if err := textpath.KeepClearedVersions(info.textFields, prev, next); err != nil {
+		// No colon: the error opens with `text field "<path>":`.
+		return fmt.Errorf("server: entity %q %w", info.name, err)
 	}
 	return nil
 }
@@ -243,15 +230,15 @@ func (info *entityInfo) dropRemovedTextInstances(
 	}
 	live := make(map[string]bool)
 	for _, tf := range info.textFields {
-		if tf.nested {
-			for _, ti := range tf.instances(next) {
-				live[ti.path] = true
+		if tf.Nested() {
+			for _, ti := range tf.Instances(next) {
+				live[ti.Path] = true
 			}
 		} else {
 			// A fixed field's document identity survives a clear — the field
 			// can be written again as the same document — so its floor stays,
 			// exactly as before elements could carry text.
-			live[tf.path] = true
+			live[tf.Path] = true
 		}
 	}
 	var removed []string

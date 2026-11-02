@@ -32,6 +32,27 @@ func concatDocs(base, incoming []byte) ([]byte, error) {
 var _ = Describe("Merge hooks", func() {
 	// A bad WithMerger is New's error to report, so these assert on the whole
 	// bring-up rather than on a registration call.
+	It("lists an entity's declared mergers in its metadata, without the text mergers", func() {
+		srv := newTestServer(server.WithMerger(&testdatav1.Widget{}, "doc", concatDocs))
+		meta, ok := srv.Entity("widget")
+		Expect(ok).To(BeTrue())
+		Expect(meta.Mergers).To(HaveLen(1))
+		Expect(meta.Mergers).To(HaveKey("doc"))
+		a, err := proto.Marshal(&testdatav1.Blob{Data: []byte("a")})
+		Expect(err).NotTo(HaveOccurred())
+		b, err := proto.Marshal(&testdatav1.Blob{Data: []byte("b")})
+		Expect(err).NotTo(HaveOccurred())
+		merged, err := meta.Mergers["doc"](a, b)
+		Expect(err).NotTo(HaveOccurred())
+		var got testdatav1.Blob
+		Expect(proto.Unmarshal(merged, &got)).To(Succeed())
+		Expect(got.GetData()).To(Equal([]byte("ab")))
+
+		meta, ok = srv.Entity("keyed_text")
+		Expect(ok).To(BeTrue())
+		Expect(meta.Mergers).To(BeNil())
+	})
+
 	Describe("WithMerger validation", func() {
 		It("accepts opaque message and bytes fields", func() {
 			Expect(newTestServerErr(

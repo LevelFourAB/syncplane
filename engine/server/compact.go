@@ -432,8 +432,8 @@ func (s *Server) compactRow(
 	}
 	floors := make(map[string][]byte, len(info.textFields))
 	for _, tf := range info.textFields {
-		for _, ti := range tf.instances(msg.ProtoReflect()) {
-			b := ti.bytes()
+		for _, ti := range tf.Instances(msg.ProtoReflect()) {
+			b := ti.Bytes()
 			if len(b) == 0 {
 				continue
 			}
@@ -453,8 +453,8 @@ func (s *Server) compactRow(
 			if items, marks := d.Compact(); items+marks < minPurged {
 				continue
 			}
-			ti.set(d.Encode())
-			floors[ti.path] = text.EncodeVV(d.VersionVector())
+			ti.Set(d.Encode())
+			floors[ti.Path] = text.EncodeVV(d.VersionVector())
 		}
 	}
 	if len(floors) == 0 {

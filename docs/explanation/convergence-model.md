@@ -378,3 +378,5 @@ workspace.
   constraints.
 - [Partial sync and coverage](partial-sync-and-coverage.md): Synchronization
   behavior when a client syncs a subset of a workspace.
+- [Chained sync](chained-sync.md): The same model with a local engine between
+  the clients and the server.

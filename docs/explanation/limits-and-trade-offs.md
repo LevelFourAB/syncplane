@@ -376,6 +376,10 @@ Set `d` well past the longest time a client can stay away and still hold unpushe
 
 A row refers to a file with a `BlobRef` field, and the bytes move through `BlobService`, not through the mutation log. The row write does not wait for the upload, so a row can name a blob that the server does not have yet, or that no device will ever upload. A caller reads a blob through the rows it can read, so a digest acts as a read capability inside its workspace. A tab that waits for another device's upload holds a `WatchBlobs` stream per workspace; against a server without it, the tab asks again on a timer, and can see a completed upload up to about one minute late. Blob GC protects only what live rows name, not tombstones or field history, so a restore after the blob retention can bring back a ref to a deleted blob. `fsstore` serves one host. See [Blobs](blobs.md).
 
+## A linked local engine is a client of its origin
+
+A local engine that `engine/upstream` links to an origin orders its writes only for a time. The origin decides, so a write the local engine accepted can change back later, and its downstream clients see that as an ordinary change, not as a rejection. The link has one identity at the origin, so the origin's permissions apply to the link and not to each local user. The local store holds a second copy of every synced row. See [Chained sync](chained-sync.md).
+
 ## Wire cursors are opaque
 
 Wire cursors are opaque tokens. Clients must not parse or interpret cursor structure.

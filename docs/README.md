@@ -45,6 +45,10 @@ Task-oriented guides. Each guide assumes you already have a running app.
 - [Sync an external store (connectors)](how-to/sync-an-external-store.md)
 - [Host multiple apps in one process](how-to/host-multiple-apps.md)
 - [Serve sync through a tunnel (desktop shells, sidecars, WebSockets)](how-to/serve-sync-through-a-tunnel.md)
+- [Embed sync in a Go desktop app](how-to/embed-sync-in-a-go-desktop-app.md)
+- [Forward sync to browsers through a local server](how-to/forward-sync-to-browsers.md)
+- [Read and write the local engine from Go](how-to/read-and-write-the-local-engine-from-go.md)
+- [Use the Go client against a remote server](how-to/use-the-go-client.md)
 - [Run more than one node](how-to/run-multiple-nodes.md)
 - [Deploy for high availability](how-to/deploy-for-high-availability.md)
 - [Observe the engine (OpenTelemetry)](how-to/observe-the-engine.md)
@@ -76,6 +80,10 @@ Information-oriented. Use these pages to look up facts.
   trusted writes, the change feed, blobs, `Manager` and the admin service.
 - [TypeScript client API](reference/typescript-client.md) — the full surface of
   `syncplane` and `syncplane/react`.
+- [Go client](reference/go-client.md) — `engine/client`: writes, reads, the
+  change feed, blobs and rooms against a remote server.
+- [Upstream link](reference/upstream.md) — `engine/upstream`: `Config`, write
+  modes, callbacks, status, errors, and the presence and blob bridges.
 - [Proto options](reference/proto-options.md) — `(syncplane.v1.entity)`,
   `(syncplane.v1.field_behavior)` and `syncplane.v1.BlobRef`.
 - [Connectors](reference/connectors.md) — the `Source` port and its optional
@@ -128,6 +136,9 @@ Understanding-oriented. Read these when a behavior surprises you.
   re-announcement.
 - [Blobs](explanation/blobs.md) — why file bytes stay out of the mutation log,
   content addressing per workspace, reads through rows, and garbage collection.
+- [Chained sync](explanation/chained-sync.md) — a local engine linked to an
+  origin: why the origin is the only authority, how a rejection becomes a
+  revert, write-through, and what crosses the hop.
 - [Tunnels](explanation/tunnels.md) — why the tunnel carries HTTP and not
   RPCs, one channel per call or one shared channel, and what a tunnel does not
   do.

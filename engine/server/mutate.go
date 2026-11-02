@@ -101,12 +101,15 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 			return err
 		}
 		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, gate: gate, actor: actor,
-			access: gate.accessOf(), guarded: guarded}
+			access: gate.accessOf(), guarded: guarded, log: s.newWriteLog()}
 		if err := fn(etx); err != nil {
 			return err
 		}
 		if etx.spoiled {
 			return errNeedsSavepoints
+		}
+		if err := s.runCapture(ctx, workspaceID, tx, etx.log, etx.Seq()); err != nil {
+			return err
 		}
 		wrote = etx.wrote
 		return nil
@@ -175,6 +178,9 @@ func (s *Server) Invoke(ctx context.Context, workspaceID, mutatorName string, ar
 	// logic, so the inner Mutate must not re-gate or authorize per row.
 	err = s.Mutate(Trusted(ctx), workspaceID, func(tx *EntityTx) error {
 		if err := s.beginInvocation(ctx, workspaceID, tx, gate, mi, bodyArgs); err != nil {
+			return err
+		}
+		if err := tx.log.invoked(mutatorName, args); err != nil {
 			return err
 		}
 		return mi.fn(markWriteTx(ctx), tx, bodyArgs)
@@ -262,9 +268,12 @@ func (s *Server) authorizeInvoke(ctx context.Context, workspaceID, mutatorName s
 // caller actually passed (see authorizeInvoke), matching push, where an
 // args-less custom mutation reaches the policy with no Any attached.
 func (s *Server) mutatorFor(mutatorName string, args proto.Message) (*mutatorInfo, proto.Message, error) {
-	mi, ok := s.mutators[mutatorName]
+	mi, ok := s.mutatorNamed(mutatorName)
 	if !ok {
 		return nil, nil, fmt.Errorf("server: unknown mutator %q", mutatorName)
+	}
+	if mi.forwarded {
+		return mi, args, nil
 	}
 	if mi.args == nil {
 		if args != nil {

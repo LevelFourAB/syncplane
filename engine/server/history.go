@@ -1321,31 +1321,31 @@ func historyPrior(info *entityInfo, base proto.Message, paths []string) ([]byte,
 // recording an empty before-state would make a later restore wipe the field.
 func reduceHistoryText(info *entityInfo, prior protoreflect.Message, paths []string) error {
 	for _, tf := range info.textFields {
-		for _, ti := range tf.instances(prior) {
-			if !maskCovers(paths, ti.path) {
+		for _, ti := range tf.Instances(prior) {
+			if !maskCovers(paths, ti.Path) {
 				continue
 			}
-			doc := ti.bytes()
+			doc := ti.Bytes()
 			if len(doc) == 0 {
 				continue
 			}
 			plain, err := text.PlainText(doc)
 			if err != nil {
-				return fmt.Errorf("server: entity %q history: text field %q: %w", info.name, ti.path, err)
+				return fmt.Errorf("server: entity %q history: text field %q: %w", info.name, ti.Path, err)
 			}
 			if plain == "" {
 				// An emptied document still encodes to bytes — its tombstoned runs
 				// outlive the text. Clearing keeps "held nothing" indistinguishable
 				// from "was never set", which is what a restore of either has to do,
 				// and is why the empty plain-string value is not recorded instead.
-				ti.clear()
+				ti.Clear()
 				continue
 			}
 			value, err := text.EncodePlainString(plain)
 			if err != nil {
-				return fmt.Errorf("server: entity %q history: text field %q: %w", info.name, ti.path, err)
+				return fmt.Errorf("server: entity %q history: text field %q: %w", info.name, ti.Path, err)
 			}
-			ti.set(value)
+			ti.Set(value)
 		}
 	}
 	return nil

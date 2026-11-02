@@ -62,11 +62,19 @@ broadcast, none of it durable; `pgpresence/` is the multi-node bus and
 transport `pgnotify` and `pgpresence` are both built on, and share one of when a
 node runs both), `internal/` (`lww` field-mask merge semantics, `naming`,
 `pubsub`, `pgtest` — all engine-only).
-`engine/client/` is reserved for a future Go client; not built yet.
+`engine/client/` is the stateless Go RPC client for a remote server (typed
+writes, reads, the change feed, blobs, rooms). `engine/upstream/` is a `Link`
+that keeps a local `*server.Server` converged with an origin server: the origin
+orders every write, and local rows are its confirmed rows with the pending local
+writes replayed on top. Its `presencebridge/` joins local rooms to the origin's,
+`blobbridge/` uploads and reads through blob bytes, and `internal/rebase/` is
+the pure replay. It rests on the server hooks `WithWriteCapture`,
+`WithUnknownMutatorForwarding` and `Replicate`.
 
 `cmd/`: every binary the repo produces. `syncplaned/` (the product: multi-app
 host with a private admin listener), `testserver/` (spawned by the TS
-integration and e2e suites), `todoserver/` (demo backend for `examples/todo`),
+integration and e2e suites; `-forward` runs an origin plus a local engine linked
+to it through `engine/upstream`, see `cmd/testserver/forward.go`), `todoserver/` (demo backend for `examples/todo`),
 `mdtodo/` (worked connector example), `admindemo/` (throwaway harness for
 eyeballing the admin UI).
 
