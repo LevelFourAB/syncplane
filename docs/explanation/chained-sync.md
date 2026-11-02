@@ -150,7 +150,9 @@ Rows that hold a `BlobRef` sync through the link, but the bytes do not. `engine/
 
 ## What the confirmed copy costs
 
-The link stores the confirmed copy of every present row of a bound entity beside the row itself. The local store therefore holds each bound row about twice, plus one entry per pending write and per row a pending write touches. Local-only entities cost nothing extra. Plan disk space for about twice the size of the bound rows, plus the local engine's own indexes, text delta log and field history.
+The link needs the confirmed row to replay pending writes on. For a row that no pending write touches, the local row is the confirmed row, so the link keeps only a small record with the origin version. When a local write to the row is captured, the link copies the row as it was before the write into that record, and it removes the copy again when the origin decides the last pending write on the row. A bound row is therefore stored twice only while it has pending writes. Each bound row also costs one small record, and each pending write costs one entry. Local-only entities cost nothing extra.
+
+The small record depends on one rule: only the link and captured writes change a bound row. The local engine does not compact the text of bound entities, because the origin compacts its own rows and the link receives the result as an ordinary change (see `server.WithoutTextCompaction`).
 
 Each origin page costs one local write transaction that updates the confirmed rows, replays the pending writes on the rows it touched, and writes the rows that changed. The work for each page is proportional to the rows in it and the pending writes on those rows, not to the size of the workspace.
 
@@ -161,6 +163,7 @@ Each origin page costs one local write transaction that updates the confirmed ro
 - **The origin collected tombstones past the link's cursor.** The link replaces the workspace's rows with a fresh snapshot, keeps the pending writes on top, and calls `OnReset`.
 - **The origin lost the link's watermark** (`mutation_id_gap`). The link learns the origin's watermark again and renumbers its pending writes after it.
 - **The origin revoked the workspace.** The workspace goes to `StateRevoked`. The link stops syncing it, calls `OnAccessRevoked`, and refuses local writes to its bound entities. With `Config.DeleteOnRevoke`, it also deletes the local rows of bound entities.
+- **A synced row changes outside the link.** A write straight to the storage adapter changes a row without a capture. The link finds this the next time it reads the confirmed state of that row, because the local row has a different version. It uses the changed row as the base for the moment, and takes a fresh snapshot to get the confirmed row back.
 - **The local engine refuses a row.** For example, an origin change and a pending write together close a cycle in an access chain. The link keeps the row at its confirmed state, keeps the pending writes, and lets the origin decide them.
 
 ## What is not supported

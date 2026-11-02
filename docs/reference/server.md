@@ -63,6 +63,7 @@ The following table lists configuration options for `server.New`:
 | `WithHistoryRetention(d)`                   | 90d          | Sets retention duration for field-history records. `HistoryForever` disables time-based expiration. See [Field history](#field-history).                                                                                                                                       |
 | `WithTextCompaction(minPurged)`             | off          | Enables background purging of unreferenced text tombstones and mark operations. See [Text compaction](#text-compaction).                                                                                                                                                       |
 | `WithTextCompactionPacing(interval, batch)` | 5m, 200 rows | Sets compaction sweep frequency and the maximum number of rows evaluated per transaction. Transactions also terminate when reaching a fixed byte budget.                                                                                                                       |
+| `WithoutTextCompaction(entities...)`        | —            | Keeps the rows of the named entities out of text compaction. A replica of another server uses it for the entities it mirrors. See [Text compaction](#text-compaction).                                                                                                         |
 | `WithTextCache(budgetBytes)`                | 8 MiB        | Caches decoded collaborative-text documents between writes. Setting `0` disables caching.                                                                                                                                                                                      |
 | `WithSchemaRevision(rev)`                   | —            | Sets an application-defined schema revision string advertised on frames, pushes, pulls, queries, and bootstraps.                                                                                                                                                               |
 | `WithLogger(l)`                             | —            | Sets the `*slog.Logger` instance.                                                                                                                                                                                                                                              |
@@ -184,6 +185,8 @@ server.WithTextCompactionPacing(5*time.Minute, 200), // optional
 Text compaction runs as an independent background sweep with its own interval and per-workspace lease. Compaction operates only on quietened rows whose last write sequence is at or below the sequence through which the text delta log has been pruned by garbage collection. If garbage collection is manual-only, background compaction does not run.
 
 Compaction sweeps evaluate rows modified between the previous pass position and the current horizon. Sweeps process batches of `batch` rows per transaction.
+
+`WithoutTextCompaction(entities...)` keeps the rows of the named entities out of the sweep and out of `CompactText`. `Link.ServerOptions` in `engine/upstream` includes it for every bound entity: the origin compacts those rows, and the link receives the result as an ordinary change.
 
 Compaction behavior includes:
 
@@ -942,6 +945,7 @@ Each `CapturedOp` has `Entity`, `Key`, `Op`, and:
 | `Mask`            | The PATCH field mask; `nil` for PUT and DELETE.                                                                                                                                                                                                            |
 | `ExpectedVersion` | The version the write required; `nil` for an unguarded write.                                                                                                                                                                                              |
 | `PrevVersion`     | The row's version before the write; 0 when absent or deleted.                                                                                                                                                                                              |
+| `Before`          | The stored value before the write; `nil` when absent or deleted. A later write of the same mutation to the same row sees what the earlier one stored.                                                                                                      |
 | `After`           | The stored value after the write; `nil` when the write deleted the row.                                                                                                                                                                                    |
 
 ### Forwarded mutations

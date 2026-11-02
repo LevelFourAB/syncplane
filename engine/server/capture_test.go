@@ -124,6 +124,7 @@ var _ = Describe("Write capture", func() {
 			Expect(put.Ops[0].Entity).To(Equal("widget"))
 			Expect(put.Ops[0].Key).To(Equal("w1"))
 			Expect(put.Ops[0].PrevVersion).To(BeZero())
+			Expect(put.Ops[0].Before).To(BeNil(), "the row did not exist")
 			Expect(proto.Equal(decodeWidget(put.Ops[0].Value), &testdatav1.Widget{Id: "w1", Label: "a"})).To(BeTrue())
 			Expect(proto.Equal(decodeWidget(put.Ops[0].After), &testdatav1.Widget{Id: "w1", Label: "a"})).To(BeTrue())
 
@@ -133,12 +134,14 @@ var _ = Describe("Write capture", func() {
 			Expect(patch.Ops[0].ExpectedVersion).To(HaveValue(BeEquivalentTo(1)))
 			Expect(patch.Ops[0].PrevVersion).To(Equal(res[0].GetSeq()))
 			Expect(proto.Equal(decodeWidget(patch.Ops[0].After), &testdatav1.Widget{Id: "w1", Label: "b"})).To(BeTrue())
+			Expect(proto.Equal(decodeWidget(patch.Ops[0].Before), &testdatav1.Widget{Id: "w1", Label: "a"})).To(BeTrue())
 
 			Expect(del.Ops).To(HaveLen(1))
 			Expect(del.Ops[0].Op).To(Equal(syncplanev1.CrudOp_CRUD_OP_DELETE))
 			Expect(del.Ops[0].PrevVersion).To(Equal(res[1].GetSeq()))
 			Expect(del.Ops[0].Value).To(BeNil())
 			Expect(del.Ops[0].After).To(BeNil())
+			Expect(proto.Equal(decodeWidget(del.Ops[0].Before), &testdatav1.Widget{Id: "w1", Label: "b"})).To(BeTrue())
 			Expect(shadowed("w1")).To(BeTrue(), "what the capture writes commits with the mutation")
 		})
 
@@ -259,6 +262,28 @@ var _ = Describe("Write capture", func() {
 			Expect(captured[0].Ops[1].Op).To(Equal(syncplanev1.CrudOp_CRUD_OP_DELETE))
 			Expect(captured[0].Ops[1].PrevVersion).To(Equal(captured[0].Seq),
 				"the delete read the row the put wrote at the same sequence")
+		})
+
+		It("captures the row each EntityTx write replaced", func() {
+			Expect(srv.Apply(server.Trusted(ctx), ws, func(tx *server.ApplyTx) error {
+				return tx.Put(&testdatav1.Widget{Id: "w1", Label: "a"})
+			})).To(Succeed())
+			captured = nil
+			Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+				if err := tx.Put(&testdatav1.Widget{Id: "w1", Label: "b"}); err != nil {
+					return err
+				}
+				if err := tx.Patch(&testdatav1.Widget{Id: "w1", Label: "c"}, []string{"label"}, nil); err != nil {
+					return err
+				}
+				return tx.Delete(&testdatav1.Widget{}, "w1")
+			})).To(Succeed())
+			Expect(captured).To(HaveLen(1))
+			ops := captured[0].Ops
+			Expect(ops).To(HaveLen(3))
+			Expect(proto.Equal(decodeWidget(ops[0].Before), &testdatav1.Widget{Id: "w1", Label: "a"})).To(BeTrue())
+			Expect(proto.Equal(decodeWidget(ops[1].Before), &testdatav1.Widget{Id: "w1", Label: "b"})).To(BeTrue())
+			Expect(proto.Equal(decodeWidget(ops[2].Before), &testdatav1.Widget{Id: "w1", Label: "c"})).To(BeTrue())
 		})
 
 		It("captures MutateIdempotent once", func() {

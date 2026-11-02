@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -190,8 +191,10 @@ func New(cfg Config) (*Link, error) {
 }
 
 // ServerOptions returns the options that install the link on the local
-// engine: the write capture that records local writes, and the forwarding of
-// custom mutations the local engine declares no mutator for. Pass them to
+// engine: the write capture that records local writes, the forwarding of
+// custom mutations the local engine declares no mutator for, and the
+// exclusion of bound entities from the engine's text compaction, since the
+// origin compacts them and sends the result. Pass them to
 // server.New of the engine later given to Start; a link installs on one
 // engine only.
 //
@@ -202,6 +205,7 @@ func (l *Link) ServerOptions() []server.Option {
 	return []server.Option{
 		server.WithWriteCapture(l.capture),
 		server.WithUnknownMutatorForwarding(),
+		server.WithoutTextCompaction(slices.Collect(maps.Keys(l.bound))...),
 	}
 }
 

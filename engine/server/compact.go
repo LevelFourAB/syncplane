@@ -66,7 +66,10 @@ type compactLoop struct {
 	// the sweep rewrites its row; <= 0 disables compaction. See
 	// WithTextCompaction.
 	minPurged int
-	interval  time.Duration
+	// skip names the entities whose rows the sweep never rewrites. See
+	// WithoutTextCompaction.
+	skip     map[string]bool
+	interval time.Duration
 	// batch bounds the rows one write transaction considers, for the reason the
 	// index build's does: the transaction holds the workspace's write lock, so
 	// an unbounded one would stall every writer for the length of a full entity
@@ -112,6 +115,28 @@ var errCompactBatchFull = errors.New("compaction batch full")
 func WithTextCompaction(minPurged int) Option {
 	return func(s *Server) error {
 		s.compact.minPurged = minPurged
+		return nil
+	}
+}
+
+// WithoutTextCompaction keeps the rows of the named entities out of text
+// compaction (see WithTextCompaction): the sweep and CompactText never rewrite
+// them, whatever the threshold. Repeat the option to add entities. A name the
+// server declares no entity for is ignored.
+//
+// Use it for an entity whose rows mirror another server, as a replica's do: a
+// rewrite the replication does not make leaves the replica's copy different
+// from what the other server sent. The other server compacts its own rows,
+// and the replica receives the result as an ordinary change.
+// engine/upstream's Link.ServerOptions includes it for every bound entity.
+func WithoutTextCompaction(entities ...string) Option {
+	return func(s *Server) error {
+		if s.compact.skip == nil {
+			s.compact.skip = make(map[string]bool, len(entities))
+		}
+		for _, e := range entities {
+			s.compact.skip[e] = true
+		}
 		return nil
 	}
 }
@@ -370,7 +395,7 @@ func (s *Server) compactBatch(tx storage.WriteTx) (int, bool, error) {
 		// The mark advances over rows of every entity, not just text-bearing
 		// ones: it is a position in ScanChanges order, and one that skipped the
 		// rows it does not care about would resume before them every batch.
-		if info, ok := entities[r.Entity]; ok && len(info.textFields) > 0 {
+		if info, ok := entities[r.Entity]; ok && len(info.textFields) > 0 && !s.compact.skip[r.Entity] {
 			candidates = append(candidates, r)
 			held += len(r.Value)
 			if held >= compactBatchBytes {

@@ -42,6 +42,9 @@ type txResult struct {
 	unreported []uint64
 	// epoch is the queue's renumbering count the view reflects.
 	epoch uint64
+	// drifted is set when the transaction read a confirmed row the local row
+	// was rewritten from outside the link: only a fresh snapshot restores it.
+	drifted bool
 }
 
 type pendRef struct{ ref, localSeq uint64 }
@@ -155,6 +158,10 @@ func (w *workspace) txn(ctx context.Context, fn func(*txn) error) (*txResult, er
 	if t.res.reject {
 		w.kickDeliver()
 	}
+	if t.res.drifted {
+		w.logger().LogAttrs(ctx, slog.LevelWarn, "a synced row was rewritten outside the link; bootstrapping again")
+		w.unready(true, false)
+	}
 	// Reported outside w.mu, so a status callback may call back into the
 	// link.
 	w.update(func(*status) {})
@@ -241,28 +248,81 @@ func (t *txn) pending() ([]*entry, error) {
 	return out, nil
 }
 
-// confirmedRow returns the row the origin confirmed, as rebase reads it.
+// confirmedRow returns the row the origin confirmed, as rebase reads it. An
+// elided record reads its value from the local row, so it must be read before
+// the transaction writes that row.
 func (t *txn) confirmedRow(r RowRef) (rebase.Row, confirmedRow, error) {
 	c, ok, err := t.st.confirmed(r.Entity, r.Key)
-	if err != nil || !ok || !c.present {
+	if err != nil || !ok {
 		return rebase.Row{}, c, err
+	}
+	if c.elided {
+		if c, err = t.resolveElided(r, c); err != nil {
+			return rebase.Row{}, c, err
+		}
+	}
+	if c.stale {
+		t.res.drifted = true
+	}
+	if !c.present {
+		return rebase.Row{}, c, nil
 	}
 	return rebase.Row{Present: true, Value: c.value}, c, nil
 }
 
+// resolveElided fills in the value of an elided record from the local row.
+// A local row at another version than the record names was rewritten outside
+// the link; its record then keeps that row as a stale value, the best base
+// left until a fresh snapshot replaces it.
+func (t *txn) resolveElided(r RowRef, c confirmedRow) (confirmedRow, error) {
+	cur, found, err := t.rtx.Get(r.Entity, r.Key)
+	if err != nil {
+		return c, err
+	}
+	live := found && !cur.Deleted
+	if live && cur.Version == c.localVersion {
+		c.value = cur.Value
+		return c, nil
+	}
+	c.elided, c.localVersion, c.stale = false, 0, true
+	c.present, c.value = live, nil
+	if live {
+		c.value = cur.Value
+	}
+	return c, t.st.putConfirmed(r.Entity, r.Key, c)
+}
+
+// elide drops the value from the record of a row no pending entry touches,
+// once the local row holds the confirmed row. A stale record keeps its value
+// and its mark until a snapshot replaces it.
+func (t *txn) elide(r RowRef, c confirmedRow) error {
+	if c.stale {
+		return nil
+	}
+	cur, found, err := t.rtx.Get(r.Entity, r.Key)
+	if err != nil || !found || cur.Deleted {
+		return err
+	}
+	if c.elided && c.localVersion == cur.Version {
+		return nil
+	}
+	c.value, c.elided, c.localVersion = nil, true, cur.Version
+	return t.st.putConfirmed(r.Entity, r.Key, c)
+}
+
 // opsFor returns the local ops of every pending entry on row r, in queue
-// order.
-func (t *txn) opsFor(r RowRef) ([]rebase.Op, error) {
+// order, and whether any pending entry touches the row.
+func (t *txn) opsFor(r RowRef) ([]rebase.Op, bool, error) {
 	ids, err := t.st.touched(r.Entity, r.Key)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	slices.Sort(ids)
 	var ops []rebase.Op
 	for _, id := range ids {
 		e, err := t.entry(id)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		if e == nil {
 			continue
@@ -273,7 +333,7 @@ func (t *txn) opsFor(r RowRef) ([]rebase.Op, error) {
 			}
 		}
 	}
-	return ops, nil
+	return ops, len(ids) > 0, nil
 }
 
 func (op entryOp) rebaseOp() rebase.Op {
@@ -281,7 +341,8 @@ func (op entryOp) rebaseOp() rebase.Op {
 }
 
 // recompute writes each row as the confirmed row with the pending entries
-// replayed on top, where it differs from the local row.
+// replayed on top, where it differs from the local row. The record of a row no
+// pending entry touches is elided once the local row holds the confirmed row.
 //
 // A row the local engine refuses to store (a Rejection from Replicate, for
 // example an access chain that only the pending writes close into a cycle) is
@@ -295,11 +356,11 @@ func (t *txn) recompute(rows []RowRef) error {
 		if m == nil {
 			continue
 		}
-		conf, _, err := t.confirmedRow(r)
+		conf, rec, err := t.confirmedRow(r)
 		if err != nil {
 			return err
 		}
-		ops, err := t.opsFor(r)
+		ops, pending, err := t.opsFor(r)
 		if err != nil {
 			return err
 		}
@@ -310,6 +371,11 @@ func (t *txn) recompute(rows []RowRef) error {
 		}
 		err = t.write(m, r, target)
 		if err == nil {
+			if !pending && conf.Present {
+				if err := t.elide(r, rec); err != nil {
+					return err
+				}
+			}
 			continue
 		}
 		if _, ok := server.AsRejection(err); !ok {
@@ -352,9 +418,15 @@ func (t *txn) applyChange(rc *syncplanev1.RowChange) error {
 		return nil
 	}
 	r := RowRef{Entity: rc.GetEntity(), Key: rc.GetKey()}
-	old, _, err := t.confirmedRow(r)
-	if err != nil {
-		return err
+	// Only text deltas fold onto the row before: any other change carries
+	// the whole row, and reading an elided record costs a local read and can
+	// find drift a snapshot is about to replace anyway.
+	var old rebase.Row
+	if len(rc.GetTextDeltas()) > 0 && !rc.GetTombstone() {
+		var err error
+		if old, _, err = t.confirmedRow(r); err != nil {
+			return err
+		}
 	}
 	row, err := m.FoldTextDeltas(old, rc)
 	if err != nil {

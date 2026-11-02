@@ -799,7 +799,8 @@ func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 	e.access.noteWrite(info)
 	e.log.add(CapturedOp{
 		Entity: info.name, Key: key, Op: syncplanev1.CrudOp_CRUD_OP_PUT, Value: submitted,
-		ExpectedVersion: o.expected, PrevVersion: liveVersion(row, live), After: value,
+		ExpectedVersion: o.expected, PrevVersion: liveVersion(row, live), Before: liveValue(row, live),
+		After: value,
 	})
 	return nil
 }
@@ -811,6 +812,14 @@ func liveVersion(row storage.Row, live bool) uint64 {
 		return 0
 	}
 	return row.Version
+}
+
+// liveValue is a row's stored value, nil for an absent or deleted row.
+func liveValue(row storage.Row, live bool) []byte {
+	if !live {
+		return nil
+	}
+	return row.Value
 }
 
 // Patch merges only the masked fields of msg onto the stored row, honoring
@@ -1046,7 +1055,8 @@ func (e *EntityTx) patch(msg proto.Message, mask []string, expected *uint64, opt
 	e.access.noteWrite(info)
 	e.log.add(CapturedOp{
 		Entity: info.name, Key: key, Op: syncplanev1.CrudOp_CRUD_OP_PATCH, Value: submitted,
-		Mask: slices.Clone(mask), ExpectedVersion: expected, PrevVersion: row.Version, After: value,
+		Mask: slices.Clone(mask), ExpectedVersion: expected, PrevVersion: row.Version, Before: row.Value,
+		After: value,
 	})
 	return nil
 }
@@ -1079,13 +1089,16 @@ func (e *EntityTx) delete(prototype proto.Message, key string) error {
 		func() (storage.Row, bool, error) { return e.liveRow(info, key) }); err != nil {
 		return err
 	}
-	var prev uint64
+	var (
+		prev   uint64
+		before []byte
+	)
 	if e.log != nil {
 		row, live, err := e.liveRow(info, key)
 		if err != nil {
 			return err
 		}
-		prev = liveVersion(row, live)
+		prev, before = liveVersion(row, live), liveValue(row, live)
 	}
 	seq, err := e.writeSeq()
 	if err != nil {
@@ -1125,7 +1138,7 @@ func (e *EntityTx) delete(prototype proto.Message, key string) error {
 		return err
 	}
 	e.access.noteWrite(info)
-	e.log.add(CapturedOp{Entity: info.name, Key: key, Op: syncplanev1.CrudOp_CRUD_OP_DELETE, PrevVersion: prev})
+	e.log.add(CapturedOp{Entity: info.name, Key: key, Op: syncplanev1.CrudOp_CRUD_OP_DELETE, PrevVersion: prev, Before: before})
 	return nil
 }
 

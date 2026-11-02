@@ -79,6 +79,10 @@ type CapturedOp struct {
 	// PrevVersion is the row's version before the write, 0 when the row was
 	// absent or deleted.
 	PrevVersion uint64
+	// Before is the row's stored value before the write, nil when the row was
+	// absent or deleted. A later write of the same mutation to the same row
+	// sees what the earlier one stored.
+	Before []byte
 	// After is the row's stored value after the write, nil when the write
 	// deleted it.
 	After []byte

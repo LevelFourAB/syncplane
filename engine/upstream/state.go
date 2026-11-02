@@ -116,6 +116,18 @@ type confirmedRow struct {
 	version uint64
 	// gen is the bootstrap generation the row was written under.
 	gen uint64
+	// elided is set when the record holds no value because the local row
+	// holds it: the local row at localVersion is the confirmed row. A record
+	// is elided only while no pending entry touches its row, and gets its
+	// value back when the first one is captured (see keepConfirmed), so a
+	// row stored twice is a row with pending writes.
+	elided       bool
+	localVersion uint64
+	// stale is set when the value may not be what the origin sent: the
+	// local row was rewritten outside the link while the record was elided,
+	// and value is that rewritten row. Every transaction that reads a stale
+	// record asks for a fresh snapshot, which replaces or retires it.
+	stale bool
 }
 
 // resultRecord is the origin's verdict on one pushed entry.
@@ -420,11 +432,14 @@ func decodeSyncMeta(b []byte) (syncMeta, error) {
 func (c *confirmedRow) encode() []byte {
 	e := newEnc()
 	e.bool(1, c.present)
-	if c.present {
+	if c.present && !c.elided {
 		e.bytes(2, append([]byte{}, c.value...))
 	}
 	e.uint(3, c.version)
 	e.uint(4, c.gen)
+	e.bool(5, c.elided)
+	e.uint(6, c.localVersion)
+	e.bool(7, c.stale)
 	return e.b
 }
 
@@ -444,6 +459,12 @@ func decodeConfirmed(b []byte) (confirmedRow, error) {
 			c.version = v
 		case 4:
 			c.gen = v
+		case 5:
+			c.elided = v != 0
+		case 6:
+			c.localVersion = v
+		case 7:
+			c.stale = v != 0
 		}
 		return nil
 	})

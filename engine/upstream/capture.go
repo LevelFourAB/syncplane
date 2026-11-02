@@ -157,6 +157,11 @@ func (l *Link) capture(ctx context.Context, cw *server.CapturedWrite) error {
 		if err != nil {
 			return err
 		}
+		if len(ids) == 0 {
+			if err := keepConfirmed(st, r, ops); err != nil {
+				return err
+			}
+		}
 		if !slices.Contains(ids, e.id) {
 			ids = append(ids, e.id)
 		}
@@ -189,6 +194,27 @@ func (l *Link) capture(ctx context.Context, cw *server.CapturedWrite) error {
 		w.kick()
 	}
 	return nil
+}
+
+// keepConfirmed gives the elided record of row r its value back, as the row
+// gets its first pending entry: the record named the local row, which the
+// captured write replaced. The value is the row before the first of ops on r.
+// A local row at another version than the record names was rewritten outside
+// the link, so the record keeps that row as a stale value (see confirmedRow).
+func keepConfirmed(st stateTx, r RowRef, ops []server.CapturedOp) error {
+	c, ok, err := st.confirmed(r.Entity, r.Key)
+	if err != nil || !ok || !c.elided {
+		return err
+	}
+	i := slices.IndexFunc(ops, func(op server.CapturedOp) bool { return op.Entity == r.Entity && op.Key == r.Key })
+	if i < 0 {
+		return fmt.Errorf("upstream: capture of %s %q holds no write to it", r.Entity, r.Key)
+	}
+	before := ops[i]
+	c.stale = before.Before == nil || before.PrevVersion != c.localVersion
+	c.elided, c.localVersion = false, 0
+	c.present, c.value = before.Before != nil, bytes.Clone(before.Before)
+	return st.putConfirmed(r.Entity, r.Key, c)
 }
 
 // translateCAS turns a local compare-and-swap into the origin's terms: the

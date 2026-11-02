@@ -1264,13 +1264,16 @@ func (s *Server) applyCrud(
 		if err := s.recordAccessMove(ctx, ws, tx, info, crud.GetKey(), currentRow, msg, seq, actor); err != nil {
 			return err
 		}
-		var prev uint64
+		var (
+			prev   uint64
+			before []byte
+		)
 		if log != nil {
 			row, live, err := currentRow()
 			if err != nil {
 				return err
 			}
-			prev = liveVersion(row, live)
+			prev, before = liveVersion(row, live), liveValue(row, live)
 		}
 		if err := tx.PutRow(info.name, crud.GetKey(), value, seq, actor); err != nil {
 			return err
@@ -1278,7 +1281,7 @@ func (s *Server) applyCrud(
 		g.accessOf().noteWrite(info)
 		log.add(CapturedOp{
 			Entity: info.name, Key: crud.GetKey(), Op: crud.GetOp(), Value: submitted,
-			ExpectedVersion: crud.ExpectedVersion, PrevVersion: prev, After: value,
+			ExpectedVersion: crud.ExpectedVersion, PrevVersion: prev, Before: before, After: value,
 		})
 		return nil
 
@@ -1431,7 +1434,7 @@ func (s *Server) applyCrud(
 		log.add(CapturedOp{
 			Entity: info.name, Key: crud.GetKey(), Op: crud.GetOp(), Value: crud.GetValue(),
 			Mask: crud.GetFieldMask().GetPaths(), ExpectedVersion: crud.ExpectedVersion,
-			PrevVersion: row.Version, After: value,
+			PrevVersion: row.Version, Before: row.Value, After: value,
 		})
 		return nil
 
@@ -1470,13 +1473,16 @@ func (s *Server) applyCrud(
 		if err := s.recordAccessMove(ctx, ws, tx, info, crud.GetKey(), currentRow, nil, seq, actor); err != nil {
 			return err
 		}
-		var prev uint64
+		var (
+			prev   uint64
+			before []byte
+		)
 		if log != nil {
 			row, live, err := currentRow()
 			if err != nil {
 				return err
 			}
-			prev = liveVersion(row, live)
+			prev, before = liveVersion(row, live), liveValue(row, live)
 		}
 		if err := tx.DeleteRow(info.name, crud.GetKey(), seq, actor); err != nil {
 			return err
@@ -1484,7 +1490,7 @@ func (s *Server) applyCrud(
 		g.accessOf().noteWrite(info)
 		log.add(CapturedOp{
 			Entity: info.name, Key: crud.GetKey(), Op: crud.GetOp(),
-			ExpectedVersion: crud.ExpectedVersion, PrevVersion: prev,
+			ExpectedVersion: crud.ExpectedVersion, PrevVersion: prev, Before: before,
 		})
 		return nil
 
