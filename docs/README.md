@@ -62,6 +62,7 @@ Task-oriented guides. Each guide assumes you already have a running app.
 - [Attach files to rows](how-to/attach-files-to-rows.md)
 - [Add presence to an app](how-to/add-presence.md)
 - [Build a UI with React](how-to/react.md)
+- [Show download progress for the first sync](how-to/show-bootstrap-progress.md)
 - [Hold several workspaces on one client](how-to/multiple-workspaces.md)
 - [Wipe local data on sign-out](how-to/sign-out.md)
 - [Restore a field to a previous value](how-to/restore-a-field.md)

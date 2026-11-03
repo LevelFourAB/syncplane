@@ -65,6 +65,40 @@ export interface HydrationInfo {
 	done: number;
 }
 
+/**
+ * How far a workspace's snapshot download has got, while a bootstrap runs.
+ *
+ * Reported for every bootstrap: the first one, which shows its rows as they
+ * land (see HydrationInfo), and a later one, which stages its rows and shows
+ * them all at once when it ends. Only the tab that runs the bootstrap reports
+ * it.
+ *
+ * The numbers survive an interrupted download: an attempt that continues the
+ * same snapshot starts from what the earlier attempts applied, also after a
+ * reload. A snapshot the server starts again (it refused to continue) starts
+ * from zero.
+ *
+ * `rowsApplied / rowsEstimated` is at most 1 and does not go down during one
+ * snapshot, so it can drive a progress bar as it is. See the bootstrap
+ * progress how-to in the docs for a time estimate.
+ */
+export interface BootstrapProgressInfo {
+	/** Snapshot rows written to the local store. */
+	rowsApplied: number;
+	/**
+	 * Expected size of the snapshot in rows, 0 when the server gives no
+	 * estimate: a server older than the estimate, a store that cannot count, or
+	 * a snapshot that read permissions or a narrowing subscription make smaller
+	 * than the entities it ships. Rows written during the download can make it
+	 * end above or below the estimate. Never below `rowsApplied`.
+	 */
+	rowsEstimated: number;
+	/** Entities whose rows are all written. */
+	entitiesDone: number;
+	/** Entities the snapshot ships, 0 until the server announces them. */
+	entitiesTotal: number;
+}
+
 /** Details of an active schema-revision skew (see SyncStatus.schemaSkew). */
 export interface SchemaSkewInfo {
 	/** This client build's revision (the configured schemaRevision). */
@@ -127,6 +161,24 @@ export interface WorkspaceStatus {
 	 * nothing for the rest of the session. See HydrationInfo.
 	 */
 	hydration?: HydrationInfo;
+	/**
+	 * Set while a bootstrap of this workspace runs in this tab, and unset when
+	 * it ends, installed or failed. Updates at most every 250 ms and within
+	 * 250 ms of each change, and always at the start and the end of the
+	 * download. See BootstrapProgressInfo.
+	 */
+	bootstrap?: BootstrapProgressInfo;
+	/**
+	 * How many sequences of server writes this workspace trails the server by,
+	 * as of the last page or snapshot this tab applied: 0 when it is up to
+	 * date. It counts writes, not rows: one write can change many rows, and a
+	 * write this client may not read still takes a sequence. It does not grow
+	 * while the server cannot be reached, and a tab that applies no pages
+	 * (another tab holds the stream) does not update it. Unset before the
+	 * first page or snapshot, and after a page from a server that does not
+	 * report its head.
+	 */
+	behind?: number;
 }
 
 /** Snapshot of the client's sync health, for UI indicators. */
@@ -176,6 +228,16 @@ export interface SyncStatus {
 	 * reason as `scope`. See HydrationInfo.
 	 */
 	hydration?: HydrationInfo;
+	/**
+	 * The default workspace's download progress, mirrored here for the same
+	 * reason as `scope`. See BootstrapProgressInfo.
+	 */
+	bootstrap?: BootstrapProgressInfo;
+	/**
+	 * The default workspace's distance behind the server, mirrored here for
+	 * the same reason as `scope`. See WorkspaceStatus.behind.
+	 */
+	behind?: number;
 }
 
 export type StatusListener = (status: SyncStatus) => void;
@@ -273,6 +335,8 @@ export class StatusTracker {
 		next.scope = def?.scope;
 		next.workspaceAccess = def?.access;
 		next.hydration = def?.hydration;
+		next.bootstrap = def?.bootstrap;
+		next.behind = def?.behind;
 		if (sameStatus(this.status, next)) return;
 		this.status = next;
 		for (const cb of [ ...this.listeners ]) safeInvoke(cb, next, 'onStatusChange listener');
@@ -309,10 +373,12 @@ function sameWorkspaces(
 			y === undefined
 			|| x.pendingMutations !== y.pendingMutations
 			|| x.access !== y.access
+			|| x.behind !== y.behind
 			|| x.scope?.own !== y.scope?.own
 			|| x.scope?.effective !== y.scope?.effective
 			|| x.scope?.widened !== y.scope?.widened
 			|| !sameHydration(x.hydration, y.hydration)
+			|| !sameBootstrap(x.bootstrap, y.bootstrap)
 		) {
 			return false;
 		}
@@ -329,4 +395,12 @@ function sameHydration(a?: HydrationInfo, b?: HydrationInfo): boolean {
 	if (a === undefined || b === undefined) return a === b;
 	if (a.total !== b.total || a.pending.length !== b.pending.length) return false;
 	return a.pending.every((entity, i) => entity === b.pending[i]);
+}
+
+function sameBootstrap(a?: BootstrapProgressInfo, b?: BootstrapProgressInfo): boolean {
+	if (a === undefined || b === undefined) return a === b;
+	return a.rowsApplied === b.rowsApplied
+		&& a.rowsEstimated === b.rowsEstimated
+		&& a.entitiesDone === b.entitiesDone
+		&& a.entitiesTotal === b.entitiesTotal;
 }

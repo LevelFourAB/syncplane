@@ -680,8 +680,15 @@ type PullResponse struct {
 	// applied and rejected after that, ordered by mutation id. See
 	// `LateRejection`. A reset response carries none.
 	LateRejections []*LateRejection `protobuf:"bytes,10,rep,name=late_rejections,json=lateRejections,proto3" json:"late_rejections,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The workspace's sequence when the server served this response: the
+	// newest write it holds. head_seq - seq is how many sequences of writes
+	// the client has not pulled yet, 0 when it is up to date. The distance
+	// counts writes, not rows: one write can change many rows, and a write the
+	// caller may not read still takes a sequence. 0 means the server gives no
+	// head (an older build), and is also the value on a reset response.
+	HeadSeq       uint64 `protobuf:"varint,11,opt,name=head_seq,json=headSeq,proto3" json:"head_seq,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PullResponse) Reset() {
@@ -782,6 +789,13 @@ func (x *PullResponse) GetLateRejections() []*LateRejection {
 		return x.LateRejections
 	}
 	return nil
+}
+
+func (x *PullResponse) GetHeadSeq() uint64 {
+	if x != nil {
+		return x.HeadSeq
+	}
+	return 0
 }
 
 // Reports a mutation that the server acknowledged as applied and rejected
@@ -2339,7 +2353,35 @@ type BootstrapResponse_Begin struct {
 	Resumed bool `protobuf:"varint,6,opt,name=resumed,proto3" json:"resumed,omitempty"`
 	// What the caller holds in the workspace under the access model, as of
 	// the snapshot. Absent in a schema without the access model.
-	CallerAccess  *CallerAccess `protobuf:"bytes,7,opt,name=caller_access,json=callerAccess,proto3" json:"caller_access,omitempty"`
+	CallerAccess *CallerAccess `protobuf:"bytes,7,opt,name=caller_access,json=callerAccess,proto3" json:"caller_access,omitempty"`
+	// Estimated row count of each entity in `entities`, at the same index:
+	// row_estimates[i] is about how many rows of entities[i] the snapshot
+	// ships. Empty means the server gives no estimate, and a client must
+	// then show the snapshot's size as unknown. A list of another length
+	// than `entities` is also no estimate.
+	//
+	// Each count is the entity's live rows as of Begin. It is an estimate,
+	// not a bound: rows written or deleted while the snapshot streams can
+	// make it ship some rows more or fewer. A client must therefore not
+	// rely on the count to size a buffer or to check the download, and
+	// must not show progress above 100%. A value of 0 means the entity is
+	// expected to ship no rows.
+	//
+	// The server gives no estimate when the snapshot does not ship every
+	// live row of the announced entities: when a read filter or the access
+	// model hides rows from the caller, or when a subscription narrows an
+	// entity with a predicate, a window, named keys or a follow closure.
+	// A count would then tell the caller how many rows exist that it may
+	// not read, and would cost more than the narrowed snapshot.
+	//
+	// On a resumed snapshot (`resumed` is true) the list covers the WHOLE
+	// snapshot again, counted as of this attempt, including the rows the
+	// earlier attempts delivered. It is not a count of the rest. A client
+	// that keeps the rows it applied across attempts computes progress as
+	// applied / total. Keeping the smaller of the totals it was given, and
+	// raising the total to at least the rows applied, gives progress that
+	// never goes backwards.
+	RowEstimates  []uint64 `protobuf:"varint,8,rep,packed,name=row_estimates,json=rowEstimates,proto3" json:"row_estimates,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2419,6 +2461,13 @@ func (x *BootstrapResponse_Begin) GetResumed() bool {
 func (x *BootstrapResponse_Begin) GetCallerAccess() *CallerAccess {
 	if x != nil {
 		return x.CallerAccess
+	}
+	return nil
+}
+
+func (x *BootstrapResponse_Begin) GetRowEstimates() []uint64 {
+	if x != nil {
+		return x.RowEstimates
 	}
 	return nil
 }
@@ -2552,7 +2601,7 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x11no_delta_entities\x18\x06 \x03(\tR\x0fnoDeltaEntities\x12\x17\n" +
 	"\amin_seq\x18\a \x01(\x04R\x06minSeq\x127\n" +
 	"\x15caller_access_version\x18\b \x01(\x06H\x00R\x13callerAccessVersion\x88\x01\x01B\x18\n" +
-	"\x16_caller_access_version\"\xd3\x03\n" +
+	"\x16_caller_access_version\"\xee\x03\n" +
 	"\fPullResponse\x12)\n" +
 	"\x05patch\x18\x01 \x01(\v2\x13.syncplane.v1.PatchR\x05patch\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\fR\n" +
@@ -2565,7 +2614,8 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\rcaller_access\x18\b \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\x12O\n" +
 	"\x13caller_access_delta\x18\t \x01(\v2\x1f.syncplane.v1.CallerAccessDeltaR\x11callerAccessDelta\x12D\n" +
 	"\x0flate_rejections\x18\n" +
-	" \x03(\v2\x1b.syncplane.v1.LateRejectionR\x0elateRejections\"\xc6\x01\n" +
+	" \x03(\v2\x1b.syncplane.v1.LateRejectionR\x0elateRejections\x12\x19\n" +
+	"\bhead_seq\x18\v \x01(\x04R\aheadSeq\"\xc6\x01\n" +
 	"\rLateRejection\x12\x1f\n" +
 	"\vmutation_id\x18\x01 \x01(\x04R\n" +
 	"mutationId\x12\x1d\n" +
@@ -2605,11 +2655,11 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x06resume\x18\x05 \x01(\v2\x1d.syncplane.v1.BootstrapResumeR\x06resume\"?\n" +
 	"\x0fBootstrapResume\x12\x16\n" +
 	"\x06cursor\x18\x01 \x01(\fR\x06cursor\x12\x14\n" +
-	"\x05token\x18\x02 \x01(\fR\x05token\"\xbb\x04\n" +
+	"\x05token\x18\x02 \x01(\fR\x05token\"\xe0\x04\n" +
 	"\x11BootstrapResponse\x12=\n" +
 	"\x05begin\x18\x01 \x01(\v2%.syncplane.v1.BootstrapResponse.BeginH\x00R\x05begin\x12=\n" +
 	"\x05chunk\x18\x02 \x01(\v2%.syncplane.v1.BootstrapResponse.ChunkH\x00R\x05chunk\x127\n" +
-	"\x03end\x18\x03 \x01(\v2#.syncplane.v1.BootstrapResponse.EndH\x00R\x03end\x1a\x86\x02\n" +
+	"\x03end\x18\x03 \x01(\v2#.syncplane.v1.BootstrapResponse.EndH\x00R\x03end\x1a\xab\x02\n" +
 	"\x05Begin\x12\x16\n" +
 	"\x06cursor\x18\x01 \x01(\fR\x06cursor\x123\n" +
 	"\x16last_acked_mutation_id\x18\x02 \x01(\x04R\x13lastAckedMutationId\x12\x10\n" +
@@ -2617,7 +2667,8 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x0fschema_revision\x18\x04 \x01(\tR\x0eschemaRevision\x12\x1a\n" +
 	"\bentities\x18\x05 \x03(\tR\bentities\x12\x18\n" +
 	"\aresumed\x18\x06 \x01(\bR\aresumed\x12?\n" +
-	"\rcaller_access\x18\a \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\x1aW\n" +
+	"\rcaller_access\x18\a \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\x12#\n" +
+	"\rrow_estimates\x18\b \x03(\x04R\frowEstimates\x1aW\n" +
 	"\x05Chunk\x12+\n" +
 	"\x04rows\x18\x01 \x03(\v2\x17.syncplane.v1.RowChangeR\x04rows\x12!\n" +
 	"\fresume_token\x18\x02 \x01(\fR\vresumeToken\x1a\x05\n" +

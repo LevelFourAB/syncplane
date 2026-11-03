@@ -961,6 +961,39 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		It("counts the live rows of an entity in its own workspace, when it can", func() {
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.PutRow("widget", "a", []byte("1"), 1, storage.Actor{})).To(Succeed())
+				Expect(tx.PutRow("widget", "b", []byte("2"), 2, storage.Actor{})).To(Succeed())
+				Expect(tx.PutRow("widget", "c", []byte("3"), 3, storage.Actor{})).To(Succeed())
+				Expect(tx.DeleteRow("widget", "c", 4, storage.Actor{})).To(Succeed())
+				Expect(tx.PutRow("todo", "t", []byte("4"), 5, storage.Actor{})).To(Succeed())
+			})
+			write("ws2", func(tx storage.WriteTx) {
+				Expect(tx.PutRow("widget", "z", []byte("5"), 1, storage.Actor{})).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				rc, ok := tx.(storage.RowCounter)
+				if !ok {
+					Skip("the adapter's ReadTx does not implement storage.RowCounter")
+				}
+				counts, err := rc.CountRows([]string{"widget", "todo", "unknown", "widget"})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(counts).To(Equal([]uint64{2, 1, 0, 2}),
+					"tombstones are not live rows, an entity with no rows counts 0, and a repeated entity counts at each index")
+				counts, err = rc.CountRows(nil)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(counts).To(BeEmpty())
+			})
+			read("ws3", func(tx storage.ReadTx) {
+				rc, ok := tx.(storage.RowCounter)
+				Expect(ok).To(BeTrue())
+				counts, err := rc.CountRows([]string{"widget"})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(counts).To(Equal([]uint64{0}), "a count stays inside its workspace")
+			})
+		})
+
 		It("orders keys by byte (code point) value, not locale collation", func() {
 			// The keys are chosen so byte order disagrees with a typical locale
 			// collation: uppercase sorts before lowercase, '_' (0x5F) lands

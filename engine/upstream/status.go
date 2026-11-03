@@ -62,6 +62,12 @@ type Status struct {
 	// OriginSeq is the origin sequence the workspace's confirmed rows are
 	// current through.
 	OriginSeq uint64
+	// OriginHeadSeq is the origin's newest sequence for the workspace, as of
+	// the last page or snapshot the link received in this process. 0 means
+	// unknown: nothing received yet, or a page from an origin that does not
+	// report it.
+	// See Behind.
+	OriginHeadSeq uint64
 	// SchemaRevision is the schema revision the origin advertised last, ""
 	// when it advertises none.
 	SchemaRevision string
@@ -71,6 +77,49 @@ type Status struct {
 	SchemaSkew *SchemaSkew
 	// LastError is the last failure, nil after the next success.
 	LastError error
+	// Bootstrap is how far the snapshot download has got, nil while no
+	// bootstrap runs. It is set for the whole of a bootstrap attempt, also
+	// while State is StateOffline after a failed call, and goes back to nil
+	// when the attempt ends, completed or failed.
+	Bootstrap *BootstrapProgress
+}
+
+// Behind returns how many sequences of origin writes the confirmed rows trail
+// the origin by, as of the last page the link received: OriginHeadSeq minus
+// OriginSeq, and 0 when the workspace is up to date or OriginHeadSeq is
+// unknown. It counts writes, not rows: one write can change many rows, and a
+// write the link's caller may not read still takes a sequence. While the
+// origin cannot be reached, it does not grow.
+func (s Status) Behind() uint64 {
+	if s.OriginHeadSeq <= s.OriginSeq {
+		return 0
+	}
+	return s.OriginHeadSeq - s.OriginSeq
+}
+
+// BootstrapProgress is how far a workspace's snapshot download has got.
+//
+// The numbers survive a resumed snapshot and a restart of the process: an
+// attempt that continues an interrupted snapshot starts from what the earlier
+// attempts applied. A snapshot the origin starts over (it refused the resume)
+// starts from zero.
+//
+// RowsApplied / RowsEstimated is at most 1 and never goes down during one
+// snapshot, so it can drive a progress bar as it is.
+type BootstrapProgress struct {
+	// RowsApplied is the number of snapshot rows applied to the local store.
+	RowsApplied uint64
+	// RowsEstimated is the expected size of the snapshot in rows, 0 when the
+	// origin gives no estimate. The origin gives none when read permissions or
+	// a narrowing subscription hide rows of the shipped entities. Rows written
+	// during the download can make it end above or below the estimate. It is
+	// never below RowsApplied.
+	RowsEstimated uint64
+	// EntitiesDone is the number of entities whose rows are all applied.
+	EntitiesDone int
+	// EntitiesTotal is the number of entities the snapshot ships, 0 until the
+	// origin announces them.
+	EntitiesTotal int
 }
 
 // SchemaSkew is a difference between the schema revision of the local engine
@@ -125,12 +174,16 @@ type status struct {
 	// and a failure is terminal.
 	failErr   error
 	originSeq uint64
+	// originHead is the origin's head as of the last page, 0 when unknown.
+	originHead uint64
 	revision  string
 	lastErr   error
 	// skew is the pair of revisions Config.OnSchemaSkew decided last and its
 	// answer, nil when the revisions agree. It stays until the worker decides
 	// again, so a block holds while a new pair waits for its answer.
 	skew *SchemaSkew
+	// boot is the progress of the running bootstrap, nil when none runs.
+	boot *BootstrapProgress
 }
 
 func (s *status) state() State {

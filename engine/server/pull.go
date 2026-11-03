@@ -818,6 +818,7 @@ func (s *Server) pullPreamble(tx storage.ReadTx, cur cursorState, ackKey string,
 	if cur.stateEvicted {
 		return current, storeEpoch, resetStateEvicted, nil
 	}
+	resp.HeadSeq = current
 	return current, storeEpoch, resetNone, nil
 }
 

@@ -86,6 +86,15 @@ type workspace struct {
 	handed     map[uint64]bool
 	st         status
 	last       Status
+	// bootReported is when bootstrap progress last reached Config.OnStatus.
+	bootReported time.Time
+	// bootPending is progress held back by the throttle, which bootTimer
+	// reports when the interval has passed. Both are nil when none waits.
+	bootPending *BootstrapProgress
+	bootTimer   *time.Timer
+	// bootAttempt counts ended bootstrap attempts, so that a report the
+	// timer took before an attempt ended does not land in the next one.
+	bootAttempt uint64
 	// changed is closed and replaced on every change of the view.
 	changed chan struct{}
 }
@@ -340,6 +349,16 @@ func (w *workspace) revoke(ctx context.Context) {
 	}
 }
 
+// observeHead records the origin's head from a page or a snapshot, without a
+// report: the transaction that applies the page reports the status. 0 is an
+// origin that does not send one, and makes the head unknown rather than leave
+// one from a snapshot the page has passed.
+func (w *workspace) observeHead(head uint64) {
+	w.vmu.Lock()
+	w.st.originHead = head
+	w.vmu.Unlock()
+}
+
 // update changes the status and reports a change to Config.OnStatus.
 func (w *workspace) update(fn func(*status)) {
 	w.vmu.Lock()
@@ -356,10 +375,89 @@ func (w *workspace) update(fn func(*status)) {
 	}
 }
 
+// bootProgressInterval is the shortest time between two reports of bootstrap
+// progress alone to Config.OnStatus. A fast origin streams many chunks a
+// second, and a report per chunk would flood the callback.
+var bootProgressInterval = 250 * time.Millisecond
+
+// progress records how far the running bootstrap has got and reports it to
+// Config.OnStatus, at once when force is set or bootProgressInterval has passed
+// since the last report of progress, and otherwise when that interval has
+// passed. Status keeps the last progress reported until then: storing p
+// without a report would not hold the reports back, because the next status
+// change of any other kind would report it.
+func (w *workspace) progress(p BootstrapProgress, force bool) {
+	now := time.Now()
+	w.vmu.Lock()
+	wait := bootProgressInterval - now.Sub(w.bootReported)
+	if !force && wait > 0 {
+		// The trailing report: without it, a stream that stops sending
+		// chunks for a while leaves the last ones unreported, which shows
+		// as a stall that is not there.
+		w.bootPending = &p
+		if w.bootTimer == nil {
+			w.bootTimer = time.AfterFunc(wait, w.reportPending)
+		}
+		w.vmu.Unlock()
+		return
+	}
+	w.bootReported = now
+	w.dropPendingLocked()
+	w.vmu.Unlock()
+	w.update(func(s *status) { s.boot = &p })
+}
+
+// reportPending reports the progress the throttle held back, while the
+// bootstrap it belongs to still runs.
+func (w *workspace) reportPending() {
+	w.vmu.Lock()
+	p, attempt := w.bootPending, w.bootAttempt
+	w.bootPending, w.bootTimer = nil, nil
+	if p != nil {
+		w.bootReported = time.Now()
+	}
+	w.vmu.Unlock()
+	if p == nil {
+		return
+	}
+	w.update(func(s *status) {
+		// update runs fn under vmu, so the attempt cannot end in between.
+		if w.bootAttempt == attempt && s.boot != nil {
+			s.boot = p
+		}
+	})
+}
+
+// endProgress clears the bootstrap progress when the attempt ends, and drops
+// any held back, so a late timer cannot report it.
+func (w *workspace) endProgress() {
+	w.vmu.Lock()
+	w.dropPendingLocked()
+	w.bootAttempt++
+	w.vmu.Unlock()
+	w.update(func(s *status) { s.bootstrapping, s.boot = false, nil })
+}
+
+func (w *workspace) dropPendingLocked() {
+	if w.bootTimer != nil {
+		w.bootTimer.Stop()
+	}
+	w.bootPending, w.bootTimer = nil, nil
+}
+
 func sameStatus(a, b Status) bool {
 	return a.State == b.State && a.Pending == b.Pending && a.OriginSeq == b.OriginSeq &&
+		a.OriginHeadSeq == b.OriginHeadSeq &&
 		a.SchemaRevision == b.SchemaRevision && sameSkew(a.SchemaSkew, b.SchemaSkew) &&
-		errors.Is(a.LastError, b.LastError) && errors.Is(b.LastError, a.LastError)
+		errors.Is(a.LastError, b.LastError) && errors.Is(b.LastError, a.LastError) &&
+		sameBoot(a.Bootstrap, b.Bootstrap)
+}
+
+func sameBoot(a, b *BootstrapProgress) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func sameSkew(a, b *SchemaSkew) bool {
@@ -379,10 +477,22 @@ func (w *workspace) statusLocked() Status {
 		State:          w.st.state(),
 		Pending:        len(w.pend),
 		OriginSeq:      w.st.originSeq,
+		OriginHeadSeq:  w.st.originHead,
 		SchemaRevision: w.st.revision,
 		SchemaSkew:     w.st.reportedSkew(),
 		LastError:      lastErr,
+		Bootstrap:      w.st.reportedBoot(),
 	}
+}
+
+// reportedBoot is a copy of the bootstrap progress, so that a Status handed
+// out never changes.
+func (s *status) reportedBoot() *BootstrapProgress {
+	if s.boot == nil {
+		return nil
+	}
+	b := *s.boot
+	return &b
 }
 
 // reportedSkew is the skew Status reports: a copy of the decided one, nil

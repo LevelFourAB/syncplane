@@ -101,6 +101,7 @@ import {
 	startStreamLeadership,
 	type StreamLeadership,
 } from './leadership.js';
+import { BootstrapProgressTracker, type StoredProgress } from './progress.js';
 import type { SchemaSkewAction, StatusTracker, SyncErrorInfo } from './status.js';
 import { fullStateKey, TextDeltaUnusableError, toWireMutations } from './textdelta.js';
 
@@ -411,6 +412,11 @@ interface WorkspaceSync {
 	 */
 	serverSeq: bigint;
 	/**
+	 * The server's newest workspace seq, from PullResponse.head_seq or
+	 * Begin.seq; 0n when no page has told. In-memory only, like serverSeq.
+	 */
+	headSeq: bigint;
+	/**
 	 * Tracks consecutive push failures of this workspace's queue head for the
 	 * poison backstop, and what it failed with — a different verdict restarts
 	 * the count (see countHeadFailure). Reset whenever the head changes or a
@@ -470,6 +476,11 @@ interface BootstrapResumeRecord {
 	cursor: Uint8Array;
 	/** Scan position within it, from the last chunk stored (opaque). */
 	token: Uint8Array;
+	/**
+	 * What the attempts of this snapshot applied, through the chunk stored with
+	 * this record. Absent in a record from a client build that kept no progress.
+	 */
+	progress?: StoredProgress;
 }
 
 /**
@@ -549,6 +560,10 @@ export class Coordinator {
 	 * empty one; see hydration.ts.
 	 */
 	private readonly hydration = new HydrationTracker();
+	/** Download progress of the bootstraps this tab runs; see progress.ts. */
+	private readonly progress = new BootstrapProgressTracker({
+		publish: (workspaceId) => this.publishProgress(workspaceId),
+	});
 	private leadership?: StreamLeadership;
 	/** Whether this tab currently holds a leadership term; see isLeader(). */
 	private leaderNow = false;
@@ -652,7 +667,13 @@ export class Coordinator {
 		this.opts = opts;
 		this.rpc = createClient(SyncService, opts.transport);
 		for (const [ ws, subs ] of opts.scopes) {
-			this.workspaces.set(ws, { subscriptions: subs, scopeGen: 0, serverSeq: 0n, revoked: false });
+			this.workspaces.set(ws, {
+				subscriptions: subs,
+				scopeGen: 0,
+				serverSeq: 0n,
+				headSeq: 0n,
+				revoked: false,
+			});
 			this.restoresUnchecked.add(ws);
 		}
 		this.forceResync = opts.forceResync ?? false;
@@ -704,6 +725,7 @@ export class Coordinator {
 			subscriptions: subs,
 			scopeGen: 0,
 			serverSeq: 0n,
+			headSeq: 0n,
 			revoked: false,
 		});
 		// Its store-resident queue is inherited exactly like those start() found,
@@ -725,6 +747,7 @@ export class Coordinator {
 		// standing: the status entry goes with the workspace, and a re-added
 		// workspace bootstraps (and re-seeds) from scratch.
 		this.hydration.finish(workspaceId);
+		this.progress.finish(workspaceId);
 		this.publishScopes();
 	}
 
@@ -2615,6 +2638,10 @@ export class Coordinator {
 		}
 		const { touched, pendingCount, skipped = false, behind = false, accessStale = false } = applied;
 		if (state && page.seq > state.serverSeq) state.serverSeq = page.seq;
+		// A server older than head_seq sends 0, which makes the head unknown
+		// rather than leaving one from the snapshot that this page has passed.
+		if (state) state.headSeq = page.headSeq;
+		this.publishBehind(workspaceId);
 		if (!skipped) {
 			this.opts.status.setPendingCount(workspaceId, pendingCount);
 			// Notify per page rather than once after the final page: each page's
@@ -2819,6 +2846,18 @@ export class Coordinator {
 	 * Returns true if this bootstrap committed, false if it was superseded.
 	 */
 	private async doBootstrap(workspaceId: string, subs: Subscription[]): Promise<boolean> {
+		try {
+			return await this.runBootstrap(workspaceId, subs);
+		} finally {
+			// The status reports progress only while an attempt runs, whichever
+			// way it ended.
+			this.progress.finish(workspaceId);
+			this.publishProgress(workspaceId);
+		}
+	}
+
+	/** The body of doBootstrap, which clears the download progress after it. */
+	private async runBootstrap(workspaceId: string, subs: Subscription[]): Promise<boolean> {
 		// What to re-scan once this is over. A cold bootstrap fills it as it goes,
 		// since its rows are visible before the final transaction; the staged path
 		// fills it in the swap.
@@ -2902,6 +2941,7 @@ export class Coordinator {
 						direct,
 						syncable,
 						resume: adopt ? { cursor: record.cursor, token: record.token } : undefined,
+						progress: adopt ? record.progress : undefined,
 					};
 				} catch (err) {
 					tx.release();
@@ -2910,6 +2950,8 @@ export class Coordinator {
 			},
 		);
 		const { gen, snapshotGen: claimedSnapshotGen, direct, resume, syncable } = claim;
+		this.progress.start(workspaceId, claim.progress);
+		this.publishProgress(workspaceId);
 		// The generation whose staging prefix holds this snapshot. It trails `gen`
 		// on an adopted snapshot — the staged rows keep the prefix they were
 		// written under, since moving them would cost the copy the adoption exists
@@ -2972,6 +3014,7 @@ export class Coordinator {
 				}
 				if (failure !== undefined) continue;
 				rows += chunk.rows;
+				this.progress.committed(workspaceId, chunk.entities);
 				// Committed, so whatever this chunk finished is now readable.
 				if (direct) {
 					try {
@@ -3033,6 +3076,13 @@ export class Coordinator {
 							this.hydration.order(workspaceId, msg.body.value.entities);
 							this.publishHydration(workspaceId);
 						}
+						this.progress.begin(
+							workspaceId,
+							msg.body.value.entities,
+							msg.body.value.rowEstimates,
+							resuming && msg.body.value.resumed,
+						);
+						this.publishProgress(workspaceId);
 						// A resume the server would not honour (the scope changed, the
 						// cursor fell behind its GC horizon, the store is a different
 						// one): what follows is a NEW snapshot, so the rows the adopted
@@ -3048,6 +3098,7 @@ export class Coordinator {
 						break;
 					case 'chunk': {
 						if (cursor === undefined) throw new Error('bootstrap chunk before Begin');
+						const entities = msg.body.value.rows.map((r) => r.entity);
 						const tx = await this.opts.kv.write();
 						try {
 							// The generation check the staged path can leave to the swap:
@@ -3093,6 +3144,7 @@ export class Coordinator {
 									syncable,
 								);
 							}
+							const progress = this.progress.written(workspaceId, entities);
 							// Durable in the same transaction as the rows it accounts
 							// for, so the record can never claim more than the store
 							// holds. An empty token is a server that cannot resume:
@@ -3106,6 +3158,7 @@ export class Coordinator {
 										direct,
 										cursor,
 										token: msg.body.value.resumeToken,
+										progress,
 									} satisfies BootstrapResumeRecord,
 								);
 							}
@@ -3122,7 +3175,7 @@ export class Coordinator {
 										(err: unknown) => ({ err }),
 									),
 									rows: msg.body.value.rows.length,
-									entities: msg.body.value.rows.map((r) => r.entity),
+									entities,
 								});
 								if (
 									postings !== undefined && postings.rows >= BOOTSTRAP_POSTINGS_ROWS
@@ -3150,6 +3203,10 @@ export class Coordinator {
 			// Nothing may still be in flight past here: the install below has to
 			// observe every row this snapshot wrote, and every posting.
 			await settleChunks(0);
+			if (ended && !superseded) {
+				this.progress.ended(workspaceId);
+				this.publishProgress(workspaceId);
+			}
 			if (!superseded && postings !== undefined && postings.rows > 0 && !(await flushPostings())) {
 				superseded = true;
 			}
@@ -3328,7 +3385,13 @@ export class Coordinator {
 		// keep the stream loop (which skips positions <= serverSeq) ignoring every
 		// page from the new store until it climbed past the old high-water mark.
 		const state = this.workspaces.get(workspaceId);
-		if (state) state.serverSeq = snapshotSeq;
+		if (state) {
+			state.serverSeq = snapshotSeq;
+			// Begin's seq was the server's head when the snapshot was taken. Set
+			// rather than raised, for the same store-swap reason as serverSeq.
+			state.headSeq = snapshotSeq;
+		}
+		this.publishBehind(workspaceId);
 		this.opts.status.setPendingCount(workspaceId, pendingCount);
 		// Nothing is outstanding any more, and the notify below re-emits every
 		// watcher this bootstrap touched — which is where they pick up the
@@ -3420,6 +3483,29 @@ export class Coordinator {
 		const touched = new TouchSet();
 		for (const entity of completed) touched.entity(workspaceId, entity);
 		await this.opts.notify(touched);
+	}
+
+	/** Mirrors how far a workspace trails the server onto the status surface. */
+	private publishBehind(workspaceId: string): void {
+		const state = this.workspaces.get(workspaceId);
+		if (!state) return;
+		let behind: number | undefined;
+		if (state.headSeq > 0n) {
+			behind = state.headSeq > state.serverSeq ? Number(state.headSeq - state.serverSeq) : 0;
+		}
+		this.opts.status.updateWorkspace(workspaceId, { behind });
+	}
+
+	/**
+	 * Mirrors one workspace's download progress onto the status surface. A
+	 * workspace removed meanwhile is left out: an update would add its status
+	 * entry again.
+	 */
+	private publishProgress(workspaceId: string): void {
+		if (!this.workspaces.has(workspaceId)) return;
+		this.opts.status.updateWorkspace(workspaceId, {
+			bootstrap: this.progress.infoOf(workspaceId),
+		});
 	}
 
 	/** Mirrors the tracker's view of one workspace onto the status surface. */

@@ -122,7 +122,8 @@
 // Catalog, cursorstate.Provider and lease.Provider (all three shipped by both
 // adapters) and ReplicaProvider (pgstore, when a read replica is configured) —
 // all resolved through storage.As, so wrapping adapters stay transparent by
-// implementing Unwrap.
+// implementing Unwrap. A ReadTx may implement RowCounter (both shipped
+// adapters do), which a caller resolves on the transaction itself.
 package storage
 
 import (
@@ -869,6 +870,31 @@ type ReadTx interface {
 	// sharing a name have separate entries, built separately, and a single
 	// shared flag would let either claim coverage of the other.
 	IndexState(entity, index string) (specHash string, ready bool, err error)
+}
+
+// RowCounter is the optional capability of a ReadTx that can count the live
+// rows of entities without reading them. Resolve it with a type assertion on
+// the ReadTx that WithReadTx gives:
+//
+//	if rc, ok := tx.(storage.RowCounter); ok { … }
+//
+// The engine uses it for the row estimates on a Bootstrap Begin frame, which
+// a client shows as snapshot progress. A ReadTx without it makes those
+// estimates unknown, and nothing else changes.
+//
+// A wrapper that hands its own ReadTx to fn hides the capability unless that
+// ReadTx also implements RowCounter.
+type RowCounter interface {
+	// CountRows returns the number of live (non-tombstone) rows of each of
+	// entities in the transaction's workspace, at the same index. An entity
+	// with no rows, registered or not, counts 0. An empty entities returns an
+	// empty slice. entities is not retained or changed.
+	//
+	// Each count is the number of rows ScanEntity yields in the same
+	// transaction. It must cost no more than a walk of an index over the
+	// entities' live keys: it must not read row values. A networked adapter
+	// answers all entities in one round trip.
+	CountRows(entities []string) ([]uint64, error)
 }
 
 // WriteTx extends ReadTx with mutations. All writes become visible

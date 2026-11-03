@@ -26,6 +26,7 @@ import (
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 	"github.com/levelfourab/syncplane/engine/upstream"
 )
@@ -138,8 +139,9 @@ func (b *trackedBody) Close() error {
 
 // origin is the authoritative server, over HTTP.
 type origin struct {
-	srv *server.Server
-	ts  *httptest.Server
+	srv   *server.Server
+	ts    *httptest.Server
+	store storage.Adapter
 }
 
 func completeAll(_ context.Context, tx *server.EntityTx, _ proto.Message) error {
@@ -176,7 +178,7 @@ func newOrigin(opts ...server.Option) *origin {
 		ts.CloseClientConnections()
 		ts.Close()
 	})
-	return &origin{srv: srv, ts: ts}
+	return &origin{srv: srv, ts: ts, store: store}
 }
 
 // put writes rows on the origin, as another client of it would.

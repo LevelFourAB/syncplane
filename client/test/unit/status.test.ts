@@ -117,4 +117,21 @@ describe('StatusTracker', () => {
 			errSpy.mockRestore();
 		}
 	});
+
+	it('emits a change of download progress alone, and mirrors the default workspace', () => {
+		const tracker = new StatusTracker();
+		tracker.setDefaultWorkspace(WS);
+		tracker.addWorkspace(WS);
+		const seen: SyncStatus[] = [];
+		tracker.onChange((s) => seen.push(s));
+		const progress = { rowsApplied: 10, rowsEstimated: 40, entitiesDone: 0, entitiesTotal: 2 };
+
+		tracker.updateWorkspace(WS, { bootstrap: progress });
+		tracker.updateWorkspace(WS, { bootstrap: { ...progress } });
+		tracker.updateWorkspace(WS, { bootstrap: { ...progress, rowsApplied: 11 } });
+		tracker.updateWorkspace(WS, { bootstrap: undefined });
+
+		expect(seen.map((s) => s.workspaces[WS]?.bootstrap?.rowsApplied)).toEqual([ 10, 11, undefined ]);
+		expect(seen[1]?.bootstrap?.rowsApplied).toBe(11);
+	});
 });

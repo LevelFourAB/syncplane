@@ -952,6 +952,19 @@ type readOnlyTx struct {
 	storage.ReadTx
 }
 
+// CountRows forwards storage.RowCounter, which embedding the interface does
+// not promote.
+func (r readOnlyTx) CountRows(entities []string) ([]uint64, error) {
+	return r.ReadTx.(storage.RowCounter).CountRows(entities)
+}
+
+// The assertion in readOnlyTx.CountRows holds because WithReadTx only wraps a
+// *sqliteTx.
+var (
+	_ storage.RowCounter = (*sqliteTx)(nil)
+	_ storage.RowCounter = readOnlyTx{}
+)
+
 func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(storage.ReadTx) error) error {
 	// Before BeginTx, because preparing needs a connection of its own and this
 	// goroutine is about to hold one (the only one, for an in-memory store).
@@ -1674,6 +1687,23 @@ func (t *sqliteTx) ScanEntityByVersionDesc(entity string, limit int, fn func(sto
 			return fn(r)
 		})
 }
+
+// CountRows implements storage.RowCounter. The filter matches the partial
+// index rows_by_entity_version exactly, so SQLite counts the entries of that
+// index and does not read the rows table.
+// One statement per entity: a statement is a local call with no round trip,
+// and a fixed text stays in the statement cache.
+func (t *sqliteTx) CountRows(entities []string) ([]uint64, error) {
+	out := make([]uint64, len(entities))
+	for i, entity := range entities {
+		if err := t.queryRow(countRowsSQL, t.ws, entity).Scan(&out[i]); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+const countRowsSQL = `SELECT COUNT(*) FROM rows WHERE workspace_id = ? AND entity = ? AND deleted = 0`
 
 func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, limit int, fn func(storage.Row) error) error {
 	if limit <= 0 {

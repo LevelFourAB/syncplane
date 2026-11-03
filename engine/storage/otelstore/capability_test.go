@@ -1,6 +1,9 @@
 package otelstore_test
 
 import (
+	"context"
+	"path/filepath"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
@@ -8,6 +11,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/lease"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/otelstore"
+	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
 
 // plainAdapter satisfies storage.Adapter by embedding; the capability specs
@@ -107,5 +111,28 @@ var _ = Describe("Capability discovery", func() {
 
 		_, ok = storage.As[storage.ReplicaProvider](wrapped)
 		Expect(ok).To(BeFalse())
+	})
+})
+
+var _ = Describe("Transaction capabilities", func() {
+	It("hands fn the inner adapter's transaction, so storage.RowCounter stays visible", func() {
+		inner, err := sqlitestore.Open(filepath.Join(GinkgoT().TempDir(), "count.db"))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(inner.Close()).To(Succeed()) })
+		wrapped, err := otelstore.Wrap(inner)
+		Expect(err).NotTo(HaveOccurred())
+		ctx := context.Background()
+		Expect(wrapped.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			return tx.PutRow("widget", "a", []byte("1"), 1, storage.Actor{})
+		})).To(Succeed())
+
+		Expect(wrapped.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+			rc, ok := tx.(storage.RowCounter)
+			Expect(ok).To(BeTrue())
+			counts, err := rc.CountRows([]string{"widget"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(counts).To(Equal([]uint64{1}))
+			return nil
+		})).To(Succeed())
 	})
 })

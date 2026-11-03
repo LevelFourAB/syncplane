@@ -470,6 +470,43 @@ func (t *pgTx) ScanEntityByVersionDesc(entity string, limit int, fn func(storage
 		decodeEntityRow(entity), fn)
 }
 
+// CountRows implements storage.RowCounter in one round trip. The filter
+// matches the partial index rows_by_entity_version, so Postgres can answer
+// with an index-only scan and does not read row values.
+func (t *pgTx) CountRows(entities []string) ([]uint64, error) {
+	out := make([]uint64, len(entities))
+	if len(entities) == 0 {
+		return out, nil
+	}
+	at := make(map[string][]int, len(entities))
+	for i, e := range entities {
+		at[e] = append(at[e], i)
+	}
+	rows, err := t.query(
+		`SELECT entity, count(*) FROM rows
+		 WHERE workspace_id = $1 AND entity = ANY($2) AND NOT deleted
+		 GROUP BY entity`,
+		t.ws, entities,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			entity string
+			n      int64
+		)
+		if err := rows.Scan(&entity, &n); err != nil {
+			return nil, err
+		}
+		for _, i := range at[entity] {
+			out[i] = uint64(n)
+		}
+	}
+	return out, rows.Err()
+}
+
 func (t *pgTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, limit int, fn func(storage.Row) error) error {
 	decode := func(rows pgx.Rows) (storage.Row, error) {
 		var r storage.Row

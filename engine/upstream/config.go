@@ -66,7 +66,10 @@ type Config struct {
 	// The link stops syncing the workspace and refuses local writes to its
 	// bound entities.
 	OnAccessRevoked func(workspace string)
-	// OnStatus is called with a workspace's status each time it changes.
+	// OnStatus is called with a workspace's status each time it changes,
+	// except that a change of Status.Bootstrap alone is reported at most
+	// every 250 ms, and the newest one within 250 ms. The start and the end
+	// of a snapshot download are always reported.
 	OnStatus func(Status)
 	// OnSchemaSkew decides how a workspace reacts when the local engine's
 	// schema revision (server.WithSchemaRevision) differs from the one the

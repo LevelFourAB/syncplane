@@ -130,6 +130,16 @@ When `ReplicaReader` returns `nil`, replica read capabilities are disabled. Call
 
 Test suites: `storagetest.Replica` and `storagetest.Conformance` (with a configured replica).
 
+## Row counts (optional)
+
+A `ReadTx` can implement `storage.RowCounter`. The server resolves it with a type assertion on the transaction, not with `storage.As`.
+
+- `CountRows(entities)` returns the number of live rows of each entity in the transaction's workspace, at the same index: the rows `ScanEntity` yields. An entity with no rows counts 0.
+- It must not read row values, and a networked adapter answers all entities in one round trip. Both shipped adapters count the entries of the partial index over live rows (`rows_by_entity_version`); `pgstore` sends one grouped query.
+- The server uses it for the row estimates on the Bootstrap Begin frame, one count per announced entity. It counts only when the snapshot ships every live row of those entities: no read filter or access model hides rows from the caller, and no subscription narrows an entity. Without it, Begin carries no estimate and clients show the snapshot size as unknown.
+- A wrapper that hands its own `ReadTx` to the closure hides the capability unless that `ReadTx` implements it too. `otelstore` and `prefixstore` hand over the inner adapter's transaction, so the capability stays visible through them.
+- Test suite: `storagetest.Conformance` (skips the check when the `ReadTx` does not implement it).
+
 ## Wrapping adapters
 
 An adapter wrapper (such as `otelstore`) can forward `storage.Adapter` calls to an underlying adapter.

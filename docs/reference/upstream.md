@@ -135,15 +135,28 @@ The callbacks run on the link's goroutines, and two of them can run at the same 
 
 ## `Status`
 
-| Field            | Meaning                                                                                                                                                          |
-| ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Workspace`      | The workspace id.                                                                                                                                                |
-| `State`          | See below. `State.String()` gives the lowercase name in the second column.                                                                                       |
-| `Pending`        | Local writes the origin has not confirmed through a pull yet, those it applied but did not send back included. A write counts from shortly after it commits.     |
-| `OriginSeq`      | The origin sequence the confirmed rows are current through.                                                                                                      |
-| `SchemaRevision` | The schema revision the origin advertised last, `""` when none.                                                                                                  |
-| `SchemaSkew`     | The standing skew (`*SchemaSkew{Local, Origin, Action}`), `nil` when the revisions agree, when either side advertises none, or when the answer was `SkewIgnore`. |
-| `LastError`      | The last failure; `nil` after the next success.                                                                                                                  |
+| Field            | Meaning                                                                                                                                                                                                                                                                 |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Workspace`      | The workspace id.                                                                                                                                                                                                                                                       |
+| `State`          | See below. `State.String()` gives the lowercase name in the second column.                                                                                                                                                                                              |
+| `Pending`        | Local writes the origin has not confirmed through a pull yet, those it applied but did not send back included. A write counts from shortly after it commits.                                                                                                            |
+| `OriginSeq`      | The origin sequence the confirmed rows are current through.                                                                                                                                                                                                             |
+| `OriginHeadSeq`  | The origin's newest sequence, from the last page or snapshot the link received; `0` when unknown (nothing received yet, or an origin that does not report it). `Behind()` returns `OriginHeadSeq - OriginSeq`, or `0` when it is not ahead. It counts writes, not rows. |
+| `SchemaRevision` | The schema revision the origin advertised last, `""` when none.                                                                                                                                                                                                         |
+| `SchemaSkew`     | The standing skew (`*SchemaSkew{Local, Origin, Action}`), `nil` when the revisions agree, when either side advertises none, or when the answer was `SkewIgnore`.                                                                                                        |
+| `LastError`      | The last failure; `nil` after the next success.                                                                                                                                                                                                                         |
+| `Bootstrap`      | The snapshot download progress (`*BootstrapProgress`), `nil` while no bootstrap runs. Set for the whole attempt, also while `State` is `offline` after a failed call.                                                                                                   |
+
+`OnStatus` receives a change of `Bootstrap` alone at most every 250 ms, and the newest one within 250 ms. It always receives the start and the end of the download.
+
+| `BootstrapProgress` field | Meaning                                                                                                                                                                                      |
+| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RowsApplied`             | Snapshot rows applied to the local store, by every attempt of the snapshot.                                                                                                                  |
+| `RowsEstimated`           | Expected size of the snapshot in rows, `0` when the origin gives no estimate (read permissions or a narrowing subscription hide rows, or the store cannot count). Never below `RowsApplied`. |
+| `EntitiesDone`            | Entities whose rows are all applied.                                                                                                                                                         |
+| `EntitiesTotal`           | Entities the snapshot ships, `0` until the origin announces them.                                                                                                                            |
+
+The progress is stored with the bootstrap state, so a resumed snapshot continues from what the earlier attempts applied, also after a restart. A snapshot the origin starts again starts from 0. `RowsApplied / RowsEstimated` is at most 1 and does not go down during one snapshot. See [Show download progress for the first sync](../how-to/show-bootstrap-progress.md).
 
 | `State`              | Name            | Meaning                                                                                                                         |
 | -------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------- |

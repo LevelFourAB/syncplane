@@ -43,6 +43,12 @@ import (
 // resumed stream every entity on it is complete in the client's staging,
 // whichever attempt delivered it. See bootstrapresume.go.
 //
+// Begin carries an estimated row count per entity (row_estimates), the
+// entity's live rows as of Begin, when the store's ReadTx implements
+// storage.RowCounter and the snapshot ships every live row of every announced
+// entity. A read filter, the access model or a narrowing subscription that
+// hides rows from the snapshot means no estimate (see rowEmitter.rowEstimates).
+//
 // With subscriptions, only subscribed entities are visited and only rows
 // matching their predicates ship; read-filtered rows are skipped the same
 // way, and a windowed subscription ships exactly its window's members.
@@ -237,6 +243,12 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			begin.Cursor = s.encodeCursor(ctx, msg.GetWorkspaceId(), &st)
 			begin.Seq = current
 		}
+		// The whole snapshot on a resumed one too. A count of only the rest
+		// would need a ranged count from the resume position, and a client
+		// would get a total whose meaning changes from one attempt to the next.
+		if begin.RowEstimates, err = emitter.rowEstimates(tx, order); err != nil {
+			return err
+		}
 		// Sent on a resumed snapshot too: an earlier attempt's Begin may not
 		// have reached the client's store, and the CallerAccess may have
 		// changed since. The resumed cursor then names an older one, which
@@ -425,6 +437,37 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	return stream.Send(&syncplanev1.BootstrapResponse{
 		Body: &syncplanev1.BootstrapResponse_End_{End: &syncplanev1.BootstrapResponse_End{}},
 	})
+}
+
+// rowEstimates counts the live rows of each entity of order, at the same
+// index, for Begin.row_estimates. It returns nil, which is "no estimate", when
+// tx cannot count or when the snapshot does not ship every live row of every
+// entity of order.
+//
+// A snapshot that ships fewer rows gets no estimate for two reasons. A read
+// filter or the access model hides rows from the caller, and a count of the
+// entity tells the caller how many rows it may not read. A scope the server
+// narrows (a predicate, a window, a follow closure, named keys) costs what it
+// ships, and a count walks the whole entity. Where every live row ships, the
+// count walks an index over the same rows that the scan then reads in full.
+func (e *rowEmitter) rowEstimates(tx storage.ReadTx, order []string) ([]uint64, error) {
+	rc, ok := tx.(storage.RowCounter)
+	if !ok || len(order) == 0 {
+		return nil, nil
+	}
+	for _, entity := range order {
+		if _, narrowed := bootstrapNarrowable(e, entity); narrowed {
+			return nil, nil
+		}
+		filter, err := e.filterOf(entity)
+		if err != nil {
+			return nil, err
+		}
+		if filter != nil {
+			return nil, nil
+		}
+	}
+	return rc.CountRows(order)
 }
 
 // bootstrapCandidates names the rows of one entity a snapshot may have to ship,

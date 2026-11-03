@@ -23,6 +23,9 @@
 // queries return, which come back stripped. The optional capabilities keyed by
 // workspace — leases, cursor state, replica reads — are wrapped the same way,
 // so background passes and pull cursors are partitioned with the data.
+// Transactions are the wrapped adapter's own, already bound to the prefixed
+// workspace, so a capability of the ReadTx such as storage.RowCounter stays
+// visible.
 //
 // The server-global catalog is NOT reachable through a wrapped adapter. It
 // belongs to no workspace and therefore to no partition; a host that keeps

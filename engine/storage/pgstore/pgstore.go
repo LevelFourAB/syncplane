@@ -323,6 +323,19 @@ type readOnlyTx struct {
 	storage.ReadTx
 }
 
+// CountRows forwards storage.RowCounter, which embedding the interface does
+// not promote.
+func (r readOnlyTx) CountRows(entities []string) ([]uint64, error) {
+	return r.ReadTx.(storage.RowCounter).CountRows(entities)
+}
+
+// The assertion in readOnlyTx.CountRows holds because WithReadTx only wraps a
+// *pgTx.
+var (
+	_ storage.RowCounter = (*pgTx)(nil)
+	_ storage.RowCounter = readOnlyTx{}
+)
+
 func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(storage.ReadTx) error) error {
 	t, err := beginTx(ctx, s.pool, workspaceID, beginRead)
 	if err != nil {

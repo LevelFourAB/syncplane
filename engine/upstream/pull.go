@@ -71,6 +71,7 @@ func (w *workspace) applyPage(ctx context.Context, page *syncplanev1.PullRespons
 		endSpan(span, err)
 	}()
 	final := !page.GetHasMore()
+	w.observeHead(page.GetHeadSeq())
 	// An entity leaving the subscriptions is dropped before the page's
 	// changes, in pages of its own: the cursor stays where it was until the
 	// page commits, so a stop in between pulls the same page and drops again.
@@ -143,13 +144,18 @@ func (w *workspace) bootstrap(ctx context.Context) (err error) {
 		w.l.mx.count(ctx, w.l.mx.bootstraps, err)
 		endSpan(span, err)
 	}()
-	w.update(func(s *status) { s.bootstrapping, s.live = true, false })
-	defer w.update(func(s *status) { s.bootstrapping = false })
-
 	w.mu.Lock()
 	meta := w.meta
 	reset := w.resetBoot
 	w.mu.Unlock()
+	// What an interrupted attempt of this snapshot applied, so a resume does
+	// not report a bar that starts again at zero.
+	var start BootstrapProgress
+	if meta.boot != nil {
+		start = meta.boot.progress()
+	}
+	w.update(func(s *status) { s.bootstrapping, s.live, s.boot = true, false, &start })
+	defer w.endProgress()
 	if meta.boot != nil && meta.boot.finishing {
 		// The snapshot arrived whole before the process stopped; only the
 		// retirement of the rows it did not carry is left.
@@ -176,6 +182,16 @@ func (w *workspace) bootstrap(ctx context.Context) (err error) {
 		return errors.New("upstream: bootstrap did not start with Begin")
 	}
 	w.observeRevision(begin.GetSchemaRevision())
+	// Begin's seq is the origin's head when the snapshot was taken.
+	w.observeHead(begin.GetSeq())
+	// Where each announced entity sits in the delivery order. Rows of one
+	// entity arrive contiguously and in this order, so a row of entity i
+	// proves the i entities before it complete.
+	position := make(map[string]uint64, len(begin.GetEntities()))
+	for i, e := range begin.GetEntities() {
+		position[e] = uint64(i)
+	}
+	var prog BootstrapProgress
 	_, err = w.txn(ctx, func(t *txn) error {
 		if err := t.establishAck(begin.GetLastAckedMutationId()); err != nil {
 			return err
@@ -188,32 +204,45 @@ func (w *workspace) bootstrap(ctx context.Context) (err error) {
 				acked:    begin.GetLastAckedMutationId(),
 				revision: begin.GetSchemaRevision(),
 			}
-			t.metaDirty = true
 		}
+		t.meta.boot.estimate = smallerEstimate(t.meta.boot.estimate, beginEstimate(begin))
+		t.meta.boot.entitiesTotal = uint64(len(begin.GetEntities()))
+		t.metaDirty = true
+		prog = t.meta.boot.progress()
 		return nil
 	})
 	if err != nil {
 		return err
 	}
+	w.progress(prog, true)
 	for stream.Receive() {
 		msg := stream.Msg()
 		if chunk := msg.GetChunk(); chunk != nil {
 			_, err := w.txn(ctx, func(t *txn) error {
-				if t.meta.boot == nil {
+				boot := t.meta.boot
+				if boot == nil {
 					return errors.New("upstream: bootstrap state lost")
 				}
 				for _, rc := range chunk.GetRows() {
 					if err := t.applyChange(rc); err != nil {
 						return err
 					}
+					// An entity the announcement did not name proves nothing
+					// about the order.
+					if at, ok := position[rc.GetEntity()]; ok {
+						boot.entitiesDone = max(boot.entitiesDone, at)
+					}
 				}
-				t.meta.boot.token = chunk.GetResumeToken()
+				boot.rows += uint64(len(chunk.GetRows()))
+				boot.token = chunk.GetResumeToken()
 				t.metaDirty = true
+				prog = boot.progress()
 				return nil
 			})
 			if err != nil {
 				return err
 			}
+			w.progress(prog, false)
 			continue
 		}
 		if msg.GetEnd() != nil {
@@ -222,16 +251,45 @@ func (w *workspace) bootstrap(ctx context.Context) (err error) {
 					return errors.New("upstream: bootstrap state lost")
 				}
 				t.meta.boot.finishing = true
+				t.meta.boot.entitiesDone = t.meta.boot.entitiesTotal
 				t.metaDirty = true
+				prog = t.meta.boot.progress()
 				return nil
 			})
 			if err != nil {
 				return err
 			}
+			w.progress(prog, true)
 			return w.finishBootstrap(ctx, reset)
 		}
 	}
 	return bootErr(stream.Err())
+}
+
+// beginEstimate is the snapshot's estimated size in rows from Begin, 0 when
+// Begin gives no estimate (see BootstrapResponse.Begin.row_estimates).
+func beginEstimate(begin *syncplanev1.BootstrapResponse_Begin) uint64 {
+	est := begin.GetRowEstimates()
+	if len(est) == 0 || len(est) != len(begin.GetEntities()) {
+		return 0
+	}
+	var total uint64
+	for _, n := range est {
+		total += n
+	}
+	return total
+}
+
+// smallerEstimate is the smaller of two estimates, where 0 is "unknown" and
+// loses to any known one.
+func smallerEstimate(a, b uint64) uint64 {
+	switch {
+	case a == 0:
+		return b
+	case b == 0:
+		return a
+	}
+	return min(a, b)
 }
 
 func bootErr(err error) error {

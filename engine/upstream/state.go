@@ -107,6 +107,28 @@ type bootState struct {
 	entity    uint64
 	afterKey  string
 	afterID   uint64
+	// rows counts the snapshot rows applied, by every attempt of it.
+	rows uint64
+	// estimate is the smallest row estimate an attempt's Begin gave, 0 when
+	// none gave one. Every Begin counts the whole snapshot as an upper bound,
+	// so the smallest is the closest.
+	estimate uint64
+	// entitiesDone of entitiesTotal entities have all their rows applied.
+	entitiesDone, entitiesTotal uint64
+}
+
+// progress is the BootstrapProgress that b records.
+func (b *bootState) progress() BootstrapProgress {
+	est := b.estimate
+	if est > 0 && est < b.rows {
+		est = b.rows
+	}
+	return BootstrapProgress{
+		RowsApplied:   b.rows,
+		RowsEstimated: est,
+		EntitiesDone:  int(b.entitiesDone),
+		EntitiesTotal: int(b.entitiesTotal),
+	}
 }
 
 // confirmedRow is a row as the origin last sent it.
@@ -359,6 +381,10 @@ func (m *syncMeta) encode() ([]byte, error) {
 		be.uint(7, m.boot.entity)
 		be.str(8, m.boot.afterKey)
 		be.uint(9, m.boot.afterID)
+		be.uint(10, m.boot.rows)
+		be.uint(11, m.boot.estimate)
+		be.uint(12, m.boot.entitiesDone)
+		be.uint(13, m.boot.entitiesTotal)
 		e.b = protowire.AppendTag(e.b, 9, protowire.BytesType)
 		e.b = protowire.AppendBytes(e.b, be.b)
 	}
@@ -417,6 +443,14 @@ func decodeSyncMeta(b []byte) (syncMeta, error) {
 					bs2.afterKey = string(b)
 				case 9:
 					bs2.afterID = v
+				case 10:
+					bs2.rows = v
+				case 11:
+					bs2.estimate = v
+				case 12:
+					bs2.entitiesDone = v
+				case 13:
+					bs2.entitiesTotal = v
 				}
 				return nil
 			}); err != nil {

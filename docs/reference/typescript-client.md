@@ -1127,6 +1127,8 @@ interface SyncStatus {
 	scope?: SyncScopeInfo;
 	workspaceAccess?: WorkspaceAccess;
 	hydration?: HydrationInfo;
+	bootstrap?: BootstrapProgressInfo;
+	behind?: number;
 }
 
 interface WorkspaceStatus {
@@ -1135,6 +1137,8 @@ interface WorkspaceStatus {
 	access?: WorkspaceAccess;
 	scope?: SyncScopeInfo;
 	hydration?: HydrationInfo;
+	bootstrap?: BootstrapProgressInfo;
+	behind?: number;
 }
 
 type WorkspaceAccess = 'granted' | 'revoked' | 'none';
@@ -1151,7 +1155,18 @@ interface HydrationInfo {
 	total: number;
 	done: number;
 }
+
+interface BootstrapProgressInfo {
+	rowsApplied: number;
+	rowsEstimated: number; // 0 when the server gives no estimate
+	entitiesDone: number;
+	entitiesTotal: number;
+}
 ```
+
+`bootstrap` is set while a bootstrap of the workspace runs in this tab, the first one and later ones, and is unset when the attempt ends, installed or failed. It updates at most every 250 ms, shows each change within 250 ms, and always shows the start and the end of the download. `rowsApplied / rowsEstimated` is at most 1 and does not go down during one snapshot. A resumed snapshot starts from the rows the earlier attempts applied; a snapshot the server starts again starts from 0. See [Show download progress for the first sync](../how-to/show-bootstrap-progress.md).
+
+`behind` is how many sequences of server writes the workspace trails the server by, as of the last page or snapshot this tab applied, from `PullResponse.head_seq`. 0 is up to date. It counts writes, not rows, and does not grow while the server cannot be reached. It is unset before the first page and after a page from a server that does not report its head.
 
 Exported status and rejection constants: `CodePoisonDropped`, `CodeConflict`, `CodeInvalidArgument`, `CodePermissionDenied`, `CodeAccessDenied`.
 See [Sync status and failure codes](sync-status-and-codes.md).
@@ -2018,8 +2033,8 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
 
 - **`useSyncStatus()`** — the live account-wide status object.
   **`useWorkspaceStatus(opts?)`** — one workspace's slice of it (its pending
-  count, scope, access verdict and first-snapshot progress), which a busy
-  neighbour workspace does not re-render.
+  count, scope, access verdict, first-snapshot progress and download
+  progress), which a busy neighbour workspace does not re-render.
 
   `hydration` is set only while a cold client is still downloading its first
   snapshot — `{ pending, total, done }`, so a one-off progress bar is
@@ -2031,6 +2046,10 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   	return <Loading done={ hydration.done } total={ hydration.total } />;
   }
   ```
+
+  `bootstrap` counts the same download in rows, against the server's estimate,
+  for every bootstrap (see
+  [Show download progress for the first sync](../how-to/show-bootstrap-progress.md)).
 
 - **`useUndo(opts?)`** — `{ canUndo, canRedo, undo, redo }` over the resolved
   scope's undo stacks: the nearest `<UndoScopeProvider>`'s if there is one, else

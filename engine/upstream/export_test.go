@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"time"
 
 	"github.com/levelfourab/syncplane/engine/storage"
 )
@@ -32,4 +33,13 @@ func ConfirmedRecord(ctx context.Context, store storage.Adapter, ws, entity, key
 		return nil
 	})
 	return found, value, err
+}
+
+// SetBootProgressInterval sets the shortest time between two reports of
+// bootstrap progress alone, and returns a func that restores the previous
+// value.
+func SetBootProgressInterval(d time.Duration) (restore func()) {
+	old := bootProgressInterval
+	bootProgressInterval = d
+	return func() { bootProgressInterval = old }
 }

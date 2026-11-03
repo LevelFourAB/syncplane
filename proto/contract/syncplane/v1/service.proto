@@ -256,6 +256,13 @@ message PullResponse {
 	// applied and rejected after that, ordered by mutation id. See
 	// `LateRejection`. A reset response carries none.
 	repeated LateRejection late_rejections = 10;
+	// The workspace's sequence when the server served this response: the
+	// newest write it holds. head_seq - seq is how many sequences of writes
+	// the client has not pulled yet, 0 when it is up to date. The distance
+	// counts writes, not rows: one write can change many rows, and a write the
+	// caller may not read still takes a sequence. 0 means the server gives no
+	// head (an older build), and is also the value on a reset response.
+	uint64 head_seq = 11;
 }
 
 // Reports a mutation that the server acknowledged as applied and rejected
@@ -439,6 +446,34 @@ message BootstrapResponse {
 		// What the caller holds in the workspace under the access model, as of
 		// the snapshot. Absent in a schema without the access model.
 		CallerAccess caller_access = 7;
+		// Estimated row count of each entity in `entities`, at the same index:
+		// row_estimates[i] is about how many rows of entities[i] the snapshot
+		// ships. Empty means the server gives no estimate, and a client must
+		// then show the snapshot's size as unknown. A list of another length
+		// than `entities` is also no estimate.
+		//
+		// Each count is the entity's live rows as of Begin. It is an estimate,
+		// not a bound: rows written or deleted while the snapshot streams can
+		// make it ship some rows more or fewer. A client must therefore not
+		// rely on the count to size a buffer or to check the download, and
+		// must not show progress above 100%. A value of 0 means the entity is
+		// expected to ship no rows.
+		//
+		// The server gives no estimate when the snapshot does not ship every
+		// live row of the announced entities: when a read filter or the access
+		// model hides rows from the caller, or when a subscription narrows an
+		// entity with a predicate, a window, named keys or a follow closure.
+		// A count would then tell the caller how many rows exist that it may
+		// not read, and would cost more than the narrowed snapshot.
+		//
+		// On a resumed snapshot (`resumed` is true) the list covers the WHOLE
+		// snapshot again, counted as of this attempt, including the rows the
+		// earlier attempts delivered. It is not a count of the rest. A client
+		// that keeps the rows it applied across attempts computes progress as
+		// applied / total. Keeping the smaller of the totals it was given, and
+		// raising the total to at least the rows applied, gives progress that
+		// never goes backwards.
+		repeated uint64 row_estimates = 8;
 	}
 	message Chunk {
 		repeated RowChange rows = 1;

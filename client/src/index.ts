@@ -21,6 +21,7 @@ export type {
 export { BLOB_CHUNK_SIZE, isBlobDigest } from './blob/digest.js';
 export { subscription, SyncClient } from './client.js';
 export type {
+	BootstrapProgressInfo,
 	CanOptions,
 	DetailOptions,
 	DiscardedMutation,

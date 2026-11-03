@@ -365,6 +365,7 @@ export type {
 	SyncEventOutcome,
 } from './sync/events.js';
 export type {
+	BootstrapProgressInfo,
 	HydrationInfo,
 	SchemaSkewAction,
 	SchemaSkewInfo,
