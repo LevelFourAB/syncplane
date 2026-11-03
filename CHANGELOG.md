@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/LevelFourAB/syncplane/compare/v0.6.0...v0.7.0) (2026-11-03)
+
+
+### Features
+
+* Provide approximate bootstrap and sync progress ([ae8cfa1](https://github.com/LevelFourAB/syncplane/commit/ae8cfa1e03a478ae4708f19e69671d5a5ed78933))
+
 ## [0.6.0](https://github.com/LevelFourAB/syncplane/compare/v0.5.0...v0.6.0) (2026-11-03)
 
 
