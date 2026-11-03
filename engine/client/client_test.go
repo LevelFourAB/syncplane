@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -807,6 +808,31 @@ var _ = Describe("Client", func() {
 			Expect(r.out).To(Equal(data))
 		})
 
+		It("returns the caller's context error when the server's copy of the deadline ends first", func() {
+			data := bytes.Repeat([]byte("early"), 500)
+			m, err := blob.Compute(bytes.NewReader(data))
+			Expect(err).NotTo(HaveOccurred())
+			ref := &syncplanev1.BlobRef{Digest: m.Digest.String(), Size: m.Size}
+			_, err = ws.Put(ctx, &testdatav1.BlobHolder{Id: "h3", Photo: ref})
+			Expect(err).NotTo(HaveOccurred())
+			_, err = c.BlobService().BeginUpload(ctx, connect.NewRequest(&syncplanev1.BeginUploadRequest{
+				WorkspaceId: "acme", Digest: ref.Digest, Size: m.Size, ChunkHashes: m.ChunkHashes,
+			}))
+			Expect(err).NotTo(HaveOccurred())
+
+			// Connect sends the deadline in whole milliseconds, rounded down, so
+			// the server's copy can end up to a millisecond before the caller's.
+			// The transport widens that gap so the server always ends first.
+			early, err := client.New(url, client.WithHTTPClient(&http.Client{
+				Transport: &earlyDeadlineTransport{base: http.DefaultTransport, by: 150 * time.Millisecond},
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			short, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+			defer cancel()
+			_, err = early.Workspace("acme").DownloadBlob(short, ref.Digest, io.Discard)
+			Expect(err).To(MatchError(context.DeadlineExceeded))
+		})
+
 		It("refuses a reader shorter than the size", func() {
 			_, err := ws.UploadBlob(ctx, strings.NewReader("abc"), 10, "")
 			Expect(err).To(HaveOccurred())
@@ -881,6 +907,25 @@ func (t *lossyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, errors.New("connection reset")
 	}
 	return resp, nil
+}
+
+// earlyDeadlineTransport forwards every request with its Connect-Timeout-Ms
+// header shortened by by, but never below one millisecond.
+type earlyDeadlineTransport struct {
+	base http.RoundTripper
+	by   time.Duration
+}
+
+func (t *earlyDeadlineTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if v := req.Header.Get("Connect-Timeout-Ms"); v != "" {
+		ms, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, err
+		}
+		req = req.Clone(req.Context())
+		req.Header.Set("Connect-Timeout-Ms", strconv.FormatInt(max(ms-t.by.Milliseconds(), 1), 10))
+	}
+	return t.base.RoundTrip(req)
 }
 
 // failFirstPush fails the first Push with code before it is sent.

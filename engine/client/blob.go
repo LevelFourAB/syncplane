@@ -123,7 +123,15 @@ func (w *Workspace) DownloadBlob(ctx context.Context, digest string, dst io.Writ
 // than uploading, and returns that status. It returns ctx's error when ctx
 // ends first.
 func (w *Workspace) awaitBlob(ctx context.Context, digest string) (*syncplanev1.BlobStatus, error) {
-	stream, err := w.c.blob.WatchBlobs(ctx, connect.NewRequest(&syncplanev1.WatchBlobsRequest{
+	// The watch runs without ctx's deadline and is cancelled when ctx ends.
+	// Connect sends a deadline to the server rounded down to the millisecond,
+	// and the server ends the watch cleanly when its copy expires, so with the
+	// deadline attached the stream can end before ctx does and look cut off.
+	wctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancel()
+	stop := context.AfterFunc(ctx, cancel)
+	defer stop()
+	stream, err := w.c.blob.WatchBlobs(wctx, connect.NewRequest(&syncplanev1.WatchBlobsRequest{
 		WorkspaceId: w.id,
 		Digests:     []string{digest},
 	}))
