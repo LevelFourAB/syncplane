@@ -358,9 +358,12 @@
 	function selectedKeySets(fs) {
 		const items = fs.querySelector('[data-ref-items]');
 		if (!items) return [];
-		const chips = Array.prototype.filter.call(items.querySelectorAll('[data-ref-chip]'), function(chip) {
-			return !pointsElsewhere(chip);
-		});
+		const chips = Array.prototype.filter.call(
+			items.querySelectorAll('[data-ref-chip]'),
+			function(chip) {
+				return !pointsElsewhere(chip);
+			},
+		);
 		return chips.map(function(chip) {
 			const obj = {};
 			chip.querySelectorAll('input[data-ref-key]').forEach(function(el) {
