@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/LevelFourAB/syncplane/compare/v0.5.0...v0.6.0) (2026-11-03)
+
+
+### Features
+
+* **engine:** Support engine syncing with an origin server ([61d5093](https://github.com/LevelFourAB/syncplane/commit/61d50936eb9ee35d4df0d2027ec177cc78ff07ed))
+
 ## [0.5.0](https://github.com/LevelFourAB/syncplane/compare/v0.4.1...v0.5.0) (2026-11-01)
 
 
