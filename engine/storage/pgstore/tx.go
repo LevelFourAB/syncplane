@@ -547,6 +547,26 @@ func (t *pgTx) ClientRejections(clientID string) ([]storage.ClientRejection, err
 	return recs, nil
 }
 
+func (t *pgTx) ClientAppliedMutations(clientID string) ([]storage.AppliedMutation, error) {
+	var blob []byte
+	err := t.queryRow(
+		`SELECT applied FROM clients
+		 WHERE workspace_id = $1 AND client_id = $2`,
+		t.ws, clientID,
+	).Scan(&blob)
+	if errors.Is(err, pgx.ErrNoRows) || len(blob) == 0 {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var recs []storage.AppliedMutation
+	if err := json.Unmarshal(blob, &recs); err != nil {
+		return nil, fmt.Errorf("pgstore: decode applied mutations for client %q: %w", clientID, err)
+	}
+	return recs, nil
+}
+
 func (t *pgTx) IdempotencyRecord(key string) (storage.IdempotencyRecord, bool, error) {
 	var (
 		rec storage.IdempotencyRecord
@@ -1409,6 +1429,26 @@ func (t *pgTx) SetClientRejections(clientID string, recs []storage.ClientRejecti
 		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (workspace_id, client_id)
 		 DO UPDATE SET rejections = excluded.rejections, updated_at = excluded.updated_at`,
+		t.ws, clientID, blob, time.Now().UnixMilli(),
+	)
+}
+
+func (t *pgTx) SetClientAppliedMutations(clientID string, recs []storage.AppliedMutation) error {
+	if err := t.register(); err != nil {
+		return err
+	}
+	var blob []byte
+	if len(recs) > 0 {
+		var err error
+		if blob, err = json.Marshal(recs); err != nil {
+			return fmt.Errorf("pgstore: encode applied mutations for client %q: %w", clientID, err)
+		}
+	}
+	return t.queue(
+		`INSERT INTO clients (workspace_id, client_id, applied, updated_at)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (workspace_id, client_id)
+		 DO UPDATE SET applied = excluded.applied, updated_at = excluded.updated_at`,
 		t.ws, clientID, blob, time.Now().UnixMilli(),
 	)
 }

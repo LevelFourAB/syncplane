@@ -160,6 +160,18 @@ var _ = Describe("Collaborative-text compaction", func() {
 		Expect(storedBody("w1")).To(Equal(before))
 	})
 
+	It("leaves the rows of an entity WithoutTextCompaction names alone", func() {
+		newServerWith(
+			server.WithGC(time.Millisecond, 0),
+			server.WithTextDeltaRetention(time.Millisecond),
+			server.WithTextCompaction(1),
+			server.WithoutTextCompaction("widget"),
+		)
+		before := seedTyped()
+		collect()
+		Expect(storedBody("w1")).To(Equal(before))
+	})
+
 	It("leaves a row alone below the purge threshold", func() {
 		newServerWith(
 			server.WithGC(time.Millisecond, 0),

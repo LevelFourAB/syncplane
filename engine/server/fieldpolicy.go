@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -225,4 +226,41 @@ func stampCreatorFields(info *entityInfo, msg proto.Message, subject string) {
 		}
 		row.Set(fd, protoreflect.ValueOfString(subject))
 	}
+}
+
+// carryUnknownFields adds to msg each top-level field of base that the schema
+// does not declare and msg does not carry. Such a field was written by a newer
+// schema, and a writer on this one could not have meant to clear what it could
+// not see. A field msg carries as unknown, sent by a writer on a newer schema,
+// wins over the stored one. Fields inside nested messages are not carried. A nil
+// base carries nothing.
+func carryUnknownFields(base, msg proto.Message) {
+	if base == nil {
+		return
+	}
+	stored := base.ProtoReflect().GetUnknown()
+	if len(stored) == 0 {
+		return
+	}
+	dst := msg.ProtoReflect()
+	sent := make(map[protowire.Number]bool)
+	for _, n := range unknownNumbers(dst.GetUnknown()) {
+		sent[n] = true
+	}
+	out := append(protoreflect.RawFields(nil), dst.GetUnknown()...)
+	for raw := stored; len(raw) > 0; {
+		n, typ, tagLen := protowire.ConsumeTag(raw)
+		if tagLen < 0 {
+			break
+		}
+		valLen := protowire.ConsumeFieldValue(n, typ, raw[tagLen:])
+		if valLen < 0 {
+			break
+		}
+		if !sent[n] {
+			out = append(out, raw[:tagLen+valLen]...)
+		}
+		raw = raw[tagLen+valLen:]
+	}
+	dst.SetUnknown(out)
 }

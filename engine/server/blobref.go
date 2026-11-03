@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/blob"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/internal/lww"
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
@@ -308,6 +310,40 @@ func (s *Server) referencedBlobs(tx storage.ReadTx, want []blob.Digest, admit bl
 		if err != nil {
 			return nil, err
 		}
+	}
+	return found, nil
+}
+
+// ReferencedBlobs returns the digests of want that a live row of the
+// workspace names in a syncplane.v1.BlobRef field: the rule blob GC keeps a
+// blob by. A digest that no such row names is absent from the map.
+//
+// The check applies no access rule and counts the rows of server-only
+// entities. When entity is not nil, only the rows of the entities it accepts
+// count. It runs in one read transaction; each entity costs one index probe
+// per digest, or a read of every row of the entity when no index can serve
+// the probe. It returns an error for an invalid workspace id.
+func (s *Server) ReferencedBlobs(ctx context.Context, workspaceID string, want []blob.Digest, entity func(name string) bool) (map[blob.Digest]bool, error) {
+	if err := naming.ValidateWorkspaceID(workspaceID); err != nil {
+		return nil, err
+	}
+	if len(want) == 0 {
+		return map[blob.Digest]bool{}, nil
+	}
+	var admit blobAdmit
+	if entity != nil {
+		admit = func(info *entityInfo, _ storage.Row, _ proto.Message) (bool, error) {
+			return entity(info.name), nil
+		}
+	}
+	var found map[blob.Digest]bool
+	err := s.store.WithReadTx(ctx, workspaceID, func(tx storage.ReadTx) error {
+		var err error
+		found, err = s.referencedBlobs(tx, want, admit, true)
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
 	return found, nil
 }

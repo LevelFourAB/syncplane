@@ -480,6 +480,10 @@ CREATE TABLE index_entries (
 	key   NOT NULL,
 	PRIMARY KEY (scope, k, key)
 ) WITHOUT ROWID;`,
+	// 8: the sequences of each client's latest applied mutations (see
+	// storage.AppliedMutation). NULL until the client's first push after the
+	// upgrade.
+	`ALTER TABLE clients ADD COLUMN applied BLOB;`,
 }
 
 // workspaceTables names every table that holds state of one workspace, keyed
@@ -1747,6 +1751,25 @@ func (t *sqliteTx) ClientRejections(clientID string) ([]storage.ClientRejection,
 	return recs, nil
 }
 
+func (t *sqliteTx) ClientAppliedMutations(clientID string) ([]storage.AppliedMutation, error) {
+	var blob []byte
+	err := t.queryRow(
+		`SELECT applied FROM clients WHERE workspace_id = ? AND client_id = ?`,
+		t.ws, clientID,
+	).Scan(&blob)
+	if errors.Is(err, sql.ErrNoRows) || len(blob) == 0 {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var recs []storage.AppliedMutation
+	if err := json.Unmarshal(blob, &recs); err != nil {
+		return nil, fmt.Errorf("sqlitestore: decode applied mutations for client %q: %w", clientID, err)
+	}
+	return recs, nil
+}
+
 func (t *sqliteTx) IdempotencyRecord(key string) (storage.IdempotencyRecord, bool, error) {
 	var rec storage.IdempotencyRecord
 	err := t.queryRow(
@@ -2755,6 +2778,27 @@ func (t *sqliteTx) SetClientRejections(clientID string, recs []storage.ClientRej
 		 VALUES (?, ?, ?, ?)
 		 ON CONFLICT (workspace_id, client_id)
 		 DO UPDATE SET rejections = excluded.rejections, updated_at = excluded.updated_at`,
+		t.ws, clientID, blob, time.Now().UnixMilli(),
+	)
+	return err
+}
+
+func (t *sqliteTx) SetClientAppliedMutations(clientID string, recs []storage.AppliedMutation) error {
+	if err := t.register(); err != nil {
+		return err
+	}
+	var blob []byte
+	if len(recs) > 0 {
+		var err error
+		if blob, err = json.Marshal(recs); err != nil {
+			return fmt.Errorf("sqlitestore: encode applied mutations for client %q: %w", clientID, err)
+		}
+	}
+	_, err := t.exec(
+		`INSERT INTO clients (workspace_id, client_id, applied, updated_at)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT (workspace_id, client_id)
+		 DO UPDATE SET applied = excluded.applied, updated_at = excluded.updated_at`,
 		t.ws, clientID, blob, time.Now().UnixMilli(),
 	)
 	return err

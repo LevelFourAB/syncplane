@@ -116,6 +116,66 @@ var _ = Describe("SyncService", func() {
 			Expect(decodeTodo(pulled.GetPatch().GetChanges()[0]).GetTitle()).To(Equal("v1"))
 		})
 
+		Describe("a resend of applied mutations", func() {
+			seqs := func(results []*syncplanev1.MutationResult) map[uint64]uint64 {
+				out := map[uint64]uint64{}
+				for _, r := range results {
+					out[r.GetMutationId()] = r.GetSeq()
+				}
+				return out
+			}
+
+			It("carries the sequence each mutation was applied at, not the row's later version", func() {
+				first := push(
+					putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}),
+					putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "two"}),
+				)
+				push(putMutation("c2", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "theirs"}))
+
+				again := push(
+					putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}),
+					putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "two"}),
+				)
+				for _, r := range again {
+					Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_ALREADY_APPLIED))
+				}
+				Expect(seqs(again)).To(Equal(seqs(first)))
+			})
+
+			It("carries the sequences when the resend is split, and alongside new mutations", func() {
+				first := seqs(push(
+					putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}),
+					putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2"}),
+					putMutation("c1", 3, "todo", "t3", &todov1.Todo{Id: "t3"}),
+				))
+				Expect(seqs(push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"})))).To(HaveKeyWithValue(uint64(1), first[1]))
+
+				mixed := push(
+					putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2"}),
+					putMutation("c1", 3, "todo", "t3", &todov1.Todo{Id: "t3"}),
+					putMutation("c1", 4, "todo", "t4", &todov1.Todo{Id: "t4"}),
+				)
+				Expect(mixed[2].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+				first[4] = mixed[2].GetSeq()
+				Expect(seqs(mixed)).To(Equal(map[uint64]uint64{2: first[2], 3: first[3], 4: first[4]}))
+
+				// The answer to the mixed push is lost too.
+				Expect(seqs(push(
+					putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2"}),
+					putMutation("c1", 3, "todo", "t3", &todov1.Todo{Id: "t3"}),
+					putMutation("c1", 4, "todo", "t4", &todov1.Todo{Id: "t4"}),
+				))).To(Equal(map[uint64]uint64{2: first[2], 3: first[3], 4: first[4]}))
+			})
+
+			It("carries no sequence for a mutation before the client's latest push", func() {
+				push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+				push(putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2"}))
+				again := push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+				Expect(again[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_ALREADY_APPLIED))
+				Expect(again[0].GetSeq()).To(BeZero())
+			})
+		})
+
 		It("fails the whole batch on a mutation id gap", func() {
 			// The gap is reported on the WORKSPACE, not as an RPC error: a
 			// client pushing several workspaces at once must not lose the

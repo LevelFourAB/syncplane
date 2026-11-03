@@ -2426,6 +2426,78 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		It("records applied mutations apart from the watermark and the rejections, and replaces them wholesale", func() {
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientLastMutationID("c1", 7)).To(Succeed())
+				Expect(tx.SetClientRejections("c1", []storage.ClientRejection{{MutationID: 5, Code: "conflict"}})).To(Succeed())
+				Expect(tx.SetClientAppliedMutations("c1", []storage.AppliedMutation{
+					{MutationID: 6, Seq: 40},
+					{MutationID: 7, Seq: 41},
+				})).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientAppliedMutations("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(Equal([]storage.AppliedMutation{{MutationID: 6, Seq: 40}, {MutationID: 7, Seq: 41}}))
+
+				last, err := tx.ClientLastMutationID("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(last).To(BeEquivalentTo(7))
+				rejs, err := tx.ClientRejections("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rejs).To(HaveLen(1))
+
+				recs, err = tx.ClientAppliedMutations("never-seen")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(BeEmpty(), "an unknown client has none, and that is not an error")
+			})
+			read("ws2", func(tx storage.ReadTx) {
+				recs, err := tx.ClientAppliedMutations("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(BeEmpty(), "records are per workspace")
+			})
+
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientAppliedMutations("c1", []storage.AppliedMutation{{MutationID: 8, Seq: 50}})).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientAppliedMutations("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(Equal([]storage.AppliedMutation{{MutationID: 8, Seq: 50}}))
+			})
+
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientAppliedMutations("c1", nil)).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientAppliedMutations("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(BeEmpty())
+				last, err := tx.ClientLastMutationID("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(last).To(BeEquivalentTo(7), "clearing the records keeps the watermark")
+			})
+		})
+
+		It("keeps every field of a late rejection", func() {
+			late := []storage.ClientRejection{
+				{MutationID: 2, Code: "conflict"},
+				{
+					MutationID: 3, Code: "permission_denied", Message: "not yours", Seq: 41,
+					Targets: []storage.RejectionTarget{{Entity: "todo", Key: "a"}, {Entity: "todo", Key: "b"}},
+				},
+				{MutationID: 4, Code: "invalid_argument", Seq: 42, Mutator: "completeAll"},
+			}
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientRejections("c1", late)).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientRejections("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(Equal(late))
+			})
+		})
+
 		It("keeps a client's watermark and its rejections independent", func() {
 			write("ws1", func(tx storage.WriteTx) {
 				Expect(tx.SetClientLastMutationID("c1", 3)).To(Succeed())
@@ -3106,6 +3178,31 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 						removed, err := tx.CollectIdleConsumers(time.Now().Add(time.Hour), 0)
 						Expect(err).NotTo(HaveOccurred())
 						Expect(removed).To(BeZero(), "a zero horizon has nothing below it")
+					})
+				})
+
+				// A consumer may keep shadows and never record a position: a
+				// replication link keeps its whole state that way. Collection
+				// is driven by positions, so such shadows have nothing that
+				// could make them stale or stranded.
+				It("never removes the shadows of a consumer that holds no position", func() {
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.PutConsumerShadow("positionless", "widget", "k", []byte("kept"))).To(Succeed())
+						Expect(tx.SetConsumerPosition("stranded", storage.ConsumerPosition{Seq: 1})).To(Succeed())
+						Expect(tx.PutConsumerShadow("stranded", "widget", "k", []byte("gone"))).To(Succeed())
+					})
+					write("ws1", func(tx storage.WriteTx) {
+						removed, err := tx.CollectIdleConsumers(time.Now().Add(time.Hour), 1<<40)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(removed).To(Equal(1))
+					})
+					read("ws1", func(tx storage.ReadTx) {
+						shadow, err := tx.ConsumerShadow("positionless", "widget", "k")
+						Expect(err).NotTo(HaveOccurred())
+						Expect(shadow).To(Equal([]byte("kept")))
+						shadow, err = tx.ConsumerShadow("stranded", "widget", "k")
+						Expect(err).NotTo(HaveOccurred())
+						Expect(shadow).To(BeNil())
 					})
 				})
 
@@ -4136,6 +4233,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					Expect(tx.SetIndexState("widget", "by_x", "spec", true)).To(Succeed())
 					Expect(tx.SetConsumerPosition("indexer", storage.ConsumerPosition{Seq: seq})).To(Succeed())
 					Expect(tx.PutConsumerShadow("indexer", "widget", "live", []byte("shadow"))).To(Succeed())
+					Expect(tx.PutConsumerShadow("positionless", "widget", "live", []byte("shadow"))).To(Succeed())
 				})
 				write(ws, func(tx storage.WriteTx) {
 					Expect(tx.SetIndexBuildMark("mark")).To(Succeed())
@@ -4182,6 +4280,8 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					Expect(found).To(BeFalse())
 					Expect(tx.ListConsumerPositions()).To(BeEmpty())
 					Expect(tx.ConsumerShadow("indexer", "widget", "live")).To(BeNil())
+					Expect(tx.ConsumerShadow("positionless", "widget", "live")).To(BeNil(),
+						"shadows of a consumer with no position go too")
 					Expect(tx.TextCompactMark()).To(BeZero())
 				})
 			}

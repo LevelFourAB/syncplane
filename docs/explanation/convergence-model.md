@@ -176,6 +176,14 @@ The server retains rejection verdicts within the following limits:
   pushed within the tombstone retention. The watermark stays. A later resend
   returns `ALREADY_APPLIED` and the server does not apply the mutation.
 
+A resend of an applied mutation also gets back the sequence the mutation was
+applied at, in `MutationResult.seq`. A client needs that sequence to make a
+compare-and-swap against its own earlier write: the version of the row is not a
+replacement, because it includes every later write to the row by other clients.
+The server keeps the sequences of the client's latest push that applied
+something. A resend of an older mutation returns `ALREADY_APPLIED` with
+sequence `0`.
+
 ## Atomic batches
 
 You can bundle multiple CRUD mutations into a single transaction using
@@ -326,11 +334,28 @@ access.
 
 ## Schema evolution is additive
 
-`PUT` operations replace entire rows. Stale writers—such as older client builds
-or server components deserializing into outdated message definitions—silently
-drop unknown fields when overwriting rows. To prevent data loss, use `PATCH`
-with field masks for partial updates, and design entity schema changes to be
-additive.
+`PUT` operations replace entire rows. A server keeps one class of field across
+a `PUT`: a top-level field that the stored row holds and that the server's
+schema does not declare. A newer schema wrote that field, and a writer on the
+server's schema could not see it, so the server does not take its absence as a
+clear. This protects a node that runs an older build during a rolling deploy,
+and a [linked local engine](chained-sync.md) with an older schema than its
+origin.
+
+The rule has limits:
+
+- It applies to top-level fields only. A field that a newer schema added inside
+  a nested message or a keyed-list element is lost when a `PUT` replaces that
+  message.
+- The server can only keep fields it does not know. An older client that writes
+  to a newer server sends a row without the newer field, and the server cannot
+  tell that absence from a clear. The `PUT` clears the field.
+- A writer on a newer schema than the server's cannot clear such a field with a
+  `PUT`. It sends no bytes for a cleared field, and the server keeps the stored
+  value. A `PATCH` that names the field clears it.
+
+To prevent data loss, use `PATCH` with field masks for partial updates, and
+design entity schema changes to be additive.
 
 A client that reads a row, modifies a single field, and writes back the entire
 row overwrites concurrent changes to other fields. To prevent this, the
@@ -378,3 +403,5 @@ workspace.
   constraints.
 - [Partial sync and coverage](partial-sync-and-coverage.md): Synchronization
   behavior when a client syncs a subset of a workspace.
+- [Chained sync](chained-sync.md): The same model with a local engine between
+  the clients and the server.

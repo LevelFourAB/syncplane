@@ -150,6 +150,13 @@ export interface RejectionInfo {
 	targets: readonly RejectionTarget[];
 	/** Name of the custom mutator, when the rejected mutation was one. */
 	mutator?: string;
+	/**
+	 * Set when the server had acknowledged the mutation as applied and rejected
+	 * it later. A server that forwards writes to another server (a local engine
+	 * linked to an origin) acknowledges a write before the origin decides it.
+	 * The rows the mutation wrote are already reverted when the callback runs.
+	 */
+	late?: true;
 }
 
 /** Reads the dead-letter description off a queued mutation (see RejectionInfo). */
@@ -2615,8 +2622,31 @@ export class Coordinator {
 			// must not strand watchers (and other tabs) on stale rows for the
 			// entities this page changed.
 			await this.opts.notify(touched);
+			// After the rebase committed the page's reverts. A skipped page was
+			// applied by another tab, which reported its late rejections.
+			this.reportLateRejections(workspaceId, page);
 		}
 		return { reset: false, committed: false, accessStale, skipped, behind };
+	}
+
+	/**
+	 * Reports the page's late rejections. The mutations left the queue when the
+	 * server acknowledged them, so they carry no undo tokens.
+	 */
+	private reportLateRejections(workspaceId: string, page: PullResponse): void {
+		const report = this.opts.onMutationRejected;
+		if (!report) return;
+		for (const late of page.lateRejections) {
+			report({
+				workspaceId,
+				mutationId: late.mutationId,
+				errorCode: late.errorCode,
+				errorMessage: late.errorMessage,
+				targets: late.targets.map((t) => ({ entity: t.entity, key: t.key })),
+				...(late.mutator === '' ? {} : { mutator: late.mutator }),
+				late: true,
+			}, []);
+		}
 	}
 
 	/** One page's rebase transaction; see applyServerPage. */

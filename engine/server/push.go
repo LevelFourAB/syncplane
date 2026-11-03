@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -204,6 +205,17 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// must re-read rather than build on what an abandoned one collected.
 		verdicts := map[string][]storage.ClientRejection{}
 		added := map[string]int{}
+		// Recorded applied mutations per client, loaded lazily by
+		// appliedOf; the ones this batch applies; the first id each client
+		// sent in it; and the clients it resent something for. The record
+		// keeps the mutations from that first id on: a client resends from
+		// its first unanswered mutation, which never moves back, so nothing
+		// before it is asked for again. That bounds the record by
+		// MaxMutationsPerPush.
+		recorded := map[string][]storage.AppliedMutation{}
+		newlyApplied := map[string][]storage.AppliedMutation{}
+		firstID := map[string]uint64{}
+		resent := map[string]bool{}
 		// Fresh per attempt: a retried closure must re-read rather than serve
 		// what an abandoned one fetched.
 		rows := &batchRows{tx: tx, owners: owners, fetched: map[string]map[string]storage.Row{}}
@@ -219,6 +231,17 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 				return nil, err
 			}
 			verdicts[key] = recs
+			return recs, nil
+		}
+		appliedOf := func(key string) ([]storage.AppliedMutation, error) {
+			if recs, ok := recorded[key]; ok {
+				return recs, nil
+			}
+			recs, err := tx.ClientAppliedMutations(key)
+			if err != nil {
+				return nil, err
+			}
+			recorded[key] = recs
 			return recs, nil
 		}
 		for i, m := range muts {
@@ -237,6 +260,9 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 				return errAbortBatch
 			}
 			key := watermarkKey(principal, m.GetClientId())
+			if _, ok := firstID[key]; !ok {
+				firstID[key] = m.GetMutationId()
+			}
 			last, ok := watermarks[key]
 			if !ok {
 				var err error
@@ -261,6 +287,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 				// is resending precisely because it never learned that. Replay
 				// the verdict rather than the bare ack that would make the edit
 				// disappear unexplained.
+				resent[key] = true
 				recs, err := rejectionsOf(key)
 				if err != nil {
 					return err
@@ -273,6 +300,15 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 					result.Status = syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED
 					result.ErrorCode = r.Code
 					result.ErrorMessage = r.Message
+				} else {
+					// The sequence lets a client resolve a compare-and-swap it
+					// made against this mutation; the row's version cannot, as
+					// it includes every later write to the row.
+					applied, err := appliedOf(key)
+					if err != nil {
+						return err
+					}
+					result.Seq = findApplied(applied, m.GetMutationId())
 				}
 				results = append(results, result)
 				continue
@@ -301,16 +337,23 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			}
 
 			var seq uint64
-			var applyErr error
 			rows.at = i
-			if guarded {
-				applyErr = tx.InSavepoint(func() error {
-					var err error
-					seq, err = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i], true)
+			// The capture runs inside the mutation's savepoint, so a capture
+			// that rejects rolls the mutation back like any other rejection, and
+			// a rejected mutation leaves nothing of what it captured.
+			run := func() error {
+				log := s.newWriteLog()
+				var err error
+				if seq, err = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i], guarded, log); err != nil {
 					return err
-				})
+				}
+				return s.runCapture(ctx, ws, tx, log, seq, originOf(key, m))
+			}
+			var applyErr error
+			if guarded {
+				applyErr = tx.InSavepoint(run)
 			} else {
-				seq, applyErr = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i], false)
+				applyErr = run()
 			}
 
 			var result *syncplanev1.MutationResult
@@ -322,6 +365,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 					Status:     syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED,
 					Seq:        seq,
 				}
+				newlyApplied[key] = append(newlyApplied[key], storage.AppliedMutation{MutationID: m.GetMutationId(), Seq: seq})
 			case isRejection:
 				if !guarded {
 					// Nothing rewound the rejected mutation's partial writes, so
@@ -377,6 +421,25 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// one client's mutations records them together.
 		for key, n := range added {
 			if err := tx.SetClientRejections(key, trimRejections(verdicts[key], n)); err != nil {
+				return err
+			}
+		}
+		// A batch that applied nothing leaves the record as it is: what it
+		// resent is still there, and nothing it sent is new. One that did
+		// replaces it. Without a resend every recorded id is below the batch,
+		// so the record is not read.
+		for key, recs := range newlyApplied {
+			var kept []storage.AppliedMutation
+			if resent[key] {
+				prev, err := appliedOf(key)
+				if err != nil {
+					return err
+				}
+				kept = slices.DeleteFunc(slices.Clone(prev), func(r storage.AppliedMutation) bool {
+					return r.MutationID < firstID[key]
+				})
+			}
+			if err := tx.SetClientAppliedMutations(key, append(kept, recs...)); err != nil {
 				return err
 			}
 		}
@@ -473,11 +536,25 @@ const maxRejectionRecordBytes = 64 << 10
 // findRejection looks a mutation id up among a client's recorded verdicts.
 func findRejection(recs []storage.ClientRejection, mutationID uint64) (storage.ClientRejection, bool) {
 	for _, r := range recs {
-		if r.MutationID == mutationID {
+		// A late rejection (Seq set) followed an APPLIED ack, and reaches the
+		// client on a pull; answering a resend with it as well would report
+		// the mutation twice.
+		if r.MutationID == mutationID && r.Seq == 0 {
 			return r, true
 		}
 	}
 	return storage.ClientRejection{}, false
+}
+
+// findApplied returns the sequence a recorded mutation was applied at, and 0
+// when the record does not hold it.
+func findApplied(recs []storage.AppliedMutation, mutationID uint64) uint64 {
+	if i, ok := slices.BinarySearchFunc(recs, mutationID, func(r storage.AppliedMutation, id uint64) int {
+		return cmp.Compare(r.MutationID, id)
+	}); ok {
+		return recs[i].Seq
+	}
+	return 0
 }
 
 // trimRejections drops the oldest verdicts from an ascending list until it fits
@@ -811,6 +888,7 @@ func (s *Server) applyMutation(
 	m *syncplanev1.Mutation,
 	authErr error,
 	guarded bool,
+	log *writeLog,
 ) (uint64, error) {
 	if err := s.checkLimits(m); err != nil {
 		return 0, err
@@ -835,11 +913,11 @@ func (s *Server) applyMutation(
 	switch payload := m.GetPayload().(type) {
 	case *syncplanev1.Mutation_Crud:
 		w := Write{ClientId: m.GetClientId(), MutationId: m.GetMutationId(), Crud: payload.Crud}
-		if err := s.applyCrud(ctx, ws, tx, rows, g, w, seq, actor); err != nil {
+		if err := s.applyCrud(ctx, ws, tx, rows, g, w, seq, actor, log); err != nil {
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Custom:
-		if err := s.applyCustom(ctx, ws, tx, g, m.GetMutationId(), payload.Custom, seq, actor, guarded); err != nil {
+		if err := s.applyCustom(ctx, ws, tx, g, m.GetMutationId(), payload.Custom, seq, actor, guarded, log); err != nil {
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Batch:
@@ -851,7 +929,7 @@ func (s *Server) applyMutation(
 		// checkLimits, above.
 		for _, crud := range payload.Batch.GetMutations() {
 			w := Write{ClientId: m.GetClientId(), MutationId: m.GetMutationId(), Crud: crud}
-			if err := s.applyCrud(ctx, ws, tx, rows, g, w, seq, actor); err != nil {
+			if err := s.applyCrud(ctx, ws, tx, rows, g, w, seq, actor, log); err != nil {
 				return 0, err
 			}
 		}
@@ -907,6 +985,7 @@ func (s *Server) applyCrud(
 	w Write,
 	seq uint64,
 	actor storage.Actor,
+	log *writeLog,
 ) error {
 	crud := w.Crud
 	info, ok := s.catalogPtr().entities[crud.GetEntity()]
@@ -956,9 +1035,8 @@ func (s *Server) applyCrud(
 	// each has to treat an absent row and a tombstone alike; one fetch behind
 	// one `live` flag is what keeps that handling from drifting apart between
 	// them. Nothing here writes the row before the op switch's final
-	// PutRow/DeleteRow, so the memo cannot go stale. Lazy, so a DELETE (or an
-	// unguarded PUT of an entity that has neither text fields nor history)
-	// still reads nothing unless the entity has a row check.
+	// PutRow/DeleteRow, so the memo cannot go stale. Lazy, so a DELETE still
+	// reads nothing unless the entity has a row check.
 	var (
 		cachedRow  storage.Row
 		cachedLive bool
@@ -1073,6 +1151,22 @@ func (s *Server) applyCrud(
 		if err := aw.carryGuarded(tx, msg, nil); err != nil {
 			return err
 		}
+		// Every PUT reads the stored row for this, also when nothing else needs
+		// it: only the stored row tells whether a newer schema wrote fields that
+		// this schema does not declare.
+		base, baseErr := currentBase()
+		if baseErr != nil {
+			return baseErr
+		}
+		carryUnknownFields(base, msg)
+		// What the capture reports as submitted: the fields the caller may not
+		// write and the fields the schema does not know are replaced by now, and
+		// the text union is still to come. A linked engine forwards this value,
+		// so the origin keeps the fields this server could not see.
+		submitted, err := marshalIfLogged(log, msg)
+		if err != nil {
+			return err
+		}
 		var prevText map[string][]byte
 		if len(info.textFields) > 0 {
 			// Ingress guard: text bytes a client sends must decode as full
@@ -1170,10 +1264,25 @@ func (s *Server) applyCrud(
 		if err := s.recordAccessMove(ctx, ws, tx, info, crud.GetKey(), currentRow, msg, seq, actor); err != nil {
 			return err
 		}
+		var (
+			prev   uint64
+			before []byte
+		)
+		if log != nil {
+			row, live, err := currentRow()
+			if err != nil {
+				return err
+			}
+			prev, before = liveVersion(row, live), liveValue(row, live)
+		}
 		if err := tx.PutRow(info.name, crud.GetKey(), value, seq, actor); err != nil {
 			return err
 		}
 		g.accessOf().noteWrite(info)
+		log.add(CapturedOp{
+			Entity: info.name, Key: crud.GetKey(), Op: crud.GetOp(), Value: submitted,
+			ExpectedVersion: crud.ExpectedVersion, PrevVersion: prev, Before: before, After: value,
+		})
 		return nil
 
 	case syncplanev1.CrudOp_CRUD_OP_PATCH:
@@ -1322,6 +1431,11 @@ func (s *Server) applyCrud(
 			return err
 		}
 		g.accessOf().noteWrite(info)
+		log.add(CapturedOp{
+			Entity: info.name, Key: crud.GetKey(), Op: crud.GetOp(), Value: crud.GetValue(),
+			Mask: crud.GetFieldMask().GetPaths(), ExpectedVersion: crud.ExpectedVersion,
+			PrevVersion: row.Version, Before: row.Value, After: value,
+		})
 		return nil
 
 	case syncplanev1.CrudOp_CRUD_OP_DELETE:
@@ -1359,10 +1473,25 @@ func (s *Server) applyCrud(
 		if err := s.recordAccessMove(ctx, ws, tx, info, crud.GetKey(), currentRow, nil, seq, actor); err != nil {
 			return err
 		}
+		var (
+			prev   uint64
+			before []byte
+		)
+		if log != nil {
+			row, live, err := currentRow()
+			if err != nil {
+				return err
+			}
+			prev, before = liveVersion(row, live), liveValue(row, live)
+		}
 		if err := tx.DeleteRow(info.name, crud.GetKey(), seq, actor); err != nil {
 			return err
 		}
 		g.accessOf().noteWrite(info)
+		log.add(CapturedOp{
+			Entity: info.name, Key: crud.GetKey(), Op: crud.GetOp(),
+			ExpectedVersion: crud.ExpectedVersion, PrevVersion: prev, Before: before,
+		})
 		return nil
 
 	default:
@@ -1413,10 +1542,14 @@ func (s *Server) applyCustom(
 	seq uint64,
 	actor storage.Actor,
 	guarded bool,
+	log *writeLog,
 ) error {
-	mi, ok := s.mutators[custom.GetName()]
+	mi, ok := s.mutatorNamed(custom.GetName())
 	if !ok {
 		return Reject(CodeInvalidArgument, fmt.Sprintf("unknown mutator %q", custom.GetName()))
+	}
+	if log != nil {
+		log.custom = custom
 	}
 	var args proto.Message
 	if mi.args != nil {
@@ -1434,7 +1567,7 @@ func (s *Server) applyCustom(
 	}
 	etx := &EntityTx{
 		srv: s, ctx: ctx, ws: ws, tx: tx, seq: seq, actor: actor, access: g.accessOf(), caller: g,
-		guarded: guarded,
+		guarded: guarded, log: log,
 	}
 	err := mi.fn(markWriteTx(ctx), etx, args)
 	if err == nil && etx.spoiled {

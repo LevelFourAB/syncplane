@@ -92,6 +92,9 @@ message PushRequest {
 
 enum MutationStatus {
 	MUTATION_STATUS_UNSPECIFIED = 0;
+	// The server applied the mutation. A server that forwards writes to
+	// another server can still reject the mutation later, and then reports it
+	// as a `LateRejection` on a later page.
 	MUTATION_STATUS_APPLIED = 1;
 	// Mutation id at or below the server's watermark for this client; safe to
 	// drop (idempotent retry).
@@ -104,8 +107,12 @@ enum MutationStatus {
 message MutationResult {
 	uint64 mutation_id = 1;
 	MutationStatus status = 2;
-	// Workspace sequence assigned when status is APPLIED; 0 otherwise. This is
-	// the only in-band way a writer learns the sequence its own write took,
+	// Workspace sequence the mutation was applied at. Set when status is
+	// APPLIED. Set when status is ALREADY_APPLIED and the mutation was in the
+	// client's latest push that applied something, which covers the resend of
+	// a push whose response was lost; 0 for an older mutation. 0 when status
+	// is REJECTED. This is the only in-band way a writer learns the sequence
+	// its own write took,
 	// without waiting for the row to come back down a pull as
 	// RowChange.version. A REJECTED mutation reports 0 because it consumes no
 	// sequence — its savepoint rolled back — which is what makes rejections
@@ -245,6 +252,43 @@ message PullResponse {
 	// response contains at most one of caller_access or caller_access_delta.
 	// Only a request that sets caller_access_version receives this field.
 	CallerAccessDelta caller_access_delta = 9;
+	// Mutations of this client and caller that the server acknowledged as
+	// applied and rejected after that, ordered by mutation id. See
+	// `LateRejection`. A reset response carries none.
+	repeated LateRejection late_rejections = 10;
+}
+
+// Reports a mutation that the server acknowledged as applied and rejected
+// after the acknowledgement. A server that forwards writes to another server
+// (write-behind) acknowledges a mutation before that server decides it. When
+// that server rejects the mutation, the forwarding server reverts the rows the
+// mutation wrote and records this report.
+//
+// The report has a position in the workspace sequence. The first page whose
+// position reaches it carries it, and the row changes that revert the
+// mutation are on that page or an earlier one. A client that pulls again from
+// an earlier cursor receives the report again. A client that bootstraps does
+// not receive reports from before the bootstrap. The server keeps a report as
+// long as it keeps the client's other rejection records.
+//
+// Only the client that pushed the mutation, under the same caller, receives
+// the report.
+message LateRejection {
+	uint64 mutation_id = 1;
+	// Machine-readable rejection code, as in `MutationResult.error_code`.
+	string error_code = 2;
+	string error_message = 3;
+	// The rows the mutation named, in payload order: one for a CRUD mutation,
+	// one for each member of a batch, none for a custom mutation.
+	repeated MutationTarget targets = 4;
+	// Name of the custom mutation. Empty for a CRUD or batch mutation.
+	string mutator = 5;
+}
+
+// Identifies one row that a mutation named.
+message MutationTarget {
+	string entity = 1;
+	string key = 2;
 }
 
 // Summary of permissions held by one caller in one workspace under the access

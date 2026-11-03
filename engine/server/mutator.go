@@ -41,6 +41,9 @@ type mutatorInfo struct {
 	fn   MutatorFunc
 	// access is the MutatorAccess the declaration carried, nil when none.
 	access *MutatorAccess
+	// forwarded marks a mutator WithUnknownMutatorForwarding stands in for:
+	// no declaration exists, so its args have no type to check against.
+	forwarded bool
 }
 
 // pendingMutator is one WithMutator declaration, held until New has built the
@@ -138,6 +141,47 @@ func (s *Server) registerMutator(name string, argsPrototype proto.Message, fn Mu
 	return nil
 }
 
+// WithUnknownMutatorForwarding makes a custom mutation whose name no
+// WithMutator declares apply as a mutator that writes nothing, instead of
+// being rejected with CodeInvalidArgument. It is for a server that forwards
+// such mutations to another server through its WriteCapture.
+//
+// Such a mutation is authorized by Permissions.CanMutate as any custom
+// mutation is, and in a schema that uses the access model every caller
+// admitted to the workspace may invoke it, as with MutatorAccess{Admitted:
+// true}. Its args are not decoded. On a client push it is APPLIED: it advances
+// the client's watermark and takes a sequence like any applied mutation.
+// Invoke and InvokeIdempotent accept it too, with args of any type, and like
+// any call that writes nothing they take no sequence. The WriteCapture
+// receives it with CapturedWrite.Custom set and no Ops.
+//
+// Because the mutation writes nothing here, a client that pushed it gets its
+// ack before the rows it changes arrive from the server that runs it: the
+// client drops its optimistic state for the mutation at once, and its rows
+// can show the state without the mutation until those rows arrive.
+func WithUnknownMutatorForwarding() Option {
+	return func(s *Server) error {
+		s.forwardUnknown = true
+		return nil
+	}
+}
+
+// mutatorNamed resolves a mutator by name: a declared one, or, under
+// WithUnknownMutatorForwarding, one that writes nothing.
+func (s *Server) mutatorNamed(name string) (*mutatorInfo, bool) {
+	if mi, ok := s.mutators[name]; ok {
+		return mi, true
+	}
+	if !s.forwardUnknown || name == "" {
+		return nil, false
+	}
+	return &mutatorInfo{name: name, fn: forwardedMutator, access: &MutatorAccess{Admitted: true}, forwarded: true}, true
+}
+
+// forwardedMutator is the body of a mutation WithUnknownMutatorForwarding
+// accepts. The server that declares the mutator runs it.
+func forwardedMutator(context.Context, *EntityTx, proto.Message) error { return nil }
+
 // EntityTx is the typed storage facade mutators run against. Entity identity
 // comes from the message type passed in; keys derive from key_fields.
 //
@@ -219,6 +263,9 @@ type EntityTx struct {
 	// reads is what the reads of a transaction with a write gate apply, nil
 	// until its first read and on every transaction without one.
 	reads *callerReads
+	// log records each write for the WriteCapture, nil when none is
+	// installed. Shared with the AsCaller view.
+	log *writeLog
 }
 
 // callerReads is the caller's read gate (see Server.readGate) that the reads
@@ -437,13 +484,14 @@ func (e *EntityTx) atomically(write func() error) error {
 		}
 		return err
 	}
-	seq, wrote := root.seq, root.wrote
+	seq, wrote, logged := root.seq, root.wrote, e.log.mark()
 	err := e.tx.InSavepoint(write)
 	if err != nil {
 		// The rewind gave the sequence back if this write allocated it. writes
 		// stays counted: it only invalidates bound reads, and one extra rebind
 		// is harmless.
 		root.seq, root.wrote = seq, wrote
+		e.log.rewind(logged)
 		e.access.invalidate()
 	}
 	return err
@@ -518,7 +566,12 @@ func (e *EntityTx) GetMeta(dst proto.Message, key string) (found bool, meta RowM
 // value carries the writer's view of the document; replacing wholesale would
 // silently drop every concurrent edit the writer had not seen, so Put reads
 // the live row and unions each text field (when both sides carry one) before
-// writing. Every other field keeps replace semantics.
+// writing.
+//
+// A top-level field the stored row holds and the schema does not declare keeps
+// its stored value unless msg carries that field number itself: a newer schema
+// wrote it, and msg could not express a clear of it. Fields inside nested
+// messages are replaced. Every other field keeps replace semantics.
 //
 // Text fields can also be written from plain strings — WithTextString plus
 // WithTextPeer — which diffs the string against the stored document under the
@@ -606,75 +659,84 @@ func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 	if err != nil {
 		return err
 	}
-	if len(info.textFields) > 0 || len(o.texts) > 0 || info.history != nil || o.expected != nil ||
-		len(protected) > 0 || aw != nil {
-		if _, _, err := currentRow(); err != nil {
-			return err
-		}
-		// WithExpectedVersion turns the write into a compare-and-swap, checked
-		// before any merge so a stale write conflicts deterministically. Mirrors
-		// Patch: an absent or deleted row reads as version 0.
-		if o.expected != nil {
-			var current uint64
-			if live {
-				current = row.Version
-			}
-			if current != *o.expected {
-				return Reject(CodeConflict, fmt.Sprintf(
-					"entity %q: expected version %d but row %q is at version %d", info.name, *o.expected, key, current))
-			}
-		}
-		var base proto.Message
+	var submitted []byte
+	// Every PUT reads the stored row, also when nothing else needs it: only the
+	// stored row tells whether a newer schema wrote fields that this schema
+	// does not declare (see carryUnknownFields).
+	if _, _, err := currentRow(); err != nil {
+		return err
+	}
+	// WithExpectedVersion turns the write into a compare-and-swap, checked
+	// before any merge so a stale write conflicts deterministically. Mirrors
+	// Patch: an absent or deleted row reads as version 0.
+	if o.expected != nil {
+		var current uint64
 		if live {
-			// A stored row that will not decode (see poison.go) is no base: Put
-			// replaces whole rows, so this write is the repair that clears the
-			// quarantine. Mirrors the client PUT path.
-			if decoded, decErr := info.decode(row.Value); decErr != nil {
-				e.srv.reportPoison(e.ctx, e.ws, row, decErr)
-			} else {
-				base = decoded
-				prevText = info.textSnapshot(base)
-				prevRead = readInputsOf(e.srv.catalogPtr().access, info, base)
-			}
+			current = row.Version
 		}
-		// Clone so the caller's message is not mutated by the merges.
-		msg = proto.Clone(msg)
-		// Before the text handling, so a plain-string value in a protected text
-		// field is replaced by the stored document rather than resolved into an
-		// edit against it.
-		if err := carryProtectedFields(info, protected, base, msg); err != nil {
+		if current != *o.expected {
+			return Reject(CodeConflict, fmt.Sprintf(
+				"entity %q: expected version %d but row %q is at version %d", info.name, *o.expected, key, current))
+		}
+	}
+	var base proto.Message
+	if live {
+		// A stored row that will not decode (see poison.go) is no base: Put
+		// replaces whole rows, so this write is the repair that clears the
+		// quarantine. Mirrors the client PUT path.
+		if decoded, decErr := info.decode(row.Value); decErr != nil {
+			e.srv.reportPoison(e.ctx, e.ws, row, decErr)
+		} else {
+			base = decoded
+			prevText = info.textSnapshot(base)
+			prevRead = readInputsOf(e.srv.catalogPtr().access, info, base)
+		}
+	}
+	// Clone so the caller's message is not mutated by the merges.
+	msg = proto.Clone(msg)
+	// Before the text handling, so a plain-string value in a protected text
+	// field is replaced by the stored document rather than resolved into an
+	// edit against it.
+	if err := carryProtectedFields(info, protected, base, msg); err != nil {
+		return err
+	}
+	if base == nil && e.gate != nil && len(info.creatorFields) > 0 {
+		stampCreatorFields(info, msg, e.gate.creatorSubject())
+	}
+	named := make([]string, 0, len(o.texts))
+	for path := range o.texts {
+		named = append(named, protectedHead(path))
+	}
+	if err := aw.carryGuarded(e.tx, msg, named); err != nil {
+		return err
+	}
+	carryUnknownFields(base, msg)
+	texts, err := takePlainStrings(info, msg, nil, o)
+	if err != nil {
+		return err
+	}
+	if len(texts) > 0 {
+		// Diff each string against the stored document (ancestor = cur):
+		// the union below is then a no-op for these fields, but it still
+		// covers text fields the caller set as raw bytes.
+		if err := ApplyTextStrings(msg, nil, base, texts, o.peer); err != nil {
 			return err
 		}
-		if base == nil && e.gate != nil && len(info.creatorFields) > 0 {
-			stampCreatorFields(info, msg, e.gate.creatorSubject())
-		}
-		named := make([]string, 0, len(o.texts))
-		for path := range o.texts {
-			named = append(named, protectedHead(path))
-		}
-		if err := aw.carryGuarded(e.tx, msg, named); err != nil {
-			return err
-		}
-		texts, err := takePlainStrings(info, msg, nil, o)
+	}
+	// What the capture reports as submitted: the value once the engine has
+	// replaced what the caller may not write and the fields the schema does
+	// not know, and resolved plain strings, but before the text union, which
+	// the stored value carries.
+	if submitted, err = marshalIfLogged(e.log, msg); err != nil {
+		return err
+	}
+	if base != nil {
+		tw, err := info.textWriteFor(e.srv, e.ws, e.tx, key)
 		if err != nil {
 			return err
 		}
-		if len(texts) > 0 {
-			// Diff each string against the stored document (ancestor = cur):
-			// the union below is then a no-op for these fields, but it still
-			// covers text fields the caller set as raw bytes.
-			if err := ApplyTextStrings(msg, nil, base, texts, o.peer); err != nil {
-				return err
-			}
-		}
-		if base != nil {
-			tw, err := info.textWriteFor(e.srv, e.ws, e.tx, key)
-			if err != nil {
-				return err
-			}
-			if err := info.mergeTextFields(base.ProtoReflect(), msg.ProtoReflect(), tw); err != nil {
-				return rejectTextWrite(err)
-			}
+		if err := info.mergeTextFields(base.ProtoReflect(), msg.ProtoReflect(), tw); err != nil {
+			return rejectTextWrite(err)
 		}
 	}
 	// A reference stores only its target's key fields, and the workspace a
@@ -735,7 +797,29 @@ func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 		return err
 	}
 	e.access.noteWrite(info)
+	e.log.add(CapturedOp{
+		Entity: info.name, Key: key, Op: syncplanev1.CrudOp_CRUD_OP_PUT, Value: submitted,
+		ExpectedVersion: o.expected, PrevVersion: liveVersion(row, live), Before: liveValue(row, live),
+		After: value,
+	})
 	return nil
+}
+
+// liveVersion is a row's version as a compare-and-swap reads it: 0 for an
+// absent or deleted row.
+func liveVersion(row storage.Row, live bool) uint64 {
+	if !live {
+		return 0
+	}
+	return row.Version
+}
+
+// liveValue is a row's stored value, nil for an absent or deleted row.
+func liveValue(row storage.Row, live bool) []byte {
+	if !live {
+		return nil
+	}
+	return row.Value
 }
 
 // Patch merges only the masked fields of msg onto the stored row, honoring
@@ -872,6 +956,10 @@ func (e *EntityTx) patch(msg proto.Message, mask []string, expected *uint64, opt
 			}
 		}
 	}
+	submitted, err := marshalIfLogged(e.log, msg)
+	if err != nil {
+		return err
+	}
 	mergers := info.mergers
 	if live && len(info.textFields) > 0 {
 		tw, err := info.textWriteFor(e.srv, e.ws, e.tx, key)
@@ -965,6 +1053,11 @@ func (e *EntityTx) patch(msg proto.Message, mask []string, expected *uint64, opt
 		return err
 	}
 	e.access.noteWrite(info)
+	e.log.add(CapturedOp{
+		Entity: info.name, Key: key, Op: syncplanev1.CrudOp_CRUD_OP_PATCH, Value: submitted,
+		Mask: slices.Clone(mask), ExpectedVersion: expected, PrevVersion: row.Version, Before: row.Value,
+		After: value,
+	})
 	return nil
 }
 
@@ -995,6 +1088,17 @@ func (e *EntityTx) delete(prototype proto.Message, key string) error {
 	if _, err := e.gate.beginAccessWrite(e.tx, info, key, syncplanev1.CrudOp_CRUD_OP_DELETE, nil,
 		func() (storage.Row, bool, error) { return e.liveRow(info, key) }); err != nil {
 		return err
+	}
+	var (
+		prev   uint64
+		before []byte
+	)
+	if e.log != nil {
+		row, live, err := e.liveRow(info, key)
+		if err != nil {
+			return err
+		}
+		prev, before = liveVersion(row, live), liveValue(row, live)
 	}
 	seq, err := e.writeSeq()
 	if err != nil {
@@ -1034,6 +1138,7 @@ func (e *EntityTx) delete(prototype proto.Message, key string) error {
 		return err
 	}
 	e.access.noteWrite(info)
+	e.log.add(CapturedOp{Entity: info.name, Key: key, Op: syncplanev1.CrudOp_CRUD_OP_DELETE, PrevVersion: prev, Before: before})
 	return nil
 }
 

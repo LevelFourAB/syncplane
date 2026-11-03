@@ -161,13 +161,16 @@ func (s *Server) mutateIdempotent(
 			return err
 		}
 		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, gate: gate, actor: actor,
-			access: gate.accessOf(), guarded: guarded}
+			access: gate.accessOf(), guarded: guarded, log: s.newWriteLog()}
 		result, err := fn(etx)
 		if err != nil {
 			return err
 		}
 		if etx.spoiled {
 			return errNeedsSavepoints
+		}
+		if err := s.runCapture(ctx, workspaceID, tx, etx.log, etx.Seq(), nil); err != nil {
+			return err
 		}
 		if max := s.limits.MaxValueBytes; len(result) > max {
 			return fmt.Errorf("server: idempotent write result is %d bytes, over the %d byte limit", len(result), max)
@@ -232,6 +235,9 @@ func (s *Server) InvokeIdempotent(
 	return s.mutateIdempotent(Trusted(ctx), workspaceID, key, admission{}, false,
 		func(tx *EntityTx) ([]byte, error) {
 			if err := s.beginInvocation(ctx, workspaceID, tx, gate, mi, bodyArgs); err != nil {
+				return nil, err
+			}
+			if err := tx.log.invoked(mutatorName, args); err != nil {
 				return nil, err
 			}
 			return nil, mi.fn(markWriteTx(ctx), tx, bodyArgs)

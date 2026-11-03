@@ -275,6 +275,38 @@ type ClientRejection struct {
 	Code string
 	// Message is the human-readable reason, as the rejecting hook worded it.
 	Message string
+	// Seq is the workspace sequence of a late rejection: a mutation the
+	// server acknowledged as applied and that another server rejected later
+	// (see server.ReplicaTx.RejectLate). 0 for a rejection the push itself
+	// reported.
+	Seq uint64 `json:",omitempty"`
+	// Targets are the rows a late rejection's mutation named. Empty for a
+	// rejection the push itself reported.
+	Targets []RejectionTarget `json:",omitempty"`
+	// Mutator is the name of a late rejection's custom mutation, "" for a
+	// CRUD or batch mutation and for a rejection the push itself reported.
+	Mutator string `json:",omitempty"`
+}
+
+// AppliedMutation is the workspace sequence one of a client's mutations was
+// applied at. A client that never received a push response resends the
+// mutations in it, and the record lets the server answer each resend with the
+// sequence as well as ALREADY_APPLIED.
+//
+// Records are stored per client alongside the watermark, and the engine keeps
+// only the mutations of a client's latest push. CollectIdleClients drops them
+// with the rest of the client.
+type AppliedMutation struct {
+	// MutationID is the applied mutation's id, unique per client.
+	MutationID uint64
+	// Seq is the workspace sequence the mutation was applied at.
+	Seq uint64
+}
+
+// RejectionTarget is one row a rejected mutation named.
+type RejectionTarget struct {
+	Entity string
+	Key    string
 }
 
 // ConsumerPosition is one effect consumer's durable progress through a
@@ -701,6 +733,10 @@ type ReadTx interface {
 	// MutationID ascending. An unknown client, or one that has had nothing
 	// refused, has none.
 	ClientRejections(clientID string) ([]ClientRejection, error)
+	// ClientAppliedMutations returns the applied mutations recorded for
+	// clientID, ordered by MutationID ascending. An unknown client, or one with
+	// nothing recorded, has none.
+	ClientAppliedMutations(clientID string) ([]AppliedMutation, error)
 	// IdempotencyRecord returns what the trusted write that claimed key did, and
 	// whether the key has been claimed at all. Keys are per workspace, exactly
 	// like everything else this transaction sees.
@@ -866,6 +902,15 @@ type WriteTx interface {
 	// SetClientLastMutationID has, and for the same reason: the two halves of a
 	// client's state must expire together.
 	SetClientRejections(clientID string, recs []ClientRejection) error
+	// SetClientAppliedMutations replaces every applied mutation recorded for
+	// clientID with recs (see ReadTx.ClientAppliedMutations). An empty slice
+	// clears them. The engine bounds what it stores, so an adapter may keep the
+	// slice whole.
+	//
+	// It creates the client's watermark row if it does not exist yet, which
+	// refreshes what CollectIdleClients considers idle, as
+	// SetClientRejections does.
+	SetClientAppliedMutations(clientID string, recs []AppliedMutation) error
 	// InSavepoint runs fn inside a nested savepoint. If fn returns an error,
 	// every write fn made (including allocated sequences) rolls back and the
 	// error propagates; on nil the savepoint is released into the enclosing

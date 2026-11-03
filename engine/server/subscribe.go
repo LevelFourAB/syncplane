@@ -456,7 +456,10 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		if err := s.readTx(ctx, sc.ws, sc.cur.readFloor(sc.minSeq), func(tx storage.ReadTx) error {
 			var e error
 			page, next, reason, e = s.servePullPage(ctx, tx, route, sc.cur, sc.emitter, sc.wantHash, sc.epoch, sc.subs, sc.ackKey, sc.rawCursor, limit)
-			return e
+			if e != nil {
+				return e
+			}
+			return attachLateRejections(tx, sc.ackKey, sc.cur, next, page)
 		}); err != nil {
 			// A read failure is this workspace's problem, not the stream's.
 			return s.dropScope(stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)
@@ -473,7 +476,11 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		// page carrying one or a delta to it goes out even without rows, or no
 		// later page resends it.
 		hasAccess := page.GetCallerAccess() != nil || page.GetCallerAccessDelta() != nil
-		if hasRows || hasAccess || (keepalive && last) {
+		// A late rejection fires a client callback, and the scope's position
+		// has moved past it, so its frame always goes out and always carries
+		// the cursor: a stream resumed from an older one would fire it twice.
+		hasLate := len(page.GetLateRejections()) > 0
+		if hasRows || hasAccess || hasLate || (keepalive && last) {
 			// The scope carries its own position, so the cursor on the frame is
 			// the client's resume point and nothing else — it can be left off
 			// when it would cost more than the re-delivery it saves. A frame
@@ -481,7 +488,7 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 			// references the stored copy of that summary, which the next change
 			// is sent as a delta from.
 			pageBytes := proto.Size(page.GetPatch())
-			if hasAccess || sc.checkpointDue(pageBytes, len(page.GetNextCursor())) {
+			if hasAccess || hasLate || sc.checkpointDue(pageBytes, len(page.GetNextCursor())) {
 				sc.owedBytes = 0
 				sc.cursorSent = true
 			} else {

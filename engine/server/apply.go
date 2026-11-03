@@ -243,11 +243,15 @@ func (s *Server) apply(
 		if err := gate.accessOf().begin(tx); err != nil {
 			return err
 		}
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, gate: gate, actor: actor, access: gate.accessOf()}
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, gate: gate, actor: actor, access: gate.accessOf(),
+			log: s.newWriteLog()}
 		for _, in := range atx.intents {
 			if err := in.apply(etx); err != nil {
 				return err
 			}
+		}
+		if err := s.runCapture(ctx, workspaceID, tx, etx.log, etx.Seq(), nil); err != nil {
+			return err
 		}
 		if key != "" {
 			if err := tx.PutIdempotencyRecord(key, storage.IdempotencyRecord{Seq: etx.Seq(), Result: result}); err != nil {
@@ -465,7 +469,8 @@ func (a *ApplyTx) getMeta(dst proto.Message, key string) (bool, RowMeta, error) 
 // Put records a full-row snapshot write; the key derives from key_fields. It
 // takes effect after the closure returns, with EntityTx.Put's semantics —
 // including the collaborative-text exception, where text fields union with the
-// stored document rather than replacing it. That merge happens against the row
+// stored document rather than replacing it, and the stored top-level fields the
+// schema does not declare, which it keeps. That merge happens against the row
 // as it stands at apply time, not as the snapshot saw it, which is what keeps a
 // concurrent editor's work from being dropped.
 //

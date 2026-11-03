@@ -29,6 +29,7 @@ Syncplane is a sync engine for local-first applications. Clients read and write 
 - **Effects and connectors**: Run custom code when writes commit, and keep external systems in two-way sync.
 - **Runtime schemas**: Register application entities at runtime instead of compiling them into the binary. One server can host multiple applications.
 - **Single-node or multi-node deployments**: Start with SQLite and no extra infrastructure, or switch to PostgreSQL to run multiple nodes. Application code does not change.
+- **Go: local engine and client**: Run the engine inside a Go desktop app or a site server and keep it converged with a remote server. It works offline, serves browsers and Go code, and the remote server decides every write. A stateless Go client reads and writes a remote server from jobs and tools. See [Chained sync](docs/explanation/chained-sync.md) and [Use the Go client](docs/how-to/use-the-go-client.md).
 - **Tunnels**: Reach the server through a message channel instead of HTTP, such as a desktop shell's stream API, a `MessagePort`, stdio to a sidecar or a WebSocket. The engine can run in the host process or behind a proxy to a remote server.
 
 ### Tooling
@@ -177,9 +178,9 @@ Changes propagate in under one second without polling. The demo shows undo and r
 Documentation is in the [`docs/`](docs/README.md) directory, organized by Diátaxis documentation type:
 
 - **[Tutorials](docs/README.md#tutorials)**: Build your first sync application and add collaborative text.
-- **[How-to guides](docs/README.md#how-to-guides)**: Configure permissions, queries, partial sync, collaborative text, server-side writes, file attachments, change feeds and effects, external store connectors, field history, multi-app hosting, multi-node setups, observability, React, and failure handling.
-- **[Reference](docs/README.md#reference)**: Review the Go server API, TypeScript client API, Protocol Buffers options, connectors, naming rules, sync status and rejection codes, storage adapter contracts, and telemetry.
-- **[Explanation](docs/README.md#explanation)**: Read about the convergence model, partial sync coverage, collaborative text CRDTs, blobs, multi-tab behavior, and system trade-offs.
+- **[How-to guides](docs/README.md#how-to-guides)**: Configure permissions, queries, partial sync, collaborative text, server-side writes, file attachments, change feeds and effects, external store connectors, field history, multi-app hosting, multi-node setups, a local engine in a Go desktop app or site server, the Go client, observability, React, and failure handling.
+- **[Reference](docs/README.md#reference)**: Review the Go server API, TypeScript client API, Go client, upstream link, Protocol Buffers options, connectors, naming rules, sync status and rejection codes, storage adapter contracts, and telemetry.
+- **[Explanation](docs/README.md#explanation)**: Read about the convergence model, partial sync coverage, collaborative text CRDTs, blobs, multi-tab behavior, chained sync, and system trade-offs.
 
 ## Development
 

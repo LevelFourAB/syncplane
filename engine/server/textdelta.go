@@ -12,6 +12,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/levelfourab/syncplane/engine/internal/textpath"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/text"
 )
@@ -46,20 +47,10 @@ const fragmentSizeRatio = 0.5
 // values rather than mutating them, so the captured slices stay valid as the
 // pre-write state. A nil message (an absent row) snapshots to nil.
 func (info *entityInfo) textSnapshot(msg proto.Message) map[string][]byte {
-	if msg == nil || len(info.textFields) == 0 {
+	if msg == nil {
 		return nil
 	}
-	out := make(map[string][]byte, len(info.textFields))
-	for _, tf := range info.textFields {
-		for _, ti := range tf.instances(msg.ProtoReflect()) {
-			if b := ti.bytes(); len(b) > 0 {
-				if _, ok := out[ti.path]; !ok {
-					out[ti.path] = b
-				}
-			}
-		}
-	}
-	return out
+	return textpath.Snapshot(info.textFields, msg.ProtoReflect())
 }
 
 // recordTextDeltas logs how this write moved each text document, at the
@@ -83,17 +74,17 @@ func (info *entityInfo) recordTextDeltas(
 ) error {
 	seen := make(map[string]bool, len(info.textFields))
 	for _, tf := range info.textFields {
-		for _, ti := range tf.instances(next) {
-			if seen[ti.path] {
+		for _, ti := range tf.Instances(next) {
+			if seen[ti.Path] {
 				continue
 			}
-			seen[ti.path] = true
-			before, after := prev[ti.path], ti.bytes()
+			seen[ti.Path] = true
+			before, after := prev[ti.Path], ti.Bytes()
 			if bytes.Equal(before, after) {
 				continue
 			}
 			frag := textFragmentOf(after, before)
-			if err := info.putTextDelta(tx, key, ti.path, seq, frag); err != nil {
+			if err := info.putTextDelta(tx, key, ti.Path, seq, frag); err != nil {
 				return err
 			}
 		}
@@ -128,9 +119,9 @@ const maxTextCounterStep = 1 << 32
 // path has decoded and encoded again, so their headers are exact.
 func (info *entityInfo) checkTextWrites(prev map[string][]byte, next protoreflect.Message) error {
 	for _, tf := range info.textFields {
-		for _, ti := range tf.instances(next) {
-			after := ti.bytes()
-			before := prev[ti.path]
+		for _, ti := range tf.Instances(next) {
+			after := ti.Bytes()
+			before := prev[ti.Path]
 			if len(after) == 0 || bytes.Equal(before, after) {
 				continue
 			}
@@ -139,18 +130,18 @@ func (info *entityInfo) checkTextWrites(prev map[string][]byte, next protoreflec
 			// column on Postgres holds neither U+0000 nor invalid UTF-8, and
 			// the failed statement would abort the whole batch. Refused on
 			// every adapter, so a write does not depend on the store.
-			if strings.ContainsRune(ti.path, 0) || !utf8.ValidString(ti.path) {
+			if strings.ContainsRune(ti.Path, 0) || !utf8.ValidString(ti.Path) {
 				return Reject(CodeInvalidArgument, fmt.Sprintf(
 					"entity %q text field %q: an element key on the path holds \\u0000 or invalid UTF-8",
-					info.name, ti.path))
+					info.name, ti.Path))
 			}
 			hi, err := text.MaxCounter(after)
 			if err != nil {
-				return fmt.Errorf("server: entity %q text field %q: %w", info.name, ti.path, err)
+				return fmt.Errorf("server: entity %q text field %q: %w", info.name, ti.Path, err)
 			}
 			lo, err := text.MaxCounter(before)
 			if err != nil {
-				return fmt.Errorf("server: entity %q text field %q: stored document: %w", info.name, ti.path, err)
+				return fmt.Errorf("server: entity %q text field %q: stored document: %w", info.name, ti.Path, err)
 			}
 			if hi > lo && hi-lo > maxTextCounterStep {
 				// The step is left out: with the write's own counter it gives the
@@ -158,7 +149,7 @@ func (info *entityInfo) checkTextWrites(prev map[string][]byte, next protoreflec
 				// read.
 				return Reject(CodeInvalidArgument, fmt.Sprintf(
 					"entity %q text field %q: the write moves the document's counters up by more than %d, the most one write may move them",
-					info.name, ti.path, uint64(maxTextCounterStep)))
+					info.name, ti.Path, uint64(maxTextCounterStep)))
 			}
 		}
 	}

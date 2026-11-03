@@ -5,9 +5,8 @@ import (
 	"sort"
 
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
 
-	"github.com/levelfourab/syncplane/engine/internal/lww"
+	"github.com/levelfourab/syncplane/engine/internal/textpath"
 	"github.com/levelfourab/syncplane/engine/text"
 )
 
@@ -46,13 +45,13 @@ func ApplyTextStrings(dst, base, cur proto.Message, texts map[string]string, pee
 	sort.Strings(paths)
 	for _, path := range paths {
 		s := texts[path]
-		ref, err := textFieldRefByPath(dst.ProtoReflect().Descriptor(), path)
+		ref, err := textpath.ParseRef(dst.ProtoReflect().Descriptor(), path)
 		if err != nil {
-			return err
+			return fmt.Errorf("server: %w", err)
 		}
 		var curDoc *text.Doc
 		if cur != nil {
-			if curBytes := ref.bytes(cur.ProtoReflect()); len(curBytes) > 0 {
+			if curBytes := ref.Bytes(cur.ProtoReflect()); len(curBytes) > 0 {
 				if curDoc, err = text.Decode(curBytes, ""); err != nil {
 					return err
 				}
@@ -60,9 +59,9 @@ func ApplyTextStrings(dst, base, cur proto.Message, texts map[string]string, pee
 		}
 		var ancestorBytes []byte
 		if base != nil {
-			ancestorBytes = ref.bytes(base.ProtoReflect())
+			ancestorBytes = ref.Bytes(base.ProtoReflect())
 		} else if cur != nil {
-			ancestorBytes = ref.bytes(cur.ProtoReflect())
+			ancestorBytes = ref.Bytes(cur.ProtoReflect())
 		}
 		doc, err := text.Decode(ancestorBytes, peer)
 		if err != nil {
@@ -81,164 +80,11 @@ func ApplyTextStrings(dst, base, cur proto.Message, texts map[string]string, pee
 				return err
 			}
 		}
-		if err := ref.set(dst.ProtoReflect(), doc.Encode()); err != nil {
-			return err
+		if err := ref.Set(dst.ProtoReflect(), doc.Encode()); err != nil {
+			return fmt.Errorf("server: %w", err)
 		}
 	}
 	return nil
-}
-
-// textFieldRef addresses one text document within a row-shaped message: the
-// resolved steps of an instance path, item keys decoded where a step crosses a
-// keyed list or map.
-type textFieldRef struct {
-	path  string
-	steps []textRefStep
-}
-
-type textRefStep struct {
-	fd protoreflect.FieldDescriptor
-	// mapKey addresses the entry of a map step.
-	mapKey protoreflect.MapKey
-	// itemKey (encoded form) and keyFields address the element of a keyed
-	// list step.
-	itemKey   string
-	keyFields []protoreflect.FieldDescriptor
-}
-
-// textFieldRefByPath resolves a dotted path — instance form, with item keys
-// for the keyed lists and maps it crosses — to a reference to the named text
-// field, rejecting anything that does not land on a
-// (syncplane.v1.field_behavior).text field.
-func textFieldRefByPath(desc protoreflect.MessageDescriptor, path string) (textFieldRef, error) {
-	badPath := func() (textFieldRef, error) {
-		return textFieldRef{}, fmt.Errorf("server: %s has no text field %q", desc.FullName(), path)
-	}
-	segs := lww.SplitPath(path)
-	ref := textFieldRef{path: path}
-	cur := desc
-	for i := 0; i < len(segs); i++ {
-		fd := cur.Fields().ByName(protoreflect.Name(segs[i]))
-		if fd == nil {
-			return badPath()
-		}
-		last := i == len(segs)-1
-		step := textRefStep{fd: fd}
-		switch {
-		case fd.IsMap():
-			if last || fd.MapValue().Kind() != protoreflect.MessageKind {
-				return badPath()
-			}
-			i++
-			mk, err := lww.DecodeMapKey(fd, segs[i])
-			if err != nil {
-				return badPath()
-			}
-			step.mapKey = mk
-			cur = fd.MapValue().Message()
-			last = i == len(segs)-1
-		case fd.IsList():
-			step.keyFields = lww.KeyFieldsFor(fd)
-			if last || len(step.keyFields) == 0 {
-				return badPath()
-			}
-			i++
-			step.itemKey = segs[i]
-			cur = fd.Message()
-			last = i == len(segs)-1
-		case fd.Kind() == protoreflect.MessageKind:
-			cur = fd.Message()
-		default:
-			if !last || !lww.IsText(fd) {
-				return badPath()
-			}
-		}
-		if last && !lww.IsText(fd) {
-			return badPath()
-		}
-		if last && (fd.IsMap() || fd.IsList()) {
-			return badPath()
-		}
-		ref.steps = append(ref.steps, step)
-	}
-	return ref, nil
-}
-
-// bytes returns the leaf document bytes in msg, or nil when any addressed step
-// — an intermediate message, element or entry — is absent.
-func (r textFieldRef) bytes(msg protoreflect.Message) []byte {
-	cur := msg
-	for i, st := range r.steps {
-		if i == len(r.steps)-1 {
-			return cur.Get(st.fd).Bytes()
-		}
-		if !cur.Has(st.fd) {
-			return nil
-		}
-		switch {
-		case st.fd.IsMap():
-			mm := cur.Get(st.fd).Map()
-			if !mm.Has(st.mapKey) {
-				return nil
-			}
-			cur = mm.Get(st.mapKey).Message()
-		case st.fd.IsList():
-			elem, ok := findListElem(cur.Get(st.fd).List(), st.keyFields, st.itemKey)
-			if !ok {
-				return nil
-			}
-			cur = elem
-		default:
-			cur = cur.Get(st.fd).Message()
-		}
-	}
-	return nil
-}
-
-// set writes the leaf document bytes in msg, materializing singular
-// intermediates. A missing addressed element or entry is an error rather than
-// created: an element is more than its key, and a caller that means to create
-// one puts it in the row.
-func (r textFieldRef) set(msg protoreflect.Message, value []byte) error {
-	cur := msg
-	for i, st := range r.steps {
-		if i == len(r.steps)-1 {
-			cur.Set(st.fd, protoreflect.ValueOfBytes(value))
-			return nil
-		}
-		switch {
-		case st.fd.IsMap():
-			mm := cur.Mutable(st.fd).Map()
-			if !mm.Has(st.mapKey) {
-				return fmt.Errorf("server: text field %q addresses a map entry the value does not carry", r.path)
-			}
-			cur = mm.Mutable(st.mapKey).Message()
-		case st.fd.IsList():
-			elem, ok := findListElem(cur.Mutable(st.fd).List(), st.keyFields, st.itemKey)
-			if !ok {
-				return fmt.Errorf("server: text field %q addresses a list element the value does not carry", r.path)
-			}
-			cur = elem
-		default:
-			cur = cur.Mutable(st.fd).Message()
-		}
-	}
-	return nil
-}
-
-// findListElem locates a keyed list element by encoded identity.
-func findListElem(
-	list protoreflect.List,
-	keyFields []protoreflect.FieldDescriptor,
-	itemKey string,
-) (protoreflect.Message, bool) {
-	for i := 0; i < list.Len(); i++ {
-		elem := list.Get(i).Message()
-		if lww.EncodeItemKey(elem, keyFields) == itemKey {
-			return elem, true
-		}
-	}
-	return nil, false
 }
 
 // WriteOption customizes EntityTx.Put and EntityTx.Patch.
@@ -273,9 +119,13 @@ func WithTextString(field, value string) WriteOption {
 // WithTextPeer names the text writer identity WithTextString operations are
 // minted under. Two writers that can run concurrently must never share a
 // peer; a stable per-writer name like the connector's `connector:<writerID>`
-// convention is the model. Reuse across calls is safe because Put/Patch read
+// convention is the model. Reuse across calls is safe when every write of the
+// peer to a row goes through a server that stores that row: Put/Patch read
 // the stored row inside the serialized write transaction (see
-// ApplyTextStrings).
+// ApplyTextStrings) and mint past the ids it holds. A server that holds only
+// part of another server's rows (a replica synced with subscriptions) does not
+// see the ids the peer minted in a row it does not hold, so it can mint them
+// again.
 func WithTextPeer(peer string) WriteOption {
 	return func(o *writeOpts) { o.peer = peer }
 }
@@ -313,8 +163,8 @@ func collectWriteOpts(opts []WriteOption) (writeOpts, error) {
 func hasPlainString(info *entityInfo, msg proto.Message) bool {
 	refl := msg.ProtoReflect()
 	for _, tf := range info.textFields {
-		for _, ti := range tf.instances(refl) {
-			if text.IsPlainString(ti.bytes()) {
+		for _, ti := range tf.Instances(refl) {
+			if text.IsPlainString(ti.Bytes()) {
 				return true
 			}
 		}
@@ -344,24 +194,24 @@ func takePlainStrings(
 	var found map[string]string
 	refl := msg.ProtoReflect()
 	for _, tf := range info.textFields {
-		for _, ti := range tf.instances(refl) {
-			value := ti.bytes()
+		for _, ti := range tf.Instances(refl) {
+			value := ti.Bytes()
 			if !text.IsPlainString(value) {
 				continue
 			}
-			if mask != nil && !maskCovers(mask, ti.path) {
-				ti.clear()
+			if mask != nil && !maskCovers(mask, ti.Path) {
+				ti.Clear()
 				continue
 			}
 			s, err := text.PlainString(value)
 			if err != nil {
-				return nil, fmt.Errorf("server: entity %q: text field %q: %w", info.name, ti.path, err)
+				return nil, fmt.Errorf("server: entity %q: text field %q: %w", info.name, ti.Path, err)
 			}
 			if found == nil {
 				found = make(map[string]string, len(info.textFields))
 			}
-			found[ti.path] = s
-			ti.clear()
+			found[ti.Path] = s
+			ti.Clear()
 		}
 	}
 	if found == nil {

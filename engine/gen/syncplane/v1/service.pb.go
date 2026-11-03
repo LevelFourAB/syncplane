@@ -25,7 +25,10 @@ type MutationStatus int32
 
 const (
 	MutationStatus_MUTATION_STATUS_UNSPECIFIED MutationStatus = 0
-	MutationStatus_MUTATION_STATUS_APPLIED     MutationStatus = 1
+	// The server applied the mutation. A server that forwards writes to
+	// another server can still reject the mutation later, and then reports it
+	// as a `LateRejection` on a later page.
+	MutationStatus_MUTATION_STATUS_APPLIED MutationStatus = 1
 	// Mutation id at or below the server's watermark for this client; safe to
 	// drop (idempotent retry).
 	MutationStatus_MUTATION_STATUS_ALREADY_APPLIED MutationStatus = 2
@@ -142,7 +145,7 @@ func (x WorkspaceDropped_Reason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use WorkspaceDropped_Reason.Descriptor instead.
 func (WorkspaceDropped_Reason) EnumDescriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{19, 0}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{21, 0}
 }
 
 // Contains mutations for one workspace in a `Push` request.
@@ -263,8 +266,12 @@ type MutationResult struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	MutationId uint64                 `protobuf:"varint,1,opt,name=mutation_id,json=mutationId,proto3" json:"mutation_id,omitempty"`
 	Status     MutationStatus         `protobuf:"varint,2,opt,name=status,proto3,enum=syncplane.v1.MutationStatus" json:"status,omitempty"`
-	// Workspace sequence assigned when status is APPLIED; 0 otherwise. This is
-	// the only in-band way a writer learns the sequence its own write took,
+	// Workspace sequence the mutation was applied at. Set when status is
+	// APPLIED. Set when status is ALREADY_APPLIED and the mutation was in the
+	// client's latest push that applied something, which covers the resend of
+	// a push whose response was lost; 0 for an older mutation. 0 when status
+	// is REJECTED. This is the only in-band way a writer learns the sequence
+	// its own write took,
 	// without waiting for the row to come back down a pull as
 	// RowChange.version. A REJECTED mutation reports 0 because it consumes no
 	// sequence — its savepoint rolled back — which is what makes rejections
@@ -669,8 +676,12 @@ type PullResponse struct {
 	// response contains at most one of caller_access or caller_access_delta.
 	// Only a request that sets caller_access_version receives this field.
 	CallerAccessDelta *CallerAccessDelta `protobuf:"bytes,9,opt,name=caller_access_delta,json=callerAccessDelta,proto3" json:"caller_access_delta,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// Mutations of this client and caller that the server acknowledged as
+	// applied and rejected after that, ordered by mutation id. See
+	// `LateRejection`. A reset response carries none.
+	LateRejections []*LateRejection `protobuf:"bytes,10,rep,name=late_rejections,json=lateRejections,proto3" json:"late_rejections,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *PullResponse) Reset() {
@@ -766,6 +777,161 @@ func (x *PullResponse) GetCallerAccessDelta() *CallerAccessDelta {
 	return nil
 }
 
+func (x *PullResponse) GetLateRejections() []*LateRejection {
+	if x != nil {
+		return x.LateRejections
+	}
+	return nil
+}
+
+// Reports a mutation that the server acknowledged as applied and rejected
+// after the acknowledgement. A server that forwards writes to another server
+// (write-behind) acknowledges a mutation before that server decides it. When
+// that server rejects the mutation, the forwarding server reverts the rows the
+// mutation wrote and records this report.
+//
+// The report has a position in the workspace sequence. The first page whose
+// position reaches it carries it, and the row changes that revert the
+// mutation are on that page or an earlier one. A client that pulls again from
+// an earlier cursor receives the report again. A client that bootstraps does
+// not receive reports from before the bootstrap. The server keeps a report as
+// long as it keeps the client's other rejection records.
+//
+// Only the client that pushed the mutation, under the same caller, receives
+// the report.
+type LateRejection struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	MutationId uint64                 `protobuf:"varint,1,opt,name=mutation_id,json=mutationId,proto3" json:"mutation_id,omitempty"`
+	// Machine-readable rejection code, as in `MutationResult.error_code`.
+	ErrorCode    string `protobuf:"bytes,2,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
+	ErrorMessage string `protobuf:"bytes,3,opt,name=error_message,json=errorMessage,proto3" json:"error_message,omitempty"`
+	// The rows the mutation named, in payload order: one for a CRUD mutation,
+	// one for each member of a batch, none for a custom mutation.
+	Targets []*MutationTarget `protobuf:"bytes,4,rep,name=targets,proto3" json:"targets,omitempty"`
+	// Name of the custom mutation. Empty for a CRUD or batch mutation.
+	Mutator       string `protobuf:"bytes,5,opt,name=mutator,proto3" json:"mutator,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LateRejection) Reset() {
+	*x = LateRejection{}
+	mi := &file_syncplane_v1_service_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LateRejection) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LateRejection) ProtoMessage() {}
+
+func (x *LateRejection) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_service_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LateRejection.ProtoReflect.Descriptor instead.
+func (*LateRejection) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *LateRejection) GetMutationId() uint64 {
+	if x != nil {
+		return x.MutationId
+	}
+	return 0
+}
+
+func (x *LateRejection) GetErrorCode() string {
+	if x != nil {
+		return x.ErrorCode
+	}
+	return ""
+}
+
+func (x *LateRejection) GetErrorMessage() string {
+	if x != nil {
+		return x.ErrorMessage
+	}
+	return ""
+}
+
+func (x *LateRejection) GetTargets() []*MutationTarget {
+	if x != nil {
+		return x.Targets
+	}
+	return nil
+}
+
+func (x *LateRejection) GetMutator() string {
+	if x != nil {
+		return x.Mutator
+	}
+	return ""
+}
+
+// Identifies one row that a mutation named.
+type MutationTarget struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Entity        string                 `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	Key           string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MutationTarget) Reset() {
+	*x = MutationTarget{}
+	mi := &file_syncplane_v1_service_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MutationTarget) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MutationTarget) ProtoMessage() {}
+
+func (x *MutationTarget) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_service_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MutationTarget.ProtoReflect.Descriptor instead.
+func (*MutationTarget) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *MutationTarget) GetEntity() string {
+	if x != nil {
+		return x.Entity
+	}
+	return ""
+}
+
+func (x *MutationTarget) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
 // Summary of permissions held by one caller in one workspace under the access
 // model. Lists permissions held at the workspace root, and rows where the
 // caller holds permissions grouped by the permissions held there.
@@ -812,7 +978,7 @@ type CallerAccess struct {
 
 func (x *CallerAccess) Reset() {
 	*x = CallerAccess{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[7]
+	mi := &file_syncplane_v1_service_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -824,7 +990,7 @@ func (x *CallerAccess) String() string {
 func (*CallerAccess) ProtoMessage() {}
 
 func (x *CallerAccess) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[7]
+	mi := &file_syncplane_v1_service_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -837,7 +1003,7 @@ func (x *CallerAccess) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CallerAccess.ProtoReflect.Descriptor instead.
 func (*CallerAccess) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{7}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CallerAccess) GetSeq() uint64 {
@@ -916,7 +1082,7 @@ type CallerAccessDelta struct {
 
 func (x *CallerAccessDelta) Reset() {
 	*x = CallerAccessDelta{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[8]
+	mi := &file_syncplane_v1_service_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -928,7 +1094,7 @@ func (x *CallerAccessDelta) String() string {
 func (*CallerAccessDelta) ProtoMessage() {}
 
 func (x *CallerAccessDelta) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[8]
+	mi := &file_syncplane_v1_service_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -941,7 +1107,7 @@ func (x *CallerAccessDelta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CallerAccessDelta.ProtoReflect.Descriptor instead.
 func (*CallerAccessDelta) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{8}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *CallerAccessDelta) GetSeq() uint64 {
@@ -994,7 +1160,7 @@ type AnchorGroup struct {
 
 func (x *AnchorGroup) Reset() {
 	*x = AnchorGroup{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[9]
+	mi := &file_syncplane_v1_service_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1006,7 +1172,7 @@ func (x *AnchorGroup) String() string {
 func (*AnchorGroup) ProtoMessage() {}
 
 func (x *AnchorGroup) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[9]
+	mi := &file_syncplane_v1_service_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1019,7 +1185,7 @@ func (x *AnchorGroup) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnchorGroup.ProtoReflect.Descriptor instead.
 func (*AnchorGroup) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{9}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *AnchorGroup) GetPermissions() []string {
@@ -1048,7 +1214,7 @@ type AnchorRows struct {
 
 func (x *AnchorRows) Reset() {
 	*x = AnchorRows{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[10]
+	mi := &file_syncplane_v1_service_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1060,7 +1226,7 @@ func (x *AnchorRows) String() string {
 func (*AnchorRows) ProtoMessage() {}
 
 func (x *AnchorRows) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[10]
+	mi := &file_syncplane_v1_service_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1073,7 +1239,7 @@ func (x *AnchorRows) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AnchorRows.ProtoReflect.Descriptor instead.
 func (*AnchorRows) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{10}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *AnchorRows) GetEntity() string {
@@ -1115,7 +1281,7 @@ type BootstrapRequest struct {
 
 func (x *BootstrapRequest) Reset() {
 	*x = BootstrapRequest{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[11]
+	mi := &file_syncplane_v1_service_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1127,7 +1293,7 @@ func (x *BootstrapRequest) String() string {
 func (*BootstrapRequest) ProtoMessage() {}
 
 func (x *BootstrapRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[11]
+	mi := &file_syncplane_v1_service_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1140,7 +1306,7 @@ func (x *BootstrapRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapRequest.ProtoReflect.Descriptor instead.
 func (*BootstrapRequest) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{11}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *BootstrapRequest) GetWorkspaceId() string {
@@ -1200,7 +1366,7 @@ type BootstrapResume struct {
 
 func (x *BootstrapResume) Reset() {
 	*x = BootstrapResume{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[12]
+	mi := &file_syncplane_v1_service_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1212,7 +1378,7 @@ func (x *BootstrapResume) String() string {
 func (*BootstrapResume) ProtoMessage() {}
 
 func (x *BootstrapResume) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[12]
+	mi := &file_syncplane_v1_service_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1225,7 +1391,7 @@ func (x *BootstrapResume) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapResume.ProtoReflect.Descriptor instead.
 func (*BootstrapResume) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{12}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *BootstrapResume) GetCursor() []byte {
@@ -1256,7 +1422,7 @@ type BootstrapResponse struct {
 
 func (x *BootstrapResponse) Reset() {
 	*x = BootstrapResponse{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[13]
+	mi := &file_syncplane_v1_service_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1268,7 +1434,7 @@ func (x *BootstrapResponse) String() string {
 func (*BootstrapResponse) ProtoMessage() {}
 
 func (x *BootstrapResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[13]
+	mi := &file_syncplane_v1_service_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1281,7 +1447,7 @@ func (x *BootstrapResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapResponse.ProtoReflect.Descriptor instead.
 func (*BootstrapResponse) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{13}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *BootstrapResponse) GetBody() isBootstrapResponse_Body {
@@ -1438,7 +1604,7 @@ type QueryRequest struct {
 
 func (x *QueryRequest) Reset() {
 	*x = QueryRequest{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[14]
+	mi := &file_syncplane_v1_service_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1450,7 +1616,7 @@ func (x *QueryRequest) String() string {
 func (*QueryRequest) ProtoMessage() {}
 
 func (x *QueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[14]
+	mi := &file_syncplane_v1_service_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1463,7 +1629,7 @@ func (x *QueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryRequest.ProtoReflect.Descriptor instead.
 func (*QueryRequest) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{14}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *QueryRequest) GetWorkspaceId() string {
@@ -1593,7 +1759,7 @@ type QueryResponse struct {
 
 func (x *QueryResponse) Reset() {
 	*x = QueryResponse{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[15]
+	mi := &file_syncplane_v1_service_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1605,7 +1771,7 @@ func (x *QueryResponse) String() string {
 func (*QueryResponse) ProtoMessage() {}
 
 func (x *QueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[15]
+	mi := &file_syncplane_v1_service_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1618,7 +1784,7 @@ func (x *QueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryResponse.ProtoReflect.Descriptor instead.
 func (*QueryResponse) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{15}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *QueryResponse) GetRows() []*RowChange {
@@ -1700,7 +1866,7 @@ type QueryRowGroup struct {
 
 func (x *QueryRowGroup) Reset() {
 	*x = QueryRowGroup{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[16]
+	mi := &file_syncplane_v1_service_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1712,7 +1878,7 @@ func (x *QueryRowGroup) String() string {
 func (*QueryRowGroup) ProtoMessage() {}
 
 func (x *QueryRowGroup) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[16]
+	mi := &file_syncplane_v1_service_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1725,7 +1891,7 @@ func (x *QueryRowGroup) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryRowGroup.ProtoReflect.Descriptor instead.
 func (*QueryRowGroup) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{16}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *QueryRowGroup) GetValue() *QueryValue {
@@ -1785,7 +1951,7 @@ type WorkspaceScope struct {
 
 func (x *WorkspaceScope) Reset() {
 	*x = WorkspaceScope{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[17]
+	mi := &file_syncplane_v1_service_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1797,7 +1963,7 @@ func (x *WorkspaceScope) String() string {
 func (*WorkspaceScope) ProtoMessage() {}
 
 func (x *WorkspaceScope) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[17]
+	mi := &file_syncplane_v1_service_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1810,7 +1976,7 @@ func (x *WorkspaceScope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkspaceScope.ProtoReflect.Descriptor instead.
 func (*WorkspaceScope) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{17}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *WorkspaceScope) GetWorkspaceId() string {
@@ -1882,7 +2048,7 @@ type SubscribeRequest struct {
 
 func (x *SubscribeRequest) Reset() {
 	*x = SubscribeRequest{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[18]
+	mi := &file_syncplane_v1_service_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1894,7 +2060,7 @@ func (x *SubscribeRequest) String() string {
 func (*SubscribeRequest) ProtoMessage() {}
 
 func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[18]
+	mi := &file_syncplane_v1_service_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1907,7 +2073,7 @@ func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeRequest.ProtoReflect.Descriptor instead.
 func (*SubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{18}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *SubscribeRequest) GetClientId() string {
@@ -1961,7 +2127,7 @@ type WorkspaceDropped struct {
 
 func (x *WorkspaceDropped) Reset() {
 	*x = WorkspaceDropped{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[19]
+	mi := &file_syncplane_v1_service_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1973,7 +2139,7 @@ func (x *WorkspaceDropped) String() string {
 func (*WorkspaceDropped) ProtoMessage() {}
 
 func (x *WorkspaceDropped) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[19]
+	mi := &file_syncplane_v1_service_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1986,7 +2152,7 @@ func (x *WorkspaceDropped) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkspaceDropped.ProtoReflect.Descriptor instead.
 func (*WorkspaceDropped) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{19}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *WorkspaceDropped) GetReason() WorkspaceDropped_Reason {
@@ -2027,7 +2193,7 @@ type SubscribeResponse struct {
 
 func (x *SubscribeResponse) Reset() {
 	*x = SubscribeResponse{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[20]
+	mi := &file_syncplane_v1_service_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2039,7 +2205,7 @@ func (x *SubscribeResponse) String() string {
 func (*SubscribeResponse) ProtoMessage() {}
 
 func (x *SubscribeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[20]
+	mi := &file_syncplane_v1_service_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2052,7 +2218,7 @@ func (x *SubscribeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeResponse.ProtoReflect.Descriptor instead.
 func (*SubscribeResponse) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{20}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *SubscribeResponse) GetWorkspaceId() string {
@@ -2180,7 +2346,7 @@ type BootstrapResponse_Begin struct {
 
 func (x *BootstrapResponse_Begin) Reset() {
 	*x = BootstrapResponse_Begin{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[21]
+	mi := &file_syncplane_v1_service_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2192,7 +2358,7 @@ func (x *BootstrapResponse_Begin) String() string {
 func (*BootstrapResponse_Begin) ProtoMessage() {}
 
 func (x *BootstrapResponse_Begin) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[21]
+	mi := &file_syncplane_v1_service_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2205,7 +2371,7 @@ func (x *BootstrapResponse_Begin) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapResponse_Begin.ProtoReflect.Descriptor instead.
 func (*BootstrapResponse_Begin) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{13, 0}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{15, 0}
 }
 
 func (x *BootstrapResponse_Begin) GetCursor() []byte {
@@ -2272,7 +2438,7 @@ type BootstrapResponse_Chunk struct {
 
 func (x *BootstrapResponse_Chunk) Reset() {
 	*x = BootstrapResponse_Chunk{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[22]
+	mi := &file_syncplane_v1_service_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2284,7 +2450,7 @@ func (x *BootstrapResponse_Chunk) String() string {
 func (*BootstrapResponse_Chunk) ProtoMessage() {}
 
 func (x *BootstrapResponse_Chunk) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[22]
+	mi := &file_syncplane_v1_service_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2297,7 +2463,7 @@ func (x *BootstrapResponse_Chunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapResponse_Chunk.ProtoReflect.Descriptor instead.
 func (*BootstrapResponse_Chunk) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{13, 1}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{15, 1}
 }
 
 func (x *BootstrapResponse_Chunk) GetRows() []*RowChange {
@@ -2322,7 +2488,7 @@ type BootstrapResponse_End struct {
 
 func (x *BootstrapResponse_End) Reset() {
 	*x = BootstrapResponse_End{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[23]
+	mi := &file_syncplane_v1_service_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2334,7 +2500,7 @@ func (x *BootstrapResponse_End) String() string {
 func (*BootstrapResponse_End) ProtoMessage() {}
 
 func (x *BootstrapResponse_End) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[23]
+	mi := &file_syncplane_v1_service_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2347,7 +2513,7 @@ func (x *BootstrapResponse_End) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapResponse_End.ProtoReflect.Descriptor instead.
 func (*BootstrapResponse_End) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{13, 2}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{15, 2}
 }
 
 var File_syncplane_v1_service_proto protoreflect.FileDescriptor
@@ -2386,7 +2552,7 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x11no_delta_entities\x18\x06 \x03(\tR\x0fnoDeltaEntities\x12\x17\n" +
 	"\amin_seq\x18\a \x01(\x04R\x06minSeq\x127\n" +
 	"\x15caller_access_version\x18\b \x01(\x06H\x00R\x13callerAccessVersion\x88\x01\x01B\x18\n" +
-	"\x16_caller_access_version\"\x8d\x03\n" +
+	"\x16_caller_access_version\"\xd3\x03\n" +
 	"\fPullResponse\x12)\n" +
 	"\x05patch\x18\x01 \x01(\v2\x13.syncplane.v1.PatchR\x05patch\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\fR\n" +
@@ -2397,7 +2563,20 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x03seq\x18\x06 \x01(\x04R\x03seq\x12'\n" +
 	"\x0fschema_revision\x18\a \x01(\tR\x0eschemaRevision\x12?\n" +
 	"\rcaller_access\x18\b \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\x12O\n" +
-	"\x13caller_access_delta\x18\t \x01(\v2\x1f.syncplane.v1.CallerAccessDeltaR\x11callerAccessDelta\"\xeb\x01\n" +
+	"\x13caller_access_delta\x18\t \x01(\v2\x1f.syncplane.v1.CallerAccessDeltaR\x11callerAccessDelta\x12D\n" +
+	"\x0flate_rejections\x18\n" +
+	" \x03(\v2\x1b.syncplane.v1.LateRejectionR\x0elateRejections\"\xc6\x01\n" +
+	"\rLateRejection\x12\x1f\n" +
+	"\vmutation_id\x18\x01 \x01(\x04R\n" +
+	"mutationId\x12\x1d\n" +
+	"\n" +
+	"error_code\x18\x02 \x01(\tR\terrorCode\x12#\n" +
+	"\rerror_message\x18\x03 \x01(\tR\ferrorMessage\x126\n" +
+	"\atargets\x18\x04 \x03(\v2\x1c.syncplane.v1.MutationTargetR\atargets\x12\x18\n" +
+	"\amutator\x18\x05 \x01(\tR\amutator\":\n" +
+	"\x0eMutationTarget\x12\x16\n" +
+	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\"\xeb\x01\n" +
 	"\fCallerAccess\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x1a\n" +
 	"\bsubjects\x18\x03 \x03(\tR\bsubjects\x12)\n" +
@@ -2530,7 +2709,7 @@ func file_syncplane_v1_service_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_v1_service_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_syncplane_v1_service_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
+var file_syncplane_v1_service_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_syncplane_v1_service_proto_goTypes = []any{
 	(MutationStatus)(0),             // 0: syncplane.v1.MutationStatus
 	(WorkspaceDropped_Reason)(0),    // 1: syncplane.v1.WorkspaceDropped.Reason
@@ -2541,85 +2720,89 @@ var file_syncplane_v1_service_proto_goTypes = []any{
 	(*PushResponse)(nil),            // 6: syncplane.v1.PushResponse
 	(*PullRequest)(nil),             // 7: syncplane.v1.PullRequest
 	(*PullResponse)(nil),            // 8: syncplane.v1.PullResponse
-	(*CallerAccess)(nil),            // 9: syncplane.v1.CallerAccess
-	(*CallerAccessDelta)(nil),       // 10: syncplane.v1.CallerAccessDelta
-	(*AnchorGroup)(nil),             // 11: syncplane.v1.AnchorGroup
-	(*AnchorRows)(nil),              // 12: syncplane.v1.AnchorRows
-	(*BootstrapRequest)(nil),        // 13: syncplane.v1.BootstrapRequest
-	(*BootstrapResume)(nil),         // 14: syncplane.v1.BootstrapResume
-	(*BootstrapResponse)(nil),       // 15: syncplane.v1.BootstrapResponse
-	(*QueryRequest)(nil),            // 16: syncplane.v1.QueryRequest
-	(*QueryResponse)(nil),           // 17: syncplane.v1.QueryResponse
-	(*QueryRowGroup)(nil),           // 18: syncplane.v1.QueryRowGroup
-	(*WorkspaceScope)(nil),          // 19: syncplane.v1.WorkspaceScope
-	(*SubscribeRequest)(nil),        // 20: syncplane.v1.SubscribeRequest
-	(*WorkspaceDropped)(nil),        // 21: syncplane.v1.WorkspaceDropped
-	(*SubscribeResponse)(nil),       // 22: syncplane.v1.SubscribeResponse
-	(*BootstrapResponse_Begin)(nil), // 23: syncplane.v1.BootstrapResponse.Begin
-	(*BootstrapResponse_Chunk)(nil), // 24: syncplane.v1.BootstrapResponse.Chunk
-	(*BootstrapResponse_End)(nil),   // 25: syncplane.v1.BootstrapResponse.End
-	(*Mutation)(nil),                // 26: syncplane.v1.Mutation
-	(*Subscription)(nil),            // 27: syncplane.v1.Subscription
-	(*Patch)(nil),                   // 28: syncplane.v1.Patch
-	(*Condition)(nil),               // 29: syncplane.v1.Condition
-	(*OrderKey)(nil),                // 30: syncplane.v1.OrderKey
-	(AggregateOp)(0),                // 31: syncplane.v1.AggregateOp
-	(*QueryFacet)(nil),              // 32: syncplane.v1.QueryFacet
-	(*RowChange)(nil),               // 33: syncplane.v1.RowChange
-	(*QueryGroup)(nil),              // 34: syncplane.v1.QueryGroup
-	(*QueryValue)(nil),              // 35: syncplane.v1.QueryValue
+	(*LateRejection)(nil),           // 9: syncplane.v1.LateRejection
+	(*MutationTarget)(nil),          // 10: syncplane.v1.MutationTarget
+	(*CallerAccess)(nil),            // 11: syncplane.v1.CallerAccess
+	(*CallerAccessDelta)(nil),       // 12: syncplane.v1.CallerAccessDelta
+	(*AnchorGroup)(nil),             // 13: syncplane.v1.AnchorGroup
+	(*AnchorRows)(nil),              // 14: syncplane.v1.AnchorRows
+	(*BootstrapRequest)(nil),        // 15: syncplane.v1.BootstrapRequest
+	(*BootstrapResume)(nil),         // 16: syncplane.v1.BootstrapResume
+	(*BootstrapResponse)(nil),       // 17: syncplane.v1.BootstrapResponse
+	(*QueryRequest)(nil),            // 18: syncplane.v1.QueryRequest
+	(*QueryResponse)(nil),           // 19: syncplane.v1.QueryResponse
+	(*QueryRowGroup)(nil),           // 20: syncplane.v1.QueryRowGroup
+	(*WorkspaceScope)(nil),          // 21: syncplane.v1.WorkspaceScope
+	(*SubscribeRequest)(nil),        // 22: syncplane.v1.SubscribeRequest
+	(*WorkspaceDropped)(nil),        // 23: syncplane.v1.WorkspaceDropped
+	(*SubscribeResponse)(nil),       // 24: syncplane.v1.SubscribeResponse
+	(*BootstrapResponse_Begin)(nil), // 25: syncplane.v1.BootstrapResponse.Begin
+	(*BootstrapResponse_Chunk)(nil), // 26: syncplane.v1.BootstrapResponse.Chunk
+	(*BootstrapResponse_End)(nil),   // 27: syncplane.v1.BootstrapResponse.End
+	(*Mutation)(nil),                // 28: syncplane.v1.Mutation
+	(*Subscription)(nil),            // 29: syncplane.v1.Subscription
+	(*Patch)(nil),                   // 30: syncplane.v1.Patch
+	(*Condition)(nil),               // 31: syncplane.v1.Condition
+	(*OrderKey)(nil),                // 32: syncplane.v1.OrderKey
+	(AggregateOp)(0),                // 33: syncplane.v1.AggregateOp
+	(*QueryFacet)(nil),              // 34: syncplane.v1.QueryFacet
+	(*RowChange)(nil),               // 35: syncplane.v1.RowChange
+	(*QueryGroup)(nil),              // 36: syncplane.v1.QueryGroup
+	(*QueryValue)(nil),              // 37: syncplane.v1.QueryValue
 }
 var file_syncplane_v1_service_proto_depIdxs = []int32{
-	26, // 0: syncplane.v1.WorkspaceBatch.mutations:type_name -> syncplane.v1.Mutation
+	28, // 0: syncplane.v1.WorkspaceBatch.mutations:type_name -> syncplane.v1.Mutation
 	2,  // 1: syncplane.v1.PushRequest.batches:type_name -> syncplane.v1.WorkspaceBatch
 	0,  // 2: syncplane.v1.MutationResult.status:type_name -> syncplane.v1.MutationStatus
 	4,  // 3: syncplane.v1.WorkspaceResults.results:type_name -> syncplane.v1.MutationResult
 	5,  // 4: syncplane.v1.PushResponse.results:type_name -> syncplane.v1.WorkspaceResults
-	27, // 5: syncplane.v1.PullRequest.subscriptions:type_name -> syncplane.v1.Subscription
-	28, // 6: syncplane.v1.PullResponse.patch:type_name -> syncplane.v1.Patch
-	9,  // 7: syncplane.v1.PullResponse.caller_access:type_name -> syncplane.v1.CallerAccess
-	10, // 8: syncplane.v1.PullResponse.caller_access_delta:type_name -> syncplane.v1.CallerAccessDelta
-	11, // 9: syncplane.v1.CallerAccess.anchor_groups:type_name -> syncplane.v1.AnchorGroup
-	11, // 10: syncplane.v1.CallerAccessDelta.anchor_groups:type_name -> syncplane.v1.AnchorGroup
-	12, // 11: syncplane.v1.CallerAccessDelta.removed:type_name -> syncplane.v1.AnchorRows
-	12, // 12: syncplane.v1.AnchorGroup.anchors:type_name -> syncplane.v1.AnchorRows
-	27, // 13: syncplane.v1.BootstrapRequest.subscriptions:type_name -> syncplane.v1.Subscription
-	14, // 14: syncplane.v1.BootstrapRequest.resume:type_name -> syncplane.v1.BootstrapResume
-	23, // 15: syncplane.v1.BootstrapResponse.begin:type_name -> syncplane.v1.BootstrapResponse.Begin
-	24, // 16: syncplane.v1.BootstrapResponse.chunk:type_name -> syncplane.v1.BootstrapResponse.Chunk
-	25, // 17: syncplane.v1.BootstrapResponse.end:type_name -> syncplane.v1.BootstrapResponse.End
-	29, // 18: syncplane.v1.QueryRequest.predicate:type_name -> syncplane.v1.Condition
-	30, // 19: syncplane.v1.QueryRequest.order_by:type_name -> syncplane.v1.OrderKey
-	31, // 20: syncplane.v1.QueryRequest.aggregate:type_name -> syncplane.v1.AggregateOp
-	32, // 21: syncplane.v1.QueryRequest.facets:type_name -> syncplane.v1.QueryFacet
-	33, // 22: syncplane.v1.QueryResponse.rows:type_name -> syncplane.v1.RowChange
-	34, // 23: syncplane.v1.QueryResponse.groups:type_name -> syncplane.v1.QueryGroup
-	18, // 24: syncplane.v1.QueryResponse.row_groups:type_name -> syncplane.v1.QueryRowGroup
-	32, // 25: syncplane.v1.QueryResponse.facets:type_name -> syncplane.v1.QueryFacet
-	35, // 26: syncplane.v1.QueryRowGroup.value:type_name -> syncplane.v1.QueryValue
-	33, // 27: syncplane.v1.QueryRowGroup.rows:type_name -> syncplane.v1.RowChange
-	27, // 28: syncplane.v1.WorkspaceScope.subscriptions:type_name -> syncplane.v1.Subscription
-	19, // 29: syncplane.v1.SubscribeRequest.scopes:type_name -> syncplane.v1.WorkspaceScope
-	1,  // 30: syncplane.v1.WorkspaceDropped.reason:type_name -> syncplane.v1.WorkspaceDropped.Reason
-	8,  // 31: syncplane.v1.SubscribeResponse.page:type_name -> syncplane.v1.PullResponse
-	21, // 32: syncplane.v1.SubscribeResponse.dropped:type_name -> syncplane.v1.WorkspaceDropped
-	9,  // 33: syncplane.v1.BootstrapResponse.Begin.caller_access:type_name -> syncplane.v1.CallerAccess
-	33, // 34: syncplane.v1.BootstrapResponse.Chunk.rows:type_name -> syncplane.v1.RowChange
-	3,  // 35: syncplane.v1.SyncService.Push:input_type -> syncplane.v1.PushRequest
-	7,  // 36: syncplane.v1.SyncService.Pull:input_type -> syncplane.v1.PullRequest
-	13, // 37: syncplane.v1.SyncService.Bootstrap:input_type -> syncplane.v1.BootstrapRequest
-	20, // 38: syncplane.v1.SyncService.Subscribe:input_type -> syncplane.v1.SubscribeRequest
-	16, // 39: syncplane.v1.SyncService.Query:input_type -> syncplane.v1.QueryRequest
-	6,  // 40: syncplane.v1.SyncService.Push:output_type -> syncplane.v1.PushResponse
-	8,  // 41: syncplane.v1.SyncService.Pull:output_type -> syncplane.v1.PullResponse
-	15, // 42: syncplane.v1.SyncService.Bootstrap:output_type -> syncplane.v1.BootstrapResponse
-	22, // 43: syncplane.v1.SyncService.Subscribe:output_type -> syncplane.v1.SubscribeResponse
-	17, // 44: syncplane.v1.SyncService.Query:output_type -> syncplane.v1.QueryResponse
-	40, // [40:45] is the sub-list for method output_type
-	35, // [35:40] is the sub-list for method input_type
-	35, // [35:35] is the sub-list for extension type_name
-	35, // [35:35] is the sub-list for extension extendee
-	0,  // [0:35] is the sub-list for field type_name
+	29, // 5: syncplane.v1.PullRequest.subscriptions:type_name -> syncplane.v1.Subscription
+	30, // 6: syncplane.v1.PullResponse.patch:type_name -> syncplane.v1.Patch
+	11, // 7: syncplane.v1.PullResponse.caller_access:type_name -> syncplane.v1.CallerAccess
+	12, // 8: syncplane.v1.PullResponse.caller_access_delta:type_name -> syncplane.v1.CallerAccessDelta
+	9,  // 9: syncplane.v1.PullResponse.late_rejections:type_name -> syncplane.v1.LateRejection
+	10, // 10: syncplane.v1.LateRejection.targets:type_name -> syncplane.v1.MutationTarget
+	13, // 11: syncplane.v1.CallerAccess.anchor_groups:type_name -> syncplane.v1.AnchorGroup
+	13, // 12: syncplane.v1.CallerAccessDelta.anchor_groups:type_name -> syncplane.v1.AnchorGroup
+	14, // 13: syncplane.v1.CallerAccessDelta.removed:type_name -> syncplane.v1.AnchorRows
+	14, // 14: syncplane.v1.AnchorGroup.anchors:type_name -> syncplane.v1.AnchorRows
+	29, // 15: syncplane.v1.BootstrapRequest.subscriptions:type_name -> syncplane.v1.Subscription
+	16, // 16: syncplane.v1.BootstrapRequest.resume:type_name -> syncplane.v1.BootstrapResume
+	25, // 17: syncplane.v1.BootstrapResponse.begin:type_name -> syncplane.v1.BootstrapResponse.Begin
+	26, // 18: syncplane.v1.BootstrapResponse.chunk:type_name -> syncplane.v1.BootstrapResponse.Chunk
+	27, // 19: syncplane.v1.BootstrapResponse.end:type_name -> syncplane.v1.BootstrapResponse.End
+	31, // 20: syncplane.v1.QueryRequest.predicate:type_name -> syncplane.v1.Condition
+	32, // 21: syncplane.v1.QueryRequest.order_by:type_name -> syncplane.v1.OrderKey
+	33, // 22: syncplane.v1.QueryRequest.aggregate:type_name -> syncplane.v1.AggregateOp
+	34, // 23: syncplane.v1.QueryRequest.facets:type_name -> syncplane.v1.QueryFacet
+	35, // 24: syncplane.v1.QueryResponse.rows:type_name -> syncplane.v1.RowChange
+	36, // 25: syncplane.v1.QueryResponse.groups:type_name -> syncplane.v1.QueryGroup
+	20, // 26: syncplane.v1.QueryResponse.row_groups:type_name -> syncplane.v1.QueryRowGroup
+	34, // 27: syncplane.v1.QueryResponse.facets:type_name -> syncplane.v1.QueryFacet
+	37, // 28: syncplane.v1.QueryRowGroup.value:type_name -> syncplane.v1.QueryValue
+	35, // 29: syncplane.v1.QueryRowGroup.rows:type_name -> syncplane.v1.RowChange
+	29, // 30: syncplane.v1.WorkspaceScope.subscriptions:type_name -> syncplane.v1.Subscription
+	21, // 31: syncplane.v1.SubscribeRequest.scopes:type_name -> syncplane.v1.WorkspaceScope
+	1,  // 32: syncplane.v1.WorkspaceDropped.reason:type_name -> syncplane.v1.WorkspaceDropped.Reason
+	8,  // 33: syncplane.v1.SubscribeResponse.page:type_name -> syncplane.v1.PullResponse
+	23, // 34: syncplane.v1.SubscribeResponse.dropped:type_name -> syncplane.v1.WorkspaceDropped
+	11, // 35: syncplane.v1.BootstrapResponse.Begin.caller_access:type_name -> syncplane.v1.CallerAccess
+	35, // 36: syncplane.v1.BootstrapResponse.Chunk.rows:type_name -> syncplane.v1.RowChange
+	3,  // 37: syncplane.v1.SyncService.Push:input_type -> syncplane.v1.PushRequest
+	7,  // 38: syncplane.v1.SyncService.Pull:input_type -> syncplane.v1.PullRequest
+	15, // 39: syncplane.v1.SyncService.Bootstrap:input_type -> syncplane.v1.BootstrapRequest
+	22, // 40: syncplane.v1.SyncService.Subscribe:input_type -> syncplane.v1.SubscribeRequest
+	18, // 41: syncplane.v1.SyncService.Query:input_type -> syncplane.v1.QueryRequest
+	6,  // 42: syncplane.v1.SyncService.Push:output_type -> syncplane.v1.PushResponse
+	8,  // 43: syncplane.v1.SyncService.Pull:output_type -> syncplane.v1.PullResponse
+	17, // 44: syncplane.v1.SyncService.Bootstrap:output_type -> syncplane.v1.BootstrapResponse
+	24, // 45: syncplane.v1.SyncService.Subscribe:output_type -> syncplane.v1.SubscribeResponse
+	19, // 46: syncplane.v1.SyncService.Query:output_type -> syncplane.v1.QueryResponse
+	42, // [42:47] is the sub-list for method output_type
+	37, // [37:42] is the sub-list for method input_type
+	37, // [37:37] is the sub-list for extension type_name
+	37, // [37:37] is the sub-list for extension extendee
+	0,  // [0:37] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_service_proto_init() }
@@ -2631,13 +2814,13 @@ func file_syncplane_v1_service_proto_init() {
 	file_syncplane_v1_patch_proto_init()
 	file_syncplane_v1_query_proto_init()
 	file_syncplane_v1_service_proto_msgTypes[5].OneofWrappers = []any{}
-	file_syncplane_v1_service_proto_msgTypes[13].OneofWrappers = []any{
+	file_syncplane_v1_service_proto_msgTypes[15].OneofWrappers = []any{
 		(*BootstrapResponse_Begin_)(nil),
 		(*BootstrapResponse_Chunk_)(nil),
 		(*BootstrapResponse_End_)(nil),
 	}
-	file_syncplane_v1_service_proto_msgTypes[17].OneofWrappers = []any{}
-	file_syncplane_v1_service_proto_msgTypes[20].OneofWrappers = []any{
+	file_syncplane_v1_service_proto_msgTypes[19].OneofWrappers = []any{}
+	file_syncplane_v1_service_proto_msgTypes[22].OneofWrappers = []any{
 		(*SubscribeResponse_Page)(nil),
 		(*SubscribeResponse_CaughtUp)(nil),
 		(*SubscribeResponse_Dropped)(nil),
@@ -2649,7 +2832,7 @@ func file_syncplane_v1_service_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_service_proto_rawDesc), len(file_syncplane_v1_service_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   24,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

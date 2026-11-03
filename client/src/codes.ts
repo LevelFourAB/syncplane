@@ -12,6 +12,8 @@
  * | ------------------------------------ | ------------------------------ | -------------------------- |
  * | Mutation refused by the app's rules  | `onMutationRejected`           | `permission_denied`, `invalid_argument`, `conflict`, or an app-defined code |
  * | Mutation refused by the access model | `onMutationRejected`           | `access_denied`            |
+ * | Mutation refused by the origin after | `onMutationRejected`, with     | the origin's code          |
+ * | a forwarding server acked it         | `late: true`                   |                            |
  * | Text PATCH's delta state did not fit | (handled internally, re-sent)  | `text_full_state_required` |
  * | Text write predates a compaction     | (handled internally, re-applied) | `text_state_stale`       |
  * | Mutation dropped after repeated      | `onMutationRejected`           | `poison_dropped`           |

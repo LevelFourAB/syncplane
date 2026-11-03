@@ -516,9 +516,16 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	// min_seq is untrusted wire input whose worst effect is forcing the read
 	// onto the primary — the behavior every pull had before replicas.
 	err = s.readTx(ctx, msg.GetWorkspaceId(), cur.readFloor(msg.GetMinSeq()), func(tx storage.ReadTx) error {
-		var e error
-		resp, _, resetSeen, e = s.servePullPage(ctx, tx, route, cur, emitter, wantHash, epoch, msg.GetSubscriptions(), watermarkKey(principal, msg.GetClientId()), msg.GetCursor(), limit)
-		return e
+		ackKey := watermarkKey(principal, msg.GetClientId())
+		var (
+			next cursorState
+			e    error
+		)
+		resp, next, resetSeen, e = s.servePullPage(ctx, tx, route, cur, emitter, wantHash, epoch, msg.GetSubscriptions(), ackKey, msg.GetCursor(), limit)
+		if e != nil {
+			return e
+		}
+		return attachLateRejections(tx, ackKey, cur, next, resp)
 	})
 	if err != nil {
 		return nil, err
