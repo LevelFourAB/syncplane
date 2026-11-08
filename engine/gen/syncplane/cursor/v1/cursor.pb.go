@@ -183,7 +183,18 @@ type Cursor struct {
 	// cursor whose mark differs from the one the store holds for seq. 0 = no
 	// mark known (a cursor older than the field, a sequence written before the
 	// store recorded marks, or one whose record GC removed), always accepted.
-	SeqLineage    uint64 `protobuf:"fixed64,23,opt,name=seq_lineage,json=seqLineage,proto3" json:"seq_lineage,omitempty"`
+	SeqLineage uint64 `protobuf:"fixed64,23,opt,name=seq_lineage,json=seqLineage,proto3" json:"seq_lineage,omitempty"`
+	// The sequence through which the client holds every row of its scope,
+	// set on the cursor of a page cut short by the limit. Such a cursor's seq
+	// names the last row the page delivered, and a row written past it was
+	// not on the page, so the client holds that row only as of the sequence
+	// where the catch-up started. The pages that follow cut text delta state
+	// against this sequence, and carry it forward until a page ends at a
+	// clean version boundary. 0 on a clean cursor, where seq says it. A cut
+	// cursor that carries 0 (one older than the field, or a catch-up that
+	// started from no cursor) ships text fields whole until the clean
+	// boundary.
+	DeltaFloor    uint64 `protobuf:"varint,24,opt,name=delta_floor,json=deltaFloor,proto3" json:"delta_floor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -375,6 +386,13 @@ func (x *Cursor) GetEpochTag() uint64 {
 func (x *Cursor) GetSeqLineage() uint64 {
 	if x != nil {
 		return x.SeqLineage
+	}
+	return 0
+}
+
+func (x *Cursor) GetDeltaFloor() uint64 {
+	if x != nil {
+		return x.DeltaFloor
 	}
 	return 0
 }
@@ -1239,7 +1257,9 @@ type StoredSets struct {
 	// Random key that Cursor.epoch_tag is computed with. It never leaves the
 	// server, so a client cannot compute the tag of another position. Empty on
 	// entries written before the field.
-	SeqKey        []byte `protobuf:"bytes,5,opt,name=seq_key,json=seqKey,proto3" json:"seq_key,omitempty"`
+	SeqKey []byte `protobuf:"bytes,5,opt,name=seq_key,json=seqKey,proto3" json:"seq_key,omitempty"`
+	// ResyncState.windows of the cursor, when the cursor is mid delta-resync.
+	ResyncWindows *WindowStates `protobuf:"bytes,6,opt,name=resync_windows,json=resyncWindows,proto3" json:"resync_windows,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1305,6 +1325,13 @@ func (x *StoredSets) GetWindow() *ClosureSet {
 func (x *StoredSets) GetSeqKey() []byte {
 	if x != nil {
 		return x.SeqKey
+	}
+	return nil
+}
+
+func (x *StoredSets) GetResyncWindows() *WindowStates {
+	if x != nil {
+		return x.ResyncWindows
 	}
 	return nil
 }
@@ -1458,8 +1485,19 @@ type ResyncState struct {
 	// The newest access move the resync accounts for (see AccessMove). A pull
 	// that finds a later move that changes what the client can read resets.
 	ToMovesThrough uint64 `protobuf:"varint,6,opt,name=to_moves_through,json=toMovesThrough,proto3" json:"to_moves_through,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// The windows of the scope the resync converges on, as its first page
+	// resolved them. Every later page classifies with them and the cursor the
+	// resync completes with records them, so the client holds one membership
+	// of each window however the windows move between pages; the catch-up
+	// pull then reconciles it with the windows as they stand. Each
+	// WindowState.subscription indexes into the subscriptions of that scope,
+	// not into Cursor.subscriptions. Absent when the sets ride in the
+	// cursor-state store (StoredSets.resync_windows), when that scope has no
+	// window, and on cursors older than the field: a page that finds none
+	// resolves the windows again.
+	Windows       *WindowStates `protobuf:"bytes,7,opt,name=windows,proto3" json:"windows,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ResyncState) Reset() {
@@ -1534,6 +1572,59 @@ func (x *ResyncState) GetToMovesThrough() uint64 {
 	return 0
 }
 
+func (x *ResyncState) GetWindows() *WindowStates {
+	if x != nil {
+		return x.Windows
+	}
+	return nil
+}
+
+// WindowStates is the per-window membership of one scope, one entry per
+// Subscription.window that the caller can resolve, in subscriptions order.
+type WindowStates struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Windows       []*WindowState         `protobuf:"bytes,1,rep,name=windows,proto3" json:"windows,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WindowStates) Reset() {
+	*x = WindowStates{}
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WindowStates) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WindowStates) ProtoMessage() {}
+
+func (x *WindowStates) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WindowStates.ProtoReflect.Descriptor instead.
+func (*WindowStates) Descriptor() ([]byte, []int) {
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *WindowStates) GetWindows() []*WindowState {
+	if x != nil {
+		return x.Windows
+	}
+	return nil
+}
+
 // BootstrapPosition is how far an interrupted Bootstrap got: what rides inside
 // the opaque BootstrapResume.token. It records the delivered set by NAME rather
 // than as a position in the delivery order, because that order is not stable
@@ -1557,7 +1648,7 @@ type BootstrapPosition struct {
 
 func (x *BootstrapPosition) Reset() {
 	*x = BootstrapPosition{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[17]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1569,7 +1660,7 @@ func (x *BootstrapPosition) String() string {
 func (*BootstrapPosition) ProtoMessage() {}
 
 func (x *BootstrapPosition) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[17]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1582,7 +1673,7 @@ func (x *BootstrapPosition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapPosition.ProtoReflect.Descriptor instead.
 func (*BootstrapPosition) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{17}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *BootstrapPosition) GetDone() []string {
@@ -1616,7 +1707,7 @@ type ClosureSet_Entry struct {
 
 func (x *ClosureSet_Entry) Reset() {
 	*x = ClosureSet_Entry{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[19]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1628,7 +1719,7 @@ func (x *ClosureSet_Entry) String() string {
 func (*ClosureSet_Entry) ProtoMessage() {}
 
 func (x *ClosureSet_Entry) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[19]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1662,7 +1753,7 @@ var File_syncplane_cursor_v1_cursor_proto protoreflect.FileDescriptor
 
 const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\n" +
-	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\x1a\x18syncplane/v1/query.proto\"\xf8\a\n" +
+	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\x1a\x18syncplane/v1/query.proto\"\x99\b\n" +
 	"\x06Cursor\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\bsub_hash\x18\x02 \x01(\x06R\asubHash\x12!\n" +
@@ -1693,7 +1784,9 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"access_tag\x18\x15 \x01(\x06R\taccessTag\x12\x1b\n" +
 	"\tepoch_tag\x18\x16 \x01(\x06R\bepochTag\x12\x1f\n" +
 	"\vseq_lineage\x18\x17 \x01(\x06R\n" +
-	"seqLineage\"\xd3\x02\n" +
+	"seqLineage\x12\x1f\n" +
+	"\vdelta_floor\x18\x18 \x01(\x04R\n" +
+	"deltaFloor\"\xd3\x02\n" +
 	"\n" +
 	"AccessMove\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x10\n" +
@@ -1756,14 +1849,15 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\x04rows\x18\x03 \x03(\v2%.syncplane.cursor.v1.ClosureSet.EntryR\x04rows\",\n" +
 	"\bStateRef\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x06R\x02id\x12\x10\n" +
-	"\x03gen\x18\x02 \x01(\x06R\x03gen\"\x97\x02\n" +
+	"\x03gen\x18\x02 \x01(\x06R\x03gen\"\xe1\x02\n" +
 	"\n" +
 	"StoredSets\x12@\n" +
 	"\rsubscriptions\x18\x01 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\x129\n" +
 	"\aclosure\x18\x02 \x01(\v2\x1f.syncplane.cursor.v1.ClosureSetR\aclosure\x12:\n" +
 	"\awindows\x18\x03 \x03(\v2 .syncplane.cursor.v1.WindowStateR\awindows\x127\n" +
 	"\x06window\x18\x04 \x01(\v2\x1f.syncplane.cursor.v1.ClosureSetR\x06window\x12\x17\n" +
-	"\aseq_key\x18\x05 \x01(\fR\x06seqKey\"a\n" +
+	"\aseq_key\x18\x05 \x01(\fR\x06seqKey\x12H\n" +
+	"\x0eresync_windows\x18\x06 \x01(\v2!.syncplane.cursor.v1.WindowStatesR\rresyncWindows\"a\n" +
 	"\vWindowState\x12\"\n" +
 	"\fsubscription\x18\x01 \x01(\rR\fsubscription\x12\x12\n" +
 	"\x04keys\x18\x02 \x03(\tR\x04keys\x12\x1a\n" +
@@ -1773,14 +1867,17 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\aentries\x18\x01 \x03(\v2%.syncplane.cursor.v1.ClosureSet.EntryR\aentries\x1a3\n" +
 	"\x05Entry\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x12\n" +
-	"\x04keys\x18\x02 \x03(\tR\x04keys\"\xda\x01\n" +
+	"\x04keys\x18\x02 \x03(\tR\x04keys\"\x97\x02\n" +
 	"\vResyncState\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x1b\n" +
 	"\tafter_key\x18\x02 \x01(\tR\bafterKey\x12\x1e\n" +
 	"\vto_sub_hash\x18\x03 \x01(\x06R\ttoSubHash\x12&\n" +
 	"\x0fto_filter_epoch\x18\x04 \x01(\x04R\rtoFilterEpoch\x12$\n" +
 	"\x0eto_access_hash\x18\x05 \x01(\x06R\ftoAccessHash\x12(\n" +
-	"\x10to_moves_through\x18\x06 \x01(\x04R\x0etoMovesThrough\"\\\n" +
+	"\x10to_moves_through\x18\x06 \x01(\x04R\x0etoMovesThrough\x12;\n" +
+	"\awindows\x18\a \x01(\v2!.syncplane.cursor.v1.WindowStatesR\awindows\"J\n" +
+	"\fWindowStates\x12:\n" +
+	"\awindows\x18\x01 \x03(\v2 .syncplane.cursor.v1.WindowStateR\awindows\"\\\n" +
 	"\x11BootstrapPosition\x12\x12\n" +
 	"\x04done\x18\x01 \x03(\tR\x04done\x12\x16\n" +
 	"\x06entity\x18\x02 \x01(\tR\x06entity\x12\x1b\n" +
@@ -1798,7 +1895,7 @@ func file_syncplane_cursor_v1_cursor_proto_rawDescGZIP() []byte {
 	return file_syncplane_cursor_v1_cursor_proto_rawDescData
 }
 
-var file_syncplane_cursor_v1_cursor_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_syncplane_cursor_v1_cursor_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
 var file_syncplane_cursor_v1_cursor_proto_goTypes = []any{
 	(*Cursor)(nil),            // 0: syncplane.cursor.v1.Cursor
 	(*AccessMove)(nil),        // 1: syncplane.cursor.v1.AccessMove
@@ -1817,14 +1914,15 @@ var file_syncplane_cursor_v1_cursor_proto_goTypes = []any{
 	(*WindowState)(nil),       // 14: syncplane.cursor.v1.WindowState
 	(*ClosureSet)(nil),        // 15: syncplane.cursor.v1.ClosureSet
 	(*ResyncState)(nil),       // 16: syncplane.cursor.v1.ResyncState
-	(*BootstrapPosition)(nil), // 17: syncplane.cursor.v1.BootstrapPosition
-	nil,                       // 18: syncplane.cursor.v1.WithinState.SubjectsEntry
-	(*ClosureSet_Entry)(nil),  // 19: syncplane.cursor.v1.ClosureSet.Entry
-	(*v1.Subscription)(nil),   // 20: syncplane.v1.Subscription
-	(*v1.Condition)(nil),      // 21: syncplane.v1.Condition
+	(*WindowStates)(nil),      // 17: syncplane.cursor.v1.WindowStates
+	(*BootstrapPosition)(nil), // 18: syncplane.cursor.v1.BootstrapPosition
+	nil,                       // 19: syncplane.cursor.v1.WithinState.SubjectsEntry
+	(*ClosureSet_Entry)(nil),  // 20: syncplane.cursor.v1.ClosureSet.Entry
+	(*v1.Subscription)(nil),   // 21: syncplane.v1.Subscription
+	(*v1.Condition)(nil),      // 22: syncplane.v1.Condition
 }
 var file_syncplane_cursor_v1_cursor_proto_depIdxs = []int32{
-	20, // 0: syncplane.cursor.v1.Cursor.subscriptions:type_name -> syncplane.v1.Subscription
+	21, // 0: syncplane.cursor.v1.Cursor.subscriptions:type_name -> syncplane.v1.Subscription
 	16, // 1: syncplane.cursor.v1.Cursor.resync:type_name -> syncplane.cursor.v1.ResyncState
 	15, // 2: syncplane.cursor.v1.Cursor.closure:type_name -> syncplane.cursor.v1.ClosureSet
 	15, // 3: syncplane.cursor.v1.Cursor.window:type_name -> syncplane.cursor.v1.ClosureSet
@@ -1837,28 +1935,31 @@ var file_syncplane_cursor_v1_cursor_proto_depIdxs = []int32{
 	3,  // 10: syncplane.cursor.v1.AccessMove.more_from:type_name -> syncplane.cursor.v1.AnchorRef
 	3,  // 11: syncplane.cursor.v1.AccessMove.more_to:type_name -> syncplane.cursor.v1.AnchorRef
 	2,  // 12: syncplane.cursor.v1.AccessMove.from_within:type_name -> syncplane.cursor.v1.WithinState
-	18, // 13: syncplane.cursor.v1.WithinState.subjects:type_name -> syncplane.cursor.v1.WithinState.SubjectsEntry
+	19, // 13: syncplane.cursor.v1.WithinState.subjects:type_name -> syncplane.cursor.v1.WithinState.SubjectsEntry
 	11, // 14: syncplane.cursor.v1.ReadAccess.permissions:type_name -> syncplane.cursor.v1.PermissionAnchors
 	5,  // 15: syncplane.cursor.v1.ReadAccess.rules:type_name -> syncplane.cursor.v1.EntityReadRule
 	6,  // 16: syncplane.cursor.v1.EntityReadRule.read:type_name -> syncplane.cursor.v1.ReadersRule
 	9,  // 17: syncplane.cursor.v1.EntityReadRule.parents:type_name -> syncplane.cursor.v1.ParentCase
 	10, // 18: syncplane.cursor.v1.EntityReadRule.hides:type_name -> syncplane.cursor.v1.HidingGuard
 	7,  // 19: syncplane.cursor.v1.ReadersRule.checked:type_name -> syncplane.cursor.v1.CheckedRule
-	21, // 20: syncplane.cursor.v1.CheckedRule.when:type_name -> syncplane.v1.Condition
+	22, // 20: syncplane.cursor.v1.CheckedRule.when:type_name -> syncplane.v1.Condition
 	8,  // 21: syncplane.cursor.v1.CheckedRule.within:type_name -> syncplane.cursor.v1.WithinRule
-	21, // 22: syncplane.cursor.v1.WithinRule.when:type_name -> syncplane.v1.Condition
+	22, // 22: syncplane.cursor.v1.WithinRule.when:type_name -> syncplane.v1.Condition
 	6,  // 23: syncplane.cursor.v1.HidingGuard.read:type_name -> syncplane.cursor.v1.ReadersRule
-	19, // 24: syncplane.cursor.v1.PermissionAnchors.rows:type_name -> syncplane.cursor.v1.ClosureSet.Entry
-	20, // 25: syncplane.cursor.v1.StoredSets.subscriptions:type_name -> syncplane.v1.Subscription
+	20, // 24: syncplane.cursor.v1.PermissionAnchors.rows:type_name -> syncplane.cursor.v1.ClosureSet.Entry
+	21, // 25: syncplane.cursor.v1.StoredSets.subscriptions:type_name -> syncplane.v1.Subscription
 	15, // 26: syncplane.cursor.v1.StoredSets.closure:type_name -> syncplane.cursor.v1.ClosureSet
 	14, // 27: syncplane.cursor.v1.StoredSets.windows:type_name -> syncplane.cursor.v1.WindowState
 	15, // 28: syncplane.cursor.v1.StoredSets.window:type_name -> syncplane.cursor.v1.ClosureSet
-	19, // 29: syncplane.cursor.v1.ClosureSet.entries:type_name -> syncplane.cursor.v1.ClosureSet.Entry
-	30, // [30:30] is the sub-list for method output_type
-	30, // [30:30] is the sub-list for method input_type
-	30, // [30:30] is the sub-list for extension type_name
-	30, // [30:30] is the sub-list for extension extendee
-	0,  // [0:30] is the sub-list for field type_name
+	17, // 29: syncplane.cursor.v1.StoredSets.resync_windows:type_name -> syncplane.cursor.v1.WindowStates
+	20, // 30: syncplane.cursor.v1.ClosureSet.entries:type_name -> syncplane.cursor.v1.ClosureSet.Entry
+	17, // 31: syncplane.cursor.v1.ResyncState.windows:type_name -> syncplane.cursor.v1.WindowStates
+	14, // 32: syncplane.cursor.v1.WindowStates.windows:type_name -> syncplane.cursor.v1.WindowState
+	33, // [33:33] is the sub-list for method output_type
+	33, // [33:33] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_cursor_v1_cursor_proto_init() }
@@ -1872,7 +1973,7 @@ func file_syncplane_cursor_v1_cursor_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_cursor_v1_cursor_proto_rawDesc), len(file_syncplane_cursor_v1_cursor_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   20,
+			NumMessages:   21,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

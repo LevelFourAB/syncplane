@@ -195,6 +195,115 @@ var _ = Describe("Downstream text delta state", func() {
 			rc := changeFor(pull(nil), "w1")
 			Expect(rc.GetTextDeltas()).To(BeEmpty())
 		})
+
+		// A page cut short by the limit hands back a cursor whose sequence is
+		// that of the last row it delivered. Rows past that sequence were not
+		// on the page, so the reader still holds them as of where the catch-up
+		// started — and a later page must fold onto that, not onto the cursor.
+		Describe("over pages cut short by the limit", func() {
+			const opening = "the quick brown fox jumps over the lazy dog, and then it naps in the sun"
+
+			var (
+				first *syncplanev1.PullResponse
+				held  []byte
+				state []byte
+			)
+
+			// Given w1 held by the reader, then an edit to w1 and a write to
+			// another row while it is away: a one-row page ends at that other
+			// row, before w1's latest version.
+			BeforeEach(func() {
+				base := bodyDoc("seed", opening)
+				push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))
+				first = pull(nil)
+				held = changeFor(first, "w1").GetValue()
+
+				state = editBody(base, "alice", func(d *text.Doc) {
+					Expect(d.Insert(d.Len(), " A")).To(Succeed())
+				})
+				push(patchMutation("c2", 1, "widget", "w1", &testdatav1.Widget{Body: state}, "body"))
+				push(putMutation("c2", 2, "widget", "other", &testdatav1.Widget{Id: "other"}))
+			})
+
+			// pullPaged drains a catch-up one row per page, folding each change
+			// to w1 into what the reader holds.
+			pullPaged := func(cursor []byte, held []byte) []byte {
+				GinkgoHelper()
+				for range 10 {
+					resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+						WorkspaceId: ws, Cursor: cursor, Limit: 1,
+					}))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(resp.Msg.GetReset_()).To(BeFalse())
+					for _, rc := range resp.Msg.GetPatch().GetChanges() {
+						if rc.GetEntity() == "widget" && rc.GetKey() == "w1" {
+							held = reconstruct(rc, held)
+						}
+					}
+					cursor = resp.Msg.GetNextCursor()
+					if !resp.Msg.GetHasMore() {
+						return held
+					}
+				}
+				Fail("the catch-up did not finish in 10 pages")
+				return nil
+			}
+
+			It("keeps an edit made before the page boundary when only another field changed after it", func() {
+				push(patchMutation("c2", 3, "widget", "w1", &testdatav1.Widget{Label: "renamed"}, "label"))
+
+				got := pullPaged(first.GetNextCursor(), held)
+
+				var w testdatav1.Widget
+				Expect(proto.Unmarshal(got, &w)).To(Succeed())
+				Expect(plainBody(w.GetBody())).To(Equal(opening + " A"))
+				Expect(got).To(Equal(storedRow("w1")))
+			})
+
+			It("keeps an edit made before the page boundary when the text changed again after it", func() {
+				state = editBody(state, "bob", func(d *text.Doc) {
+					Expect(d.Insert(0, "B ")).To(Succeed())
+				})
+				push(patchMutation("c2", 3, "widget", "w1", &testdatav1.Widget{Body: state}, "body"))
+
+				got := pullPaged(first.GetNextCursor(), held)
+
+				var w testdatav1.Widget
+				Expect(proto.Unmarshal(got, &w)).To(Succeed())
+				Expect(plainBody(w.GetBody())).To(Equal("B " + opening + " A"))
+				Expect(got).To(Equal(storedRow("w1")))
+			})
+
+			It("keeps an edit made before the page boundary on a stream's catch-up", func() {
+				push(patchMutation("c2", 3, "widget", "w1", &testdatav1.Widget{Label: "renamed"}, "label"))
+
+				streamCtx, cancel := context.WithCancel(ctx)
+				defer cancel()
+				stream, err := client.Subscribe(streamCtx, connect.NewRequest(&syncplanev1.SubscribeRequest{
+					ClientId: "c9",
+					Scopes:   []*syncplanev1.WorkspaceScope{{WorkspaceId: ws, Cursor: first.GetNextCursor()}},
+					Limit:    1,
+				}))
+				Expect(err).NotTo(HaveOccurred())
+				got := held
+				for stream.Receive() {
+					if stream.Msg().GetCaughtUp() {
+						break
+					}
+					for _, rc := range stream.Msg().GetPage().GetPatch().GetChanges() {
+						if rc.GetEntity() == "widget" && rc.GetKey() == "w1" {
+							got = reconstruct(rc, got)
+						}
+					}
+				}
+				Expect(stream.Err()).NotTo(HaveOccurred())
+
+				var w testdatav1.Widget
+				Expect(proto.Unmarshal(got, &w)).To(Succeed())
+				Expect(plainBody(w.GetBody())).To(Equal(opening + " A"))
+				Expect(got).To(Equal(storedRow("w1")))
+			})
+		})
 	})
 
 	Describe("falling back to full state", func() {

@@ -28,7 +28,7 @@ If the server cannot apply a fragment, it rejects the edit with `text_full_state
 
 ### Downstream: pulls ship deltas
 
-Downstream synchronization mirrors the upstream design. Every write of a text-bearing row appends its added fragment to a per-(row, field) log keyed by the sequence number of the write. A pull operation folds the entries above the client's cursor into one fragment carried beside the row (`RowChange.text_deltas`, with those fields cleared from `value`).
+Downstream synchronization mirrors the upstream design. Every write of a text-bearing row appends its added fragment to a per-(row, field) log keyed by the sequence number of the write. A pull operation folds the entries above the client's cursor into one fragment carried beside the row (`RowChange.text_deltas`, with those fields cleared from `value`). When the pull limit cuts a catch-up into pages, a row written after a page's last row is not on that page, so the client holds the row only as of the cursor where the catch-up started. Every page of the catch-up therefore folds the entries above that start cursor, until a page ends the catch-up.
 
 Catching up on another peer's typing costs a payload proportional to what they typed. A field that remained untouched over the span ships as an empty fragment that means "keep what you hold". A row whose other fields changed stops re-sending its document entirely. The client folds the fragments back into its confirmed row, so IndexedDB, reads, watches, and rebase replay continue to observe whole documents.
 
@@ -46,6 +46,8 @@ Bootstrap chunks, delta resyncs, membership diffs, query results, and the `Chang
 The access model does not stop deltas. A caller below the workspace root receives fragments, as a caller at the root does. A change of the caller's grants, or a move above a row that changes what the caller reads, turns the pull into a delta resync. A change of the row's own access parent or subject field records a gap in the log. Each case sends full state to a reader that did not hold the row (see [Access model](access-model.md)).
 
 The server can make each of these decisions independently. Holding the row is necessary but not sufficient: folding a fragment also requires a schema, and a build routinely stores rows for an entity that only a neighbouring tab declares (see [A client holds only the entities it declares](convergence-model.md#a-client-holds-only-the-entities-it-declares)). Only the client knows this information, so it names those entities in `PullRequest.no_delta_entities` and their rows arrive as full state.
+
+A build can also declare an entity but not a text field that a later build added to it. The server cannot see this, so the first fragment for that field reaches the client. The client discards the page, bootstraps the workspace again, and from then on names the entity in `no_delta_entities`. The cost is one bootstrap per client session, not one per edit.
 
 ### Locally: edits are deltas in storage too
 

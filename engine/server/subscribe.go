@@ -53,10 +53,12 @@ type subScope struct {
 	// (SubscribeRequest.sparse_cursor). cursorSent records whether the client
 	// holds one at all — a scope opened without a cursor must be given one
 	// before any can be withheld. owedBytes is the weight of the rows sent
-	// since the last one. See checkpointDue.
+	// since the last one, and sent is the position of that cursor. See
+	// checkpointDue.
 	sparseCursor bool
 	cursorSent   bool
 	owedBytes    int
+	sent         cursorState
 	logger       *slog.Logger
 	// live is false once the scope has been dropped (reset, revoked, failed).
 	// A dropped scope is silently skipped by the tail loop; the client has
@@ -419,8 +421,19 @@ func (s *Server) regateScopes(ctx context.Context, stream *connect.ServerStream[
 // The client then holds rows past the seq of its stored cursor, and its next
 // pull can answer below that seq; the client takes such a page rather than
 // drop it.
-func (sc *subScope) checkpointDue(pageBytes, cursorBytes int) bool {
+//
+// Re-delivery restores only rows the scope still shows. A pull from the stored
+// cursor revokes a row only when that cursor says the client can hold it, so
+// the cursor is never withheld from a page after which the client holds what
+// the stored cursor does not say: a page that moves a window or closure
+// membership, a page of a delta resync or its catch-up, a page under another
+// scope or access, or a page that sends a row created past the stored
+// cursor's seq that the scope can later hide (see hidesRows).
+func (sc *subScope) checkpointDue(next cursorState, pageBytes, cursorBytes int) bool {
 	if !sc.sparseCursor || !sc.cursorSent {
+		return true
+	}
+	if !sc.sent.sameHolding(next) || sc.emitter.newestHidable > sc.sent.seq {
 		return true
 	}
 	return sc.owedBytes+pageBytes >= cursorBytes
@@ -488,9 +501,10 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 			// references the stored copy of that summary, which the next change
 			// is sent as a delta from.
 			pageBytes := proto.Size(page.GetPatch())
-			if hasAccess || hasLate || sc.checkpointDue(pageBytes, len(page.GetNextCursor())) {
+			if hasAccess || hasLate || sc.checkpointDue(next, pageBytes, len(page.GetNextCursor())) {
 				sc.owedBytes = 0
 				sc.cursorSent = true
+				sc.sent = next
 			} else {
 				sc.owedBytes += pageBytes
 				page.NextCursor = nil

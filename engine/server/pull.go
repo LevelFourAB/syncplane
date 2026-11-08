@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 
 	"connectrpc.com/connect"
 	"go.opentelemetry.io/otel/metric"
@@ -50,6 +51,9 @@ type cursorState struct {
 	subs []*syncplanev1.Subscription
 	// resync is non-nil while a delta resync is paging; see ResyncState.
 	resync *syncplanecursorv1.ResyncState
+	// resyncWindows are the new scope's windows a delta resync in flight
+	// classifies with (ResyncState.windows); nil when no page pinned them.
+	resyncWindows *syncplanecursorv1.WindowStates
 	// closure is the reference-following closure key-set the cursor was issued
 	// under (Cursor.closure): the exact set of rows the client holds via follow
 	// beyond its base scope. The next following pull brings the closure up to
@@ -69,6 +73,10 @@ type cursorState struct {
 	// full state; the page that ends the catch-up at a clean boundary issues a
 	// cursor without it.
 	resynced bool
+	// deltaFloor is the sequence through which the client holds every row of
+	// its scope, set while a catch-up is cut into pages (Cursor.delta_floor).
+	// See deltaBase.
+	deltaFloor uint64
 	// window is the windowed membership as ONE set (Cursor.window), which is
 	// what cursors issued before windows were maintained per window carry.
 	// This server issues windows instead, except on a truncated page that
@@ -132,6 +140,37 @@ type cursorState struct {
 // converges on.
 func (c cursorState) readFloor(minSeq uint64) uint64 {
 	return max(c.seq, minSeq, c.movesThrough, c.resync.GetToMovesThrough())
+}
+
+// deltaBase is the sequence through which the client holding the cursor holds
+// every row of its scope, which is what text delta state is cut against. A
+// clean cursor holds its scope as of seq. A cursor cut inside a catch-up holds
+// it as of the floor it carries, and known is false when it carries none.
+func (c cursorState) deltaBase() (seq uint64, known bool) {
+	if c.deltaFloor != 0 {
+		return c.deltaFloor, true
+	}
+	if c.partialEntity != "" {
+		return 0, false
+	}
+	return c.seq, true
+}
+
+// sameHolding reports whether a client that holds the rows c says it holds,
+// and then applies the pages that lead to o, holds what o says: both cursors
+// name one scope, filter epoch and access, neither is inside a delta resync
+// or its catch-up, and both carry the same window and closure membership.
+// What a pull from c decides the client was never sent then stays true for a
+// client at o, except for rows created past c's seq, which the caller checks
+// apart.
+func (c cursorState) sameHolding(o cursorState) bool {
+	if c.subHash != o.subHash || c.epoch != o.epoch ||
+		c.accessPolicy != o.accessPolicy || c.accessHash != o.accessHash ||
+		c.resync != nil || o.resync != nil || c.resynced || o.resynced {
+		return false
+	}
+	return maps.Equal(c.windowSet(), o.windowSet()) &&
+		maps.Equal(closureSetMembership(c.closure), closureSetMembership(o.closure))
 }
 
 // windowSet is the window membership the cursor carries, in whichever form it
@@ -204,9 +243,11 @@ func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte, verdic
 		partialKey:       c.GetPartialKey(),
 		subs:             c.GetSubscriptions(),
 		resync:           c.GetResync(),
+		resyncWindows:    c.GetResync().GetWindows(),
 		closure:          c.GetClosure(),
 		closureRebuild:   c.GetClosureRebuild(),
 		resynced:         c.GetResynced(),
+		deltaFloor:       c.GetDeltaFloor(),
 		window:           c.GetWindow(),
 		windows:          c.GetWindows(),
 		accessPolicy:     c.GetAccessPolicy(),
@@ -257,6 +298,9 @@ func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte, verdic
 	st.closure = sets.GetClosure()
 	st.window = sets.GetWindow()
 	st.windows = sets.GetWindows()
+	if w := sets.GetResyncWindows(); w != nil {
+		st.resyncWindows = w
+	}
 	st.stateBlob = blob
 	st.setsKey = sets.GetSeqKey()
 	return st, nil
@@ -286,12 +330,25 @@ func (s *Server) encodeCursor(ctx context.Context, ws string, st *cursorState) [
 		Resync:         st.resync,
 		ClosureRebuild: st.closureRebuild,
 		Resynced:       st.resynced,
+		DeltaFloor:     st.deltaFloor,
+	}
+	// The pinned windows of a resync travel with the other sets, so the copy
+	// a decoded cursor carried inline must not ride along as well.
+	if st.resync.GetWindows() != nil {
+		c.Resync = proto.CloneOf(st.resync)
+		c.Resync.Windows = nil
 	}
 	if !s.storeSets(ctx, ws, st, c) {
 		c.Subscriptions = st.subs
 		c.Closure = st.closure
 		c.Window = st.window
 		c.Windows = st.windows
+		if st.resync != nil && st.resyncWindows != nil {
+			if c.Resync == st.resync {
+				c.Resync = proto.CloneOf(st.resync)
+			}
+			c.Resync.Windows = st.resyncWindows
+		}
 	}
 	st.epochTag = 0
 	if c.GetSetsRef() != nil && len(st.setsKey) > 0 {
@@ -318,6 +375,9 @@ func (s *Server) storeSets(ctx context.Context, ws string, st *cursorState, c *s
 		Windows:       st.windows,
 		Window:        st.window,
 		SeqKey:        st.setsKey,
+	}
+	if st.resync != nil {
+		sets.ResyncWindows = st.resyncWindows
 	}
 	blob, err := proto.Marshal(sets)
 	if err != nil {
@@ -1084,8 +1144,16 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	// folded into anything. A page that stops short of the current seq leaves
 	// such rows to the next page, so the mark stays on its cursor; the client
 	// holds the whole scope only as of the cursor of the page that catches up.
-	emitter.deltas = !cur.resynced
-	emitter.deltaAfter = cur.seq
+	//
+	// A page cut short by the limit is the other exception: its cursor's seq
+	// names the last row it delivered, and a row written past that was not on
+	// it, so the client holds such a row only as of the sequence where the
+	// catch-up started. The cut cursor carries that sequence, and the pages
+	// that follow cut delta state against it.
+	floor, known := cur.deltaBase()
+	emitter.deltas = !cur.resynced && known
+	emitter.deltaAfter = floor
+	emitter.newestHidable = 0
 	// What the cursor proves the client holds, for the hidden branches below:
 	// the exact membership sets it carried (window and closure), and — for
 	// scopes with no stored set — the fact that nothing created past its seq
@@ -1121,6 +1189,15 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 			change, err := emitter.emitChange(tx, row)
 			if err != nil {
 				return err
+			}
+			if !row.Deleted && row.CreatedVersion > emitter.newestHidable {
+				hides, err := emitter.hidesRows(row.Entity)
+				if err != nil {
+					return err
+				}
+				if hides {
+					emitter.newestHidable = row.CreatedVersion
+				}
 			}
 			resp.Patch.Changes = append(resp.Patch.Changes, change)
 			ck := closureKey{entity: row.Entity, key: row.Key}
@@ -1210,6 +1287,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 			}
 		}
 		next.resynced = cur.resynced
+		next.deltaFloor, _ = cur.deltaBase()
 	} else {
 		next.seq = current
 		// Clean boundary: reconcile both bounded membership sets. Each emits

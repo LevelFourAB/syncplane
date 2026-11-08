@@ -2055,6 +2055,10 @@ type SubscribeRequest struct {
 	// reopened stream resumes from the last checkpoint rather than the last
 	// frame, re-delivering what came after it; the server withholds a cursor
 	// only while that re-delivery would cost less than the cursor it skipped.
+	// A frame that changes which rows the client holds beyond what the last
+	// checkpoint accounts for always carries the cursor: one that moves a
+	// window or closure membership, a delta resync, or a new row the scope can
+	// later hide. So the saving comes from edits to rows the client holds.
 	SparseCursor  bool `protobuf:"varint,5,opt,name=sparse_cursor,json=sparseCursor,proto3" json:"sparse_cursor,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

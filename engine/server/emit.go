@@ -230,12 +230,19 @@ type rowEmitter struct {
 	// to withhold.
 	includeServerOnly bool
 	// deltas enables collaborative-text delta state on emitted rows, cut
-	// against deltaAfter (the cursor's sequence). Only the forward pull scan
+	// against deltaAfter (the sequence through which the recipient holds every
+	// row of its scope, see cursorState.deltaBase). Only the forward pull scan
 	// sets it: every other path (bootstrap, delta resync, membership diffs,
 	// query) emits to a recipient whose prior state is not the workspace as of
 	// deltaAfter, which is the assumption delta state rests on.
 	deltas     bool
 	deltaAfter uint64
+	// newestHidable is the highest CreatedVersion of a row the last forward
+	// page delivered as visible in an entity whose scope can hide a row that
+	// is not deleted (see hidesRows); 0 when it delivered none. A pull from a
+	// cursor below it would not revoke such a row (see the rowHidden case of
+	// pullPage), so a Subscribe frame that carries one must carry its cursor.
+	newestHidable uint64
 	// noDeltaEntities indexes the entities the request's sender said it cannot
 	// decode; nil when it named none. Set by the sync entry points from
 	// PullRequest/SubscribeRequest.no_delta_entities.
@@ -728,9 +735,8 @@ func (e *rowEmitter) emitChange(tx storage.ReadTx, row storage.Row) (*syncplanev
 	if err != nil {
 		return nil, err
 	}
-	// A row at or below the cursor is one the recipient may never have held (a
-	// page resuming inside a same-version group delivers the rest of that
-	// group), so its state cannot be assumed.
+	// A row at or below deltaAfter is one the recipient may never have held,
+	// so its state cannot be assumed.
 	if !e.deltas || row.Deleted || row.Version <= e.deltaAfter {
 		return rc, nil
 	}
@@ -794,6 +800,19 @@ func (e *rowEmitter) emitChange(tx storage.ReadTx, row storage.Row) (*syncplanev
 	rc.Body = &syncplanev1.RowChange_Value{Value: value}
 	rc.TextDeltas = deltas
 	return rc, nil
+}
+
+// hidesRows reports whether the scope can stop showing a row of entity that
+// is not deleted: through a predicate, a window, a key set, a reach by follow
+// alone, or a read filter.
+func (e *rowEmitter) hidesRows(entity string) (bool, error) {
+	if e.scopes != nil {
+		if scope := e.scopes[entity]; scope == nil || !scope.whole {
+			return true, nil
+		}
+	}
+	filter, err := e.filterOf(entity)
+	return filter != nil, err
 }
 
 // foldFragments unions a span's fragments into one, in log order. ok is false

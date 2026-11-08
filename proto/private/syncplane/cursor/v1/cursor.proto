@@ -167,6 +167,17 @@ message Cursor {
 	// mark known (a cursor older than the field, a sequence written before the
 	// store recorded marks, or one whose record GC removed), always accepted.
 	fixed64 seq_lineage = 23;
+	// The sequence through which the client holds every row of its scope,
+	// set on the cursor of a page cut short by the limit. Such a cursor's seq
+	// names the last row the page delivered, and a row written past it was
+	// not on the page, so the client holds that row only as of the sequence
+	// where the catch-up started. The pages that follow cut text delta state
+	// against this sequence, and carry it forward until a page ends at a
+	// clean version boundary. 0 on a clean cursor, where seq says it. A cut
+	// cursor that carries 0 (one older than the field, or a catch-up that
+	// started from no cursor) ships text fields whole until the clean
+	// boundary.
+	uint64 delta_floor = 24;
 }
 
 // AccessMove is one change of the access parent of a row that other rows sit
@@ -349,6 +360,8 @@ message StoredSets {
 	// server, so a client cannot compute the tag of another position. Empty on
 	// entries written before the field.
 	bytes seq_key = 5;
+	// ResyncState.windows of the cursor, when the cursor is mid delta-resync.
+	WindowStates resync_windows = 6;
 }
 
 // WindowState is one Subscription.window's membership plus the position of its
@@ -409,6 +422,23 @@ message ResyncState {
 	// The newest access move the resync accounts for (see AccessMove). A pull
 	// that finds a later move that changes what the client can read resets.
 	uint64 to_moves_through = 6;
+	// The windows of the scope the resync converges on, as its first page
+	// resolved them. Every later page classifies with them and the cursor the
+	// resync completes with records them, so the client holds one membership
+	// of each window however the windows move between pages; the catch-up
+	// pull then reconciles it with the windows as they stand. Each
+	// WindowState.subscription indexes into the subscriptions of that scope,
+	// not into Cursor.subscriptions. Absent when the sets ride in the
+	// cursor-state store (StoredSets.resync_windows), when that scope has no
+	// window, and on cursors older than the field: a page that finds none
+	// resolves the windows again.
+	WindowStates windows = 7;
+}
+
+// WindowStates is the per-window membership of one scope, one entry per
+// Subscription.window that the caller can resolve, in subscriptions order.
+message WindowStates {
+	repeated WindowState windows = 1;
 }
 
 // BootstrapPosition is how far an interrupted Bootstrap got: what rides inside

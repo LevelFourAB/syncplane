@@ -105,6 +105,8 @@ type accessReplica struct {
 	// CallerAccessDelta does.
 	access *syncplanev1.CallerAccess
 	legacy bool
+	// subs is the subscription set the replica pulls with; nil is full sync.
+	subs []*syncplanev1.Subscription
 	// drops and resets record what the pulls asked of the client.
 	drops  []string
 	resets int
@@ -119,6 +121,7 @@ func (r *accessReplica) pullOnce(limit uint32) *syncplanev1.PullResponse {
 	GinkgoHelper()
 	req := connect.NewRequest(&syncplanev1.PullRequest{
 		WorkspaceId: ws, ClientId: "c-" + r.user, Cursor: r.cursor, Limit: limit,
+		Subscriptions: r.subs,
 	})
 	if !r.legacy {
 		req.Msg.CallerAccessVersion = proto.Uint64(r.access.GetVersion())
@@ -260,6 +263,22 @@ var _ = Describe("Access model sync", func() {
 		guest.sync()
 		Expect(guest.view()).NotTo(ContainElements("project/p2", "task/t2"))
 		converged(guest)
+	})
+
+	It("tombstones a window member written after the cursor when the caller loses its grant", func() {
+		f.seed(&accessv1.ProjectMember{Id: "pm-guest2", Project: project("p2"), UserId: "guest", Role: "project_reader"})
+		guest := newAccessReplica(f, "guest")
+		guest.subs = []*syncplanev1.Subscription{
+			{Entity: "task", Window: &syncplanev1.Window{ByRecency: true, Limit: 5}},
+		}
+		guest.sync()
+		Expect(guest.view()).To(ContainElement("task/t2"))
+
+		// Written after the guest's cursor, while it can still read it.
+		f.seed(&accessv1.Task{Id: "t2", Project: project("p2"), Title: "in two, edited"})
+		revoke("project_member", "pm-guest2")
+		guest.sync()
+		Expect(guest.view()).NotTo(ContainElement("task/t2"))
 	})
 
 	It("tombstones the rows below an anchor that is deleted", func() {

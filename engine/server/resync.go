@@ -131,13 +131,11 @@ type resyncPos struct {
 // The old side's windows are the membership the cursor records, not a rebuild:
 // a window moves for rows that were never written — a member deleted lets the
 // next one rise, a newer row pushes the tail out — so the old specs resolved
-// against current rows describe a set the client never received. The new
-// side's windows are rebuilt HERE, per page, rather than stored in
-// ResyncState. That keeps the cursor small, and it is safe: the diff visits
-// each row once in (entity, key) order, rows changed since the cursor carry
-// version > cur.seq and belong to the catch-up pull, and a re-emitted row
-// applies idempotently. The price is resolving the new windows once per page
-// of a scope change, which is a rare event.
+// against current rows describe a set the client never received. For the same
+// reason the new side's windows are resolved once, on the first page, and
+// ride in ResyncState until the resync completes: every page diffs against
+// one membership, which the completion cursor records, and the catch-up pull
+// reconciles it with the windows as they then stand.
 //
 // The follow closure is NOT rebuilt here. Both emitters classify with the set
 // the cursor carries — the rows the client holds through follow — so a member
@@ -154,9 +152,23 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 	for ck := range cur.windowSet() {
 		oldEm.windowMembers[ck] = storage.Row{}
 	}
+	// A window resolved again on a later page can name a row the diff passed
+	// on an earlier page under another membership; see the doc comment.
 	var err error
-	if newEm.windowMembers, err = newEm.buildWindows(tx); err != nil {
-		return cursorState{}, err
+	pinned := cur.resyncWindows
+	if cur.resync != nil && pinned != nil {
+		newEm.windowMembers = closureRows{}
+		for ck := range (cursorState{subs: subs, windows: pinned.GetWindows()}).windowSet() {
+			newEm.windowMembers[ck] = storage.Row{}
+		}
+	} else {
+		if newEm.windowMembers, err = newEm.buildWindows(tx); err != nil {
+			return cursorState{}, err
+		}
+		pinned = nil
+		if len(newEm.windows) > 0 {
+			pinned = &syncplanecursorv1.WindowStates{Windows: newEm.windowStates()}
+		}
 	}
 	oldEm.closure = closureSetRows(cur.closure)
 	newEm.closure = oldEm.closure
@@ -193,12 +205,13 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 			// catch-up pull must ship them whole rather than as text delta state.
 			resynced: true,
 			// The window, by contrast, is REPLACED: the resync just emitted the
-			// difference between the windows the cursor recorded and the new
-			// ones, so the client now holds the new membership and the cursor
-			// must say so. Carrying
-			// the old set forward would make the catch-up pull re-diff a
-			// membership the client no longer has.
-			windows: newEm.windowStates(),
+			// difference between the windows the cursor recorded and the
+			// pinned new ones, so the client now holds the pinned membership
+			// and the cursor must say so. Carrying the old set forward would
+			// make the catch-up pull re-diff a membership the client no longer
+			// has. The catch-up pull reconciles the pinned windows with the
+			// windows as they then stand.
+			windows: pinned.GetWindows(),
 		}
 		// Same state lineage, new entry: the sets moved with the scope, but
 		// they are still this client's succession of cursors.
@@ -215,6 +228,7 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 		// Mid-resync the cursor keeps the access it was issued under, which
 		// is the old side the next page diffs from.
 		st = cur
+		st.resyncWindows = pinned
 		st.resync = &syncplanecursorv1.ResyncState{
 			Entity:        next.entity,
 			AfterKey:      next.afterKey,
@@ -275,8 +289,9 @@ const resyncScanBatch = 4096
 
 // runResync visits the live rows of the new-subscribed entities in
 // (entity, key) order, classifies each under both scopes, and appends only the
-// differences to patch. Rows with Version > seq are skipped (catch-up pull
-// territory).
+// differences to patch. Rows with Version > seq are the catch-up pull's,
+// except that a row the new scope leaves out by window or key-set membership
+// is revoked here (see emitLateRevocation).
 //
 // Which rows it visits per entity is decided per entity, and the two ways of
 // deciding produce the same patch:
@@ -307,11 +322,38 @@ const resyncScanBatch = 4096
 func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resyncPos, emitLimit int, limits Limits, patch *syncplanev1.Patch) (next resyncPos, done bool, err error) {
 	scanLimit := limits.MaxResyncScan
 	scanned, emitted := 0, 0
+	// emitLateRevocation tombstones a row written past seq that the client can
+	// hold and that the new scope leaves out by window or key-set membership.
+	// The catch-up pull cannot: it classifies with the membership this resync
+	// completes with, which does not name the row, so to it the row was never
+	// delivered. Every other verdict of the new scope the catch-up handles.
+	//
+	// The old side classifies the row's current value, not the one the client
+	// holds. A membership verdict does not read the value and is exact; a
+	// predicate or read filter that hides the current value may have shown the
+	// held one, so such a row is revoked unless it was created past seq, the
+	// rule the catch-up applies to a hidden row.
+	emitLateRevocation := func(row storage.Row) error {
+		newClass, err := newEm.classify(row)
+		if err != nil || newClass != rowHiddenNonMember {
+			return err
+		}
+		oldClass, err := oldEm.classify(row)
+		if err != nil {
+			return err
+		}
+		if oldClass == rowVisible || (oldClass == rowHidden && row.CreatedVersion <= seq) {
+			patch.Changes = append(patch.Changes, hiddenChange(row))
+			emitted++
+		}
+		return nil
+	}
 	// emitDiff appends the difference between the two verdicts for one row, if
-	// there is one. Rows the client could not hold yet are the catch-up pull's.
+	// there is one. Rows written past seq are the catch-up pull's, except for
+	// the revocation of one the new scope leaves out by membership.
 	emitDiff := func(row storage.Row) error {
 		if row.Version > seq {
-			return nil
+			return emitLateRevocation(row)
 		}
 		oldClass, err := oldEm.classify(row)
 		if err != nil {

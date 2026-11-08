@@ -451,6 +451,53 @@ var _ = Describe("Delta resync", func() {
 			Expect(valueKeys(changes, "widget")).To(ConsistOf("w-low", "w-mid"))
 		})
 
+		// The resync diff leaves rows written after the cursor to the catch-up
+		// pull, and a purely keyed or windowed scope does not name rows outside
+		// its membership. A row written after the cursor that the narrower
+		// scope no longer holds still has to leave the client.
+		Describe("narrowing past a row written after the cursor", func() {
+			It("tombstones the row when a whole entity narrows to a key set", func() {
+				push(putWidget(1, "w1", 1), putWidget(2, "w2", 2))
+				cursor, rows := bootstrap(widgetSub(nil))
+				push(putWidget(3, "w2", 99))
+
+				changes, drops, _ := drain(cursor, keySub("w1"))
+				Expect(tombstoneKeys(changes)).To(Equal([]string{"w2"}))
+				Expect(heldAfter(rows, changes, drops)).To(Equal(map[string]bool{"widget/w1": true}))
+			})
+
+			It("tombstones the row when a whole entity narrows to a window", func() {
+				push(putWidget(1, "w1", 10), putWidget(2, "w2", 2))
+				cursor, rows := bootstrap(widgetSub(nil))
+				push(putWidget(3, "w2", 3))
+
+				changes, drops, _ := drain(cursor, windowSub(1, nil))
+				Expect(tombstoneKeys(changes)).To(Equal([]string{"w2"}))
+				Expect(heldAfter(rows, changes, drops)).To(Equal(map[string]bool{"widget/w1": true}))
+			})
+
+			It("tombstones the row when a window shrinks", func() {
+				push(putWidget(1, "w1", 10), putWidget(2, "w2", 2))
+				cursor, rows := bootstrap(windowSub(2, nil))
+				push(putWidget(3, "w2", 3))
+
+				changes, drops, _ := drain(cursor, windowSub(1, nil))
+				Expect(tombstoneKeys(changes)).To(Equal([]string{"w2"}))
+				Expect(heldAfter(rows, changes, drops)).To(Equal(map[string]bool{"widget/w1": true}))
+			})
+
+			It("still delivers a row written after the cursor that the key set holds", func() {
+				push(putWidget(1, "w1", 1), putWidget(2, "w2", 2))
+				cursor, rows := bootstrap(widgetSub(nil))
+				push(putWidget(3, "w1", 5))
+
+				changes, drops, _ := drain(cursor, keySub("w1"))
+				Expect(valueKeys(changes, "widget")).To(Equal([]string{"w1"}))
+				Expect(tombstoneKeys(changes)).To(Equal([]string{"w2"}))
+				Expect(heldAfter(rows, changes, drops)).To(Equal(map[string]bool{"widget/w1": true}))
+			})
+		})
+
 		It("paginates the resync under the pull limit", func() {
 			muts := []*syncplanev1.Mutation{}
 			for i := uint64(1); i <= 5; i++ {
@@ -508,6 +555,43 @@ var _ = Describe("Delta resync", func() {
 			}
 			Expect(resp.GetHasMore()).To(BeFalse(), "pull never drained")
 			Expect(state).To(Equal(map[string]bool{"widget/w1": true, "widget/w3": true}))
+		})
+
+		Describe("a window the scope change adds, paged", func() {
+			todoSub := &syncplanev1.Subscription{Entity: "todo"}
+
+			// resyncPaged takes the first resync page one change at a time,
+			// runs between before the next one, and drains the rest. It
+			// returns the rows the client then holds.
+			resyncPaged := func(between func()) map[string]bool {
+				GinkgoHelper()
+				push(putTodo(1, "t1", "x"), putWidget(2, "a", 8), putWidget(3, "b", 10), putWidget(4, "c", 9))
+				cursor, rows := bootstrap(todoSub)
+				state := map[string]bool{}
+				applyPatch(state, &syncplanev1.Patch{Changes: rows})
+
+				resp := pull(cursor, 1, todoSub, windowSub(2, nil))
+				Expect(resp.GetReset_()).To(BeFalse())
+				Expect(resp.GetHasMore()).To(BeTrue(), "limit 1 must split the resync")
+				applyPatch(state, resp.GetPatch())
+				between()
+				changes, drops, _ := drain(resp.GetNextCursor(), todoSub, windowSub(2, nil))
+				applyPatch(state, &syncplanev1.Patch{DropEntities: drops, Changes: changes})
+				return state
+			}
+
+			It("delivers a row that rises into the window between pages without being written", func() {
+				state := resyncPaged(func() {
+					// c leaves the window, so a enters it.
+					push(deleteMutation("c1", 5, "widget", "c"))
+				})
+				Expect(state).To(Equal(map[string]bool{"todo/t1": true, "widget/a": true, "widget/b": true}))
+			})
+
+			It("delivers the window as it stands when nothing changes between pages", func() {
+				state := resyncPaged(func() {})
+				Expect(state).To(Equal(map[string]bool{"todo/t1": true, "widget/b": true, "widget/c": true}))
+			})
 		})
 
 		It("resets when the scope changes again mid-resync", func() {
@@ -569,6 +653,20 @@ var _ = Describe("Delta resync", func() {
 			Expect(resp.GetReset_()).To(BeFalse())
 			Expect(resp.GetPatch().GetChanges()).To(BeEmpty())
 			Expect(resp.GetHasMore()).To(BeFalse())
+		})
+
+		It("revokes a window member written after the cursor that the new epoch hides", func() {
+			recent := &syncplanev1.Subscription{Entity: "todo", Window: &syncplanev1.Window{ByRecency: true, Limit: 5}}
+			push(putTodo(1, "t1", "plain thing"), putTodo(2, "t2", "beta one"))
+			cursor, rows := bootstrap(recent)
+			Expect(valueKeys(rows, "todo")).To(ConsistOf("t1", "t2"))
+			// Written after the cursor, while the old epoch still shows it.
+			push(putTodo(3, "t2", "beta two"))
+
+			perms.setHiddenWord("beta")
+			changes, drops, _ := drain(cursor, recent)
+			Expect(tombstoneKeys(changes)).To(Equal([]string{"t2"}), "a row the caller may no longer read must leave the client")
+			Expect(heldAfter(rows, changes, drops)).To(Equal(map[string]bool{"todo/t1": true}))
 		})
 
 		It("handles a subscription and epoch change in the same pull", func() {
