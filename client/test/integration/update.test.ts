@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { RejectionInfo } from '../../src/client.js';
+import { CodeInvalidArgument } from '../../src/codes.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { freshWorkspace, newClient } from './helpers.js';
 
@@ -358,5 +359,115 @@ describe('update (sync)', () => {
 
 		await a.close();
 		await b.close();
+	});
+
+	// The server lets a row grow past MaxValueBytes (1 MiB) through writes that
+	// each fit, and refuses a write whose value is over it. An update of one
+	// small field of such a row writes only that field, so it must still apply.
+	describe('of a row larger than the value limit', () => {
+		/** A widget whose `raw` (700 KiB) and `attrs.big` (600 KiB) two accepted
+		 * PATCHes wrote. */
+		async function bigRow() {
+			const ws = freshWorkspace();
+			const rejections: RejectionInfo[] = [];
+			const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+			await a.start();
+			await a.mutate.put(WidgetSchema, { id: 'w1', label: 'x' });
+			await a.mutate.patch(WidgetSchema, 'w1', { raw: new Uint8Array(700 * 1024).fill(1) });
+			await a.syncNow();
+			await a.mutate.patch(WidgetSchema, 'w1', { attrs: { big: 'y'.repeat(600 * 1024) } });
+			await a.syncNow();
+			expect(rejections).toEqual([]);
+			return { ws, a, rejections };
+		}
+
+		async function serverRow(ws: string) {
+			const b = newClient(ws);
+			await b.start();
+			await b.syncNow();
+			const row = await b.get(WidgetSchema, 'w1');
+			await b.close();
+			return row;
+		}
+
+		it('stores an update of one small field', async () => {
+			// Given a widget larger than the value limit
+			const { ws, a, rejections } = await bigRow();
+
+			// When the client renames it with update() and syncs
+			await a.mutate.update(WidgetSchema, 'w1', (w) => {
+				w.label = 'renamed';
+			});
+			await a.syncNow();
+			await a.syncNow();
+
+			// Then the server stores the new label
+			// And the update must not be refused for the size of the row
+			expect({ label: (await serverRow(ws))?.label, rejections }).toEqual({
+				label: 'renamed',
+				rejections: [],
+			});
+			await a.close();
+		});
+
+		it('stores an update of one small field when the text grew past the limit', async () => {
+			// Given a widget whose body grew past the value limit through four
+			// accepted text edits of 300 KiB each
+			const ws = freshWorkspace();
+			const rejections: RejectionInfo[] = [];
+			const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+			await a.start();
+			await a.mutate.put(WidgetSchema, { id: 'w1', label: 'x' });
+			await a.syncNow();
+			let text = '';
+			for (let i = 0; i < 4; i++) {
+				text += String.fromCharCode(97 + i).repeat(300 * 1024);
+				await a.mutate.patch(WidgetSchema, 'w1', { body: text });
+				await a.syncNow();
+			}
+			expect(rejections).toEqual([]);
+
+			// When the client renames it with update() and syncs
+			await a.mutate.update(WidgetSchema, 'w1', (w) => {
+				w.label = 'renamed';
+			});
+			await a.syncNow();
+			await a.syncNow();
+
+			// Then the server stores the new label
+			expect({ label: (await serverRow(ws))?.label, rejections }).toEqual({
+				label: 'renamed',
+				rejections: [],
+			});
+			await a.close();
+		}, 60_000);
+
+		it('control: stores a patch of one small field', async () => {
+			// Given a widget larger than the value limit
+			const { ws, a, rejections } = await bigRow();
+
+			// When the client patches only the count
+			await a.mutate.patch(WidgetSchema, 'w1', { count: 5 });
+			await a.syncNow();
+
+			// Then the server stores it
+			expect(rejections).toEqual([]);
+			expect((await serverRow(ws))?.count).toBe(5);
+			await a.close();
+		});
+
+		it('control: refuses a put of the whole row', async () => {
+			// Given a widget larger than the value limit
+			const { a, rejections } = await bigRow();
+
+			// When the client puts the whole row back with a new label
+			const row = (await a.get(WidgetSchema, 'w1'))!;
+			await a.mutate.put(WidgetSchema, { ...row, label: 'renamed' });
+			await a.syncNow();
+
+			// Then the server refuses it: the value really is the whole row
+			expect(rejections.map((r) => r.errorCode)).toEqual([ CodeInvalidArgument ]);
+			await a.close();
+		});
 	});
 });

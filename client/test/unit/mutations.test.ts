@@ -71,6 +71,53 @@ describe('buildPatch key-field guard', () => {
 	});
 });
 
+// The value of a PATCH carries only what its mask reaches: a merge reads nothing
+// else, and the server limits the size of the encoded value.
+describe('buildPatch value', () => {
+	const widget = entityDefOf(WidgetSchema);
+
+	it('carries only the top-level fields the mask reaches', () => {
+		const row = create(WidgetSchema, {
+			id: 'w1',
+			label: 'renamed',
+			count: 7,
+			attrs: { a: '1' },
+			settings: { color: 'r' },
+		});
+		const crud = buildPatch(widget, WidgetSchema, 'w1', row, [ 'label', 'settings.color' ]);
+		const value = fromBinary(WidgetSchema, crud.value);
+		expect({
+			label: value.label,
+			count: value.count,
+			attrs: value.attrs,
+			color: value.settings?.color,
+		})
+			.toEqual({ label: 'renamed', count: 0, attrs: {}, color: 'r' });
+	});
+
+	it('carries a oneof group the mask names', () => {
+		const row = create(WidgetSchema, {
+			id: 'w1',
+			label: 'x',
+			choice: { case: 'choiceText', value: 't' },
+		});
+		const value = fromBinary(
+			WidgetSchema,
+			buildPatch(widget, WidgetSchema, 'w1', row, [ 'choice' ]).value,
+		);
+		expect({ label: value.label, choice: value.choice }).toEqual({
+			label: '',
+			choice: { case: 'choiceText', value: 't' },
+		});
+	});
+
+	it('keeps the whole value when a path names a field the schema does not declare', () => {
+		const row = create(WidgetSchema, { id: 'w1', label: 'x', count: 7 });
+		const crud = buildPatch(widget, WidgetSchema, 'w1', row, [ 'label', 'newer_field' ]);
+		expect(fromBinary(WidgetSchema, crud.value).count).toBe(7);
+	});
+});
+
 // A reference field stores only its target's key fields; projectRefs strips fat
 // stubs before marshaling, mirroring the server (rebase parity).
 describe('reference projection', () => {

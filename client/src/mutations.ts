@@ -3561,10 +3561,37 @@ export function buildPatch<D extends DescMessage>(
 		entity: def.name,
 		key,
 		op: CrudOp.PATCH,
-		value: toBinary(schema, projectRefs(schema, value)),
+		value: toBinary(schema, projectRefs(schema, maskedPart(schema, value, maskPaths))),
 		fieldMask: create(FieldMaskSchema, { paths: maskPaths }),
 		expectedVersion,
 	});
+}
+
+/**
+ * The top-level fields of `value` that some mask path reaches, every other
+ * field left at its zero value. A merge reads nothing else, and the server
+ * holds the encoded value to MaxValueBytes, so a PATCH of one small field of a
+ * large row must not carry the rest of the row. A path this schema does not
+ * declare keeps the whole value: the field may ride in its unknown fields.
+ */
+function maskedPart<D extends DescMessage>(
+	schema: D,
+	value: MessageShape<D>,
+	paths: readonly string[],
+): MessageShape<D> {
+	const src = value as unknown as Rec;
+	const out = create(schema) as unknown as Rec;
+	for (const path of paths) {
+		const [ seg ] = splitSeg(path);
+		const field = schema.fields.find((f) => f.name === seg);
+		// A oneof member is held under its group, which a mask names instead.
+		const name = field
+			? field.oneof?.localName ?? field.localName
+			: schema.oneofs.find((o) => o.name === seg)?.localName;
+		if (name === undefined) return value;
+		out[name] = src[name];
+	}
+	return out as unknown as MessageShape<D>;
 }
 
 export function buildDelete(def: EntityDef, key: string, expectedVersion?: bigint): CrudMutation {
