@@ -793,6 +793,25 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	/** Hold the live change stream open. Default true. */
 	streamEnabled?: boolean;
 	/**
+	 * Deadline in milliseconds of one push or pull request, and of the wait for
+	 * each frame of a bootstrap. A request past it fails with
+	 * `deadline_exceeded` and the sync cycle retries it with backoff. A push
+	 * that timed out may still have committed on the server; the retry is
+	 * idempotent. 0 disables the deadline.
+	 *
+	 * @defaultValue 60000
+	 */
+	requestTimeoutMs?: number;
+	/**
+	 * Milliseconds the live change stream may deliver no frame, heartbeats
+	 * included, before the client closes it, reports `online: false` and opens
+	 * a new one. Keep it above the server's heartbeat interval (`WithHeartbeat`,
+	 * 30s by default). 0 disables the check.
+	 *
+	 * @defaultValue 90000
+	 */
+	streamIdleTimeoutMs?: number;
+	/**
 	 * Hold the room `Watch` stream open. Default true.
 	 *
 	 * Independent of `streamEnabled`: the two planes are separate streams with
@@ -3429,6 +3448,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			pushDebounceMs: this.opts.pushDebounceMs,
 			pushMaxDelayMs: this.opts.pushMaxDelayMs,
 			streamEnabled: this.opts.streamEnabled,
+			requestTimeoutMs: this.opts.requestTimeoutMs,
+			streamIdleTimeoutMs: this.opts.streamIdleTimeoutMs,
 			pullLimit: this.opts.pullLimit,
 			poisonThreshold: this.opts.poisonThreshold,
 			maxMutationsPerPush: this.opts.maxMutationsPerPush,

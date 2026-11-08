@@ -1,6 +1,6 @@
 import { create } from '@bufbuild/protobuf';
 import { Code, ConnectError, createRouterTransport, type Transport } from '@connectrpc/connect';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
@@ -239,5 +239,70 @@ describe('coordinator mid-push tail', () => {
 		expect(await pendingIds()).toEqual([ 2n, 3n, 4n ]);
 
 		await coord.stop();
+	});
+
+	// A half-open connection takes the request and never answers. The cycle that
+	// sent it must not hold every later push and pull for as long as the
+	// connection stays up, which can be forever.
+	describe('a push that never answers', () => {
+		/** Ten minutes: past any per-call deadline the coordinator could choose. */
+		const LONG = 10 * 60_000;
+
+		beforeEach(() => {
+			vi.useFakeTimers();
+		});
+
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it('gives up on it and ships the queue in a later push', async () => {
+			// Given one queued write and a server whose first push never answers
+			await enqueue([ 1n ]);
+			const coord = newCoordinator(transport(async (call) => {
+				if (call === 1) await new Promise(() => {});
+			}));
+			let settled = false;
+			void coord.syncNow().then(
+				() => (settled = true),
+				() => (settled = true),
+			);
+			await vi.advanceTimersByTimeAsync(1_000);
+			expect(calls).toEqual([ { push: [ 1n ] } ]);
+
+			// When the deadline passes and the user writes again
+			await vi.advanceTimersByTimeAsync(LONG);
+			expect(settled).toBe(true);
+			await enqueue([ 2n ]);
+			const next = coord.syncNow();
+			await vi.advanceTimersByTimeAsync(LONG);
+			await next;
+
+			// Then a later push carries both writes and the pull runs
+			expect(calls.slice(1)).toContainEqual({ push: [ 1n, 2n ] });
+			expect(calls).toContainEqual({ pull: true });
+			expect(await pendingIds()).toEqual([]);
+
+			await coord.stop();
+		});
+
+		it('takes the answer of a push that is slow but alive', async () => {
+			await enqueue([ 1n ]);
+			const coord = newCoordinator(transport(async (call) => {
+				if (call === 1) await new Promise((r) => setTimeout(r, 5_000));
+			}));
+
+			const cycle = coord.syncNow();
+			await vi.advanceTimersByTimeAsync(5_000);
+			await cycle;
+
+			expect(calls).toEqual([
+				{ push: [ 1n ] },
+				{ pull: true },
+			]);
+			expect(await pendingIds()).toEqual([]);
+
+			await coord.stop();
+		});
 	});
 });

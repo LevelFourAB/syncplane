@@ -454,4 +454,58 @@ describe('coordinator subscribe stream', () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it('reopens a stream that stops delivering frames without closing', async () => {
+		vi.useFakeTimers();
+		vi.spyOn(Math, 'random').mockReturnValue(0.5);
+		try {
+			const h = harness();
+			await h.seed();
+
+			// Given a stream that delivers its backlog and a few heartbeats, then
+			// goes silent while the connection stays open (no FIN, no RST)
+			const opens: number[] = [];
+			const transport = createRouterTransport(({ service }) => {
+				service(SyncService, {
+					push: (req) => pushResults(req, []),
+					pull: (req) => ({
+						patch: { changes: [], dropEntities: [] },
+						nextCursor: req.cursor,
+						lastAckedMutationId: 0n,
+						reset: false,
+						hasMore: false,
+						seq: 0n,
+					}),
+					// eslint-disable-next-line require-yield
+					async *bootstrap() {
+						throw new Error('bootstrap should not run');
+					},
+					async *subscribe(_req, ctx) {
+						opens.push(Date.now());
+						yield caughtUp();
+						for (let i = 0; i < 4; i++) {
+							await new Promise((r) => setTimeout(r, 250));
+							yield { schemaRevision: '', body: { case: 'heartbeat' as const, value: true } };
+						}
+						await waitAbort(ctx.signal);
+					},
+					query: () => ({ rows: [] }),
+				});
+			});
+			const coord = h.coordinator(transport);
+			await coord.start();
+			await vi.advanceTimersByTimeAsync(2_000);
+			expect(opens).toHaveLength(1);
+
+			// When it stays silent for far longer than its heartbeat
+			await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+			// Then the client has given up on it and opened a new one
+			expect(opens.length).toBeGreaterThanOrEqual(2);
+			await coord.stop();
+		} finally {
+			vi.restoreAllMocks();
+			vi.useRealTimers();
+		}
+	});
 });

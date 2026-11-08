@@ -260,6 +260,45 @@ export const DEFAULT_MAX_WORKSPACES_PER_REQUEST = 64;
  */
 const IDLE_STREAM_RECHECK_MS = 30_000;
 
+/** Default deadline of one push or pull call, and of the wait for each bootstrap frame. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
+ * Default time the live stream may deliver no frame before the client gives up
+ * on it and opens another: three of the engine's default 30s heartbeats.
+ */
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 90_000;
+
+/**
+ * Aborts a controller once `ms` pass with the clock running. `arm` starts the
+ * clock again from zero and `pause` stops it, so the time a caller spends on a
+ * frame it received does not count as silence. `ms <= 0` never fires.
+ */
+class IdleWatchdog {
+	private timer: ReturnType<typeof setTimeout> | undefined;
+	/** Whether the watchdog aborted the controller. */
+	fired = false;
+
+	constructor(
+		private readonly controller: AbortController,
+		private readonly ms: number,
+	) {}
+
+	arm(): void {
+		this.pause();
+		if (this.ms <= 0) return;
+		this.timer = setTimeout(() => {
+			this.fired = true;
+			this.controller.abort();
+		}, this.ms);
+	}
+
+	pause(): void {
+		if (this.timer !== undefined) clearTimeout(this.timer);
+		this.timer = undefined;
+	}
+}
+
 const EMPTY_IDS: ReadonlySet<bigint> = new Set();
 
 export interface CoordinatorOptions {
@@ -339,6 +378,17 @@ export interface CoordinatorOptions {
 	pushMaxDelayMs?: number;
 	/** Hold the live change stream open. Default true. */
 	streamEnabled?: boolean;
+	/**
+	 * Deadline in milliseconds of one push or pull call, and of the wait for
+	 * each bootstrap frame. A call past it fails, and the cycle retries with
+	 * backoff. Default 60000; 0 disables the deadline.
+	 */
+	requestTimeoutMs?: number;
+	/**
+	 * Milliseconds the live stream may deliver no frame, heartbeats included,
+	 * before it is closed and opened again. Default 90000; 0 disables the check.
+	 */
+	streamIdleTimeoutMs?: number;
 	/** Max changes per pull page; 0 = server default. Pages loop until drained. */
 	pullLimit?: number;
 	/**
@@ -629,6 +679,10 @@ export class Coordinator {
 	private readonly poisonThreshold: number;
 	private readonly maxMutationsPerPush: number;
 	private readonly maxWorkspacesPerRequest: number;
+	/** Per-call deadline in ms; 0 for none. See CoordinatorOptions.requestTimeoutMs. */
+	private readonly requestTimeoutMs: number;
+	/** See CoordinatorOptions.streamIdleTimeoutMs; 0 for no check. */
+	private readonly streamIdleTimeoutMs: number;
 	/**
 	 * Armed after an InvalidArgument push whose request named several workspaces:
 	 * the RPC error is request-level, so it says nothing about WHICH workspace is
@@ -727,6 +781,23 @@ export class Coordinator {
 			1,
 			opts.maxWorkspacesPerRequest ?? DEFAULT_MAX_WORKSPACES_PER_REQUEST,
 		);
+		this.requestTimeoutMs = Math.max(0, opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+		this.streamIdleTimeoutMs = Math.max(
+			0,
+			opts.streamIdleTimeoutMs ?? DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+		);
+	}
+
+	/**
+	 * Options for a unary sync call: cancelled by stop(), and failed with
+	 * deadline_exceeded past requestTimeoutMs. Without a deadline, a connection
+	 * that takes the request and never answers holds the sync cycle, and with it
+	 * every later push and pull, for as long as the connection stays open.
+	 */
+	private callOptions(): { signal: AbortSignal; timeoutMs?: number } {
+		return this.requestTimeoutMs > 0
+			? { signal: this.abort.signal, timeoutMs: this.requestTimeoutMs }
+			: { signal: this.abort.signal };
 	}
 
 	/** The workspaces this tab itself holds, with its own subscription sets. */
@@ -1614,7 +1685,7 @@ export class Coordinator {
 				const pushStarted = performance.now();
 				const submitted = batches.reduce((n, b) => n + b.mutations.length, 0);
 				try {
-					resp = await this.rpc.push({ batches }, { signal: this.abort.signal });
+					resp = await this.rpc.push({ batches }, this.callOptions());
 				} catch (err) {
 					this.emit({
 						type: 'push',
@@ -2612,7 +2683,7 @@ export class Coordinator {
 						minSeq,
 						callerAccessVersion,
 					},
-					{ signal: this.abort.signal },
+					this.callOptions(),
 				);
 			} catch (err) {
 				this.emit({
@@ -3205,6 +3276,14 @@ export class Coordinator {
 			await Promise.all(inflight.splice(0).map((chunk) => chunk.settled));
 		};
 		let frameStarted = performance.now();
+		// A stream can take long as a whole, so the deadline is on the wait for
+		// each frame rather than on the call.
+		const frameAbort = new AbortController();
+		const onBootstrapStop = (): void => frameAbort.abort();
+		if (this.abort.signal.aborted) frameAbort.abort();
+		this.abort.signal.addEventListener('abort', onBootstrapStop);
+		const frameWatch = new IdleWatchdog(frameAbort, this.requestTimeoutMs);
+		frameWatch.arm();
 		try {
 			for await (
 				const msg of this.rpc.bootstrap(
@@ -3215,9 +3294,10 @@ export class Coordinator {
 						priorityEntities: this.opts.priorityEntities,
 						resume,
 					},
-					{ signal: this.abort.signal },
+					{ signal: frameAbort.signal },
 				)
 			) {
+				frameWatch.pause();
 				streamMs += performance.now() - frameStarted;
 				switch (msg.body.case) {
 					case 'begin':
@@ -3359,7 +3439,9 @@ export class Coordinator {
 				// Leaving the loop closes the stream: there is nothing left to write,
 				// and the rows already downloaded belong to a snapshot that lost.
 				if (superseded) break;
+				frameWatch.arm();
 			}
+			frameWatch.pause();
 			streamMs += performance.now() - frameStarted;
 			// Nothing may still be in flight past here: the install below has to
 			// observe every row this snapshot wrote, and every posting.
@@ -3384,7 +3466,16 @@ export class Coordinator {
 			// snapshot would paint rows the store no longer holds until the retry
 			// lands, which may be a long time on the connection that just failed.
 			if (direct) await this.notifyAfterFailure(touched);
+			if (frameWatch.fired) {
+				throw new ConnectError(
+					`bootstrap stream delivered no frame for ${this.requestTimeoutMs}ms`,
+					Code.DeadlineExceeded,
+				);
+			}
 			throw err;
+		} finally {
+			frameWatch.pause();
+			this.abort.signal.removeEventListener('abort', onBootstrapStop);
 		}
 		// A bootstrap that stopped early because it lost the workspace is allowed
 		// to have neither frame; anything else that ends without them is a server
@@ -3824,6 +3915,12 @@ export class Coordinator {
 			// per retry, making a flapping connection look like a working one.
 			let reportedOpen = false;
 			let streamError: unknown;
+			// A connection can go silent without closing (no FIN, no RST: a
+			// sleeping laptop, a roaming phone, a proxy that drops idle state).
+			// The server sends heartbeats, so a stream that delivers nothing for
+			// several of them is dead, and only a new one can bring changes.
+			const idleWatch = new IdleWatchdog(streamAbort, this.streamIdleTimeoutMs);
+			idleWatch.arm();
 			try {
 				const markHealthy = (): void => {
 					if (healthy) return;
@@ -3853,6 +3950,7 @@ export class Coordinator {
 						{ signal: streamAbort.signal },
 					)
 				) {
+					idleWatch.pause();
 					// Carried on every frame, heartbeats included, so a connected
 					// client learns of a rolling deploy without waiting for a page.
 					this.observeServerRevision(msg.schemaRevision);
@@ -3914,6 +4012,7 @@ export class Coordinator {
 						planned.scopes = planned.scopes.filter((s) => s.workspaceId !== ws);
 						if (planned.scopes.length === 0) break;
 					}
+					idleWatch.arm();
 				}
 			} catch (err) {
 				// A dropped connection (ConnectError) or our own cancellation is the
@@ -3924,8 +4023,14 @@ export class Coordinator {
 				if (!streamAbort.signal.aborted && !(err instanceof ConnectError)) {
 					reportError('subscribe stream failed', err);
 				}
-				streamError = err;
+				streamError = idleWatch.fired
+					? new ConnectError(
+						`stream delivered no frame for ${this.streamIdleTimeoutMs}ms`,
+						Code.DeadlineExceeded,
+					)
+					: err;
 			} finally {
+				idleWatch.pause();
 				// Tear the connection down promptly however the loop exited (clean
 				// end, reset break, or throw); the next iteration opens a fresh one.
 				streamAbort.abort();
