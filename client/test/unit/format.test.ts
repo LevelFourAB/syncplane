@@ -20,6 +20,7 @@ import {
 	metaLastMutationId,
 	metaPushedThrough,
 	pendingKey,
+	pendingPrefix,
 } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { RejectionInfo } from '../../src/sync/coordinator.js';
@@ -45,13 +46,17 @@ function pendingPut(id: bigint, todoId: string): Mutation {
 }
 
 /**
- * A store carrying data written by an (imaginary) older format version, with a
- * pending queue of `count` mutations (ids 1..count).
+ * A store carrying data written by another (imaginary) format version, older
+ * unless `formatVersion` says otherwise, with a pending queue of `count`
+ * mutations (ids 1..count).
  */
-async function seedOldFormatStore(count = 2): Promise<MemoryKVStore> {
+async function seedOldFormatStore(
+	count = 2,
+	formatVersion = FORMAT_VERSION - 1,
+): Promise<MemoryKVStore> {
 	const kv = new MemoryKVStore();
 	const tx = await kv.write();
-	await tx.put(META_FORMAT_VERSION, FORMAT_VERSION - 1);
+	await tx.put(META_FORMAT_VERSION, formatVersion);
 	await tx.put(META_CLIENT_ID, 'seeded-client');
 	await tx.put(metaLastMutationId(WS), String(count));
 	await tx.put(metaCursor(WS), new Uint8Array([ 9 ]));
@@ -554,5 +559,49 @@ describe('format version upgrade', () => {
 		// the status line is all this one can be reported as.
 		expect(rejections).toEqual([]);
 		await client.close();
+	});
+
+	// The format check runs both ways: a store a newer build has stamped is not
+	// this build's to salvage, and a tab of this build left running after a
+	// newer one restamped the store no longer understands what it holds.
+	describe('a store of a newer build', () => {
+		it('is left as it is, queue included', async () => {
+			// Given a store stamped by a newer build, holding 3 unsynced mutations
+			const kv = await seedOldFormatStore(3, FORMAT_VERSION + 1);
+			const before = await dump(kv);
+			const { transport, pushedBatches } = stubServer();
+
+			// When a client of this build starts on it
+			const client = newUpgradingClient(kv, transport, []);
+			await client.start().catch(() => {});
+
+			// Then nothing is pushed with this build's decoder and nothing is wiped
+			expect.soft(pushedBatches).toEqual([]);
+			expect(await dump(kv)).toEqual(before);
+			await client.close();
+		});
+
+		it('takes no write from a running client once a newer build restamped it', async () => {
+			// Given a running client of this build
+			const kv = new MemoryKVStore();
+			const { transport } = stubServer();
+			const client = newUpgradingClient(kv, transport, []);
+			await client.start();
+
+			// When a newer build's tab wipes the store and stamps its version
+			const tx = await kv.write();
+			const keys: string[] = [];
+			for await (const [ k ] of tx.scan('')) keys.push(k);
+			for (const k of keys) await tx.del(k);
+			await tx.put(META_FORMAT_VERSION, FORMAT_VERSION + 1);
+			await tx.commit();
+			await client.mutate.put(TodoSchema, { id: 't1', title: 'after the restamp' }).catch(() => {});
+
+			// Then no record of this build's layout lands in the store
+			const pending = [ ...(await dump(kv)).keys() ].filter((k) => k.startsWith(pendingPrefix(WS)));
+			expect.soft(pending).toEqual([]);
+			expect([ ...(await dump(kv)).keys() ]).toEqual([ META_FORMAT_VERSION ]);
+			await client.close();
+		});
 	});
 });

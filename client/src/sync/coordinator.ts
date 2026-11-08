@@ -34,6 +34,7 @@ import {
 	WorkspaceDropped_Reason,
 } from '../gen/syncplane/v1/service_pb.js';
 import {
+	META_FORMAT_VERSION,
 	metaAckedSeq,
 	metaBootstrapGen,
 	metaBootstrapResume,
@@ -45,8 +46,10 @@ import {
 	metaSnapshotGen,
 	metaTextRestores,
 	metaUnresolvedPush,
+	newerFormat,
 	stagingPrefix,
 	stagingWsRoot,
+	StoreFormatError,
 } from '../keys.js';
 import {
 	CountingWrite,
@@ -1881,7 +1884,8 @@ export class Coordinator {
 						// An ALREADY_APPLIED resend of a push whose response was lost
 						// carries the seq the first attempt committed at; older ones carry 0.
 						if (
-							(result.status === MutationStatus.APPLIED || result.status === MutationStatus.ALREADY_APPLIED)
+							(result.status === MutationStatus.APPLIED
+								|| result.status === MutationStatus.ALREADY_APPLIED)
 							&& result.seq > ackedSeq
 						) {
 							ackedSeq = result.seq;
@@ -3173,6 +3177,11 @@ export class Coordinator {
 				};
 				const tx = await this.opts.kv.write();
 				try {
+					// A newer build that took over the store reads a layout this
+					// build does not write, so no snapshot of this build may land in
+					// it. Read under the mutex the newer build's wipe also takes.
+					const stamp = await tx.get(META_FORMAT_VERSION);
+					if (newerFormat(stamp)) throw new StoreFormatError(stamp);
 					const current = ((await tx.get(metaBootstrapGen(workspaceId))) as number | undefined) ?? 0;
 					const next = current + 1;
 					await tx.put(metaBootstrapGen(workspaceId), next);

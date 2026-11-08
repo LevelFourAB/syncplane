@@ -112,6 +112,7 @@ import {
 	metaPushedThrough,
 	metaUndoTokenCounter,
 	metaWsPrefix,
+	newerFormat,
 	overlayGeneration,
 	overlayGenerationFor,
 	overlayKey,
@@ -123,6 +124,7 @@ import {
 	searchIndexWsPrefix,
 	searchPostingsScope,
 	stagingWsRoot,
+	StoreFormatError,
 	workspaceOfPendingKey,
 	wsFromSegment,
 } from './keys.js';
@@ -4961,6 +4963,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					await tx.commit();
 					return null;
 				}
+				if (newerFormat(stored)) {
+					// A newer build owns this store. Its queue is not this build's to
+					// decode or push, and a wipe would take its unsynced writes and
+					// make its running tabs work on a layout they do not know.
+					throw new StoreFormatError(stored);
+				}
 
 				const queue = await readSalvageQueue(tx, seen);
 				tx.release(); // read-only so far; the wipe runs in its own transaction.
@@ -5065,6 +5073,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						this.clientIdPromise = undefined;
 						return undefined;
 					}
+					if (newerFormat(now)) throw new StoreFormatError(now);
 
 					const late = await readSalvageQueue(tx, seen);
 					undecodable += late.undecodable;
@@ -6693,6 +6702,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		let capturedToken: bigint | undefined;
 		/** Set when the store no longer holds this client's identity. */
 		let identityLost = false;
+		/** Set to the stamp of a newer build that took over the store. */
+		let newerStamp: number | undefined;
 		/** Set when every crud of the payload changes nothing, so nothing was written. */
 		let nothingToWrite = false;
 		const capturedInverses: (Inverse | undefined)[] = [];
@@ -6750,8 +6761,17 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						metaPendingAccess(workspaceId),
 						...(mintsToken ? [ metaUndoTokenCounter(workspaceId) ] : []),
 						...(guard ? undoJournalKeys(workspaceId) : []),
+						META_FORMAT_VERSION,
 						META_CLIENT_ID,
 					]);
+					// A newer build that took over the store while this client ran
+					// reads its records in a layout this build does not write.
+					const stamp = pre[pre.length - 2];
+					if (newerFormat(stamp)) {
+						tx.release();
+						newerStamp = stamp;
+						return;
+					}
 					// The memo of the identity is only good while the store still
 					// holds it. Another tab's purgeLocalData() deletes the identity
 					// together with the counters; a write minted here would then
@@ -7043,6 +7063,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		if (identityLost) {
 			await this.close();
 			throw new Error('SyncClient is closed: the local data was purged');
+		}
+		if (newerStamp !== undefined) {
+			await this.close();
+			throw new StoreFormatError(newerStamp);
 		}
 		if (nothingToWrite) return;
 		if (undoBarrier) {

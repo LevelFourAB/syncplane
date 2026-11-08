@@ -343,15 +343,38 @@ export const accessGenerationFor = (key: string): string | string[] | undefined 
 };
 
 /**
- * Version of this KV layout. On mismatch the client tries to push the
- * pending queues once, then wipes everything except the clientId and the
- * per-workspace mutation-id counters (and the pushed-through marks that pair
- * with them) and re-bootstraps. Bump when the layout or
+ * Version of this KV layout. On a store of an older version the client tries
+ * to push the pending queues once, then wipes everything except the clientId
+ * and the per-workspace mutation-id counters (and the pushed-through marks
+ * that pair with them) and re-bootstraps. A store of a newer version is left
+ * as it is (see StoreFormatError). Bump when the layout or
  * record encoding changes incompatibly — in either direction: a client that
  * cannot read a newer store's records is as broken as one whose writes a newer
  * client would misread.
  */
 export const FORMAT_VERSION = 1;
+
+/**
+ * The error of a client whose local store carries the format stamp of a newer
+ * build: SyncClient.start() rejects with it and leaves the store as it is, a
+ * write rejects with it and closes the client, and sync stops on it before
+ * a snapshot is written. Only a newer build can open such a
+ * store, so the app has to load that build, for example with a page reload.
+ */
+export class StoreFormatError extends Error {
+	constructor(readonly storedVersion: number) {
+		super(
+			`the local store has format ${storedVersion}, newer than the ${FORMAT_VERSION} this build reads; `
+				+ 'load the newer build',
+		);
+		this.name = 'StoreFormatError';
+	}
+}
+
+/** Whether a stored format stamp is one only a newer build can read. */
+export function newerFormat(stored: unknown): stored is number {
+	return typeof stored === 'number' && stored > FORMAT_VERSION;
+}
 
 /** Every workspace's confirmed rows of one entity — the cross-workspace scan. */
 export const confirmedPrefix = (entity: string): string => `c/${entity}/`;

@@ -120,6 +120,11 @@ It leaves the store on the device for the next client session on the account.
 A closed client throws `"SyncClient is closed"` and cannot be reopened.
 Create a new instance instead.
 
+A store that a newer build of the client stamped with a newer format is not changed.
+`start()` rejects with `StoreFormatError` on such a store, and a write rejects with it and closes the client.
+This also applies to a client that was already running when a newer build in another tab took over the store; its sync then stops before it writes a snapshot.
+Load the newer build, for example with a page reload.
+
 `purgeLocalData()` stops synchronization, deletes all account data (workspace rows, overlay, staging, cursors, queues, `clientId`, queued blob uploads and cached blobs), and closes the client.
 The client discards queued mutations rather than pushing them, returns them in the result array, and emits them to `onMutationRejected` with code `workspace_purged`.
 The IndexedDB database remains in place and empty.

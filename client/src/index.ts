@@ -105,6 +105,7 @@ export type {
 } from './devtools.js';
 export { BASE_62_DIGITS, generateKeyBetween, generateNKeysBetween } from './fractional.js';
 export { newId } from './id.js';
+export { StoreFormatError } from './keys.js';
 export { IDBKVStore } from './kv/idb.js';
 export { MemoryKVStore } from './kv/memory.js';
 export type { IndexEntry, KVRead, KVStore, KVWrite } from './kv/store.js';
