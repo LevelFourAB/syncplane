@@ -13,11 +13,12 @@ import {
 	metaBootstrapGen,
 	metaBootstrapResume,
 	metaCursor,
+	stagingPrefix,
 	stagingWsRoot,
 } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { EntityRegistry } from '../../src/mutations.js';
-import { createKvMutex, type Mutex } from '../../src/mutex.js';
+import { ChainMutex, createKvMutex, type Mutex } from '../../src/mutex.js';
 import { scanMergedRows } from '../../src/read.js';
 import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator } from '../../src/sync/coordinator.js';
@@ -366,5 +367,220 @@ describe('bootstrap resume', () => {
 		expect((await keysOf(kv)).sort()).toEqual([ 't1', 't2' ]);
 
 		await coord.stop();
+	});
+
+	// Two coordinators over one store and one mutex stand in for two tabs that
+	// re-bootstrap the same workspace at the same time.
+	describe('two tabs', () => {
+		function deferred() {
+			let resolve!: () => void;
+			const promise = new Promise<void>((r) => (resolve = r));
+			return { promise, resolve };
+		}
+
+		/**
+		 * A server holding a two-chunk snapshot that stops before frame `pauseAt`
+		 * (0 and 1 are the chunks, 2 is End) until `resume` is called. `paused`
+		 * resolves once it is waiting there.
+		 */
+		function pausingTransport(pauseAt: number) {
+			const chunks = [ [ row('t1', 1n) ], [ row('t2', 2n) ] ];
+			const requests: BootstrapRequest[] = [];
+			const paused = deferred();
+			const held = deferred();
+			const transport = createRouterTransport(({ service }) => {
+				service(SyncService, {
+					async *bootstrap(req) {
+						requests.push(req);
+						const from = req.resume === undefined ? 0 : req.resume.token[0]!;
+						yield create(BootstrapResponseSchema, {
+							body: {
+								case: 'begin',
+								value: {
+									cursor: req.resume?.cursor ?? new Uint8Array([ 9 ]),
+									seq: 7n,
+									resumed: req.resume !== undefined,
+								},
+							},
+						});
+						for (let i = from; i <= chunks.length; i++) {
+							if (i === pauseAt) {
+								paused.resolve();
+								await held.promise;
+							}
+							if (i === chunks.length) break;
+							yield create(BootstrapResponseSchema, {
+								body: {
+									case: 'chunk',
+									value: { rows: chunks[i]!, resumeToken: new Uint8Array([ i + 1 ]) },
+								},
+							});
+						}
+						yield create(BootstrapResponseSchema, { body: { case: 'end', value: {} } });
+					},
+					push(req) {
+						return pushResults(req, []);
+					},
+					pull() {
+						return {
+							patch: { changes: [], dropEntities: [] },
+							nextCursor: new Uint8Array([ 9 ]),
+							lastAckedMutationId: 0n,
+							reset: true,
+							hasMore: false,
+							seq: 7n,
+						};
+					},
+					query() {
+						return { rows: [] };
+					},
+				});
+			});
+			return { transport, requests, paused: paused.promise, resume: held.resolve };
+		}
+
+		/** A synced workspace, so the next bootstrap stages rather than writing directly. */
+		async function seedSynced(kv: MemoryKVStore): Promise<void> {
+			const seed = await kv.write();
+			await seed.put(metaCursor(WS), new Uint8Array([ 1 ]));
+			await seed.put(
+				confirmedKey('todo', WS, 'old'),
+				{ v: toBinary(TodoSchema, create(TodoSchema, { id: 'old' })), ver: '1' },
+			);
+			await seed.commit();
+		}
+
+		/**
+		 * Tab A commits chunk 0 of a staged re-bootstrap and pauses before chunk 1;
+		 * tab B then claims the workspace, adopts A's record and pauses before End.
+		 */
+		async function adoptMidSnapshot() {
+			const kv = new MemoryKVStore();
+			const kvMutex = new ChainMutex();
+			await seedSynced(kv);
+			const serverA = pausingTransport(1);
+			const serverB = pausingTransport(2);
+			const a = newCoordinator(kv, kvMutex, serverA.transport);
+			const b = newCoordinator(kv, kvMutex, serverB.transport);
+
+			const syncA = a.syncNow();
+			await serverA.paused;
+			await expect.poll(() => read(kv, metaBootstrapResume(WS))).toMatchObject({
+				gen: 1,
+				snapshotGen: 1,
+			});
+
+			const syncB = b.syncNow();
+			await serverB.paused;
+			expect(serverB.requests[0]!.resume?.token).toEqual(new Uint8Array([ 1 ]));
+			expect(await read(kv, metaBootstrapGen(WS))).toBe(2);
+
+			return { kv, a, b, serverA, serverB, syncA, syncB };
+		}
+
+		it('keeps the rows of the attempt the other tab adopted', async () => {
+			// Given tab B resuming the snapshot tab A started
+			const t = await adoptMidSnapshot();
+
+			// When A finishes first, superseded, and then B installs
+			t.serverA.resume();
+			await t.syncA;
+			expect.soft(await stagedKeys(t.kv)).not.toEqual([]);
+			t.serverB.resume();
+			await t.syncB;
+
+			// Then the installed workspace is the whole snapshot
+			expect((await keysOf(t.kv)).sort()).toEqual([ 't1', 't2' ]);
+			expect(await read(t.kv, metaCursor(WS))).toEqual(new Uint8Array([ 9 ]));
+
+			await t.a.stop();
+			await t.b.stop();
+		});
+
+		it('stops a superseded attempt from writing to the staging or the resume record', async () => {
+			// Given tab B resuming the snapshot tab A started
+			const t = await adoptMidSnapshot();
+			const before = await stagedKeys(t.kv);
+			const record = await read(t.kv, metaBootstrapResume(WS));
+
+			// When A receives chunk 1 after B's claim
+			t.serverA.resume();
+			await t.syncA;
+
+			// Then A wrote nothing: the record and the staging are B's
+			expect(record).toMatchObject({ gen: 2 });
+			expect(await read(t.kv, metaBootstrapResume(WS))).toEqual(record);
+			expect(await stagedKeys(t.kv)).toEqual(before);
+
+			t.serverB.resume();
+			await t.syncB;
+			await t.a.stop();
+			await t.b.stop();
+		});
+
+		it('keeps the adopted rows when the other tab finds out at its install', async () => {
+			// Given tab A with every chunk staged, and tab B adopting its record
+			// before A installs
+			const kv = new MemoryKVStore();
+			const kvMutex = new ChainMutex();
+			await seedSynced(kv);
+			const serverA = pausingTransport(2);
+			const serverB = pausingTransport(2);
+			const a = newCoordinator(kv, kvMutex, serverA.transport);
+			const b = newCoordinator(kv, kvMutex, serverB.transport);
+			const syncA = a.syncNow();
+			await serverA.paused;
+			await expect.poll(() => read(kv, metaBootstrapResume(WS))).toMatchObject({ gen: 1 });
+			const syncB = b.syncNow();
+			await serverB.paused;
+			expect(serverB.requests[0]!.resume?.token).toEqual(new Uint8Array([ 2 ]));
+
+			// When A ends, superseded at its install, and then B installs
+			serverA.resume();
+			await syncA;
+			serverB.resume();
+			await syncB;
+
+			// Then the installed workspace is the whole snapshot
+			expect((await keysOf(kv)).sort()).toEqual([ 't1', 't2' ]);
+			expect(await stagedKeys(kv)).toEqual([]);
+
+			await a.stop();
+			await b.stop();
+		});
+
+		it('installs its own snapshot when the other tab staged nothing before the claim', async () => {
+			// Given tab A paused before its first chunk, so there is no record to adopt
+			const kv = new MemoryKVStore();
+			const kvMutex = new ChainMutex();
+			await seedSynced(kv);
+			const serverA = pausingTransport(0);
+			const serverB = pausingTransport(2);
+			const a = newCoordinator(kv, kvMutex, serverA.transport);
+			const b = newCoordinator(kv, kvMutex, serverB.transport);
+			const syncA = a.syncNow();
+			await serverA.paused;
+			const syncB = b.syncNow();
+			await serverB.paused;
+			expect(serverB.requests[0]!.resume).toBeUndefined();
+
+			// When A finishes superseded, then B installs
+			serverA.resume();
+			await syncA;
+			const ownStaging: string[] = [];
+			for (const k of await stagedKeys(kv)) {
+				if (k.startsWith(stagingPrefix(WS, 2))) ownStaging.push(k);
+			}
+			expect(ownStaging).toHaveLength(2);
+			serverB.resume();
+			await syncB;
+
+			// Then B's snapshot is installed unchanged
+			expect((await keysOf(kv)).sort()).toEqual([ 't1', 't2' ]);
+			expect(await stagedKeys(kv)).toEqual([]);
+
+			await a.stop();
+			await b.stop();
+		});
 	});
 });

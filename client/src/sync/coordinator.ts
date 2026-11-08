@@ -2866,13 +2866,14 @@ export class Coordinator {
 	 *
 	 * Concurrency: two tabs sharing the store can bootstrap the same workspace at
 	 * once. Each claims a distinct generation, and the final transaction commits
-	 * only if its generation is still current, so a superseded staged bootstrap
-	 * discards its staging instead of installing a half-snapshot. A cold
-	 * bootstrap cannot discard rows it has already written into c/, so it
-	 * re-checks the generation INSIDE every chunk transaction and stops writing
-	 * the moment it is superseded. The two transactions serialize, so each of its
-	 * chunks either lands before the winner's claim — which wipes it — or sees
-	 * the bumped generation and never lands at all.
+	 * only if its generation is still current, so a superseded bootstrap never
+	 * installs a half-snapshot. Every chunk re-checks the generation INSIDE its
+	 * transaction and stops writing the moment it is superseded: a cold
+	 * bootstrap cannot discard rows it has already written into c/, and a staged
+	 * one may have been adopted by the claim that superseded it, which owns its
+	 * staging prefix and resume record from then on. The two transactions
+	 * serialize, so each chunk either lands before the winner's claim — which
+	 * wipes or adopts it — or sees the bumped generation and never lands at all.
 	 *
 	 * A failed attempt is not thrown away. What it staged stays where it is, and
 	 * the resume record it left (metaBootstrapResume) lets the next attempt ask
@@ -3139,10 +3140,11 @@ export class Coordinator {
 						const entities = msg.body.value.rows.map((r) => r.entity);
 						const tx = await this.opts.kv.write();
 						try {
-							// The generation check the staged path can leave to the swap:
-							// these rows are visible the moment they commit, so a
-							// superseded cold bootstrap has to stop writing rather than
-							// discard afterwards. Read from the transaction that writes,
+							// A superseded bootstrap stops writing. Cold rows are visible
+							// the moment they commit, so they cannot be discarded
+							// afterwards; staged rows can be adopted by the claim that
+							// superseded this one, which then owns the prefix and the
+							// resume record. Read from the transaction that writes,
 							// which is what makes the two orderings against the winner's
 							// claim exhaustive (see the contract above) — and asked for
 							// here, before the rows below are decoded, rather than awaited
@@ -3151,11 +3153,11 @@ export class Coordinator {
 							// serialize this chunk's decoding against that commit. The
 							// verdict still gates every write, since the transaction is
 							// handed over only after it comes back.
-							const current = direct ? this.stillCurrent(tx, workspaceId, gen) : undefined;
+							const current = this.stillCurrent(tx, workspaceId, gen);
 							// Awaited below, which is where a failure is reported. This
 							// only keeps one that never gets there — the staging under it
 							// threw first — from surfacing as an unhandled rejection.
-							void current?.catch(() => {});
+							void current.catch(() => {});
 							if (direct) {
 								// Indexed as they land. The chunk holds a transaction of
 								// its own and no store mutex, so the decode this costs is
@@ -3200,7 +3202,7 @@ export class Coordinator {
 									} satisfies BootstrapResumeRecord,
 								);
 							}
-							superseded = current !== undefined && !(await current);
+							superseded = !(await current);
 							if (superseded) {
 								tx.release();
 							} else {
@@ -3318,12 +3320,19 @@ export class Coordinator {
 				try {
 					const active = ((await tx.get(metaBootstrapGen(workspaceId))) as number | undefined) ?? 0;
 					if (active !== gen) {
-						// Only a prefix nothing else can be writing is swept here. An
-						// adopted snapshot's prefix is shared with whoever adopted it
-						// next, and clearing it would throw away the winner's rows;
-						// leaving it costs one stale prefix, which the next claim's
-						// sweep — or the next successful swap — takes.
-						if (snapshotGen === gen) await clearStaging(tx, stagingPrefix(workspaceId, gen));
+						// Only a prefix nothing else can be writing is swept here. A
+						// prefix is shared with every claim that adopted it, this
+						// attempt's own included, and the resume record names it
+						// while an adopter can still install it: clearing it then
+						// would throw away the winner's rows. Leaving it costs one
+						// stale prefix, which the next claim's sweep — or the next
+						// successful swap — takes.
+						const record = (await tx.get(metaBootstrapResume(workspaceId))) as
+							| BootstrapResumeRecord
+							| undefined;
+						if (snapshotGen === gen && record?.snapshotGen !== gen) {
+							await clearStaging(tx, stagingPrefix(workspaceId, gen));
+						}
 						await tx.commit();
 						swapWrites = tx.writes;
 						return false;
