@@ -166,6 +166,12 @@ A server keeps the stored top-level fields that its schema does not declare, so 
 
 The [schema-revision handshake](../how-to/handle-failures.md#steps) detects version skew during rolling deployments, but does not replace the need for additive schema changes.
 
+## A large collection edit replaces the collection
+
+The TypeScript client names each changed item of a set, map or keyed list in the `PATCH` field mask, so a concurrent edit to another item of the same collection survives. The server refuses a mask of more than `MaxFieldMaskPaths` paths (64 by default), and that rejection also takes every other field of the write. When one write changes more items than that, the client names the largest changed collections whole until the mask fits. Those collections are replaced whole: a concurrent edit to one of their other items is lost, the same as with a `PUT` of the collection.
+
+A collection whose elements hold collaborative text is never replaced whole, because a whole replace would discard concurrent edits to its documents. A write that still needs more paths than the limit, through such a collection or through explicit `paths`, is refused locally: the call rejects and nothing is written. Split the edit into several writes. A client of a server with another limit sets `maxFieldMaskPaths` to match.
+
 ## The TypeScript client writes `-0` as `+0`
 
 A `double` or `float` field without explicit presence loses the sign of zero when the TypeScript client writes it. The Protobuf encoder the client uses treats `-0` as the zero value and leaves the field off the wire, so the server stores `+0`. The overlay stores the same encoded bytes, so the writer and every other replica read `+0`, and the replicas stay converged.

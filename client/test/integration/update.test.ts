@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import type { RejectionInfo } from '../../src/client.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { freshWorkspace, newClient } from './helpers.js';
 
@@ -152,5 +153,123 @@ describe('update (sync)', () => {
 		expect(await a.pendingCount()).toBe(0);
 
 		await a.close();
+	});
+
+	// The enqueue path narrows a collection to one mask path per changed item,
+	// so the number of paths follows the data. The server refuses a mask of
+	// more than 64 paths (MaxFieldMaskPaths); an update the app wrote as one
+	// field must still reach it.
+	it('an update that adds 65 values to a scalar set is stored', async () => {
+		// Given a widget with no tags
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'x', tags: [] });
+		await a.syncNow();
+
+		// When the client adds 65 tags in one update and syncs
+		await a.mutate.update(WidgetSchema, 'w1', (w) => {
+			for (let i = 0; i < 65; i++) w.tags.push(`t${i}`);
+		});
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then the server stores all 65 tags
+		// And the update must not be refused for the number of mask paths
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		expect({ tags: (await b.get(WidgetSchema, 'w1'))?.tags.length, rejections }).toEqual({
+			tags: 65,
+			rejections: [],
+		});
+
+		await a.close();
+		await b.close();
+	});
+
+	it('an update that clears a 100-entry map and renames the label is stored', async () => {
+		// Given a widget with 100 attrs entries
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		const attrs: Record<string, string> = {};
+		for (let i = 0; i < 100; i++) attrs[`k${i}`] = 'v';
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'x', attrs });
+		await a.syncNow();
+
+		// When the client clears attrs and renames the label in one update
+		await a.mutate.update(WidgetSchema, 'w1', (w) => {
+			w.attrs = {};
+			w.label = 'cleared';
+		});
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then the server stores both changes
+		// And the label change must not be lost with the attrs change
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		const stored = await b.get(WidgetSchema, 'w1');
+		expect({
+			label: stored?.label,
+			attrs: Object.keys(stored?.attrs ?? {}).length,
+			rejections,
+		}).toEqual({ label: 'cleared', attrs: 0, rejections: [] });
+
+		await a.close();
+		await b.close();
+	});
+
+	it('a patch whose explicit paths are over the limit rejects and writes nothing', async () => {
+		// Given a widget with no attrs
+		const ws = freshWorkspace();
+		const a = newClient(ws);
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'x' });
+
+		// When the client patches 65 map entries by explicit paths
+		const attrs: Record<string, string> = {};
+		const paths: string[] = [];
+		for (let i = 0; i < 65; i++) {
+			attrs[`k${i}`] = 'v';
+			paths.push(`attrs.k${i}`);
+		}
+		const write = a.mutate.patch(WidgetSchema, 'w1', { attrs }, { paths });
+
+		// Then the patch rejects, and nothing of it reaches the local row
+		await expect(write).rejects.toThrow(/over the limit of 64/);
+		expect(Object.keys((await a.get(WidgetSchema, 'w1'))?.attrs ?? {})).toEqual([]);
+
+		await a.close();
+	});
+
+	it('control: an update that adds 64 values to a scalar set is stored', async () => {
+		// Given a widget with no tags
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'x', tags: [] });
+		await a.syncNow();
+
+		// When the client adds 64 tags in one update and syncs
+		await a.mutate.update(WidgetSchema, 'w1', (w) => {
+			for (let i = 0; i < 64; i++) w.tags.push(`t${i}`);
+		});
+		await a.syncNow();
+
+		// Then the server stores all 64 tags
+		expect(rejections).toEqual([]);
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		expect((await b.get(WidgetSchema, 'w1'))?.tags.length).toBe(64);
+
+		await a.close();
+		await b.close();
 	});
 });

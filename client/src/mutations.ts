@@ -2997,17 +2997,6 @@ function copyField(dst: Rec, src: Rec, field: DescField): void {
 }
 
 /**
- * Replaces each bare, non-opaque collection path in a PATCH mask with per-item
- * paths (field.<encodedKey>) for the keys/values that were added, removed, or
- * changed between prior and next (unchanged items are skipped). Non-collection,
- * opaque, non-keyed-list, and already-sub-pathed paths pass through verbatim.
- * The crud value is NOT trimmed — only the mask narrows.
- *
- * This is the client-side guarantee that "adding something never replaces the
- * list": a bare collection path would whole-replace, so we expand it to name
- * exactly the touched items, which the merge core then merges per item.
- */
-/**
  * Whether expandCollectionMask could change anything about `paths` — true only
  * when some path names a whole non-opaque list or map. Purely schema-driven, so
  * it answers before the two row decodes the expansion itself needs; a mask over
@@ -3026,15 +3015,36 @@ export function maskNeedsExpansion(schema: DescMessage, paths: readonly string[]
 	return false;
 }
 
+/**
+ * Replaces each bare, non-opaque collection path in a PATCH mask with per-item
+ * paths (field.<encodedKey>) for the keys/values that were added, removed, or
+ * changed between prior and next (unchanged items are skipped). Non-collection,
+ * opaque, non-keyed-list, and already-sub-pathed paths pass through verbatim.
+ * The crud value is NOT trimmed — only the mask narrows.
+ *
+ * This is the client-side guarantee that "adding something never replaces the
+ * list": a bare collection path would whole-replace, so we expand it to name
+ * exactly the touched items, which the merge core then merges per item.
+ *
+ * When the expanded mask would hold more than `maxPaths` paths, the largest
+ * expansions go back to their bare path (whole-replace) until it fits. A
+ * collection whose elements hold text keeps its expansion, as a whole-replace
+ * would clobber concurrent edits to its documents. The result can therefore
+ * still be over `maxPaths`. An unchanged collection expands to no path, so the
+ * result can be empty.
+ */
 export function expandCollectionMask(
 	schema: DescMessage,
 	prior: Message,
 	next: Message,
 	paths: string[],
+	maxPaths = Infinity,
 ): string[] {
 	const priorRec = prior as unknown as Rec;
 	const nextRec = next as unknown as Rec;
-	const out: string[] = [];
+	// One entry per input path. `bare` is set where the expansion may fall back
+	// to the whole-collection path.
+	const parts: { items: string[]; bare?: string }[] = [];
 	for (const path of paths) {
 		const [ seg ] = splitSeg(path);
 		// Only a bare path names the whole collection; 'attrs.' already names
@@ -3044,25 +3054,46 @@ export function expandCollectionMask(
 			!field || isOpaque(field)
 			|| (field.fieldKind !== 'list' && field.fieldKind !== 'map')
 		) {
-			out.push(path);
+			parts.push({ items: [ path ] });
 			continue;
 		}
 		if (field.fieldKind === 'map') {
-			out.push(...expandMap(field, seg, priorRec, nextRec));
+			const text = field.mapKind === 'message' && hasTextDescendant(field.message);
+			parts.push({
+				items: expandMap(field, seg, priorRec, nextRec),
+				bare: text ? undefined : path,
+			});
 		} else if (field.listKind === 'message') {
 			const keyFields = keyFieldsFor(field);
 			if (isRefMessageField(field)) {
-				out.push(...expandRefSet(field, seg, priorRec, nextRec));
+				parts.push({ items: expandRefSet(field, seg, priorRec, nextRec), bare: path });
 			} else if (keyFields.length === 0) {
-				out.push(path); // non-keyed message list → whole-replace
+				parts.push({ items: [ path ] }); // non-keyed message list → whole-replace
 			} else {
-				out.push(...expandKeyedList(field, seg, keyFields, priorRec, nextRec));
+				parts.push({
+					items: expandKeyedList(field, seg, keyFields, priorRec, nextRec),
+					bare: hasTextDescendant(field.message) ? undefined : path,
+				});
 			}
 		} else {
-			out.push(...expandScalarSet(field, seg, priorRec, nextRec));
+			parts.push({ items: expandScalarSet(field, seg, priorRec, nextRec), bare: path });
 		}
 	}
-	return out;
+	let total = parts.reduce((n, part) => n + part.items.length, 0);
+	while (total > maxPaths) {
+		// Largest first: each fallback gives back the most paths it can, so the
+		// fewest collections lose their per-item merge.
+		let widest: (typeof parts)[number] | undefined;
+		for (const part of parts) {
+			if (part.bare !== undefined && part.items.length > 1) {
+				if (!widest || part.items.length > widest.items.length) widest = part;
+			}
+		}
+		if (!widest) break;
+		total -= widest.items.length - 1;
+		widest.items = [ widest.bare! ];
+	}
+	return parts.flatMap((part) => part.items);
 }
 
 function expandMap(field: MapField, seg: string, prior: Rec, next: Rec): string[] {

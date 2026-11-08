@@ -106,6 +106,14 @@ describe('mask expansion around element text', () => {
 			.toEqual([ 'notes.n2', 'notes.n3' ]);
 	});
 
+	it('keeps per-item paths of a text-bearing list over the path limit', () => {
+		const prior = base();
+		const next = base();
+		next.notes = [ create(KeyedNoteSchema, { id: 'n3' }) ];
+		expect(expandCollectionMask(schema, prior, next, [ 'notes' ], 1).sort())
+			.toEqual([ 'notes.n1', 'notes.n2', 'notes.n3' ]);
+	});
+
 	it('reaches a document below a singular message inside the element', () => {
 		const prior = base();
 		prior.notes[0]!.deep = create(TextHolderSchema, { body: bodyDoc('p', 'deep') });

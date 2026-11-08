@@ -856,6 +856,18 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 */
 	maxMutationsPerPush?: number;
 	/**
+	 * Largest number of field-mask paths one PATCH carries. Default 64 (the
+	 * engine's default Limits.MaxFieldMaskPaths). A write that changes more
+	 * items of a set, map or keyed list than this replaces the largest of those
+	 * collections whole, so a concurrent edit to another item of that
+	 * collection is lost. A collection whose elements hold collaborative text
+	 * is never replaced whole. A PATCH that still names more paths than this
+	 * (through such a collection, or through explicit `paths`) makes the write
+	 * reject, and nothing of it is written. Set this to match a server
+	 * configured with another MaxFieldMaskPaths.
+	 */
+	maxFieldMaskPaths?: number;
+	/**
 	 * Largest number of workspaces one request may name — push batches and
 	 * Subscribe scopes. Default 64 (the engine's default
 	 * Limits.MaxWorkspacesPerRequest). A client holding more splits its pushes
@@ -1237,6 +1249,8 @@ const DEFAULT_HOLD_GRACE_MS = 30_000;
 const DEFAULT_SAVED_UNDO_SCOPES = 20;
 /** See UndoPersistOptions.maxAgeMs. */
 const DEFAULT_SAVED_UNDO_AGE_MS = 24 * 60 * 60_000;
+/** See SyncClientOptions.maxFieldMaskPaths. */
+const DEFAULT_MAX_FIELD_MASK_PATHS = 64;
 
 /**
  * A hold on one row (see WorkspaceClient.hold). The row stays in scope until
@@ -6630,6 +6644,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		/** Set when the store no longer holds this client's identity. */
 		let identityLost = false;
 		const capturedInverses: (Inverse | undefined)[] = [];
+		const maxMaskPaths = Math.max(1, this.opts.maxFieldMaskPaths ?? DEFAULT_MAX_FIELD_MASK_PATHS);
 		const payloadCruds = payload.case === 'crud'
 			? [ payload.value ]
 			: payload.case === 'batch'
@@ -6805,6 +6820,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 									base,
 									next,
 									crud.fieldMask.paths,
+									maxMaskPaths,
+								);
+							}
+							// The server refuses the whole mutation, batch and all, so it
+							// fails here, where the caller can still act on it.
+							if (crud.op === CrudOp.PATCH && (crud.fieldMask?.paths.length ?? 0) > maxMaskPaths) {
+								throw new Error(
+									`entity "${crud.entity}": PATCH of row "${crud.key}" names `
+										+ `${crud.fieldMask!.paths.length} field-mask paths, over the limit of `
+										+ `${maxMaskPaths} (maxFieldMaskPaths). Split the write.`,
 								);
 							}
 							// Reuse the one `prev`: invert against it (undo) and apply locally.

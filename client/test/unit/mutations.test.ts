@@ -217,6 +217,30 @@ describe('expandCollectionMask', () => {
 			expect(expand(prior, next, [ 'attrs.a' ])).toEqual([ 'attrs.a' ]);
 		});
 	});
+
+	describe('path limit', () => {
+		it('keeps per-item paths that fit the limit', () => {
+			const prior = w({ tags: [] });
+			const next = w({ tags: [ 'a', 'b', 'c' ] });
+			expect(expandCollectionMask(WidgetSchema, prior, next, [ 'tags', 'label' ], 4).sort())
+				.toEqual([ 'label', 'tags.a', 'tags.b', 'tags.c' ]);
+		});
+
+		it('names the largest collection whole until the mask fits', () => {
+			const prior = w({ tags: [], attrs: { a: '1', b: '2', c: '3' } });
+			const next = w({ tags: [ 'x', 'y' ], attrs: {} });
+			// 2 + 3 + 1 paths over a limit of 4: attrs goes whole, tags stays per item.
+			expect(
+				expandCollectionMask(WidgetSchema, prior, next, [ 'tags', 'attrs', 'label' ], 4).sort(),
+			).toEqual([ 'attrs', 'label', 'tags.x', 'tags.y' ]);
+		});
+
+		it('leaves an unchanged collection out at any limit', () => {
+			const prior = w({ tags: [ 'a' ] });
+			const next = w({ tags: [ 'a' ] });
+			expect(expandCollectionMask(WidgetSchema, prior, next, [ 'tags' ], 0)).toEqual([]);
+		});
+	});
 });
 
 // maskFromInit turns a partial init into a mask. A whole message is refused
