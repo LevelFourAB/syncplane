@@ -542,21 +542,18 @@ describe('client index maintenance', () => {
 				expect((await cursor())?.k).toBe(keyAt(BUILD_BATCH - 1));
 				expect(await entries(kv)).toHaveLength(BUILD_BATCH);
 
-				// Rewrite the FIRST row without maintenance, which unindexes it. A
-				// walk that restarted would re-index it at its new label; one that
-				// resumes never looks at it again, which is what makes this
-				// observable at all.
-				await apply(kv, undefined, [ valueChange(keyAt(0), 'zzz', 999n) ]);
-
 				const mutex = new ChainMutex();
-				await buildIndexes(kv, (fn) => mutex.run(fn), indexedRegistry(), indexed, ws);
+				const built = await buildIndexes(
+					kv,
+					(fn) => mutex.run(fn),
+					indexedRegistry(),
+					indexed,
+					ws,
+				);
 
-				const got = await entries(kv);
-				// Row 0 holds no position at all — untouched by the resumed walk.
-				// Under a restart it would have been re-indexed at 'zzz', i.e. last.
-				expect(got).toHaveLength(ROWS - 1);
-				expect(got.some(([ , rowKey ]) => rowKey === keyAt(0))).toBe(false);
-				expect(got[0]![1]).toBe(keyAt(1));
+				// Only the rows after the position are walked again.
+				expect(built).toEqual({ rows: ROWS - BUILD_BATCH, ready: true });
+				expect(await entries(kv)).toHaveLength(ROWS);
 				// And the walk finished, so the claim is made and the spent position
 				// is gone.
 				const marker = metaIndexBuilt(ws, 'widget', 'by_label', indexed.for('widget')[0]!.specHash);
@@ -576,21 +573,24 @@ describe('client index maintenance', () => {
 				// unindexed, as that swap writes them. A resume that trusted the
 				// stale position would skip exactly those rows and then claim the
 				// index covers them.
+				//
+				// The rows are put as the swap promotes them, not through
+				// applyServerChanges, which would also drop the cursor as a write
+				// of a build without the index.
 				const swap = await kv.write();
 				await swap.put(metaSnapshotGen(ws), 7);
+				// Labels that sort AFTER every untouched row's, so where the
+				// replaced rows end up in index order is what the assertion reads —
+				// and, since the swap leaves them unindexed, a stale resume leaves
+				// them with no position at all.
+				for (let i = 0; i < BUILD_BATCH; i++) {
+					const record: ConfirmedRecord = {
+						v: toBinary(WidgetSchema, create(WidgetSchema, { id: keyAt(i), label: `z${keyAt(i)}` })),
+						ver: String(1000 + i),
+					};
+					await swap.put(confirmedKey('widget', ws, keyAt(i)), record);
+				}
 				await swap.commit();
-				await apply(
-					kv,
-					undefined,
-					// Labels that sort AFTER every untouched row's, so where the
-					// replaced rows end up in index order is what the assertion
-					// reads — and, since the rewrite unindexed them, a stale resume
-					// leaves them with no position at all.
-					Array.from(
-						{ length: BUILD_BATCH },
-						(_, i) => valueChange(keyAt(i), `z${keyAt(i)}`, BigInt(1000 + i)),
-					),
-				);
 
 				const mutex = new ChainMutex();
 				await buildIndexes(kv, (fn) => mutex.run(fn), indexedRegistry(), indexed, ws);
@@ -602,6 +602,60 @@ describe('client index maintenance', () => {
 				// would have left them at the front under their old ones.
 				expect(got[0]![1]).toBe(keyAt(BUILD_BATCH));
 				expect(got[got.length - 1]![1]).toBe(keyAt(BUILD_BATCH - 1));
+			});
+
+			it('claims nothing when a build without the index rewrote a row it had passed', async () => {
+				await seed();
+				const mutex = new ChainMutex();
+				const marker = metaIndexBuilt(ws, 'widget', 'by_label', indexed.for('widget')[0]!.specHash);
+				let batches = 0;
+				const interrupted = await buildIndexes(
+					kv,
+					async (fn) => {
+						const result = await mutex.run(fn);
+						// After the first batch, a tab of a build that declares no index
+						// applies a page that rewrites the first row, which leaves the
+						// row without a position.
+						if (++batches === 1) await apply(kv, undefined, [ valueChange(keyAt(0), 'zzz', 999n) ]);
+						return result;
+					},
+					indexedRegistry(),
+					indexed,
+					ws,
+				);
+				expect(interrupted.ready).toBe(false);
+				let tx = await kv.read();
+				expect(await tx.has(marker)).toBe(false);
+				tx.release();
+
+				// The pass after it walks the whole entity again, so the row is
+				// indexed at its new label.
+				const rebuilt = await buildIndexes(kv, (fn) => mutex.run(fn), indexedRegistry(), indexed, ws);
+				expect(rebuilt).toEqual({ rows: ROWS, ready: true });
+				const got = await entries(kv);
+				expect(got).toHaveLength(ROWS);
+				expect(got[got.length - 1]![1]).toBe(keyAt(0));
+				tx = await kv.read();
+				expect(await tx.has(marker)).toBe(true);
+				tx.release();
+			});
+
+			it('drops the built marker when a build without the index rewrites a row', async () => {
+				await seed();
+				const mutex = new ChainMutex();
+				await buildIndexes(kv, (fn) => mutex.run(fn), indexedRegistry(), indexed, ws);
+				const marker = metaIndexBuilt(ws, 'widget', 'by_label', indexed.for('widget')[0]!.specHash);
+
+				// A tombstone leaves the index whole, so the marker stays.
+				await apply(kv, undefined, [ tombstone(keyAt(1), 998n) ]);
+				let tx = await kv.read();
+				expect(await tx.has(marker)).toBe(true);
+				tx.release();
+
+				await apply(kv, undefined, [ valueChange(keyAt(0), 'zzz', 999n) ]);
+				tx = await kv.read();
+				expect(await tx.has(marker)).toBe(false);
+				tx.release();
 			});
 		});
 

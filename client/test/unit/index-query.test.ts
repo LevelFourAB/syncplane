@@ -11,7 +11,7 @@ import { describe, expect, it } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
 import type { RowSet } from '../../src/coverage.js';
-import { RowChangeSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
+import { type RowChange, RowChangeSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
 import { metaCursor } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { KVRead, KVStore } from '../../src/kv/store.js';
@@ -1163,6 +1163,97 @@ describe('finishing a range through a pending overlay', () => {
 		expect(counts).toBe(1);
 		expect(page.total).toBe(scanned.total);
 		expect(widened).toBe(true);
+	});
+});
+
+// Tabs of two builds share one store during a rolling upgrade. A build that
+// does not declare an index still writes the entity's rows, and the index of
+// the build that does must keep answering as its scan does.
+describe('mixed builds', () => {
+	// The same entity as an older build declares it: same fields, no indexes.
+	const olderIssue = entity('issue', {
+		id: text().key(),
+		title: text(),
+		state: text(),
+		rank: int32(),
+		done: bool(),
+		labels: list(text()),
+		meta: message({ due: int32() }),
+		custom: map('string', message({ number: int32(), tag: text() })),
+	});
+	const OlderIssueSchema = defineSchema(olderIssue).descMessage('issue');
+	const olderRegistry = new EntityRegistry([ OlderIssueSchema ]);
+
+	/** A store this build seeded and indexed, then an older build applied `changes` to. */
+	async function rewrittenByOlderBuild(
+		changes: RowChange[],
+	) {
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(registry);
+		await seedConfirmed(kv, indexes);
+		const mutex = new ChainMutex();
+		await buildIndexes(kv, (fn) => mutex.run(fn), registry, indexes, WS);
+
+		const tx = await kv.write();
+		await applyServerChanges(
+			tx,
+			olderRegistry,
+			WS,
+			changes,
+			new TouchSet(),
+			new IndexCache(olderRegistry),
+		);
+		await tx.commit();
+
+		return new SyncClient({
+			workspaceId: WS,
+			kvStore: kv,
+			entities: [ IssueSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		}) as unknown as SyncClient<never>;
+	}
+
+	const openIssues: Query<Issue> = { where: (i) => i.state.eq('open') };
+
+	it('finds a row an older build rewrote without the index', async () => {
+		// Given i1 retitled by a build that declares no index, its state still open
+		const i1 = SEED[0]!;
+		const client = await rewrittenByOlderBuild([
+			create(RowChangeSchema, {
+				entity: 'issue',
+				key: 'i1',
+				version: 7n,
+				body: {
+					case: 'value',
+					value: toBinary(OlderIssueSchema, create(OlderIssueSchema, { ...i1, title: 'one (edited)' })),
+				},
+			}),
+		]);
+
+		// When this build queries by the indexed field
+		const rows = await run(client, openIssues);
+		await client.close();
+
+		// Then the answer holds every open row, as a scan does
+		expect(rows.map((r) => r.key).sort()).toEqual([ 'i1', 'i2', 'i4' ]);
+		expect(rows.total).toBe(3);
+	});
+
+	it('drops a row an older build deleted', async () => {
+		const client = await rewrittenByOlderBuild([
+			create(RowChangeSchema, {
+				entity: 'issue',
+				key: 'i2',
+				version: 7n,
+				body: { case: 'tombstone', value: true },
+			}),
+		]);
+
+		const rows = await run(client, openIssues);
+		await client.close();
+
+		expect(rows.map((r) => r.key).sort()).toEqual([ 'i1', 'i4' ]);
 	});
 });
 

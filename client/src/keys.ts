@@ -700,6 +700,10 @@ function fingerprintChars(parts: string): string {
  * follows rewrites every row's whole position list, which reclaims the
  * unreachable positions (see index-maintain.ts), and the marker sweep in
  * index-build.ts deletes the stale marker.
+ *
+ * A write of a confirmed row deletes every marker of the row's entity that its
+ * own build does not maintain (see dropForeignIndexes in index-build.ts), so a
+ * marker stays only while each write since its build kept that index.
  */
 export const metaIndexBuilt = (
 	workspaceId: string,
@@ -730,11 +734,16 @@ export const metaIndexEntityPrefix = (workspaceId: string, entity: string): stri
 export const metaIndexBuildCursor = (workspaceId: string, entity: string): string =>
 	`${metaWsPrefix(workspaceId)}indexbuild/${entity}`;
 
-/** A build cursor: the snapshot generation `g` it was taken under, and the last
- * row key `k` whose entries committed. */
+/**
+ * A build cursor: the snapshot generation `g` it was taken under, the last row
+ * key `k` whose entries committed (absent before the first commit), and the
+ * set `m` of indexes the walk builds, as indexSetTag names it. A cursor that
+ * names another set is another build's walk.
+ */
 export interface IndexBuildCursor {
 	g: number | undefined;
-	k: string;
+	k?: string;
+	m?: string;
 }
 
 export const overlayTextKey = (

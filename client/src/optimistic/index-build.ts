@@ -15,16 +15,20 @@
 // it scans. Nothing blocks on a build and nothing is wrong while one runs. A
 // marker naming a different spec or a different position layout is not the
 // current one, so both changes fall out as a re-walk (see keys.ts
-// metaIndexBuilt).
+// metaIndexBuilt). A tab of another build that shares the store does not
+// maintain this build's indexes, so its writes delete the markers they make
+// untrue (dropForeignIndexes).
 //
 // An interrupted walk RESUMES rather than restarting. The position commits with
 // the batch it describes (metaIndexBuildCursor), so the work already done
 // survives a closed tab — without which a client whose session is shorter than
 // the walk would pay a full walk's writes every session and never claim an
-// index. Two things scope that position: it is only a position and never a
-// claim about coverage, and it carries the snapshot generation it was taken
-// under, so a bootstrap landing in between discards it instead of resuming into
-// rows that have since been replaced.
+// index. Three things scope that position: it is only a position and never a
+// claim about coverage; it carries the snapshot generation it was taken under,
+// so a bootstrap landing in between discards it instead of resuming into rows
+// that have since been replaced; and it names the set of indexes the walk
+// builds. A walk of another build does not resume it, and a write under
+// another build deletes it, after which the walk claims nothing.
 //
 // COORDINATION: none beyond the store's write lock. The plan for this called
 // for a leader-elected task, but a build is idempotent and writes only derived
@@ -152,6 +156,58 @@ export async function markIndexesBuilt(
 	}
 }
 
+/** The built markers of one entity's indexes `compiled`, in compiled order. */
+function builtMarkers(
+	compiled: readonly CompiledIndex[],
+	workspaceId: string,
+	entity: string,
+): string[] {
+	return compiled.map((idx) => metaIndexBuilt(workspaceId, entity, idx.name, idx.specHash));
+}
+
+/**
+ * Names the set of indexes `compiled` maintains: each index's name, spec and
+ * position layout, as its built marker carries them. Two builds get the same
+ * tag exactly when a write under one keeps every index of the other.
+ */
+function indexSetTag(compiled: readonly CompiledIndex[]): string {
+	const prefix = metaIndexEntityPrefix('', '').length;
+	return builtMarkers(compiled, '', '').map((k) => k.slice(prefix)).join(',');
+}
+
+/**
+ * Makes the indexes of `entity` that a write under `compiled` does not
+ * maintain read as unbuilt in one workspace: deletes their built markers, and
+ * the build cursor of a walk that builds another set. Call it in each
+ * transaction that writes a confirmed row of the entity, before it commits;
+ * `compiled` is the entity's indexes in the writing build, empty for a build
+ * that declares none. Costs one scan of the entity's markers and one read.
+ */
+export async function dropForeignIndexes(
+	tx: KVWrite,
+	compiled: readonly CompiledIndex[],
+	workspaceId: string,
+	entity: string,
+): Promise<void> {
+	// Tabs of two builds share the store. A write replaces the row's position
+	// list with the positions of its own build, and its postings writer
+	// removes the row from every other search declaration, so the other
+	// build's index loses the row. Its marker must go with it, or that build
+	// keeps answering from an index that no longer covers the entity. A walk
+	// of the other build that is in progress loses its cursor, which makes it
+	// abandon its claim: rows it already passed may be among the ones this
+	// write changed.
+	const own = new Set(builtMarkers(compiled, workspaceId, entity));
+	const foreign: string[] = [];
+	for await (const [ k ] of tx.scan(metaIndexEntityPrefix(workspaceId, entity))) {
+		if (!own.has(k)) foreign.push(k);
+	}
+	for (const k of foreign) await tx.del(k);
+	const cursorKey = metaIndexBuildCursor(workspaceId, entity);
+	const cursor = await tx.get(cursorKey) as IndexBuildCursor | undefined;
+	if (cursor !== undefined && cursor.m !== indexSetTag(compiled)) await tx.del(cursorKey);
+}
+
 /**
  * What the workspace's confirmed rows currently are: `installed` says they are a
  * whole snapshot, `gen` which one (undefined on a store that predates the
@@ -193,13 +249,16 @@ async function readBuildCursor(
 	workspaceId: string,
 	entity: string,
 	gen: number | undefined,
+	tag: string,
 ): Promise<string | undefined> {
 	const tx = await kv.read();
 	try {
 		const cursor = await tx.get(metaIndexBuildCursor(workspaceId, entity)) as
 			| IndexBuildCursor
 			| undefined;
-		return cursor !== undefined && cursor.g === gen ? cursor.k : undefined;
+		// A cursor of another build's walk counts rows as done that this
+		// build's indexes do not cover.
+		return cursor !== undefined && cursor.g === gen && cursor.m === tag ? cursor.k : undefined;
 	} finally {
 		tx.release();
 	}
@@ -214,7 +273,9 @@ async function buildEntity(
 	workspaceId: string,
 	stopped?: () => boolean,
 ): Promise<BuildResult> {
-	const markers = compiled.map((idx) => metaIndexBuilt(workspaceId, entity, idx.name, idx.specHash));
+	const markers = builtMarkers(compiled, workspaceId, entity);
+	const setTag = indexSetTag(compiled);
+	const cursorKey = metaIndexBuildCursor(workspaceId, entity);
 	const search = searchIndexOf(compiled);
 
 	const tx = await kv.read();
@@ -251,7 +312,12 @@ async function buildEntity(
 	// nothing until it finishes: a client whose session is shorter than the walk
 	// would restart the entity every time and never claim an index, while paying
 	// a full walk's writes each session.
-	let after = await readBuildCursor(kv, workspaceId, entity, startedAt);
+	let after = await readBuildCursor(kv, workspaceId, entity, startedAt, setTag);
+	// The position the stored cursor names: where a later walk resumes.
+	let committed = after;
+	// Whether the store holds this walk's cursor. A write under another build
+	// deletes it (dropForeignIndexes), and a walk that finds it gone abandons.
+	let held = after !== undefined;
 	let walked = 0;
 	// The search postings of the rows visited since the last flush, and the
 	// version each of those rows had when its batch read it. They are written
@@ -261,9 +327,16 @@ async function buildEntity(
 	const visited = new Map<string, string>();
 	for (;;) {
 		if (stopped?.()) return { rows: walked, ready: false };
-		const done = await runLocked(async () => {
+		const done = await runLocked(async (): Promise<boolean | 'lost'> => {
 			const wtx = await kv.write();
 			try {
+				if (held && (await wtx.get(cursorKey) as IndexBuildCursor | undefined)?.m !== setTag) {
+					wtx.release();
+					return 'lost';
+				}
+				// This walk rewrites rows under this build's indexes, so it is a
+				// write like any other to the indexes of another build.
+				await dropForeignIndexes(wtx, compiled, workspaceId, entity);
 				// Collect the batch before writing any of it: iterating a prefix
 				// while writing (even into a disjoint keyspace) is needlessly
 				// subtle across the KV backends.
@@ -340,12 +413,14 @@ async function buildEntity(
 				// The cursor commits WITH the rows it describes and their postings,
 				// so it can never name a position whose rows did not make it to the
 				// store indexed. Between flushes it stays where the last one left
-				// it, and a walk resumed from there revisits the rows after it.
-				if (flush && last !== undefined) {
-					const cursor: IndexBuildCursor = { g: startedAt, k: last };
-					await wtx.put(metaIndexBuildCursor(workspaceId, entity), cursor);
-				}
+				// it, and a walk resumed from there revisits the rows after it. It
+				// is written from the first batch on, before it names a position,
+				// so a write under another build from then on can void the walk.
+				if (flush && last !== undefined) committed = last;
+				const cursor: IndexBuildCursor = { g: startedAt, k: committed, m: setTag };
+				await wtx.put(cursorKey, cursor);
 				await wtx.commit();
+				held = true;
 				after = last ?? after;
 				walked += batch.length;
 				return finished;
@@ -354,6 +429,7 @@ async function buildEntity(
 				throw err;
 			}
 		});
+		if (done === 'lost') return { rows: walked, ready: false };
 		if (done) break;
 	}
 
@@ -370,9 +446,13 @@ async function buildEntity(
 			// bootstrap that CLEARED the workspace during the walk and is still
 			// streaming its replacement into c/ has not written a new generation
 			// yet, and on a store that had none it would compare equal.
+			//
+			// A cursor that is gone, or names another walk, means a write under
+			// another build changed rows this walk had passed.
 			if (
 				(await wtx.get(metaSnapshotGen(workspaceId))) !== startedAt
 				|| !(await wtx.has(metaCursor(workspaceId)))
+				|| (await wtx.get(cursorKey) as IndexBuildCursor | undefined)?.m !== setTag
 			) {
 				wtx.release();
 				return false;
@@ -408,7 +488,7 @@ async function buildEntity(
 			// key per entity per workspace, and a later rebuild (a changed spec)
 			// must start from the beginning rather than from where the PREVIOUS
 			// build happened to finish.
-			await wtx.del(metaIndexBuildCursor(workspaceId, entity));
+			await wtx.del(cursorKey);
 			await wtx.commit();
 			return true;
 		} catch (err) {

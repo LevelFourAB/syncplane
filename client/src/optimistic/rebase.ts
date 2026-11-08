@@ -74,7 +74,7 @@ import { reportError } from '../report.js';
 import { applyTextDeltas, TextDeltaUnusableError } from '../sync/textdelta.js';
 import { isFragment } from '../text/index.js';
 import { TouchSet } from '../touch.js';
-import { markIndexesBuilt } from './index-build.js';
+import { dropForeignIndexes, markIndexesBuilt } from './index-build.js';
 import {
 	deletePrefixes,
 	type IndexCache,
@@ -674,12 +674,21 @@ export async function applyServerChanges(
 ): Promise<void> {
 	const syncable = await syncableEntities(tx, registry);
 	const postings = new SearchPostingsWriter();
+	// Entities whose foreign indexes this transaction has dropped already.
+	const dropped = new Set<string>();
 	for (const change of changes) {
 		if (!syncable.has(change.entity)) continue;
 		touched.row(workspaceId, change.entity, change.key);
 		const cKey = confirmedKey(change.entity, workspaceId, change.key);
 		const idx = indexes?.for(change.entity) ?? [];
 		const search = searchIndexOf(idx);
+		// A value write keeps only the indexes of this build. A tombstone leaves
+		// every index whole: the positions go with the row, and the postings
+		// writer removes the row from every declaration.
+		if (change.body.case === 'value' && !dropped.has(change.entity)) {
+			dropped.add(change.entity);
+			await dropForeignIndexes(tx, idx, workspaceId, change.entity);
+		}
 		if (change.body.case === 'tombstone') {
 			// The value positions are a field on the row, so the delete takes them
 			// with it — but the search postings are records of their own, and one

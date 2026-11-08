@@ -81,9 +81,11 @@
 //   whoever writes it under another declaration, so two tabs declaring
 //   different indexes over one entity invalidate each other's. The previous
 //   layout left such an index STALE in the same situation rather than
-//   incomplete, which is no more correct; neither is a state the built markers
-//   can survive, and the fix for both is that a build only trusts markers it
-//   earned itself.
+//   incomplete, which is no more correct. Neither is a state a built marker can
+//   survive, so a write of a row deletes every marker of the entity that its
+//   build does not maintain, and voids a walk of another build that is in
+//   progress (dropForeignIndexes in index-build.ts). The build that declares
+//   the index walks it again on its next pass.
 
 import type { DescMessage } from '@bufbuild/protobuf';
 
