@@ -217,6 +217,40 @@ describe('planCompaction', () => {
 		expect(planCompaction(registry, dels, 0n, NO_PROTECTED).mutations).toHaveLength(1);
 	});
 
+	// The server refuses an over-limit write whole, so a fold past a limit
+	// loses writes it would take one at a time.
+	describe('write limits', () => {
+		it('keeps guarded PATCHes apart when their masks together pass the path limit', () => {
+			const attrsPatch = (id: bigint, prefix: string): Mutation => {
+				const attrs: Record<string, string> = {};
+				for (let i = 0; i < 40; i++) attrs[`${prefix}${i}`] = 'v';
+				return mutation(
+					id,
+					create(CrudMutationSchema, {
+						entity: 'widget',
+						key: 'w1',
+						op: CrudOp.PATCH,
+						value: toBinary(WidgetSchema, create(WidgetSchema, { attrs })),
+						fieldMask: { paths: Object.keys(attrs).map((k) => `attrs.${k}`) },
+						expectedVersion: 5n,
+					}),
+				);
+			};
+			const widgets = new EntityRegistry([ WidgetSchema ]);
+			const original = [ attrsPatch(1n, 'a'), attrsPatch(2n, 'b') ];
+			expect(planCompaction(widgets, original, 0n, NO_PROTECTED, STORED).changed).toBe(false);
+		});
+
+		it('keeps guarded PATCHes apart when their values together pass the size limit', () => {
+			const big = 'x'.repeat(600 * 1024);
+			const original = [
+				patch(1n, 't1', { title: big }, [ 'title' ], 5n),
+				patch(2n, 't1', { sortKey: big }, [ 'sort_key' ], 5n),
+			];
+			expect(planCompaction(registry, original, 0n, NO_PROTECTED, STORED).changed).toBe(false);
+		});
+	});
+
 	// A refusal of the later PUT would take the row with it, where alone it
 	// leaves the row the earlier PUT created.
 	describe('a PUT that may create the row', () => {

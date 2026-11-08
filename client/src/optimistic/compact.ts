@@ -87,6 +87,9 @@ import { clearOverlayAndReplay, type MirrorMap } from './rebase.js';
  *    field, which is the one the user last asked for. Text has no "later
  *    value": a PUT unions its documents with the stored ones, so a PUT folds
  *    onto an earlier PUT only when it already carries all of that PUT's text.
+ *  - A fold never makes a write past the engine's default write limits
+ *    (MaxValueBytes, MaxFieldMaskPaths). The server refuses an over-limit
+ *    write whole, which would lose every write in the slot.
  *  - An unguarded PUT never folds onto a PUT that may create the row (no
  *    confirmed row, or a DELETE before it). A refusal of the later value
  *    would otherwise take the row itself with it, not only an earlier value.
@@ -193,7 +196,7 @@ export function planCompaction(
 			&& (crud.expectedVersion !== undefined
 				|| (sameWrite(open.crud, crud) && !(open.creates && crud.op === CrudOp.PUT)));
 		const folded = foldable ? foldCrud(registry, def, open!.crud!, crud) : undefined;
-		if (open?.crud && folded && folded !== 'barrier') {
+		if (open?.crud && folded && folded !== 'barrier' && !pastLimits(folded)) {
 			open.crud = folded;
 			open.sources.push(m.mutationId);
 			continue;
@@ -233,6 +236,22 @@ export function planCompaction(
 		out.push(mutation);
 	}
 	return { mutations: out, remap, changed: slots.length !== tail.length };
+}
+
+/** The engine's default Limits.MaxValueBytes. */
+const MAX_VALUE_BYTES = 1 << 20;
+/** The engine's default Limits.MaxFieldMaskPaths. */
+const MAX_FIELD_MASK_PATHS = 64;
+
+/**
+ * Whether `folded` passes a write limit. The queued size of a text value can
+ * be larger than what the push ships for it (a whole document, sent as a
+ * delta), so this can keep apart writes the server would take folded. That
+ * costs one unfolded slot.
+ */
+function pastLimits(folded: CrudMutation): boolean {
+	return folded.value.length > MAX_VALUE_BYTES
+		|| (folded.fieldMask?.paths.length ?? 0) > MAX_FIELD_MASK_PATHS;
 }
 
 /**

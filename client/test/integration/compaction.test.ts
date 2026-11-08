@@ -288,6 +288,81 @@ describe('compaction stores what the separate writes store', () => {
 		await b.close();
 	});
 
+	it('two guarded updates that fit the mask limit alone do not fold into one that does not', async () => {
+		// Given a widget at a version the client read
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { ...HOLD, onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'x' });
+		await a.syncNow();
+		const base = (await a.getRow(WidgetSchema, 'w1'))!.version;
+
+		// And two updates guarded by that version, each adding 40 attrs entries
+		// (the server takes at most 64 mask paths in one write)
+		await a.mutate.update(WidgetSchema, 'w1', (w) => {
+			for (let i = 0; i < 40; i++) w.attrs[`a${i}`] = 'v';
+		}, { expectedVersion: base });
+		await a.mutate.update(WidgetSchema, 'w1', (w) => {
+			for (let i = 0; i < 40; i++) w.attrs[`b${i}`] = 'v';
+		}, { expectedVersion: base });
+
+		// When the client pushes the two writes in one compaction pass
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then the first update is stored, and the second is stored or refused
+		// alone as a conflict with the first
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		const keys = Object.keys((await b.get(WidgetSchema, 'w1'))?.attrs ?? {});
+		// And must not lose both to a refusal of the folded mask
+		expect({
+			first: keys.filter((k) => k.startsWith('a')).length,
+			refusedOtherwise: rejections.map((r) => r.errorCode).filter((c) => c !== CodeConflict),
+		}).toEqual({ first: 40, refusedOtherwise: [] });
+
+		await a.close();
+		await b.close();
+	});
+
+	it('offline text edits that fit the value limit alone are not lost together', async () => {
+		// Given a widget with no text
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { ...HOLD, onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'x' });
+		await a.syncNow();
+
+		// And three offline text edits that add 450 KiB each (the server takes
+		// at most 1 MiB in one value)
+		let text = '';
+		const afterTwo = 'a'.repeat(450 * 1024) + 'b'.repeat(450 * 1024);
+		for (let i = 0; i < 3; i++) {
+			text += String.fromCharCode(97 + i).repeat(450 * 1024);
+			await a.mutate.patch(WidgetSchema, 'w1', { body: text });
+		}
+
+		// When the client syncs
+		for (let i = 0; i < 3; i++) await a.syncNow().catch(() => undefined);
+
+		// Then the server holds at least the first two edits
+		// And must not lose them with an edit that does not fit
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		const stored = plainTextOf((await b.get(WidgetSchema, 'w1'))?.body);
+		expect({ keepsFirstTwo: stored.startsWith(afterTwo), pending: await a.pendingCount() }).toEqual({
+			keepsFirstTwo: true,
+			pending: 0,
+		});
+
+		await a.close();
+		await b.close();
+	}, 60_000);
+
 	it('a later PUT without text is not refused for text an earlier refused PUT carried', async () => {
 		// Given a widget with text, which another client changed after this
 		// client read it
@@ -510,4 +585,30 @@ describe('compaction stores what the separate writes store', () => {
 		await a.close();
 		await b.close();
 	});
+
+	it('control: two offline text edits within the value limit are stored', async () => {
+		// Given a widget with no text
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { ...HOLD, onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'x' });
+		await a.syncNow();
+
+		// When two offline text edits add 450 KiB each, and the client syncs
+		const text = 'a'.repeat(450 * 1024) + 'b'.repeat(450 * 1024);
+		await a.mutate.patch(WidgetSchema, 'w1', { body: text.slice(0, 450 * 1024) });
+		await a.mutate.patch(WidgetSchema, 'w1', { body: text });
+		await a.syncNow();
+
+		// Then the server holds both edits
+		expect(rejections).toEqual([]);
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		expect(plainTextOf((await b.get(WidgetSchema, 'w1'))?.body) === text).toBe(true);
+
+		await a.close();
+		await b.close();
+	}, 60_000);
 });
