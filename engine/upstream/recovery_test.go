@@ -172,9 +172,13 @@ var _ = Describe("Recovery", func() {
 		o.put(&todov1.Todo{Id: "r1", Title: "restored"})
 		n.part.Heal()
 		Eventually(func() string { return title(n.todo("r1")) }).Should(Equal("restored"))
-		n.mu.Lock()
-		Expect(n.resets).To(Equal([]string{ws}))
-		n.mu.Unlock()
+		// OnReset runs after the bootstrap's last page commits, so r1 can
+		// show before the reset is recorded.
+		Eventually(func() []string {
+			n.mu.Lock()
+			defer n.mu.Unlock()
+			return slices.Clone(n.resets)
+		}).Should(Equal([]string{ws}))
 		n.flush()
 
 		// The reads of the next start come from the restored workspace's
