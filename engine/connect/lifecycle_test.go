@@ -4,15 +4,42 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"google.golang.org/protobuf/proto"
 
 	engineconnect "github.com/levelfourab/syncplane/engine/connect"
+	"github.com/levelfourab/syncplane/engine/connect/sqlitestate"
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
+	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
+
+// keptState is a State that outlives the connectors built over it, as a
+// connector state database does when only the engine store is replaced.
+type keptState struct{ engineconnect.State }
+
+func (keptState) Close() error { return nil }
+
+// copyStore copies a SQLite database with its WAL files, which is what a file
+// backup or restore of the engine store does.
+func copyStore(from, to string) {
+	GinkgoHelper()
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		data, err := os.ReadFile(from + suffix)
+		if os.IsNotExist(err) {
+			_ = os.Remove(to + suffix)
+			continue
+		}
+		Expect(err).NotTo(HaveOccurred())
+		Expect(os.WriteFile(to+suffix, data, 0o600)).To(Succeed())
+	}
+}
 
 var _ = Describe("Connector lifecycle", func() {
 	var ctx context.Context
@@ -323,6 +350,89 @@ var _ = Describe("Cursor-too-old recovery", func() {
 		Expect(after.EngineVersion).To(Equal(before.EngineVersion))
 		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
 		Expect(f.src.writeCount()).To(Equal(writes))
+	})
+	It("keeps a row made at the source after the engine backup it is restored from", func() {
+		const ws = "ws-backup"
+		dir := GinkgoT().TempDir()
+		live, backup := filepath.Join(dir, "engine.db"), filepath.Join(dir, "backup.db")
+		src := newTodoSource()
+		st, err := sqlitestate.Open(filepath.Join(dir, "state.db"))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(st.Close()).To(Succeed()) })
+
+		// open starts an engine over the live store file and a connector over
+		// the one connector state, and returns how to stop both.
+		open := func() (*fixture, func()) {
+			GinkgoHelper()
+			store, err := sqlitestore.Open(live)
+			Expect(err).NotTo(HaveOccurred())
+			srv, err := server.New(store, server.WithEntities(&todov1.Todo{}, &testdatav1.Widget{}))
+			Expect(err).NotTo(HaveOccurred())
+			conn, err := engineconnect.New(engineconnect.Config{
+				Server: srv, Source: src, State: keptState{st}, Entities: []proto.Message{&todov1.Todo{}},
+			})
+			Expect(err).NotTo(HaveOccurred())
+			return &fixture{srv: srv, src: src, st: st, conn: conn}, func() {
+				GinkgoHelper()
+				Expect(conn.Close()).To(Succeed())
+				Expect(srv.Close()).To(Succeed())
+				Expect(store.Close()).To(Succeed())
+			}
+		}
+
+		// Given an engine backup at seq 1, then s1 made at the source and
+		// imported at seq 2
+		f, stop := open()
+		f.push(ctx, ws, putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+		stop()
+		copyStore(live, backup)
+		f, stop = open()
+		src.set(ws, &todov1.Todo{Id: "s1", Title: "made at the source"})
+		Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+		f.push(ctx, ws, putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "two"}))
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+		Expect(f.engineTodo(ctx, ws, "s1")).NotTo(BeNil())
+		stop()
+
+		// When the engine store is restored from the backup, with the
+		// connector state kept, and the connector heals
+		copyStore(backup, live)
+		f, stop = open()
+		DeferCleanup(stop)
+		f.push(ctx, ws, putMutation("c9", 1, "todo", "r1", &todov1.Todo{Id: "r1", Title: "after restore"}))
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+		Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+
+		// Then s1 is still at the source, and the engine holds it again
+		Expect(src.get(ws, "s1")).NotTo(BeNil(), "a row the user made in the external system was deleted there")
+		Expect(f.engineTodo(ctx, ws, "s1")).NotTo(BeNil())
+	})
+
+	It("does not delete the source rows of a workspace that was deleted and restored", func() {
+		const ws = "ws-restored"
+		// Given a workspace synced with f1..f9 at the source
+		f := newFixture()
+		for i := 1; i <= 9; i++ {
+			id := fmt.Sprintf("f%d", i)
+			f.push(ctx, ws, putMutation("c1", uint64(i), "todo", id, &todov1.Todo{Id: id}))
+		}
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+
+		// When the workspace is deleted, restored and written once, and the
+		// connector heals
+		Expect(f.srv.DeleteWorkspace(ctx, ws)).To(Succeed())
+		Expect(f.srv.RestoreWorkspace(ctx, ws)).To(Succeed())
+		f.push(ctx, ws, putMutation("c2", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+
+		// Then the heal treats the new workspace as an initial sync, and
+		// keeps the source's rows
+		for i := 1; i <= 9; i++ {
+			Expect(f.src.get(ws, fmt.Sprintf("f%d", i))).NotTo(BeNil(),
+				"shadows from the deleted workspace decided to delete f%d at the source", i)
+		}
 	})
 })
 
