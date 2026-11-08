@@ -56,7 +56,7 @@ A consumer that falls behind past the horizon logs a warning, drops its shadow r
 The effects runtime provides three guarantees for handlers:
 
 - **Post-commit execution**: Handlers run on background goroutines outside the write transaction. A handler can issue write-backs using `Mutate`.
-- **At-least-once delivery**: If a crash occurs between handler execution and position commit, the change is redelivered on restart. Handlers must be idempotent. Handlers writing back should use `MutateIdempotent` keyed on `(workspace, entity, key, seq)`.
+- **At-least-once delivery**: If a crash occurs between handler execution and position commit, the change is redelivered on restart. Handlers must be idempotent. Handlers writing back should use `MutateIdempotent` keyed on `(consumer, workspace, epoch, entity, key, seq)`. Trusted writes share one key space, so the consumer name keeps two consumers of one change apart. The epoch keeps a deleted and restored workspace apart from its earlier incarnation, whose sequences it repeats.
 - **Per-workspace ordering**: Handlers process sequentially per workspace in change feed order. Different workspaces and different consumers run independently.
 
 ## Failure isolation and wedging

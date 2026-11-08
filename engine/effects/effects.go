@@ -21,8 +21,12 @@
 // committing redelivers the change, by design: it is the only recovery an
 // outbound effect has, since there is no reconcile pass that can un-send an
 // email or notice a webhook was never posted. Handlers must be idempotent. One
-// that writes back should do so through server.MutateIdempotent keyed on the
-// change (workspace, entity, key and seq identify it exactly).
+// that writes back should do so through server.MutateIdempotent with a key made
+// of the consumer's name and the change's Workspace, Epoch, Entity, Key and
+// Seq. Each part is needed: trusted calls share one key space, so consumers
+// that leave out their name share keys and only the first write-back applies,
+// and a workspace that is deleted and restored repeats its sequences under a
+// new Epoch.
 //
 // Ordering is PER WORKSPACE, matching the feed. One consumer's handler runs
 // serially for a workspace; different workspaces, and different consumers,
@@ -197,8 +201,13 @@ type Config struct {
 // is what a Sink receives; the typed Event handlers get is a view of it.
 type Change struct {
 	Workspace string
-	Entity    string
-	Key       string
+	// Epoch identifies the incarnation of the workspace: a workspace that is
+	// deleted and restored gets a new Epoch, and its sequences start again at
+	// 1. It is the store epoch that Changes stamps on server.Cursor. Opaque;
+	// only equality has a meaning.
+	Epoch  uint64
+	Entity string
+	Key    string
 	// Seq is the workspace sequence of the mutation that wrote this state.
 	Seq uint64
 	// Deleted reports a tombstone: the row is gone and After is nil.

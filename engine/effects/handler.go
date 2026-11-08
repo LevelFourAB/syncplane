@@ -14,11 +14,14 @@ import (
 // for. It is the typed view of Change.
 type Event[T proto.Message] struct {
 	Workspace string
-	Entity    string
-	Key       string
+	// Epoch identifies the incarnation of the workspace; see Change.Epoch.
+	Epoch  uint64
+	Entity string
+	Key    string
 	// Seq is the workspace sequence of the mutation that wrote this state.
-	// Together with Workspace, Entity and Key it identifies this delivery
-	// exactly, which is what a handler writing back keys its idempotency on.
+	// Together with Workspace, Epoch, Entity and Key it identifies this change
+	// exactly. A handler that writes back adds its consumer's name and keys its
+	// idempotency on the result (see the package doc).
 	Seq uint64
 	// Deleted reports a tombstone: the row is gone and After is the zero value.
 	// A handler that dereferences After must check this first.
@@ -116,6 +119,7 @@ type handlerSink[T proto.Message] struct {
 func (h handlerSink[T]) Deliver(ctx context.Context, ch Change) error {
 	ev := Event[T]{
 		Workspace: ch.Workspace,
+		Epoch:     ch.Epoch,
 		Entity:    ch.Entity,
 		Key:       ch.Key,
 		Seq:       ch.Seq,

@@ -209,7 +209,9 @@ func (rt *Runtime) drain(ctx context.Context, c *consumer, workspaceID string) (
 func (rt *Runtime) deliverPage(ctx context.Context, c *consumer, workspaceID string, page []server.Change, up *server.ConsumerUpdate) (int, error) {
 	delivered := 0
 	for _, ch := range page {
-		out, shadow, err := rt.buildChange(ctx, c, workspaceID, ch)
+		// The page was read in one transaction, so the epoch Changes stamped
+		// on its cursor is the epoch of every change in it.
+		out, shadow, err := rt.buildChange(ctx, c, workspaceID, up.Cursor.Epoch, ch)
 		if err != nil {
 			return delivered, err
 		}
@@ -228,9 +230,10 @@ func (rt *Runtime) deliverPage(ctx context.Context, c *consumer, workspaceID str
 // buildChange turns a feed change into what the sink sees, and returns the
 // shadow write to land with it (nil when the consumer watches nothing on this
 // entity).
-func (rt *Runtime) buildChange(ctx context.Context, c *consumer, workspaceID string, ch server.Change) (Change, *server.ConsumerShadowWrite, error) {
+func (rt *Runtime) buildChange(ctx context.Context, c *consumer, workspaceID string, epoch uint64, ch server.Change) (Change, *server.ConsumerShadowWrite, error) {
 	out := Change{
 		Workspace: workspaceID,
+		Epoch:     epoch,
 		Entity:    ch.Entity,
 		Key:       ch.Key,
 		Seq:       ch.Seq,

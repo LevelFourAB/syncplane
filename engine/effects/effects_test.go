@@ -603,6 +603,75 @@ var _ = Describe("Effects runtime", func() {
 		})
 	})
 
+	// The package documents (consumer, workspace, epoch, entity, key, seq) as
+	// the key a handler writes back under with MutateIdempotent, so these
+	// handlers use exactly that key and nothing more.
+	Describe("writing back keyed on the change", func() {
+		changeKey := func(consumer string, ev effects.Event[*testdatav1.Widget]) string {
+			return fmt.Sprintf("%s:%s:%d:%s:%s:%d", consumer, ev.Workspace, ev.Epoch, ev.Entity, ev.Key, ev.Seq)
+		}
+		// fanOut writes one inbox row per delivery, named by prefix and the
+		// delivered label, so every write-back that applied is visible.
+		fanOut := func(f *fixture, consumer, prefix string) func(context.Context, effects.Event[*testdatav1.Widget]) error {
+			return func(ctx context.Context, ev effects.Event[*testdatav1.Widget]) error {
+				_, err := f.srv.MutateIdempotent(ctx, "inbox", changeKey(consumer, ev), func(tx *server.EntityTx) ([]byte, error) {
+					return nil, tx.Put(&testdatav1.Widget{Id: prefix + "-" + ev.After.GetLabel()})
+				})
+				return err
+			}
+		}
+		inbox := func(f *fixture) []string {
+			GinkgoHelper()
+			var ids []string
+			Expect(f.srv.Mutate(ctx, "inbox", func(tx *server.EntityTx) error {
+				for _, id := range []string{"notice-old", "notice-new", "index-src", "notice-src"} {
+					var w testdatav1.Widget
+					found, err := tx.Get(&w, id)
+					if err != nil {
+						return err
+					}
+					if found {
+						ids = append(ids, id)
+					}
+				}
+				return nil
+			})).To(Succeed())
+			return ids
+		}
+
+		It("applies a write-back for the first change of a restored workspace", func() {
+			// Given a fan-out from team into inbox that handled team's w1
+			f := newFixture()
+			Expect(effects.On(f.rt, "notifier", fanOut(f, "notifier", "notice"))).To(Succeed())
+			f.put(ctx, "team", &testdatav1.Widget{Id: "w1", Label: "old"})
+			Expect(f.rt.Drain(ctx, "notifier", "team")).To(Succeed())
+			Expect(inbox(f)).To(Equal([]string{"notice-old"}))
+
+			// When team is deleted, restored and written again
+			Expect(f.srv.DeleteWorkspace(ctx, "team")).To(Succeed())
+			Expect(f.srv.RestoreWorkspace(ctx, "team")).To(Succeed())
+			f.put(ctx, "team", &testdatav1.Widget{Id: "w1", Label: "new"})
+			Expect(f.rt.Drain(ctx, "notifier", "team")).To(Succeed())
+
+			// Then the new change gets its own write-back
+			Expect(inbox(f)).To(ContainElement("notice-new"),
+				"the restored workspace's change was answered from the deleted one's record")
+		})
+
+		It("applies the write-backs of two consumers that handle the same change", func() {
+			f := newFixture()
+			Expect(effects.On(f.rt, "indexer", fanOut(f, "indexer", "index"))).To(Succeed())
+			Expect(effects.On(f.rt, "notifier", fanOut(f, "notifier", "notice"))).To(Succeed())
+			f.put(ctx, "team", &testdatav1.Widget{Id: "w1", Label: "src"})
+
+			Expect(f.rt.Drain(ctx, "indexer", "team")).To(Succeed())
+			Expect(f.rt.Drain(ctx, "notifier", "team")).To(Succeed())
+
+			Expect(inbox(f)).To(ConsistOf("index-src", "notice-src"),
+				"one consumer's record answered the other's write-back")
+		})
+	})
+
 	Describe("running in the background", func() {
 		It("delivers on the commit signal without waiting for a tick", func() {
 			f := newFixture(func(cfg *effects.Config) {

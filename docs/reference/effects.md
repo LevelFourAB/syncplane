@@ -46,6 +46,8 @@ Change events provide the following fields to watched consumers:
 | `ev.Changed` / `ev.DidChange` | The watched fields that differ between the two states. `DidChange` returns `false` for all `FirstSeen` events. |
 | `ev.FirstSeen`                | Indicates that the consumer held no shadow copy to compare against.                                            |
 
+Every change event also carries `ev.Workspace`, `ev.Epoch`, `ev.Entity`, `ev.Key`, `ev.Seq`, `ev.Deleted` and `ev.Actor`. `ev.Epoch` identifies the incarnation of the workspace: a workspace that is deleted and restored gets a new epoch. A handler that writes back with `MutateIdempotent` keys it on the consumer name, `ev.Workspace`, `ev.Epoch`, `ev.Entity`, `ev.Key` and `ev.Seq`. See [Write back idempotently from a handler](../how-to/react-to-changes.md#3-write-back-idempotently-from-a-handler).
+
 ### FirstSeen conditions
 
 `ev.FirstSeen` occurs in three cases:

@@ -100,7 +100,7 @@ When writing handlers, account for the following conditions:
 
 Handlers execute post-commit on a background goroutine outside the write transaction, so you can write back through the server API.
 
-Because the runtime delivers changes with at-least-once semantics, use `server.MutateIdempotent` keyed on the delivery identity (`Workspace`, `Entity`, `Key`, and `Seq`) to prevent duplicate writes on redelivery:
+Because the runtime delivers changes with at-least-once semantics, use `server.MutateIdempotent` to prevent duplicate writes on redelivery. Make the key from the consumer name and the change identity (`Workspace`, `Epoch`, `Entity`, `Key`, and `Seq`):
 
 ```go
 err = effects.On(rt, "issue-indexer", func(ctx context.Context, ev effects.Event[*issuev1.Issue]) error {
@@ -108,7 +108,7 @@ err = effects.On(rt, "issue-indexer", func(ctx context.Context, ev effects.Event
         return nil
     }
 
-    key := fmt.Sprintf("indexer:%s:%s:%s:%d", ev.Workspace, ev.Entity, ev.Key, ev.Seq)
+    key := fmt.Sprintf("issue-indexer:%s:%d:%s:%s:%d", ev.Workspace, ev.Epoch, ev.Entity, ev.Key, ev.Seq)
     _, err := srv.MutateIdempotent(ctx, ev.Workspace, key,
         func(tx *server.EntityTx) ([]byte, error) {
             return nil, tx.Put(&issuev1.IssueSummary{
@@ -124,6 +124,11 @@ The closure returns the bytes that a replay of the key answers with. Return
 `nil` to record only that the write applied. The key is claimed even when the
 closure writes nothing, and it expires after `WithIdempotencyRetention` (default 24
 hours). Keep that retention period longer than your longest retry window.
+
+Keep every part of the key:
+
+- Without the consumer name, two consumers that handle the same change use the same key. Trusted calls share one key space, so only the first write-back applies.
+- Without `Epoch`, a workspace that is deleted and restored repeats the keys of the deleted workspace, because its sequences start again at 1. A write-back into a different workspace then applies nothing while the old key is retained.
 
 For more details on server mutations, see [Writing from server-side code](server-side-writes.md).
 
