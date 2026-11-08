@@ -260,6 +260,7 @@ When a read operation must inspect an undecodable row (for a read filter, subscr
 - The server logs a warning (`undecodable row quarantined`) containing the entity, key, and version, and treats the row as absent.
 - Pull operations send a tombstone for quarantined rows so clients drop their cached copies.
 - Bootstrap sync, queries, windows, and follow closures skip quarantined rows, allowing the rest of the workspace to sync normally.
+- The change feed (`Changes`) skips quarantined rows and moves its cursor past them, so effects and connectors continue with the changes after the row. They do not see the row until a write replaces it.
 
 Quarantined rows are not deleted from storage:
 

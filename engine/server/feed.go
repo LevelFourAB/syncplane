@@ -115,7 +115,10 @@ var ErrCursorForeign = fmt.Errorf("%w: the cursor names a history this store doe
 // the change, since redelivery is the design and not the exception. Only the
 // latest state of a row is observable, not every intermediate write
 // (coalescing by row, like pull). The feed is trusted server-side API:
-// read filters and subscription scoping do not apply.
+// read filters and subscription scoping do not apply. A stored row of a
+// registered entity that does not decode is logged and left out, and the
+// cursor moves past it; a later write that replaces the row is delivered as
+// usual.
 //
 // When the cursor cannot be resumed — below the tombstone horizon, above the
 // current sequence, from another store lineage, or from a history a restore
@@ -221,7 +224,12 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 				if info, ok := s.catalogPtr().entities[row.Entity]; ok {
 					msg, err := info.decode(row.Value)
 					if err != nil {
-						return err
+						// Quarantine, as the client read paths do (see
+						// poison.go). A consumer commits only past a page
+						// it got, so an error here would hold back every
+						// later change of the workspace on every retry.
+						s.reportPoison(ctx, workspaceID, row, err)
+						return nil
 					}
 					ch.Message = msg
 				}

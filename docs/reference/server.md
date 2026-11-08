@@ -501,6 +501,8 @@ The feed outputs all workspace changes, including `syncplane_field_history` reco
 
 `Changes` returns `ErrCursorTooOld` if the cursor is below the tombstone horizon, ahead of the current sequence, contains a mismatched store epoch (`Cursor.Epoch`), or names a write the store does not hold (`Cursor.Lineage`), which is the case after a restore from backup. In every case except the horizon, the error is `ErrCursorForeign`, which wraps `ErrCursorTooOld`: the cursor names a history that the store does not hold, for example after a store swap, a restore from backup, or `DeleteWorkspace` and `RestoreWorkspace`. See [Follow committed changes](../how-to/change-feed.md).
 
+`Changes` skips a stored row of a registered entity that does not decode, logs it, and moves the cursor past it. See [A stored row that will not decode goes invisible](../explanation/limits-and-trade-offs.md#a-stored-row-that-will-not-decode-goes-invisible).
+
 `CurrentSeq` returns the current head sequence of the workspace feed.
 
 ### Semantics

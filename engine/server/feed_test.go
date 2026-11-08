@@ -440,6 +440,41 @@ var _ = Describe("Server.Changes", func() {
 			Expect(got[0].Deleted).To(BeFalse())
 		})
 	})
+
+	// A stored row of a registered entity can stop decoding after a
+	// non-additive schema change or storage damage. Consumers advance only
+	// past a page the feed delivered, so the row must not hold back every
+	// change written after it.
+	Describe("undecodable rows", func() {
+		It("delivers the changes written after an undecodable row", func() {
+			store, err := sqlitestore.Open(filepath.Join(GinkgoT().TempDir(), "feed.db"))
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+			srv = mustNewServer(store, server.WithEntities(&todov1.Todo{}))
+
+			// Given an undecodable todo, then a valid write after it
+			Expect(store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
+				seq, err := tx.NextSeq()
+				if err != nil {
+					return err
+				}
+				return tx.PutRow("todo", "poison", []byte{0xff, 0xff, 0xff}, seq, storage.Actor{})
+			})).To(Succeed())
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "after"}))
+
+			// When a consumer drains the feed from the start
+			var got []server.Change
+			next, _, err := srv.Changes(ctx, ws, server.Cursor{}, 0, func(ch server.Change) error {
+				got = append(got, ch)
+				return nil
+			})
+
+			// Then the valid change arrives and the position moves past both
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(ContainElement(HaveField("Key", "t1")))
+			Expect(next.Seq).To(BeEquivalentTo(2))
+		})
+	})
 })
 
 // An access move writes an engine-internal log row at the same seq as the row

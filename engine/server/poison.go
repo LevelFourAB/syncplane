@@ -39,6 +39,10 @@ import (
 //     that hits one while serving a custom mutation should turn it into a
 //     Reject, or the client retries a mutation nothing can make succeed.
 //
+// The change feed (Changes) is trusted too, but quarantines: its consumers are
+// background runtimes that retry the same page and cannot repair the row, so
+// an error would stop every effect and connector of the workspace.
+//
 // One asymmetry survives on purpose: a full sync with no read filter and no
 // predicate never decodes a row at all — it ships the stored bytes verbatim on
 // a zero-decode fast path. Decoding every row there to catch a corrupt one
