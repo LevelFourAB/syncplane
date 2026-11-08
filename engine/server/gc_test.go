@@ -179,6 +179,48 @@ var _ = Describe("Garbage collection", func() {
 		Expect(rest.GetPatch().GetChanges()).To(BeEmpty())
 	})
 
+	It("keeps a cursor whose page ended on the last row of the version group the horizon reached", func() {
+		// The page stops on a limit, but the row it stopped on closes its
+		// version group: the client has seen every row of that version,
+		// collected tombstone included, and has nothing to re-bootstrap for.
+		srv := newTestServer(server.WithGC(-time.Second, 0))
+		DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
+		start(srv)
+
+		pullLim := func(cursor []byte, limit uint32) *syncplanev1.PullResponse {
+			GinkgoHelper()
+			resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+				WorkspaceId: ws,
+				ClientId:    "c1",
+				Cursor:      cursor,
+				Limit:       limit,
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			return resp.Msg
+		}
+
+		// Given a delete alone at seq 2 and a put at seq 3, and a page of one
+		// from seq 1 that delivers the tombstone and stops
+		push(putMutation("c1", 1, "widget", "gone", &testdatav1.Widget{Id: "gone"}))
+		first := pullLim(nil, 0)
+		push(deleteMutation("c1", 2, "widget", "gone"))
+		push(putMutation("c1", 3, "widget", "b", &testdatav1.Widget{Id: "b"}))
+		page := pullLim(first.GetNextCursor(), 1)
+		Expect(page.GetReset_()).To(BeFalse())
+		Expect(page.GetHasMore()).To(BeTrue())
+		Expect(page.GetPatch().GetChanges()).To(HaveLen(1))
+		Expect(page.GetPatch().GetChanges()[0].GetTombstone()).To(BeTrue())
+
+		// When GC collects that tombstone, moving the horizon to seq 2
+		Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+
+		// Then the next pull resumes with b
+		rest := pullLim(page.GetNextCursor(), 0)
+		Expect(rest.GetReset_()).To(BeFalse(), "every row at the horizon was delivered")
+		Expect(rest.GetPatch().GetChanges()).To(HaveLen(1))
+		Expect(rest.GetPatch().GetChanges()[0].GetKey()).To(Equal("b"))
+	})
+
 	It("keeps tombstones younger than the retention", func() {
 		srv := newTestServer(server.WithGC(time.Hour, 0))
 		DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })

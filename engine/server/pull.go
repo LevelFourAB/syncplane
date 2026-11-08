@@ -1190,10 +1190,14 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	// emitting it.
 	scanned := 0
 	var lastScanned storage.Row
+	// The version of the row past the limit, which tells whether the page
+	// stopped inside a version group or on its last row.
+	var overflowVersion uint64
 	deliver := func(row storage.Row) error {
 		scanned++
 		if scanned > limit {
 			resp.HasMore = true
+			overflowVersion = row.Version
 			return nil
 		}
 		// The cursor tracks the last SCANNED row, not the last emitted
@@ -1322,6 +1326,24 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		}
 		next.resynced = cur.resynced
 		next.deltaFloor, _ = cur.deltaBase()
+		// The page stopped on the last row of its version group, so the
+		// client holds every row at next.seq. Drop the sub-position, or GC
+		// moving the horizon to next.seq resets a cursor that missed nothing
+		// (see belowHorizon). The sub-position also told the next page that
+		// the cursor's membership sets were issued before its seq, which
+		// keeps them from being maintained; the forms below say that instead.
+		// A floor of 0 cannot ride on a clean cursor, whose deltaBase would
+		// then read as its seq, so such a page keeps the sub-position.
+		if overflowVersion > lastScanned.Version && next.deltaFloor > 0 {
+			next.partialEntity, next.partialKey = "", ""
+			if len(next.windows) > 0 {
+				next.window = heldSet(next.windowSet(), nil)
+				next.windows = nil
+			}
+			if emitter.followEntities != nil {
+				next.closureRebuild = true
+			}
+		}
 	} else {
 		next.seq = current
 		// Clean boundary: reconcile both bounded membership sets. Each emits
