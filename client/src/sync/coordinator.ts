@@ -532,11 +532,12 @@ interface WorkspaceSync {
 	 */
 	noAccess?: { backoff: Backoff; retryAt: number; timer?: ReturnType<typeof setTimeout> };
 	/**
-	 * The server refused this workspace's queue for a mutation-id gap and has
-	 * not taken it since. Cleared once a push is accepted or the queue is
-	 * resequenced onto the server's watermark; see recoverGap.
+	 * The first mutation of the batch the server refused for a mutation-id gap,
+	 * set while the server has not taken this workspace's queue since. Cleared
+	 * once a push is accepted or the queue is resequenced onto the server's
+	 * watermark; see recoverGap.
 	 */
-	gapped?: boolean;
+	gapped?: Mutation;
 }
 
 /**
@@ -1815,7 +1816,7 @@ export class Coordinator {
 							// only be refused the same way.
 							if (state) {
 								state.poison = undefined;
-								state.gapped = true;
+								state.gapped = entry.pending[0];
 							}
 							continue;
 						}
@@ -1873,7 +1874,7 @@ export class Coordinator {
 					if (state) {
 						state.poison = undefined;
 						state.deadLetter = undefined;
-						state.gapped = false;
+						state.gapped = undefined;
 					}
 					let ackedSeq = 0n;
 					for (const result of wsResult.results) {
@@ -2110,7 +2111,11 @@ export class Coordinator {
 	 * failed push dropped, or the watermark a pull just reported — because
 	 * renumbering onto an applied id would re-send it as a new mutation.
 	 */
-	private async resequence(workspaceId: string, firstId: bigint): Promise<boolean> {
+	private async resequence(
+		workspaceId: string,
+		firstId: bigint,
+		head?: Mutation,
+	): Promise<boolean> {
 		const result = await this.opts.kvMutex.run(() =>
 			resequencePending(
 				this.opts.kv,
@@ -2118,6 +2123,7 @@ export class Coordinator {
 				this.opts.mirrors,
 				workspaceId,
 				firstId,
+				head,
 			)
 		);
 		if (!result.changed) return false;
@@ -2150,12 +2156,18 @@ export class Coordinator {
 	 * below the head closes only by renumbering. The pull is the arbiter either
 	 * way — once it has run, whatever it left is contiguous with the watermark
 	 * or is about to be made so — so the flag clears here regardless.
+	 *
+	 * The renumber applies only while the refused mutation still heads the
+	 * queue. A peer tab may have recovered first and pushed ids above
+	 * `lastAcked` since this pull read it; a queue whose head moved is left for
+	 * the next push to test.
 	 */
 	private async recoverGap(workspaceId: string, lastAcked: bigint): Promise<void> {
 		const state = this.workspaces.get(workspaceId);
-		if (!state?.gapped) return;
-		state.gapped = false;
-		await this.resequence(workspaceId, lastAcked + 1n);
+		const head = state?.gapped;
+		if (!state || !head) return;
+		state.gapped = undefined;
+		await this.resequence(workspaceId, lastAcked + 1n, head);
 	}
 
 	/**

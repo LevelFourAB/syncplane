@@ -14,7 +14,7 @@ import {
 import { metaCursor, metaLastMutationId, metaPushedThrough } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { buildPut, EntityRegistry } from '../../src/mutations.js';
-import { createKvMutex } from '../../src/mutex.js';
+import { ChainMutex, createKvMutex, type Mutex } from '../../src/mutex.js';
 import { enqueuePending, readPending } from '../../src/optimistic/queue.js';
 import { applyMutationLocally } from '../../src/optimistic/rebase.js';
 import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
@@ -42,6 +42,37 @@ class FakeEngine {
 	watermark = 0n;
 	/** Mutation ids the server accepted, in arrival order. */
 	readonly applied: bigint[] = [];
+	private hold: { reached: () => void; release: Promise<void> } | undefined;
+
+	/**
+	 * Holds the next pull after it has read the watermark, until `release`: the
+	 * answer is on its way while other requests run.
+	 */
+	holdNextPull(): { isHeld: Promise<void>; release: () => void } {
+		let reached!: () => void;
+		const isHeld = new Promise<void>((r) => (reached = r));
+		let release!: () => void;
+		this.hold = { reached, release: new Promise<void>((r) => (release = r)) };
+		return { isHeld, release };
+	}
+
+	private async pull() {
+		const watermark = this.watermark;
+		const hold = this.hold;
+		this.hold = undefined;
+		if (hold !== undefined) {
+			hold.reached();
+			await hold.release;
+		}
+		return {
+			patch: { changes: [], dropEntities: [] },
+			nextCursor: new Uint8Array([ 1 ]),
+			lastAckedMutationId: watermark,
+			reset: false,
+			hasMore: false,
+			seq: 0n,
+		};
+	}
 
 	push(req: PushRequest): MessageInitShape<typeof PushResponseSchema> {
 		const batch = req.batches[0]!;
@@ -79,14 +110,7 @@ class FakeEngine {
 		return createRouterTransport(({ service }) => {
 			service(SyncService, {
 				push: (req) => this.push(req),
-				pull: () => ({
-					patch: { changes: [], dropEntities: [] },
-					nextCursor: new Uint8Array([ 1 ]),
-					lastAckedMutationId: this.watermark,
-					reset: false,
-					hasMore: false,
-					seq: 0n,
-				}),
+				pull: () => this.pull(),
 				// eslint-disable-next-line require-yield
 				async *bootstrap() {
 					throw new Error('bootstrap should not be called with a seeded cursor');
@@ -146,8 +170,10 @@ describe('coordinator mutation-id gap recovery', () => {
 		}
 	}
 
-	function newCoordinator(status: StatusTracker): Coordinator {
-		const kvMutex = createKvMutex('test');
+	function newCoordinator(
+		status: StatusTracker,
+		kvMutex: Mutex = createKvMutex('test'),
+	): Coordinator {
 		const hub = new WatcherHub(kv, registry, kvMutex);
 		return new Coordinator({
 			transport: engine.transport(),
@@ -215,6 +241,49 @@ describe('coordinator mutation-id gap recovery', () => {
 		expect(await pendingIds()).toEqual([]);
 
 		await coord.stop();
+	});
+
+	it("keeps a new write's id when a peer tab recovered the gap first", async () => {
+		// Given two tabs on one store, both refused for the hole below [6, 7]
+		engine.watermark = 3n;
+		await seedQueue([ 6n, 7n ]);
+		const kvMutex = new ChainMutex();
+		const tabA = newCoordinator(new StatusTracker(), kvMutex);
+		const tabB = newCoordinator(new StatusTracker(), kvMutex);
+		const heldB = engine.holdNextPull();
+		const syncB = tabB.syncNow().catch(() => {});
+		await heldB.isHeld; // B was refused and its pull read watermark 3
+
+		// When A recovers, ships [4, 5] and pulls them away, the user writes
+		// id 6, and only then B's pull answers
+		await expect(tabA.syncNow()).rejects.toThrow();
+		await tabA.syncNow();
+		expect(engine.applied).toEqual([ 4n, 5n ]);
+		expect(await pendingIds()).toEqual([]);
+		const def = registry.bySchema(TodoSchema);
+		const write = create(MutationSchema, {
+			clientId: CLIENT,
+			mutationId: 6n,
+			payload: {
+				case: 'crud',
+				value: buildPut(def, TodoSchema, create(TodoSchema, { id: 'new', title: 'new' })),
+			},
+		});
+		const tx = await kv.write();
+		await enqueuePending(tx, WS, write);
+		await applyMutationLocally(tx, registry, {}, WS, write, new TouchSet());
+		await tx.put(metaLastMutationId(WS), '6');
+		await tx.commit();
+		heldB.release();
+		await syncB;
+
+		// Then the write keeps id 6 and reaches the server
+		expect.soft(await pendingIds()).toEqual([ 6n ]);
+		await tabA.syncNow();
+		expect(engine.applied).toEqual([ 4n, 5n, 6n ]);
+
+		await tabA.stop();
+		await tabB.stop();
 	});
 
 	it('does not renumber a contiguous queue', async () => {

@@ -1670,6 +1670,11 @@ export interface ResequenceResult extends RebaseResult {
  * writes both marks back down, since the counter is what the next local write
  * mints from.
  *
+ * With `head`, the renumber applies only while the queue head is `head` itself,
+ * at its id. Otherwise `changed` is false and nothing is written: the queue is
+ * shared, and a peer tab that acked, dropped or renumbered the head may have
+ * pushed ids from `firstId` on already.
+ *
  * Run under the kv mutex.
  */
 export async function resequencePending(
@@ -1678,8 +1683,9 @@ export async function resequencePending(
 	mirrors: MirrorMap,
 	workspaceId: string,
 	firstId: bigint,
+	head?: Mutation,
 ): Promise<ResequenceResult> {
-	return runResequence(kv, registry, mirrors, workspaceId, undefined, firstId);
+	return runResequence(kv, registry, mirrors, workspaceId, undefined, firstId, head);
 }
 
 /** Outcome of dropAndResequencePending. */
@@ -1773,16 +1779,22 @@ async function runResequence(
 	workspaceId: string,
 	drop: Mutation | undefined,
 	firstId: bigint,
+	expectHead?: Mutation,
 ): Promise<DropResult> {
 	const touched = new TouchSet();
 	const tx = await kv.write();
 	try {
 		const pending = await readPending(tx, workspaceId);
-		if (drop !== undefined) {
-			const queued = pending.find((m) => m.mutationId === drop.mutationId);
-			if (queued === undefined || !equals(MutationSchema, queued, drop)) {
-				// Without the drop there is no hole to close, and a renumber would
-				// pull the counter down onto ids a peer tab may have pushed already.
+		const expected = drop ?? expectHead;
+		if (expected !== undefined) {
+			const queued = drop === undefined
+				? pending[0]
+				: pending.find((m) => m.mutationId === drop.mutationId);
+			if (queued === undefined || !equals(MutationSchema, queued, expected)) {
+				// A peer tab moved the queue first. Without the drop there is no hole
+				// to close, and a head that changed may already be on the server past
+				// the caller's watermark: a renumber would pull the counter down onto
+				// ids a peer tab may have pushed already.
 				tx.release();
 				return {
 					touched,
