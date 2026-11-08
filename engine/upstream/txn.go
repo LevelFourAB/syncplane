@@ -672,7 +672,7 @@ func (t *txn) drop(e *entry, rej *rejection) error {
 				changed = true
 				version := uint64(impossibleVersion)
 				if rej == nil && hasResult {
-					version = casVersionOf(r)
+					version = casVersionOf(r, op.cas)
 				}
 				op.cas = casRef{mode: casVersion, version: version}
 			}

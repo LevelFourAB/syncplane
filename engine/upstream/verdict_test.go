@@ -306,6 +306,32 @@ var _ = Describe("Verdicts", func() {
 			Expect(title(n.todo("t8"))).To(Equal("theirs"))
 		})
 
+		It("made against a pending write whose push response was lost applies when the row already shows the origin's later change", func() {
+			n.part.blockPush.Store(true)
+			n.patch(&todov1.Todo{Id: "t1", Title: "mine"}, "title")
+			// Another writer changes the row after the origin applied the
+			// pending write, and pushes stay blocked so that the page with
+			// that change reaches the link before the write's answer.
+			theirs := func() {
+				o.patch(&todov1.Todo{Id: "t1", Completed: true}, "completed")
+				n.part.blockPush.Store(true)
+			}
+			n.part.onLost.Store(&theirs)
+			n.part.losePushes.Store(1)
+			n.part.blockPush.Store(false)
+			Eventually(func() bool { return n.todo("t1").GetCompleted() }).Should(BeTrue())
+			Expect(title(n.todo("t1"))).To(Equal("mine"))
+
+			v := version("t1")
+			_, err := n.ws().Patch(ctx, &todov1.Todo{Id: "t1", Title: "swapped"}, []string{"title"}, &v)
+			Expect(err).NotTo(HaveOccurred())
+			n.part.blockPush.Store(false)
+			n.flush()
+			Expect(n.rejected()).To(BeEmpty())
+			Expect(title(o.todo("t1"))).To(Equal("swapped"))
+			Expect(o.todo("t1").GetCompleted()).To(BeTrue())
+		})
+
 		It("made against a pending write the origin rejects is rejected with conflict", func() {
 			n.part.Cut()
 			n.put(&todov1.Todo{Id: "t6", Title: "forbidden"})

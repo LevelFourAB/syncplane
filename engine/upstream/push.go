@@ -158,13 +158,14 @@ func forwardedValue(b *bound, st stateTx, op entryOp, maxValue int) ([]byte, err
 }
 
 // baseVersion resolves a compare-and-swap whose base is another entry: the
-// sequence the origin applied the base at, and impossibleVersion when it
-// rejected the base or did not say the sequence. wait reports a base the
-// origin has not answered; the version is then a placeholder.
+// sequence the origin applied the base at (see casVersionOf), and
+// impossibleVersion when it rejected the base or did not say the sequence.
+// wait reports a base the origin has not answered; the version is then a
+// placeholder.
 //
-// The confirmed version is no substitute for an unknown sequence: it includes
-// every write to the row after the base, so a compare-and-swap made against
-// the base would apply over a change it never saw. An origin that predates
+// The current confirmed version is no substitute for an unknown sequence: it
+// includes every write to the row after the capture, so a compare-and-swap
+// made against the base would apply over a change it never saw. An origin that predates
 // sequences on ALREADY_APPLIED, or that no longer holds the sequence, leaves
 // it unknown.
 func baseVersion(st stateTx, op entryOp) (version uint64, wait bool, err error) {
@@ -178,18 +179,19 @@ func baseVersion(st stateTx, op entryOp) (version uint64, wait bool, err error) 
 	case r.status == syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED:
 		return impossibleVersion, false, nil
 	default:
-		return casVersionOf(r), false, nil
+		return casVersionOf(r, op.cas), false, nil
 	}
 }
 
 // casVersionOf is the version a compare-and-swap based on an applied entry
-// expects: the sequence the origin applied it at, or impossibleVersion when
-// the answer did not say.
-func casVersionOf(r resultRecord) uint64 {
+// expects: the later of the sequence the origin applied it at and the
+// confirmed version cas recorded at capture, or impossibleVersion when the
+// answer did not say the sequence.
+func casVersionOf(r resultRecord, cas casRef) uint64 {
 	if r.seq == 0 {
 		return impossibleVersion
 	}
-	return r.seq
+	return max(r.seq, cas.version)
 }
 
 // recordResults stores the origin's verdicts on a pushed batch. A resend

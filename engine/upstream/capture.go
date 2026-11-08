@@ -224,7 +224,8 @@ func keepConfirmed(st stateTx, r RowRef, ops []server.CapturedOp) error {
 
 // translateCAS turns a local compare-and-swap into the origin's terms: the
 // origin version of the confirmed row when no pending entry touches the row,
-// and otherwise the sequence the latest such entry is applied at.
+// and otherwise the later of that version and the sequence the latest such
+// entry is applied at.
 func translateCAS(st stateTx, e *entry, op server.CapturedOp) (casRef, error) {
 	for _, prev := range e.ops {
 		if prev.entity == op.Entity && prev.key == op.Key {
@@ -232,21 +233,27 @@ func translateCAS(st stateTx, e *entry, op server.CapturedOp) (casRef, error) {
 				fmt.Sprintf("a compare-and-swap of %s %q after another write to it in the same mutation cannot be forwarded", op.Entity, op.Key))
 		}
 	}
+	c, ok, err := st.confirmed(op.Entity, op.Key)
+	if err != nil {
+		return casRef{}, err
+	}
+	var version uint64
+	if ok && c.present {
+		version = c.version
+	}
 	ids, err := st.touched(op.Entity, op.Key)
 	if err != nil {
 		return casRef{}, err
 	}
 	if len(ids) > 0 {
-		return casRef{mode: casBase, base: slices.Max(ids)}, nil
+		// The local row the guard passed against is the confirmed row with
+		// the pending entries replayed on top, so the caller saw every
+		// origin change the confirmed row holds. One the origin made after
+		// the base was applied puts the origin row at that change's version,
+		// not at the base's sequence (see casVersionOf).
+		return casRef{mode: casBase, base: slices.Max(ids), version: version}, nil
 	}
-	c, ok, err := st.confirmed(op.Entity, op.Key)
-	if err != nil {
-		return casRef{}, err
-	}
-	if !ok || !c.present {
-		return casRef{mode: casVersion}, nil
-	}
-	return casRef{mode: casVersion, version: c.version}, nil
+	return casRef{mode: casVersion, version: version}, nil
 }
 
 // allocate returns the id of a new entry: the id and verdict of an earlier

@@ -194,7 +194,8 @@ const (
 	casNone casMode = iota
 	// casVersion sends casRef.version as is.
 	casVersion
-	// casBase sends the origin sequence the entry casRef.base was applied at.
+	// casBase sends the origin sequence the entry casRef.base was applied
+	// at, or casRef.version when that is higher.
 	casBase
 )
 
