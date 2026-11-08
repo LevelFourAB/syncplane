@@ -2,8 +2,10 @@ package server_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -68,6 +70,24 @@ var _ = Describe("Late rejection", func() {
 			}
 			return tx.RejectLate(origins[id], server.CodePermissionDenied, "refused upstream")
 		})).To(Succeed())
+	}
+	// lateIDs pulls from cursor to the end and returns the mutation ids of
+	// every late rejection the pages carried.
+	lateIDs := func(clientID string, cursor []byte) map[uint64]bool {
+		GinkgoHelper()
+		ids := map[uint64]bool{}
+		for range 1000 {
+			page := pull(clientID, cursor)
+			for _, l := range page.GetLateRejections() {
+				ids[l.GetMutationId()] = true
+			}
+			cursor = page.GetNextCursor()
+			if !page.GetHasMore() {
+				return ids
+			}
+		}
+		Fail("the pulls did not settle")
+		return nil
 	}
 
 	It("gives each client write its origin", func() {
@@ -203,5 +223,93 @@ var _ = Describe("Late rejection", func() {
 			Expect(page.GetNextCursor()).NotTo(BeEmpty())
 			break
 		}
+	})
+
+	// A late rejection waits in the client's rejection record until a pull
+	// reaches it, so the record's size bound must not drop it first.
+	Describe("before the client pulls", func() {
+		It("delivers every late rejection one pass records", func() {
+			// Given 700 applied writes, as a long offline queue would leave
+			const n = 700
+			for chunk := range n / 100 {
+				var muts []*syncplanev1.Mutation
+				for i := range 100 {
+					id := uint64(chunk*100 + i + 1)
+					key := fmt.Sprintf("w%04d", id)
+					muts = append(muts, putMutation("c1", id, "widget", key, &testdatav1.Widget{Id: key}))
+				}
+				for _, r := range push(muts...) {
+					Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+				}
+			}
+			before := pull("c1", nil)
+			for before.GetHasMore() {
+				before = pull("c1", before.GetNextCursor())
+			}
+
+			// When the origin refuses every one of them in one pass
+			msg := "refused upstream: " + strings.Repeat("x", 82)
+			Expect(srv.Replicate(ctx, ws, func(tx *server.ReplicaTx) error {
+				for id := uint64(1); id <= n; id++ {
+					if err := tx.Delete("widget", fmt.Sprintf("w%04d", id)); err != nil {
+						return err
+					}
+					if err := tx.RejectLate(origins[id], server.CodePermissionDenied, msg); err != nil {
+						return err
+					}
+				}
+				return nil
+			})).To(Succeed())
+
+			// Then the client hears of each one
+			got := lateIDs("c1", before.GetNextCursor())
+			var missing []uint64
+			for id := uint64(1); id <= n; id++ {
+				if !got[id] {
+					missing = append(missing, id)
+				}
+			}
+			Expect(missing).To(BeEmpty(), "every reverted mutation is reported to its client")
+		})
+
+		It("keeps a late rejection across a push the server rejects", func() {
+			// Given a late rejection the client has not pulled
+			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1"}))
+			before := pull("c1", nil)
+			rejectLate(1, "w1")
+
+			// When the client pushes 1000 writes that are each refused
+			push(putMutation("c2", 1, "widget", "hot", &testdatav1.Widget{Id: "hot"}))
+			id := uint64(2)
+			for range 10 {
+				var muts []*syncplanev1.Mutation
+				for range 100 {
+					muts = append(muts, withExpectedVersion(
+						putMutation("c1", id, "widget", "hot", &testdatav1.Widget{Id: "hot"}), 999999))
+					id++
+				}
+				for _, r := range push(muts...) {
+					Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+				}
+			}
+
+			// Then its next pull still carries the late rejection
+			Expect(lateIDs("c1", before.GetNextCursor())).To(HaveKey(uint64(1)))
+		})
+
+		It("delivers a late rejection whose message is larger than the record's bound", func() {
+			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1"}))
+			before := pull("c1", nil)
+
+			Expect(srv.Replicate(ctx, ws, func(tx *server.ReplicaTx) error {
+				if err := tx.Delete("widget", "w1"); err != nil {
+					return err
+				}
+				return tx.RejectLate(origins[1], server.CodePermissionDenied, strings.Repeat("x", 70<<10))
+			})).To(Succeed())
+
+			Expect(lateIDs("c1", before.GetNextCursor())).To(HaveKey(uint64(1)),
+				"the message may be cut short, but the rejection must arrive")
+		})
 	})
 })

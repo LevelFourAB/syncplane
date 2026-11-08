@@ -171,7 +171,10 @@ The server retains rejection verdicts within the following limits:
 
 - The server drops verdicts oldest-first when stored codes and messages exceed
   64 KiB per client. It keeps every verdict of the client's latest push,
-  whatever they cost, so a resend of that push always gets them back.
+  whatever they cost, so a resend of that push always gets them back. Late
+  rejections (see [Chained sync](chained-sync.md)) are not counted and not
+  dropped by this bound, because only a pull delivers them. The server cuts the
+  message of each late rejection to 1 KiB.
 - Garbage collection (`WithGC`) clears the verdicts of a client that has not
   pushed within the tombstone retention. The watermark stays. A later resend
   returns `ALREADY_APPLIED` and the server does not apply the mutation.

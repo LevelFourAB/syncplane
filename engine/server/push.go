@@ -525,12 +525,17 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 }
 
 // maxRejectionRecordBytes bounds the code and message text one client's
-// recorded verdicts may cost, because both are written by the rejecting hook
-// and a client can provoke as many rejections per push as the batch limit
+// recorded push verdicts may cost, because both are written by the rejecting
+// hook and a client can provoke as many rejections per push as the batch limit
 // allows. Verdicts past the bound are dropped oldest-first and their ids fall
 // back to a bare ALREADY_APPLIED ack. The verdicts of the latest batch are
 // never dropped (see trimRejections), so only a client that pushes again
 // without reading a response can lose one.
+//
+// Late rejections are outside the bound. A push verdict past it was already
+// sent in a push response, but a late rejection is sent only by a pull that
+// reaches it, so dropping one loses it. RejectLate bounds each of their
+// messages instead (maxLateRejectionMessageBytes), and GC expires them.
 const maxRejectionRecordBytes = 64 << 10
 
 // findRejection looks a mutation id up among a client's recorded verdicts.
@@ -557,18 +562,31 @@ func findApplied(recs []storage.AppliedMutation, mutationID uint64) uint64 {
 	return 0
 }
 
-// trimRejections drops the oldest verdicts from an ascending list until it fits
-// maxRejectionRecordBytes, keeping the newest keep verdicts whatever they cost.
-// Those are the verdicts of the batch being written, and the client resends
-// that batch whole when its response is lost: a verdict dropped there turns a
-// rejection into a silent ALREADY_APPLIED. What they cost is bounded by the
-// response that carries them.
+// trimRejections drops the oldest push verdicts from an ascending list until
+// they fit maxRejectionRecordBytes, keeping the newest keep push verdicts
+// whatever they cost. Those are the verdicts of the batch being written, and
+// the client resends that batch whole when its response is lost: a verdict
+// dropped there turns a rejection into a silent ALREADY_APPLIED. What they
+// cost is bounded by the response that carries them. Late rejections (Seq set)
+// are kept and not counted.
 func trimRejections(recs []storage.ClientRejection, keep int) []storage.ClientRejection {
 	budget := maxRejectionRecordBytes
+	seen := 0
 	for i := len(recs) - 1; i >= 0; i-- {
+		if recs[i].Seq != 0 {
+			continue
+		}
 		budget -= len(recs[i].Code) + len(recs[i].Message)
-		if budget < 0 {
-			return recs[min(i+1, max(len(recs)-keep, 0)):]
+		seen++
+		if budget < 0 && seen > keep {
+			// recs[i] and every older push verdict go.
+			out := make([]storage.ClientRejection, 0, len(recs)-i)
+			for _, r := range recs[:i] {
+				if r.Seq != 0 {
+					out = append(out, r)
+				}
+			}
+			return append(out, recs[i+1:]...)
 		}
 	}
 	return recs

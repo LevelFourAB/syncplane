@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"unicode/utf8"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/storage"
@@ -58,6 +59,8 @@ func originOf(client string, m *syncplanev1.Mutation) *MutationOrigin {
 // a row write does. A second record for the same mutation replaces the first.
 // The record is kept and expired with the client's other rejection records:
 // a client that pulls after they expired, or bootstraps, does not receive it.
+// The size bound on those records does not drop it. A message longer than
+// 1 KiB is stored and delivered cut to 1 KiB.
 //
 // It returns an error when origin has no Client or no MutationID, or when
 // code is empty.
@@ -80,7 +83,7 @@ func (r *ReplicaTx) RejectLate(origin MutationOrigin, code, message string) erro
 		rec := storage.ClientRejection{
 			MutationID: origin.MutationID,
 			Code:       code,
-			Message:    message,
+			Message:    clipMessage(message, maxLateRejectionMessageBytes),
 			Seq:        seq,
 			Targets:    slices.Clone(origin.Targets),
 			Mutator:    origin.Mutator,
@@ -97,6 +100,22 @@ func (r *ReplicaTx) RejectLate(origin MutationOrigin, code, message string) erro
 		}
 		return r.tx.SetClientRejections(origin.Client, trimRejections(recs, 0))
 	})
+}
+
+// maxLateRejectionMessageBytes bounds the message of one late rejection. Late
+// rejections are outside maxRejectionRecordBytes, so this is what bounds the
+// record a mass refusal leaves for one client.
+const maxLateRejectionMessageBytes = 1 << 10
+
+// clipMessage cuts s to at most n bytes, at a rune boundary.
+func clipMessage(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // deliveredThrough is the sequence through which a client holding cursor c

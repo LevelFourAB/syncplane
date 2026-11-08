@@ -50,7 +50,8 @@ The client got `APPLIED` for its push from the local engine, so the local engine
 Some limits apply to late rejections:
 
 - They reach only the client id and the caller that pushed the write. A write that no client pushed, such as one from `Apply` or an effect, is reported only through `OnRejected`.
-- The local engine keeps them with the client's other rejection records, and expires them with those records. A client that pulls after that, or bootstraps again, sees only the revert.
+- The local engine keeps them with the client's other rejection records, and expires them with those records. A client that pulls after that, or bootstraps again, sees only the revert. The size bound on those records does not drop a late rejection.
+- The local engine cuts the message of a late rejection to 1 KiB.
 - A client that pulls again from an earlier cursor receives them again.
 - The TypeScript client fires the callback in the tab that applies the page, which is not always the tab that made the write.
 - A late rejection that the local engine itself receives from its origin, in a chain of more than two servers, is not passed on.
