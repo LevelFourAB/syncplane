@@ -40,6 +40,7 @@ import {
 	metaIndexEntityPrefix,
 	metaIndexPrefix,
 	metaLastMutationId,
+	metaPushedThrough,
 	metaServerSeq,
 	metaUnresolvedPush,
 	overlayKey,
@@ -1266,34 +1267,46 @@ export async function finalizeRebase(
 		touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 	}
 
-	// The server can only have acked ids this store minted, so a watermark above
-	// the counter means the store lost writes it once held: a restored backup,
-	// a commit the browser dropped. The queued ids at or below the watermark
-	// then name writes the server never saw — it took other writes under them —
-	// and retiring them as acked would lose them without a word. They move to
-	// the ids the server expects next, and the counter with them.
+	// The server can only have acked ids this store sent, and the pushed-through
+	// mark holds the highest of them: it rises before every push. A watermark
+	// above it means that another writer used this client's ids. The store went
+	// back to an older copy of itself, another install shares a copy of it, or
+	// the server refused a push for client_id_in_use and the coordinator took
+	// the mark back to what the store had sent before that push. The queued ids
+	// above the mark then name writes the server never saw, and retiring them
+	// as acked would lose them without a word. They move to the ids the server
+	// expects next, and the counter with them. A store from before the mark has
+	// only its counter and queue to go by, and every queued id counts as unsent.
+	const throughRaw = (await tx.get(metaPushedThrough(workspaceId))) as string | undefined;
 	const counter = BigInt(
 		((await tx.get(metaLastMutationId(workspaceId))) as string | undefined) ?? '0',
 	);
-	const queued = counter < input.lastAckedMutationId ? await readPending(tx, workspaceId) : [];
-	const tail = queued[queued.length - 1]?.mutationId ?? 0n;
-	const minted = tail > counter ? tail : counter;
-	if (input.lastAckedMutationId > minted) {
-		const lost = queued;
-		reportError(
-			`workspace ${workspaceId}: the server has acked mutation ${input.lastAckedMutationId} of this client, `
-				+ `above the ${minted} this store minted; moving ${lost.length} queued mutations above it`,
-			new Error('local store is older than the server watermark'),
-		);
-		const { renumbered } = await renumberPending(
-			tx,
-			registry,
-			workspaceId,
-			lost,
-			input.lastAckedMutationId + 1n,
-		);
-		await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, renumbered, touched);
-		return renumbered.length;
+	const sentMark = throughRaw !== undefined ? BigInt(throughRaw) : undefined;
+	if (input.lastAckedMutationId > (sentMark ?? counter)) {
+		let lost = await readPending(tx, workspaceId);
+		const tail = lost[lost.length - 1]?.mutationId ?? 0n;
+		const mark = sentMark ?? (tail > counter ? tail : counter);
+		if (input.lastAckedMutationId > mark) {
+			let acked: Mutation[] = [];
+			if (sentMark !== undefined) {
+				({ dropped: acked, remaining: lost } = await dropAcked(tx, workspaceId, sentMark));
+				touchPendingAccess(touched, registry, workspaceId, acked);
+			}
+			reportError(
+				`workspace ${workspaceId}: the server has acked mutation ${input.lastAckedMutationId} of this client, `
+					+ `above the ${mark} this store sent; moving ${lost.length} queued mutations above it`,
+				new Error('another writer used this client id'),
+			);
+			const { renumbered } = await renumberPending(
+				tx,
+				registry,
+				workspaceId,
+				lost,
+				input.lastAckedMutationId + 1n,
+			);
+			await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, renumbered, touched, acked);
+			return renumbered.length;
+		}
 	}
 
 	// Read in this transaction, not passed in by the caller: the push that went

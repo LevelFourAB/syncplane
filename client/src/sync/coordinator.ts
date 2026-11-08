@@ -4,6 +4,7 @@ import { type Client, Code, ConnectError, createClient, type Transport } from '@
 import { type DecodedAccess, encodeAccess, touchPendingAccess } from '../access.js';
 import { sameBytes } from '../blob/digest.js';
 import {
+	CodeClientIdInUse,
 	CodeConflict,
 	CodeInternal,
 	CodeMutationIdGap,
@@ -541,6 +542,12 @@ interface WorkspaceSync {
 	 * watermark; see recoverGap.
 	 */
 	gapped?: Mutation;
+	/**
+	 * Set when the server refused this workspace's batch for client_id_in_use,
+	 * until the next pull. That pull moves the writes the server never saw past
+	 * the other writer's mutations (see finalizeRebase).
+	 */
+	inUse?: boolean;
 }
 
 /**
@@ -721,6 +728,13 @@ export class Coordinator {
 	 * another reaches past it.
 	 */
 	private unresolvedPush = new Map<string, bigint>();
+	/**
+	 * The highest mutation id of each workspace that this store may have sent:
+	 * the pushed-through mark as markPushThrough read it before raising it,
+	 * raised again by every request this tab builds. Each batch carries it as
+	 * sent_through.
+	 */
+	private sentThrough = new Map<string, bigint>();
 	/**
 	 * Rows (fullStateKey) whose collaborative-text writes must ship whole
 	 * documents because the server refused a delta-state fragment for them. In
@@ -1212,6 +1226,9 @@ export class Coordinator {
 				const gapped = syncable
 					.map(([ ws ]) => ws)
 					.filter((ws) => this.workspaces.get(ws)?.gapped);
+				const inUse = syncable
+					.map(([ ws ]) => ws)
+					.filter((ws) => this.workspaces.get(ws)?.inUse);
 				for (const [ ws, subs ] of syncable) {
 					if (this.workspaces.get(ws)?.revoked || this.cycleDenied.has(ws)) continue;
 					try {
@@ -1223,6 +1240,7 @@ export class Coordinator {
 					}
 				}
 				for (const ws of gapped) errors.push(gapError(ws));
+				for (const ws of inUse) errors.push(inUseError(ws));
 			}
 			if (errors.length > 0) throw errors[0];
 		});
@@ -1500,7 +1518,7 @@ export class Coordinator {
 			// settle the first, and the second can never succeed.
 			const eligible = round === 0 ? workspaceIds : workspaceIds.filter((ws) => {
 				const state = this.workspaces.get(ws);
-				return state !== undefined && !state.revoked && !state.gapped;
+				return state !== undefined && !state.revoked && !state.gapped && !state.inUse;
 			});
 			if (eligible.length === 0) return;
 			if (!await this.pushRound(eligible, sent, round === 0)) return;
@@ -1668,7 +1686,7 @@ export class Coordinator {
 		let settled = false;
 		try {
 			while (remaining.size > 0) {
-				const batches: { workspaceId: string; mutations: Mutation[] }[] = [];
+				const batches: { workspaceId: string; mutations: Mutation[]; sentThrough?: bigint }[] = [];
 				const shipped: { workspaceId: string; count: number; atHead: boolean }[] = [];
 				// What was sent this round, so a rejection can name the rows it would
 				// have written; the server answers with ids alone.
@@ -1693,7 +1711,10 @@ export class Coordinator {
 					bytes += wsBytes;
 					const slice = entry.pending.slice(0, take);
 					for (const m of slice) inFlight.set(`${ws}\u0000${m.mutationId}`, m);
-					batches.push({ workspaceId: ws, mutations: slice });
+					const sentThrough = this.sentThrough.get(ws);
+					batches.push({ workspaceId: ws, mutations: slice, sentThrough });
+					const last = slice[slice.length - 1]!.mutationId;
+					if (sentThrough !== undefined && last > sentThrough) this.sentThrough.set(ws, last);
 					shipped.push({ workspaceId: ws, count: take, atHead: entry.atHead });
 					budget -= take;
 				}
@@ -1823,6 +1844,19 @@ export class Coordinator {
 							}
 							continue;
 						}
+						if (wsResult.errorCode === CodeClientIdInUse) {
+							// Nothing applied, and the ids above what this store sent before
+							// the batch hold the other writer's mutations. The mark goes back
+							// to that value, so the next pull moves the queue past them
+							// rather than retire it as acked (see finalizeRebase).
+							if (state) {
+								state.poison = undefined;
+								state.inUse = true;
+							}
+							const sentBefore = batches.find((b) => b.workspaceId === sent.workspaceId)?.sentThrough;
+							if (sentBefore !== undefined) await this.lowerPushedThrough(sent.workspaceId, sentBefore);
+							continue;
+						}
 						if (wsResult.errorCode === CodeWorkspaceAccessRevoked) {
 							// Permanent: this client may no longer write here. Retrying can
 							// never succeed, so stop and let the status carry it.
@@ -1878,6 +1912,7 @@ export class Coordinator {
 						state.poison = undefined;
 						state.deadLetter = undefined;
 						state.gapped = undefined;
+						state.inUse = undefined;
 					}
 					let ackedSeq = 0n;
 					for (const result of wsResult.results) {
@@ -1979,6 +2014,29 @@ export class Coordinator {
 			await this.resolveUnresolvedPush(answered).catch(() => undefined);
 		}
 		return !settled;
+	}
+
+	/**
+	 * Takes a workspace's pushed-through mark back to `sentThrough` after the
+	 * server refused a batch for client_id_in_use: the server applied none of
+	 * the ids above it.
+	 */
+	private async lowerPushedThrough(workspaceId: string, sentThrough: bigint): Promise<void> {
+		this.sentThrough.set(workspaceId, sentThrough);
+		await this.opts.kvMutex.run(async () => {
+			const tx = await this.opts.kv.write();
+			try {
+				if ((await readPushedThrough(tx, workspaceId)) <= sentThrough) {
+					tx.release();
+					return;
+				}
+				await writePushedThrough(tx, workspaceId, sentThrough);
+				await tx.commit();
+			} catch (err) {
+				tx.release();
+				throw err;
+			}
+		});
 	}
 
 	/**
@@ -2203,7 +2261,9 @@ export class Coordinator {
 					queues.set(ws, pending);
 					const isolating = this.workspaces.get(ws)?.poison?.id === head.mutationId;
 					const through = isolating ? head.mutationId : pending[pending.length - 1]!.mutationId;
-					if (through > (await readPushedThrough(tx, ws))) {
+					const before = await readPushedThrough(tx, ws);
+					this.sentThrough.set(ws, before);
+					if (through > before) {
 						await writePushedThrough(tx, ws, through);
 						dirty = true;
 					}
@@ -2821,6 +2881,8 @@ export class Coordinator {
 			repulled = true;
 		}
 		await this.recoverGap(workspaceId, lastAcked);
+		const state = this.workspaces.get(workspaceId);
+		if (state) state.inUse = undefined;
 		await this.settleDeadLetter(workspaceId, lastAcked);
 	}
 
@@ -4312,6 +4374,15 @@ function errorInfo(err: unknown): SyncErrorInfo {
  * server reports it as a code on a workspace's batch result rather than as an
  * RPC error, so nothing else in the cycle would carry it.
  */
+function inUseError(workspaceId: string): ConnectError {
+	const err = new ConnectError(
+		`workspace "${workspaceId}": another writer used this client's id; the client moves its queue past that writer's mutations`,
+		Code.FailedPrecondition,
+	);
+	err.metadata.set(ErrorCodeMetadataKey, CodeClientIdInUse);
+	return err;
+}
+
 function gapError(workspaceId: string): ConnectError {
 	const err = new ConnectError(
 		`workspace "${workspaceId}": the server refused this client's queue for a mutation-id gap`,

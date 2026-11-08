@@ -223,14 +223,39 @@ watermark names the caller for this reason: a principal that pushes under
 another principal's `client_id` moves only its own watermark, so it cannot
 consume or skip IDs sent by the other principal.
 
-The server can only acknowledge IDs that a client minted. The TypeScript client
-uses this to detect a local store that went back in time, for example a
-restored device backup or a commit that the browser lost. When a pull or a
-bootstrap reports a watermark above the last ID the store minted, the client
-moves its queued mutations to the IDs after the watermark, and mints new IDs
-from there. The check cannot see a rollback when the store minted IDs up to
-the watermark again before its first pull. The server already holds those IDs,
-so the mutations queued under them are lost.
+### Another writer under the same `client_id`
+
+A watermark cannot tell a resend from another write that carries the same
+mutation ID. Another writer can use a client's IDs in three ways: a second
+install that runs on a copy of the client's store, the store after it went
+back to an older copy of itself (a restored device backup, a commit that the
+browser lost), or another anonymous caller. The server would answer the
+client's next write with an acknowledgment, or with the verdict of the other
+writer's mutation, and the write would never apply.
+
+Each push therefore says how far the client got: `WorkspaceBatch.sent_through`
+holds the highest mutation ID the client sent before this request. A watermark
+above that value means that the IDs between the two are another writer's. The
+server applies nothing of the batch and answers `client_id_in_use`. Every
+client in this repository sends the value. The TypeScript client keeps it in
+the store, and raises it before each push. A copy of the store or a rollback
+copies or rolls back the value with the queue, which is what makes the other
+writer visible. On `client_id_in_use` the client keeps its queue: the next pull
+reports the watermark, and the client moves every queued write above
+`sent_through` to the IDs after the watermark. The Go client returns
+`ErrClientIDInUse` and learns the watermark again, and the upstream link moves
+its writes as the TypeScript client does.
+
+The check has limits:
+
+- A push without `sent_through`, from an older client, gets the earlier
+  answers.
+- The client counts every ID it put in a request as sent, answered or not. A
+  push whose response was lost, followed by another writer that takes the same
+  ID before the resend, still gets an acknowledgment for a write that never
+  applied.
+- A queued write that a store had already pushed before it went back to an
+  older copy of itself applies again under its new ID.
 
 ## Deletes and the horizon
 

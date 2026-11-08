@@ -23,6 +23,7 @@ import {
 	ruleRowOf,
 } from '../access.js';
 import {
+	CodeClientIdInUse,
 	CodeConflict,
 	CodeInvalidArgument,
 	CodeMutationIdGap,
@@ -741,12 +742,12 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		await this.pushGate();
 		const results = [];
 		for (const batch of req.batches) {
-			results.push(await this.pushWorkspace(batch.workspaceId, batch.mutations));
+			results.push(await this.pushWorkspace(batch.workspaceId, batch.mutations, batch.sentThrough));
 		}
 		return { results, schemaRevision: this.schemaRevision };
 	}
 
-	private async pushWorkspace(workspaceId: string, mutations: Mutation[]) {
+	private async pushWorkspace(workspaceId: string, mutations: Mutation[], sentThrough?: bigint) {
 		const fail = (errorCode: string, errorMessage: string) => ({
 			workspaceId,
 			results: [],
@@ -756,6 +757,23 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		const denial = this.denial(workspaceId);
 		if (denial) return fail(denial.code, denial.message);
 		const state = this.ws(workspaceId);
+		if (sentThrough !== undefined && mutations.length > 0) {
+			// Judged before any mutation, as engine/server/push.go does: the ids
+			// above sentThrough that the watermark covers are another writer's.
+			const clientId = mutations[0]!.clientId;
+			if (mutations.some((m) => m.clientId !== clientId)) {
+				return fail(
+					CodeInvalidArgument,
+					`workspace "${workspaceId}": a batch that sets sent_through must carry one client_id`,
+				);
+			}
+			if ((state.watermarks.get(clientId) ?? 0n) > sentThrough) {
+				return fail(
+					CodeClientIdInUse,
+					`workspace "${workspaceId}": client_id "${clientId}" is in use by another writer`,
+				);
+			}
+		}
 		const results = [];
 		let applied = false;
 		for (const m of mutations) {

@@ -58,6 +58,7 @@ export {
 	CodeBlobCorrupt,
 	CodeBlobRefused,
 	CodeBlobUnavailable,
+	CodeClientIdInUse,
 	CodeConflict,
 	CodeFormatUpgraded,
 	CodeInternal,

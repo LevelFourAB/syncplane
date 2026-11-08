@@ -140,6 +140,21 @@ export const CodeWorkspaceNoAccess = 'workspace_no_access';
 export const CodeMutationIdGap = 'mutation_id_gap';
 
 /**
+ * Another writer used this client's id after the mutation ids this client
+ * sent, so NOTHING in the push batch applied. It can be a second install that
+ * runs on a copy of this client's store, this store after it went back to an
+ * older copy of itself, or another caller. The client keeps every queued
+ * write: the next pull moves the writes the server never saw past the other
+ * writer's mutations, and the next push sends them.
+ *
+ * Also surfaces on `status().lastError` for the cycle that saw it.
+ *
+ * Workspace-scoped, like CodeMutationIdGap: it appears on `WorkspaceResults`,
+ * not on any single mutation.
+ */
+export const CodeClientIdInUse = 'client_id_in_use';
+
+/**
  * A failure the caller cannot act on and that may not persist — a storage
  * error, or a permission hook that could not decide. Retry with backoff. It
  * never means "denied": a denial is always typed.
@@ -307,6 +322,7 @@ export type SyncErrorCode =
 	| typeof CodeInvalidArgument
 	| typeof CodeWorkspaceAccessRevoked
 	| typeof CodeMutationIdGap
+	| typeof CodeClientIdInUse
 	| typeof CodeInternal
 	| typeof CodeUnavailable
 	| typeof CodeFormatUpgraded

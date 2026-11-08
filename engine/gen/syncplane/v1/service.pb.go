@@ -179,8 +179,10 @@ type WorkspaceBatch struct {
 	// or below the watermark then name that writer's mutations, not this
 	// client's, and an ack for one would report a write that never applied.
 	// The server applies nothing and fails the batch with "client_id_in_use".
-	// The client must not push under the `client_id` again. It must take a new
-	// `client_id` and resend its queue under it from `mutation_id` 1.
+	// The client then resends its unanswered mutations above `sent_through`
+	// after the watermark, or under a new `client_id` from `mutation_id` 1. It
+	// must not resend them under their old ids, where the server holds the
+	// other writer's mutations.
 	SentThrough   *uint64 `protobuf:"varint,3,opt,name=sent_through,json=sentThrough,proto3,oneof" json:"sent_through,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
