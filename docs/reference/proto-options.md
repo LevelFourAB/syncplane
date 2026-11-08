@@ -1161,6 +1161,8 @@ References are allowed inside a oneof: a stored stub is replaced as a whole, and
 
 Maps merge per entry by map key. Individual entries are addressable in field masks, query conditions, and sort clauses:
 
+A map with `string` keys cannot hold the key `__proto__`, at any depth of a row. The TypeScript client holds a map as a plain object, where that key sets the prototype instead of adding an entry. The engine rejects with `invalid_argument` a write that stores the key, on every write path, and the TypeScript client throws on a `put` or `patch` whose value holds it. A row stored before the engine refused the key keeps it, the engine rejects a write of that row that keeps the key, and a TypeScript `put` of that row removes it.
+
 ```proto
 message Issue {
 	option (syncplane.v1.entity) = {

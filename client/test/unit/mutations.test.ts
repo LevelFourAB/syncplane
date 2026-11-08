@@ -19,6 +19,7 @@ import {
 } from '@bufbuild/protobuf/wkt';
 import { describe, expect, it } from 'vitest';
 
+import { SyncClient } from '../../src/client.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import {
 	IssueSchema,
@@ -31,6 +32,7 @@ import {
 	EntityOptionsSchema,
 	file_syncplane_v1_options,
 } from '../../src/gen/syncplane/v1/options_pb.js';
+import { MemoryKVStore } from '../../src/kv/memory.js';
 import {
 	buildPatch,
 	buildPut,
@@ -486,6 +488,56 @@ describe('keyOf', () => {
 			const msg = create(schema, { id: '-1' } as never);
 			expect(() => toBinary(schema, msg)).toThrow('invalid uint64');
 			expect(() => keyOf(entityDefOf(schema), msg)).toThrow('invalid uint64');
+		});
+	});
+});
+
+// A message holds a map as a plain object, where the key "__proto__" sets the
+// prototype, so the entry would be lost without an error on encode.
+describe('the map key "__proto__"', () => {
+	const def = entityDefOf(WidgetSchema);
+	// JSON.parse makes "__proto__" an own key, as user input does.
+	const attrs = (): Record<string, string> => JSON.parse('{"__proto__":"x","k":"v"}');
+
+	it('refuses a PATCH that holds it', () => {
+		expect(() => buildPatch(def, WidgetSchema, 'w1', { attrs: attrs() }, [ 'attrs' ]))
+			.toThrow('map "attrs" holds the key "__proto__"');
+	});
+
+	it('refuses it in a map of messages', () => {
+		const custom = JSON.parse('{"__proto__":{}}');
+		expect(() => buildPatch(def, WidgetSchema, 'w1', { custom }, [ 'custom' ])).toThrow(
+			'"__proto__"',
+		);
+	});
+
+	it('refuses a PUT that holds it', async () => {
+		const client = new SyncClient({
+			workspaceId: 'ws1',
+			kvStore: new MemoryKVStore(),
+			entities: [ WidgetSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		});
+		try {
+			await expect(client.mutate.put(WidgetSchema, { id: 'w1', attrs: attrs() }))
+				.rejects.toThrow('map "attrs" holds the key "__proto__"');
+			expect(await client.get(WidgetSchema, 'w1')).toBeUndefined();
+		} finally {
+			await client.close();
+		}
+	});
+
+	it('writes keys that only look like it', () => {
+		const crud = buildPatch(def, WidgetSchema, 'w1', {
+			attrs: { __proto: 'a', proto__: 'b', '': 'c' },
+		}, [
+			'attrs',
+		]);
+		expect(fromBinary(WidgetSchema, crud.value).attrs).toEqual({
+			__proto: 'a',
+			proto__: 'b',
+			'': 'c',
 		});
 	});
 });

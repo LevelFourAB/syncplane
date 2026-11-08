@@ -52,6 +52,9 @@ type entityInfo struct {
 	// keyedLists reports whether a row can hold a keyed list, which is what
 	// puts checkItemKeys on the write path.
 	keyedLists bool
+	// stringMaps reports whether a row can hold a map with string keys, which
+	// is what puts the map-key check of checkItemKeys on the write path.
+	stringMaps bool
 	// indexes are the entity's secondary indexes, derived at registration.
 	// Every row write refreshes all of them together (updateRowIndexes), so
 	// this is the ONE list that decides an entity's index write cost.
@@ -1476,6 +1479,7 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
 	info.keyedLists = lww.HoldsKeyedList(desc)
+	info.stringMaps = holdsStringMap(desc, map[protoreflect.FullName]bool{})
 	if len(info.textFields) > 0 {
 		info.mergers = lww.Mergers{}
 		for _, tf := range info.textFields {
@@ -2103,15 +2107,87 @@ func (info *entityInfo) checkKey(key string) error {
 // checkItemKeys refuses a row that holds one key on two elements of a keyed
 // list. A mask addresses an element by its key, so a merge into such a row
 // could not reach the second element, and a removal would leave it behind.
+//
+// It also refuses a row whose map with string keys holds the key
+// "__proto__". A JavaScript client holds a map as a plain object, where that
+// key sets the prototype instead of adding an entry, so a TS client could not
+// read the entry, and its PUT of the row would remove it.
 func (info *entityInfo) checkItemKeys(next protoreflect.Message) error {
-	if !info.keyedLists {
-		return nil
+	if info.keyedLists {
+		if path, ok := lww.DuplicateItemKey(next); ok {
+			return Reject(CodeInvalidArgument, fmt.Sprintf(
+				"entity %q: keyed list element %q appears more than once; a key names one element", info.name, path))
+		}
 	}
-	if path, ok := lww.DuplicateItemKey(next); ok {
-		return Reject(CodeInvalidArgument, fmt.Sprintf(
-			"entity %q: keyed list element %q appears more than once; a key names one element", info.name, path))
+	if info.stringMaps {
+		if path, ok := protoMapKey(next, ""); ok {
+			return Reject(CodeInvalidArgument, fmt.Sprintf(
+				"entity %q: map %q holds the key %q, which a JavaScript client cannot hold", info.name, path, jsProtoKey))
+		}
 	}
 	return nil
+}
+
+// jsProtoKey is the one string a JavaScript object cannot hold as an own
+// property through assignment.
+const jsProtoKey = "__proto__"
+
+// holdsStringMap reports whether a message of type md can hold a map with
+// string keys, at any depth.
+func holdsStringMap(md protoreflect.MessageDescriptor, seen map[protoreflect.FullName]bool) bool {
+	if seen[md.FullName()] {
+		return false
+	}
+	seen[md.FullName()] = true
+	fields := md.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if fd.IsMap() {
+			if fd.MapKey().Kind() == protoreflect.StringKind {
+				return true
+			}
+			if fd.MapValue().Kind() == protoreflect.MessageKind && holdsStringMap(fd.MapValue().Message(), seen) {
+				return true
+			}
+			continue
+		}
+		if fd.Message() != nil && holdsStringMap(fd.Message(), seen) {
+			return true
+		}
+	}
+	return false
+}
+
+// protoMapKey returns the path of the first map in msg with string keys that
+// holds jsProtoKey.
+func protoMapKey(msg protoreflect.Message, prefix string) (path string, found bool) {
+	msg.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		name := prefix + string(fd.Name())
+		switch {
+		case fd.IsMap():
+			if fd.MapKey().Kind() == protoreflect.StringKind && v.Map().Has(protoreflect.ValueOfString(jsProtoKey).MapKey()) {
+				path, found = name, true
+				return false
+			}
+			if fd.MapValue().Kind() == protoreflect.MessageKind {
+				v.Map().Range(func(mk protoreflect.MapKey, mv protoreflect.Value) bool {
+					path, found = protoMapKey(mv.Message(), name+"."+mk.String()+".")
+					return !found
+				})
+			}
+		case fd.IsList():
+			if fd.Message() != nil {
+				l := v.List()
+				for i := 0; i < l.Len() && !found; i++ {
+					path, found = protoMapKey(l.Get(i).Message(), fmt.Sprintf("%s.%d.", name, i))
+				}
+			}
+		case fd.Message() != nil:
+			path, found = protoMapKey(v.Message(), name+".")
+		}
+		return !found
+	})
+	return path, found
 }
 
 // projectRefs strips every embedded reference stub down to the target's key

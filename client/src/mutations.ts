@@ -3540,6 +3540,63 @@ export function stampCreatorFields<D extends DescMessage>(
 	return value;
 }
 
+/**
+ * Throws when a map with string keys in `init` holds the key "__proto__",
+ * at any depth. A message holds a map as a plain object, where that key sets
+ * the prototype instead of adding an entry, so encoding would drop the entry
+ * without an error. The server refuses the key too.
+ */
+export function refuseProtoMapKeys(entity: string, schema: DescMessage, init: unknown): void {
+	const path = protoMapKeyPath(schema, init, '');
+	if (path !== undefined) {
+		throw new Error(
+			`entity "${entity}": map "${path}" holds the key "__proto__", which a JavaScript client cannot hold`,
+		);
+	}
+}
+
+function protoMapKeyPath(schema: DescMessage, init: unknown, prefix: string): string | undefined {
+	if (init === null || typeof init !== 'object') return undefined;
+	const rec = init as Rec;
+	for (const member of schema.members) {
+		let field: DescField | undefined;
+		let v: unknown;
+		if (member.kind === 'oneof') {
+			const set = rec[member.localName] as { case?: string; value?: unknown } | undefined;
+			field = member.fields.find((f) => f.localName === set?.case);
+			v = set?.value;
+		} else {
+			field = member;
+			v = rec[member.localName];
+		}
+		if (field === undefined || v === null || typeof v !== 'object') continue;
+		const name = prefix + field.name;
+		let found: string | undefined;
+		switch (field.fieldKind) {
+			case 'map':
+				if (field.mapKey === ScalarType.STRING && Object.hasOwn(v, '__proto__')) return name;
+				if (field.mapKind === 'message') {
+					for (const [ k, mv ] of Object.entries(v)) {
+						found ??= protoMapKeyPath(field.message, mv, `${name}.${k}.`);
+					}
+				}
+				break;
+			case 'list':
+				if (field.listKind === 'message') {
+					(v as unknown[]).forEach((elem, i) => {
+						found ??= protoMapKeyPath(field.message, elem, `${name}.${i}.`);
+					});
+				}
+				break;
+			case 'message':
+				found = protoMapKeyPath(field.message, v, `${name}.`);
+				break;
+		}
+		if (found !== undefined) return found;
+	}
+	return undefined;
+}
+
 export function buildPut<D extends DescMessage>(
 	def: EntityDef,
 	schema: D,
@@ -3568,6 +3625,7 @@ export function buildPatch<D extends DescMessage>(
 	expectedVersion?: bigint,
 ): CrudMutation {
 	validateRowKey(def.name, key);
+	refuseProtoMapKeys(def.name, schema, init);
 	const value = create(schema, init);
 	const maskPaths = paths ?? maskFromInit(schema, init as object);
 	// Key fields define identity and travel in `key`; they are never patchable.

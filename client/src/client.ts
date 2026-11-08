@@ -164,6 +164,7 @@ import {
 	protectedFieldOf,
 	refQualified,
 	refSegmentOf,
+	refuseProtoMapKeys,
 	stampCreatorFields,
 	takeTextStrings,
 	textBasesFor,
@@ -2964,6 +2965,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						);
 					}
 				}
+				refuseProtoMapKeys(def.name, schema, init);
 				let msg = create(schema, init as MessageInitShape<typeof schema>);
 				if (
 					def.protectedFields.length > 0 || def.clearedOnCreate.length > 0

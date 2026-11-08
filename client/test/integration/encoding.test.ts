@@ -1,7 +1,59 @@
-import { describe, expect, it } from 'vitest';
+import { create } from '@bufbuild/protobuf';
+import { createClient } from '@connectrpc/connect';
+import { createConnectTransport } from '@connectrpc/connect-node';
+import { describe, expect, inject, it } from 'vitest';
 
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import {
+	CrudMutationSchema,
+	CrudOp,
+	MutationSchema,
+} from '../../src/gen/syncplane/v1/mutation_pb.js';
+import {
+	MutationStatus,
+	PullRequestSchema,
+	PushRequestSchema,
+	SyncService,
+} from '../../src/gen/syncplane/v1/service_pb.js';
 import { freshWorkspace, newClient } from './helpers.js';
+
+function rawRpc() {
+	return createClient(
+		SyncService,
+		createConnectTransport({ baseUrl: inject('serverUrl'), httpVersion: '1.1' }),
+	);
+}
+
+/** PUTs widget bytes exactly as given, the way a writer with another Protobuf
+ * runtime sends them, and returns the server's verdict. */
+async function putRawWidget(workspaceId: string, key: string, value: Uint8Array) {
+	const resp = await rawRpc().push(create(PushRequestSchema, {
+		batches: [ {
+			workspaceId,
+			mutations: [ create(MutationSchema, {
+				clientId: 'raw',
+				mutationId: 1n,
+				payload: {
+					case: 'crud',
+					value: create(CrudMutationSchema, { entity: 'widget', key, op: CrudOp.PUT, value }),
+				},
+			}) ],
+		} ],
+	}));
+	return resp.results[0]!.results[0]!;
+}
+
+/** The bytes the server stores for a widget, before any TS decode. */
+async function storedWidgetBytes(workspaceId: string, key: string): Promise<Uint8Array> {
+	const resp = await rawRpc().pull(create(PullRequestSchema, { workspaceId, clientId: 'reader' }));
+	const row = resp.patch?.changes.find((c) => c.entity === 'widget' && c.key === key);
+	if (row?.body.case !== 'value') throw new Error(`no stored widget ${key}`);
+	return row.body.value;
+}
+
+function contains(haystack: Uint8Array, needle: Uint8Array): boolean {
+	return Buffer.from(haystack).includes(Buffer.from(needle));
+}
 
 // Values at the edges of what the TS client and the Go server encode the same
 // way. Each spec writes through one client, syncs, and reads the row through a
@@ -165,5 +217,42 @@ describe('value encoding across Go and TS', () => {
 		expect((await b.get(WidgetSchema, 'w1'))!.attrs).toEqual(want);
 		await a.close();
 		await b.close();
+	});
+
+	// Protobuf allows any string as a map key, and a Go writer keeps
+	// "__proto__" as an ordinary entry. A TS client must not delete that
+	// entry from the server without an error.
+	it('keeps a "__proto__" map entry another writer stored through a TS put of the row', async () => {
+		// Given a widget stored as a Go writer encodes
+		// { id: 'w1', attrs: { __proto__: 'x', k: 'v' } }
+		const ws = freshWorkspace();
+		const utf8 = (v: string) => [ ...new TextEncoder().encode(v) ];
+		const entry = (k: string, v: string) => {
+			const body = [ 0x0a, k.length, ...utf8(k), 0x12, v.length, ...utf8(v) ];
+			return new Uint8Array([ 0x5a, body.length, ...body ]);
+		};
+		const protoEntry = entry('__proto__', 'x');
+		const goBytes = new Uint8Array([ 0x0a, 0x02, ...utf8('w1'), ...protoEntry, ...entry('k', 'v') ]);
+		const verdict = await putRawWidget(ws, 'w1', goBytes);
+		// Refusing the key at the first write is also correct: then no stored
+		// row holds an entry that a TS client cannot represent.
+		if (verdict.status === MutationStatus.REJECTED) return;
+		expect(verdict.status).toBe(MutationStatus.APPLIED);
+		expect(contains(await storedWidgetBytes(ws, 'w1'), protoEntry)).toBe(true);
+
+		// When a TS client puts the row it read with a new label
+		const a = newClient(ws);
+		await a.start();
+		await a.syncNow();
+		const read = (await a.get(WidgetSchema, 'w1'))!;
+		await a.mutate.put(WidgetSchema, { ...read, label: 'edited' });
+		await a.syncNow();
+
+		// Then the server stores the new label
+		const stored = await storedWidgetBytes(ws, 'w1');
+		expect(contains(stored, new Uint8Array(utf8('edited')))).toBe(true);
+		// And must not have dropped the "__proto__" entry
+		expect(contains(stored, protoEntry)).toBe(true);
+		await a.close();
 	});
 });
