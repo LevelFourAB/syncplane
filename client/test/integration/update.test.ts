@@ -272,4 +272,91 @@ describe('update (sync)', () => {
 		await a.close();
 		await b.close();
 	});
+
+	// A keyed list without an order field and a scalar set do not keep order,
+	// so the diff names the collection but no item changed. The enqueue path
+	// narrows the collection to no item path, and the server must not see a
+	// PATCH with an empty field mask.
+	it('an update that only reorders a keyed list is not refused', async () => {
+		// Given a widget whose members the server holds
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, {
+			id: 'w1',
+			label: 'x',
+			members: [ { uid: 'u1' }, { uid: 'u2' } ],
+		});
+		await a.syncNow();
+
+		// When the client reverses the members and syncs
+		await a.mutate.update(WidgetSchema, 'w1', (w) => {
+			w.members.reverse();
+		});
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then nothing is refused and the queue drains
+		expect(rejections).toEqual([]);
+		expect(await a.pendingCount()).toBe(0);
+
+		await a.close();
+	});
+
+	it('an update that only drops a duplicate from a scalar set is not refused', async () => {
+		// Given a widget whose tags hold a duplicate
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', tags: [ 'x', 'y', 'x' ] });
+		await a.syncNow();
+
+		// When the client writes the set without the duplicate and syncs
+		await a.mutate.update(WidgetSchema, 'w1', (w) => {
+			w.tags = [ 'y', 'x' ];
+		});
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then nothing is refused and the queue drains
+		expect(rejections).toEqual([]);
+		expect(await a.pendingCount()).toBe(0);
+
+		await a.close();
+	});
+
+	it('control: an update that reorders members and renames the label stores the label', async () => {
+		// Given a widget whose members the server holds
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, {
+			id: 'w1',
+			label: 'x',
+			members: [ { uid: 'u1' }, { uid: 'u2' } ],
+		});
+		await a.syncNow();
+
+		// When the client reverses the members and renames the label
+		await a.mutate.update(WidgetSchema, 'w1', (w) => {
+			w.members.reverse();
+			w.label = 'renamed';
+		});
+		await a.syncNow();
+
+		// Then the label is stored and both members stay
+		expect(rejections).toEqual([]);
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		const stored = (await b.get(WidgetSchema, 'w1'))!;
+		expect(stored.label).toBe('renamed');
+		expect(stored.members.map((m) => m.uid).sort()).toEqual([ 'u1', 'u2' ]);
+
+		await a.close();
+		await b.close();
+	});
 });

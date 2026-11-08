@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import type { RejectionInfo } from '../../src/client.js';
 import { type Widget, WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { freshWorkspace, newClient } from './helpers.js';
 
@@ -128,6 +129,108 @@ describe('per-item collection merge (sync)', () => {
 		for (const client of [ a, b ]) {
 			expect((await client.get(WidgetSchema, 'w1'))!.tags.sort()).toEqual([ 'a', 'b', 'base' ]);
 		}
+
+		await a.close();
+		await b.close();
+	});
+
+	// A collection patched to the value it holds narrows to no item path. The
+	// write changes nothing, so the server must not see it as a PATCH with an
+	// empty field mask.
+	it('a patch that sets a map to the entries it holds is not refused', async () => {
+		// Given a widget whose attrs the server holds
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'one', attrs: { k: 'v' } });
+		await a.syncNow();
+
+		// When the client patches attrs with the same entries and syncs
+		await a.mutate.patch(WidgetSchema, 'w1', { attrs: { k: 'v' } });
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then nothing is refused and the queue drains
+		expect(rejections).toEqual([]);
+		expect(await a.pendingCount()).toBe(0);
+		expect((await a.get(WidgetSchema, 'w1'))!.attrs).toEqual({ k: 'v' });
+
+		await a.close();
+	});
+
+	it('a patch that sets an empty map to empty is not refused', async () => {
+		// Given a widget with no attrs on the server
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'one' });
+		await a.syncNow();
+
+		// When the client patches attrs to {} and syncs
+		await a.mutate.patch(WidgetSchema, 'w1', { attrs: {} });
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then nothing is refused and the queue drains
+		expect(rejections).toEqual([]);
+		expect(await a.pendingCount()).toBe(0);
+
+		await a.close();
+	});
+
+	it('a no-op collection patch does not roll back the transact() batch it is in', async () => {
+		// Given a widget whose tags the server holds
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'one', tags: [ 'x' ] });
+		await a.syncNow();
+
+		// When one batch patches tags to the value they hold and creates a second row
+		await a.transact(async (tx) => {
+			await tx.mutate.patch(WidgetSchema, 'w1', { tags: [ 'x' ] });
+			await tx.mutate.put(WidgetSchema, { id: 'w2', label: 'created in batch' });
+		});
+		expect((await a.get(WidgetSchema, 'w2'))?.label).toBe('created in batch');
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then the row the batch created is stored on the server
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		expect((await b.get(WidgetSchema, 'w2'))?.label).toBe('created in batch');
+		// And must not disappear from the writer when the batch is acked
+		expect((await a.get(WidgetSchema, 'w2'))?.label).toBe('created in batch');
+		// And the batch is not refused
+		expect(rejections).toEqual([]);
+
+		await a.close();
+		await b.close();
+	});
+
+	it('control: a patch that adds a scalar set value is stored', async () => {
+		// Given a widget whose tags the server holds
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', tags: [ 'x' ] });
+		await a.syncNow();
+
+		// When the client patches tags with one more value
+		await a.mutate.patch(WidgetSchema, 'w1', { tags: [ 'x', 'y' ] });
+		await a.syncNow();
+
+		// Then the server stores both values
+		expect(rejections).toEqual([]);
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		expect((await b.get(WidgetSchema, 'w1'))!.tags.sort()).toEqual([ 'x', 'y' ]);
 
 		await a.close();
 		await b.close();

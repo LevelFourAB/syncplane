@@ -1046,6 +1046,10 @@ interface CrudMutateApi {
 	 * Merges the given fields into a row, leaving every other field alone. The
 	 * mask is the keys of `init` — so `init` carries the fields to change, not a
 	 * whole row (see PatchInit, and `update` for read-modify-write).
+	 *
+	 * A set, map or keyed list is written per changed item, so a patch that
+	 * sets only such fields to the items they hold writes nothing. Inside a
+	 * transact() batch it leaves the batch, and the other writes stay.
 	 */
 	patch<D extends DescMessage>(
 		schema: D,
@@ -6643,6 +6647,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		let capturedToken: bigint | undefined;
 		/** Set when the store no longer holds this client's identity. */
 		let identityLost = false;
+		/** Set when every crud of the payload changes nothing, so nothing was written. */
+		let nothingToWrite = false;
 		const capturedInverses: (Inverse | undefined)[] = [];
 		const maxMaskPaths = Math.max(1, this.opts.maxFieldMaskPaths ?? DEFAULT_MAX_FIELD_MASK_PATHS);
 		const payloadCruds = payload.case === 'crud'
@@ -6736,6 +6742,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						if (undoMgr) {
 							capturedToken = await mintUndoToken(tx, workspaceId, counterRaw);
 						}
+						/** PATCHes left with an empty mask: they change nothing. */
+						const unchanged = new Set<CrudMutation>();
 						let crudIndex = -1;
 						for (const crud of cruds) {
 							crudIndex++;
@@ -6832,6 +6840,13 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 										+ `${maxMaskPaths} (maxFieldMaskPaths). Split the write.`,
 								);
 							}
+							// A collection set to the items it holds expands to no path. The
+							// server refuses a PATCH with an empty mask, and with it the whole
+							// batch, so the crud leaves the payload here instead.
+							if (crud.op === CrudOp.PATCH && (crud.fieldMask?.paths.length ?? 0) === 0) {
+								unchanged.add(crud);
+								continue;
+							}
 							// Reuse the one `prev`: invert against it (undo) and apply locally.
 							// A caller-provided override (symbolic text inverse) replaces the
 							// snapshot inverse for its crud.
@@ -6884,6 +6899,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 								confirmed,
 							);
 							if (outcome === 'no-target') warnPatchWithoutTarget(crud, workspaceId);
+						}
+						if (unchanged.size > 0) {
+							const kept = cruds.filter((crud) => !unchanged.has(crud));
+							if (kept.length === 0) {
+								tx.release();
+								nothingToWrite = true;
+								return;
+							}
+							// Only a batch can keep some of its cruds.
+							if (payload.case === 'batch') payload.value.mutations = kept;
 						}
 						// Persist AFTER the loop so the queued+pushed mask is the expanded one.
 						await enqueuePending(tx, workspaceId, mutation);
@@ -6967,6 +6992,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			await this.close();
 			throw new Error('SyncClient is closed: the local data was purged');
 		}
+		if (nothingToWrite) return;
 		if (undoBarrier) {
 			// Workspace-wide: a custom mutation is opaque and may have touched
 			// anything, so no stack in this workspace can claim to invert what came
