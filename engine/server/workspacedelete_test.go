@@ -3,8 +3,10 @@ package server_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"time"
 
 	"connectrpc.com/connect"
@@ -16,6 +18,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage"
+	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
 
 // staleDeletionCheck answers the gate's deletion check with "not deleted"
@@ -207,6 +210,52 @@ var _ = Describe("Deleting a workspace", func() {
 			Expect(err).To(MatchError(storage.ErrNotFound), "restoring brings back no data")
 			return nil
 		})).To(Succeed())
+	})
+
+	// A read replica's floor is a bare sequence, which cannot tell the deleted
+	// workspace from the one restored under its id. A Bootstrap whose Begin
+	// read the restored workspace must not take its pages from a replica that
+	// still holds the deleted one.
+	It("ships no row of the deleted workspace from a replica that still holds it", func() {
+		dir := GinkgoT().TempDir()
+		primaryPath := filepath.Join(dir, "primary.db")
+		primary, err := sqlitestore.Open(primaryPath)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(primary.Close()).To(Succeed()) })
+		lagging := &laggingReplicaStore{Adapter: primary, dir: dir}
+		srv = mustNewServer(lagging, testEntities(), server.WithHeartbeat(time.Hour))
+		DeferCleanup(srv.Close)
+		serve(srv)
+
+		// Given a replica copy of the workspace at seq 8
+		for i := uint64(1); i <= 8; i++ {
+			Expect(push("c1", i, fmt.Sprintf("old-%d", i)).GetErrorCode()).To(BeEmpty())
+		}
+		lagging.snapshot(primaryPath)
+
+		// And on the primary the workspace deleted, restored and written to
+		// seq 3
+		Expect(srv.DeleteWorkspace(ctx, ws)).To(Succeed())
+		Expect(srv.RestoreWorkspace(ctx, ws)).To(Succeed())
+		for i := uint64(1); i <= 3; i++ {
+			Expect(push("c2", i, fmt.Sprintf("new-%d", i)).GetErrorCode()).To(BeEmpty())
+		}
+
+		// When a client bootstraps while reads may route to the replica
+		lagging.route(true)
+		stream, err := client.Bootstrap(streamCtx(), connect.NewRequest(&syncplanev1.BootstrapRequest{
+			WorkspaceId: ws, ClientId: "c3",
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		var keys []string
+		for stream.Receive() {
+			for _, rc := range stream.Msg().GetChunk().GetRows() {
+				keys = append(keys, rc.GetKey())
+			}
+		}
+
+		// Then the snapshot holds no row of the deleted workspace
+		Expect(keys).NotTo(ContainElement(HavePrefix("old-")), "stream error: %v", stream.Err())
 	})
 
 	It("is idempotent and refuses an id that never held state", func() {

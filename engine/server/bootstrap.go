@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sort"
 	"time"
@@ -54,6 +55,10 @@ import (
 // (WithHeartbeat) has passed since the workspace gate last admitted the
 // caller, the gate runs again before the next page, and a refusal ends the
 // stream with the gate's error. Rows sent before that stay sent.
+//
+// Every page reads the workspace incarnation the Begin cursor names. When the
+// workspace is deleted and restored while the snapshot streams, the stream
+// ends with CodeAborted, and a retry starts a new snapshot.
 //
 // With subscriptions, only subscribed entities are visited and only rows
 // matching their predicates ship; read-filtered rows are skipped the same
@@ -146,6 +151,9 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		SchemaRevision: s.catalogPtr().schemaRev,
 		Entities:       order,
 	}
+	// The store epoch the Begin cursor names. Every page reads rows of this
+	// incarnation only (see snapshotReadTx).
+	var beginEpoch uint64
 	// Anchored: the Begin cursor's seq becomes the client's resume point, so it
 	// must not sit behind writes the client has already been acked — and the
 	// anchor is at least any resume's own floor.
@@ -168,6 +176,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		if err != nil {
 			return err
 		}
+		beginEpoch = storeEpoch
 		if emitter.caller != nil && emitter.caller.model.moving {
 			// Every page classifies rows with the parents they have at or
 			// after this point.
@@ -372,7 +381,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		if resume != nil && entity == resume.entity {
 			afterKey = resume.afterKey
 		}
-		candidates, narrowed, err := s.bootstrapCandidates(ctx, msg.GetWorkspaceId(), begin.GetSeq(), emitter, entity)
+		candidates, narrowed, err := s.bootstrapCandidates(ctx, msg.GetWorkspaceId(), begin.GetSeq(), beginEpoch, emitter, entity)
 		if err != nil {
 			return err
 		}
@@ -390,7 +399,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 					page    []storage.Row
 					visible []*syncplanev1.RowChange
 				)
-				if err := s.readTx(ctx, msg.GetWorkspaceId(), begin.GetSeq(), func(tx storage.ReadTx) error {
+				if err := s.snapshotReadTx(ctx, msg.GetWorkspaceId(), begin.GetSeq(), beginEpoch, func(tx storage.ReadTx) error {
 					page = page[:0]
 					if err := tx.GetRows(entity, batch, func(row storage.Row) error {
 						// GetRows yields tombstones and skips keys with no row
@@ -430,7 +439,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			}
 			// Floored at the Begin seq: pages of one snapshot must not read
 			// from before the position the Begin frame promised.
-			if err := s.readTx(ctx, msg.GetWorkspaceId(), begin.GetSeq(), func(tx storage.ReadTx) error {
+			if err := s.snapshotReadTx(ctx, msg.GetWorkspaceId(), begin.GetSeq(), beginEpoch, func(tx storage.ReadTx) error {
 				page = page[:0]
 				if err := tx.ScanEntityAfter(entity, afterKey, s.chunkSize, func(row storage.Row) error {
 					page = append(page, row)
@@ -468,6 +477,37 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	return stream.Send(&syncplanev1.BootstrapResponse{
 		Body: &syncplanev1.BootstrapResponse_End_{End: &syncplanev1.BootstrapResponse_End{}},
 	})
+}
+
+// errOtherIncarnation is the snapshotReadTx check failing: the transaction
+// reads another incarnation of the workspace than the snapshot began on.
+var errOtherIncarnation = errors.New("server: the read reached another incarnation of the workspace")
+
+// snapshotReadTx runs fn over a read snapshot floored at a Bootstrap's Begin
+// seq that holds the store incarnation storeEpoch names. A replica floor is a
+// bare sequence, so a replica that still holds a deleted incarnation can pass
+// it; fn then runs again on the primary. When the primary holds another
+// incarnation too, the workspace was deleted and restored after Begin, and the
+// snapshot fails with CodeAborted.
+func (s *Server) snapshotReadTx(ctx context.Context, ws string, beginSeq, storeEpoch uint64, fn func(storage.ReadTx) error) error {
+	checked := func(tx storage.ReadTx) error {
+		epoch, err := tx.StoreEpoch()
+		if err != nil {
+			return err
+		}
+		if epoch != storeEpoch {
+			return errOtherIncarnation
+		}
+		return fn(tx)
+	}
+	err := s.readTx(ctx, ws, beginSeq, checked)
+	if errors.Is(err, errOtherIncarnation) && s.replicaReads != nil {
+		err = s.store.WithReadTx(ctx, ws, checked)
+	}
+	if errors.Is(err, errOtherIncarnation) {
+		return connect.NewError(connect.CodeAborted, err)
+	}
+	return err
 }
 
 // rowEstimates counts the live rows of each entity of order, at the same
@@ -516,7 +556,7 @@ func (e *rowEmitter) rowEstimates(tx storage.ReadTx, order []string) ([]uint64, 
 // hides is hidden whatever the scope says, closure and window members
 // included, since they were filtered when built. So when both sources narrow,
 // the candidates are the keys both name.
-func (s *Server) bootstrapCandidates(ctx context.Context, ws string, beginSeq uint64, e *rowEmitter, entity string) (keys []string, narrowed bool, err error) {
+func (s *Server) bootstrapCandidates(ctx context.Context, ws string, beginSeq, beginEpoch uint64, e *rowEmitter, entity string) (keys []string, narrowed bool, err error) {
 	info, registered := s.catalogPtr().entities[entity]
 	if !registered {
 		return nil, false, nil
@@ -525,7 +565,7 @@ func (s *Server) bootstrapCandidates(ctx context.Context, ws string, beginSeq ui
 	if !scoped && !e.accessNarrows(info) {
 		return nil, false, nil
 	}
-	err = s.readTx(ctx, ws, beginSeq, func(tx storage.ReadTx) error {
+	err = s.snapshotReadTx(ctx, ws, beginSeq, beginEpoch, func(tx storage.ReadTx) error {
 		accessKeys, byAccess, err := e.accessCandidates(tx, info, s.limits.MaxResyncScan)
 		if err != nil {
 			return err
