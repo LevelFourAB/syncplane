@@ -3507,6 +3507,12 @@ export class Coordinator {
 						{
 							nextCursor: snapshotCursor,
 							lastAckedMutationId: lastAcked,
+							// A resumed Begin reports the watermark as of now, but the
+							// rows come from the snapshot the first attempt began, so a
+							// write acked between the attempts is in the watermark and
+							// not in the rows. Kept queued, it stays visible over the
+							// older row until a pull from this cursor brings its change.
+							deferAcked: resuming,
 							serverSeq: snapshotSeq,
 							baseline: true,
 							...(storedAccess === undefined ? {} : { callerAccess: storedAccess }),

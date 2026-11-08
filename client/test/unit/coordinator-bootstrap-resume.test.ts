@@ -1,11 +1,13 @@
-import { create, toBinary } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { Code, ConnectError, createRouterTransport, type Transport } from '@connectrpc/connect';
 import { describe, expect, it } from 'vitest';
 
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
+import { MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import {
 	type BootstrapRequest,
 	BootstrapResponseSchema,
+	MutationStatus,
 	SyncService,
 } from '../../src/gen/syncplane/v1/service_pb.js';
 import {
@@ -13,18 +15,22 @@ import {
 	metaBootstrapGen,
 	metaBootstrapResume,
 	metaCursor,
+	metaLastMutationId,
 	stagingPrefix,
 	stagingWsRoot,
 } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
-import { EntityRegistry } from '../../src/mutations.js';
+import { buildPatch, EntityRegistry } from '../../src/mutations.js';
 import { ChainMutex, createKvMutex, type Mutex } from '../../src/mutex.js';
-import { scanMergedRows } from '../../src/read.js';
+import { enqueuePending, readPending } from '../../src/optimistic/queue.js';
+import { applyMutationLocally } from '../../src/optimistic/rebase.js';
+import { readMergedRow, scanMergedRows } from '../../src/read.js';
 import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator } from '../../src/sync/coordinator.js';
 import { StatusTracker } from '../../src/sync/status.js';
+import { TouchSet } from '../../src/touch.js';
 import { WatcherHub } from '../../src/watch.js';
-import { pushResults } from './pushfake.js';
+import { pushedMutations, pushResults } from './pushfake.js';
 
 // Resuming an interrupted bootstrap. What every spec here turns on is that the
 // client keeps what an attempt delivered — staged rows and the tokens that
@@ -341,6 +347,203 @@ describe('bootstrap resume', () => {
 		expect(await keysOf(kv)).toEqual([ 't1' ]);
 
 		await coord.stop();
+	});
+
+	describe('a write acked between the attempts', () => {
+		const todo = (title: string) => toBinary(TodoSchema, create(TodoSchema, { id: 'r', title }));
+
+		/**
+		 * A server where row r is 'A' until mutation 1 sets it to 'B' at seq 11.
+		 * It refuses the client's cursor, and its re-bootstrap snapshot is taken
+		 * at seq 10: the first attempt drops after the chunk holding r. A resumed
+		 * attempt keeps that snapshot's cursor and seq and reports the watermark
+		 * as it is when the attempt begins. `refuseResume` answers the resume
+		 * with a fresh snapshot instead.
+		 */
+		function ackBetweenAttemptsTransport(opts: { refuseResume: boolean }): Transport {
+			let watermark = 0n;
+			let title = 'A';
+			let installed = false;
+			return createRouterTransport(({ service }) => {
+				service(SyncService, {
+					async *bootstrap(req) {
+						const resumed = req.resume !== undefined && !opts.refuseResume;
+						if (req.resume !== undefined && opts.refuseResume) {
+							yield create(BootstrapResponseSchema, {
+								body: {
+									case: 'begin',
+									value: { cursor: new Uint8Array([ 11 ]), seq: 11n, lastAckedMutationId: watermark },
+								},
+							});
+							yield create(BootstrapResponseSchema, {
+								body: {
+									case: 'chunk',
+									value: {
+										rows: [ {
+											entity: 'todo',
+											key: 'r',
+											version: 11n,
+											body: { case: 'value', value: todo(title) },
+										} ],
+									},
+								},
+							});
+							yield create(BootstrapResponseSchema, { body: { case: 'end', value: {} } });
+							installed = true;
+							return;
+						}
+						yield create(BootstrapResponseSchema, {
+							body: {
+								case: 'begin',
+								value: {
+									cursor: new Uint8Array([ 10 ]),
+									seq: 10n,
+									resumed,
+									lastAckedMutationId: watermark,
+								},
+							},
+						});
+						if (!resumed) {
+							yield create(BootstrapResponseSchema, {
+								body: {
+									case: 'chunk',
+									value: {
+										rows: [ {
+											entity: 'todo',
+											key: 'r',
+											version: 5n,
+											body: { case: 'value', value: todo('A') },
+										} ],
+										resumeToken: new Uint8Array([ 1 ]),
+									},
+								},
+							});
+							throw new ConnectError('connection lost', Code.Unavailable);
+						}
+						yield create(BootstrapResponseSchema, { body: { case: 'end', value: {} } });
+						installed = true;
+					},
+					push(req) {
+						const ms = pushedMutations(req);
+						for (const m of ms) {
+							watermark = m.mutationId;
+							title = 'B';
+						}
+						return pushResults(
+							req,
+							ms.map((m) => ({ mutationId: m.mutationId, status: MutationStatus.APPLIED, seq: 11n })),
+						);
+					},
+					pull(req) {
+						if (!installed) {
+							return {
+								patch: { changes: [], dropEntities: [] },
+								nextCursor: req.cursor,
+								lastAckedMutationId: watermark,
+								reset: true,
+								hasMore: false,
+								seq: 0n,
+							};
+						}
+						return {
+							patch: {
+								changes: [ {
+									entity: 'todo',
+									key: 'r',
+									version: 11n,
+									body: { case: 'value', value: todo(title) },
+								} ],
+								dropEntities: [],
+							},
+							nextCursor: new Uint8Array([ 11 ]),
+							lastAckedMutationId: watermark,
+							reset: false,
+							hasMore: false,
+							seq: 11n,
+						};
+					},
+					query() {
+						return { rows: [] };
+					},
+				});
+			});
+		}
+
+		/** Given r = 'A' installed, a re-bootstrap that dropped after r, then a local edit of r to 'B'. */
+		async function editDuringReBootstrap(opts: { refuseResume: boolean }) {
+			const kv = new MemoryKVStore();
+			const seed = await kv.write();
+			await seed.put(metaCursor(WS), new Uint8Array([ 5 ]));
+			await seed.put(confirmedKey('todo', WS, 'r'), { v: todo('A'), ver: '5' });
+			await seed.commit();
+			const coord = newCoordinator(
+				kv,
+				createKvMutex('resume-acked'),
+				ackBetweenAttemptsTransport(opts),
+			);
+
+			await expect(coord.syncNow()).rejects.toThrow(/connection lost/);
+
+			const def = registry.bySchema(TodoSchema);
+			const edit = create(MutationSchema, {
+				clientId: 'c1',
+				mutationId: 1n,
+				payload: { case: 'crud', value: buildPatch(def, TodoSchema, 'r', { title: 'B' }) },
+			});
+			const tx = await kv.write();
+			await enqueuePending(tx, WS, edit);
+			await applyMutationLocally(tx, registry, {}, WS, edit, new TouchSet());
+			await tx.put(metaLastMutationId(WS), '1');
+			await tx.commit();
+
+			return { kv, coord };
+		}
+
+		async function titleOf(kv: MemoryKVStore): Promise<string | undefined> {
+			const tx = await kv.read();
+			try {
+				const bytes = await readMergedRow(tx, registry, 'todo', WS, 'r');
+				return bytes === undefined ? undefined : fromBinary(TodoSchema, bytes).title;
+			} finally {
+				tx.release();
+			}
+		}
+
+		async function pendingOf(kv: MemoryKVStore): Promise<number> {
+			const tx = await kv.read();
+			try {
+				return (await readPending(tx, WS)).length;
+			} finally {
+				tx.release();
+			}
+		}
+
+		it('keeps the edit visible when the resumed snapshot installs', async () => {
+			const { kv, coord } = await editDuringReBootstrap({ refuseResume: false });
+			expect(await titleOf(kv)).toBe('B');
+
+			// When one cycle pushes the edit (acked at seq 11), and the resumed
+			// snapshot (seq 10) installs
+			await coord.syncNow();
+			expect(await read(kv, metaCursor(WS))).toEqual(new Uint8Array([ 10 ]));
+
+			// Then the row shows the acked edit
+			expect(await titleOf(kv)).toBe('B');
+
+			await coord.stop();
+		});
+
+		it('takes the edit from a fresh snapshot when the server refuses the resume', async () => {
+			const { kv, coord } = await editDuringReBootstrap({ refuseResume: true });
+
+			await coord.syncNow();
+
+			expect(await read(kv, metaCursor(WS))).toEqual(new Uint8Array([ 11 ]));
+			expect(await titleOf(kv)).toBe('B');
+			expect(await pendingOf(kv)).toBe(0);
+
+			await coord.stop();
+		});
 	});
 
 	it('starts over when another bootstrap claimed the workspace in between', async () => {
