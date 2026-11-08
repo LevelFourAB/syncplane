@@ -395,6 +395,61 @@ var _ = Describe("Windowed subscriptions", func() {
 		})
 	})
 
+	// A truncated page tombstones a member that left the window. Its cursor
+	// must not still count that member as held, or a member that comes back
+	// before the clean boundary, without being written, is never sent again.
+	Describe("a truncated page that removes a member", func() {
+		// pagedCatchUp starts from a client holding the top 2 of a(10), b(9)
+		// and c(8), edits b and lets d(20) push it out, takes one page, runs
+		// between, and drains the rest. It returns the client's view.
+		pagedCatchUp := func(between func()) map[string][]byte {
+			GinkgoHelper()
+			sub := windowSub(2, nil)
+			putWidget("a", 10)
+			putWidget("b", 9)
+			putWidget("c", 8)
+			cursor, rows := bootstrap(sub)
+			view := map[string][]byte{}
+			applyPatch(view, &syncplanev1.Patch{Changes: rows})
+			Expect(viewKeys(view)).To(Equal([]string{"widget/a", "widget/b"}))
+
+			nextMut++
+			_, err := client.Push(ctx, connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+				patchMutation("c1", nextMut, "widget", "b", &testdatav1.Widget{Label: "edited"}, "label"),
+			})))
+			Expect(err).NotTo(HaveOccurred())
+			putWidget("d", 20)
+
+			resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+				WorkspaceId: ws, ClientId: "c1", Cursor: cursor,
+				Subscriptions: []*syncplanev1.Subscription{sub}, Limit: 1,
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetHasMore()).To(BeTrue())
+			applyPatch(view, resp.Msg.GetPatch())
+			Expect(view).NotTo(HaveKey("widget/b"), "the first page removes b")
+
+			between()
+			_, changes := drain(resp.Msg.GetNextCursor(), sub)
+			applyPatch(view, &syncplanev1.Patch{Changes: changes})
+			return view
+		}
+
+		It("sends the member again when it re-enters before the clean boundary", func() {
+			view := pagedCatchUp(func() { delWidget("d") })
+
+			_, rows := bootstrap(windowSub(2, nil))
+			Expect(valueKeys(rows)).To(ConsistOf("a", "b"))
+			Expect(viewKeys(view)).To(Equal([]string{"widget/a", "widget/b"}))
+		})
+
+		It("holds the window as it stands when nothing moves between pages", func() {
+			view := pagedCatchUp(func() {})
+
+			Expect(viewKeys(view)).To(Equal([]string{"widget/a", "widget/d"}))
+		})
+	})
+
 	Describe("by_recency", func() {
 		It("holds the most recently written rows with no order fields", func() {
 			putWidget("a", 1)

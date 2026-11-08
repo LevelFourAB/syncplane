@@ -294,6 +294,52 @@ var _ = Describe("Reference-following subscriptions", func() {
 		})
 	})
 
+	Describe("a truncated page that removes a closure member", func() {
+		// The page tombstones a member the closure dropped. Its cursor must
+		// not still count that member as held, or a member the closure takes
+		// back before the clean boundary, without a write to it, is never
+		// sent again.
+		It("sends the member again when the closure takes it back before the clean boundary", func() {
+			sub := followProject(1)
+			push(
+				putMutation("c1", 1, "project", "P", &testdatav1.Project{Id: "P", Name: "pee"}),
+				putMutation("c1", 2, "project", "Q", &testdatav1.Project{Id: "Q", Name: "queue"}),
+				putMutation("c1", 3, "issue", "i1", issue("i1", "one", "P")),
+			)
+			r1 := pull(nil, sub)
+			view := map[string][]byte{}
+			applyPatch(view, r1.GetPatch())
+			Expect(viewKeys(view)).To(Equal([]string{"issue/i1", "project/P"}))
+
+			// P is edited, then i1 moves to Q: a one-row page reaches P while
+			// i1 points elsewhere, removes it, and truncates.
+			push(putMutation("c1", 4, "project", "P", &testdatav1.Project{Id: "P", Name: "pee 2"}))
+			push(putMutation("c1", 5, "issue", "i1", issue("i1", "one", "Q")))
+			resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+				WorkspaceId: ws, Cursor: r1.GetNextCursor(), Subscriptions: []*syncplanev1.Subscription{sub}, Limit: 1,
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetHasMore()).To(BeTrue())
+			applyPatch(view, resp.Msg.GetPatch())
+			Expect(view).NotTo(HaveKey("project/P"), "the first page removes P")
+
+			// i1 points at P again before the next page.
+			push(putMutation("c1", 6, "issue", "i1", issue("i1", "one", "P")))
+			cursor := resp.Msg.GetNextCursor()
+			for i := 0; ; i++ {
+				Expect(i).To(BeNumerically("<", 10), "pull did not settle")
+				r := pull(cursor, sub)
+				applyPatch(view, r.GetPatch())
+				cursor = r.GetNextCursor()
+				if !r.GetHasMore() {
+					break
+				}
+			}
+
+			Expect(viewKeys(view)).To(Equal([]string{"issue/i1", "project/P"}))
+		})
+	})
+
 	Describe("forward depth", func() {
 		// blocked_by is a repeated self-reference: a dependency chain
 		// i1→i2→i3. Depth bounds how far the closure walks it.

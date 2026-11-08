@@ -1159,9 +1159,18 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	// scopes with no stored set — the fact that nothing created past its seq
 	// can ever have been delivered.
 	priorClosure := closureSetMembership(cur.closure)
-	// Members this page delivers that the cursor's sets do not name. A page
-	// that truncates must carry them on its cursor; see the HasMore branch.
+	// Members this page delivers that the cursor's sets do not name, and
+	// members of those sets that it revokes. A page that truncates must carry
+	// both on its cursor; see the HasMore branch.
 	var shippedWindow, shippedClosure []closureKey
+	revoked := map[closureKey]bool{}
+	revoke := func(row storage.Row) {
+		ck := closureKey{entity: row.Entity, key: row.Key}
+		if oldWindow[ck] || priorClosure[ck] {
+			revoked[ck] = true
+		}
+		resp.Patch.Changes = append(resp.Patch.Changes, hiddenChange(row))
+	}
 	// Scan one row past the limit: seeing it proves truncation without
 	// emitting it.
 	scanned := 0
@@ -1217,7 +1226,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 			if row.CreatedVersion > cur.seq {
 				return nil
 			}
-			resp.Patch.Changes = append(resp.Patch.Changes, hiddenChange(row))
+			revoke(row)
 		case rowHiddenNonMember:
 			// Hidden solely by set-membership, and the cursor stores those
 			// sets: a prior member left and must drop; anything else was never
@@ -1227,7 +1236,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 			if !oldWindow[ck] && !priorClosure[ck] {
 				return nil
 			}
-			resp.Patch.Changes = append(resp.Patch.Changes, hiddenChange(row))
+			revoke(row)
 		case rowUnsubscribed:
 			// Skip: the client holds no state for this entity, unless the
 			// cursor's closure names the row. Then an earlier follow spec
@@ -1236,7 +1245,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 			// scan.
 			ck := closureKey{entity: row.Entity, key: row.Key}
 			if priorClosure[ck] && emitter.syncable(row.Entity) {
-				resp.Patch.Changes = append(resp.Patch.Changes, hiddenChange(row))
+				revoke(row)
 			}
 		}
 		return nil
@@ -1275,12 +1284,22 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		// or walk's membership, so it goes in the forms that are diffed but
 		// never maintained, and a closure seeded from such a window is
 		// walked again too.
-		if len(shippedClosure) > 0 {
-			next.closure = heldSet(priorClosure, shippedClosure)
+		//
+		// A member this page revoked leaves the carried set for the same
+		// reason. The clean boundary's diff skips every row the set names, so
+		// a row that becomes a member again without a write before that
+		// boundary would never be sent again.
+		closureRevoked, windowRevoked := false, false
+		for ck := range revoked {
+			closureRevoked = closureRevoked || priorClosure[ck]
+			windowRevoked = windowRevoked || oldWindow[ck]
+		}
+		if len(shippedClosure) > 0 || closureRevoked {
+			next.closure = heldSet(without(priorClosure, revoked), shippedClosure)
 			next.closureRebuild = true
 		}
-		if len(shippedWindow) > 0 {
-			next.window = heldSet(oldWindow, shippedWindow)
+		if len(shippedWindow) > 0 || windowRevoked {
+			next.window = heldSet(without(oldWindow, revoked), shippedWindow)
 			next.windows = nil
 			if emitter.followEntities != nil {
 				next.closureRebuild = true

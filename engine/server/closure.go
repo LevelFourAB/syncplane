@@ -170,6 +170,17 @@ func heldSet(held map[closureKey]bool, added []closureKey) *syncplanecursorv1.Cl
 	return cr.keySet()
 }
 
+// without returns a new set of the keys of held that are not in drop.
+func without(held, drop map[closureKey]bool) map[closureKey]bool {
+	out := make(map[closureKey]bool, len(held))
+	for ck := range held {
+		if !drop[ck] {
+			out[ck] = true
+		}
+	}
+	return out
+}
+
 // ---- reference graph (server mirror of EntityRegistry.buildRefGraph) ----
 
 // forwardRefRel is one forward reference relation surfaced on the source
