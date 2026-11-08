@@ -788,7 +788,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			if (last !== 0n && m.mutationId !== last + 1n) {
 				return fail(
 					CodeMutationIdGap,
-					`workspace "${workspaceId}": mutation id gap: got ${m.mutationId}, want ${last + 1n}`,
+					`workspace "${workspaceId}": mutation id gap: got ${m.mutationId}, which does not follow the client's watermark`,
 				);
 			}
 			try {

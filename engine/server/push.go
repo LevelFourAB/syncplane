@@ -165,6 +165,11 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// treat them as infrastructure failures.
 		gap    string
 		badArg string
+		// gapLog holds what the server logs about a gap but does not send:
+		// the id the server expected. Any caller may push under any anonymous
+		// client_id, so a reply that named it would tell that caller which ids
+		// to use up next.
+		gapLog string
 	)
 	// adopted records returning clients re-admitted by watermark adoption (see
 	// the last == 0 branch). Captured here and logged after the tx so a closure
@@ -189,7 +194,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// so a retried attempt does not duplicate results.
 		results = nil
 		applied = false
-		gap, badArg = "", ""
+		gap, badArg, gapLog = "", "", ""
 		adopted = adopted[:0]
 		// Watermarks per client, by watermarkKey, loaded lazily and tracked as
 		// we bump them. bumped names the clients whose watermark this batch
@@ -331,7 +336,8 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 				// Nothing in this batch applies: the client must resend from
 				// its watermark, in order. Roll the whole closure back by
 				// dropping the results collected so far.
-				gap = fmt.Sprintf("mutation id gap: got %d, want %d", m.GetMutationId(), last+1)
+				gap = fmt.Sprintf("mutation id gap: got %d, which does not follow the client's watermark", m.GetMutationId())
+				gapLog = fmt.Sprintf("client %q: got %d, want %d", m.GetClientId(), m.GetMutationId(), last+1)
 				results = nil
 				return errAbortBatch
 			}
@@ -471,6 +477,10 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 	case gap != "":
 		// errAbortBatch only exists to roll the transaction back; the verdict
 		// itself is in gap.
+		if gapLog != "" {
+			s.reqLog(ctx, "push", ws, "").LogAttrs(ctx, slog.LevelDebug, "mutation id gap",
+				slog.String("detail", gapLog))
+		}
 		return fail(CodeMutationIDGap, "workspace %q: %s", ws, gap)
 	case badArg != "":
 		return fail(CodeInvalidArgument, "workspace %q: %s", ws, badArg)

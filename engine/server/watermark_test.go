@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -143,6 +144,18 @@ var _ = Describe("Client watermarks", func() {
 				To(Equal([]syncplanev1.MutationStatus{applied}))
 			Expect(statuses(anonymous, putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "v1"}))).
 				To(Equal([]syncplanev1.MutationStatus{already}))
+		})
+
+		It("does not disclose a client's watermark in a gap reply", func() {
+			for id := uint64(1); id <= 3; id++ {
+				Expect(statuses(anonymous, putMutation("victim", id, "todo", fmt.Sprintf("v%d", id), &todov1.Todo{Id: fmt.Sprintf("v%d", id)}))).
+					To(Equal([]syncplanev1.MutationStatus{applied}))
+			}
+
+			res := pushAs(anonymous, putMutation("victim", 1_000_000, "todo", "junk", &todov1.Todo{Id: "junk"}))
+			Expect(res.GetErrorCode()).To(Equal(server.CodeMutationIDGap))
+			Expect(res.GetErrorMessage()).NotTo(ContainSubstring("want 4"),
+				"the expected id tells any caller which ids to use up next")
 		})
 
 		It("treats one subject from two issuers as two callers", func() {
