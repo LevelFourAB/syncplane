@@ -23,13 +23,14 @@ import (
 )
 
 // fakeStateStore is a map-backed cursorstate.Store the specs steer: failPuts
-// simulates an outage, wipe simulates eviction, puts counts the entries the
-// server actually wrote.
+// and failGets simulate an outage, wipe simulates eviction, puts counts the
+// entries the server actually wrote.
 type fakeStateStore struct {
 	mu       sync.Mutex
 	entries  map[string][]byte
 	puts     int
 	failPuts bool
+	failGets bool
 }
 
 func newFakeStateStore() *fakeStateStore {
@@ -43,6 +44,9 @@ func (f *fakeStateStore) key(ws string, ref cursorstate.Ref) string {
 func (f *fakeStateStore) Get(_ context.Context, ws string, ref cursorstate.Ref) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.failGets {
+		return nil, fmt.Errorf("store down")
+	}
 	state, ok := f.entries[f.key(ws, ref)]
 	if !ok {
 		return nil, cursorstate.ErrNotFound
@@ -65,6 +69,12 @@ func (f *fakeStateStore) setFailPuts(fail bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.failPuts = fail
+}
+
+func (f *fakeStateStore) setFailGets(fail bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.failGets = fail
 }
 
 func (f *fakeStateStore) wipe() {
@@ -216,6 +226,57 @@ var _ = Describe("Cursor state store", func() {
 		state.wipe()
 		resp := pull(client, cursor)
 		Expect(resp.GetReset_()).To(BeTrue())
+	})
+
+	// A store that cannot be read says nothing about the client's cursor. Pull
+	// answers unavailable so the client retries with its data; a stream has to
+	// tell it the same rather than send it to re-bootstrap.
+	Describe("on a Subscribe stream", func() {
+		// openDropped opens a stream from cursor and returns the drop its
+		// first frame carries.
+		openDropped := func(cursor []byte) *syncplanev1.WorkspaceDropped {
+			GinkgoHelper()
+			streamCtx, cancel := context.WithCancel(ctx)
+			DeferCleanup(cancel)
+			stream, err := client.Subscribe(streamCtx, connect.NewRequest(&syncplanev1.SubscribeRequest{
+				ClientId: "c1",
+				Scopes: []*syncplanev1.WorkspaceScope{{
+					WorkspaceId: ws, Cursor: cursor, Subscriptions: []*syncplanev1.Subscription{windowed()},
+				}},
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			for stream.Receive() {
+				if dropped := stream.Msg().GetDropped(); dropped != nil {
+					return dropped
+				}
+				Expect(stream.Msg().GetCaughtUp()).To(BeFalse(), "the scope caught up instead of dropping")
+			}
+			Fail(fmt.Sprintf("stream ended without a drop: %v", stream.Err()))
+			return nil
+		}
+
+		It("drops the scope with an error, not a reset, while the store cannot be read", func() {
+			fill(client)
+			cursor := bootstrapCursor(client)
+
+			state.setFailGets(true)
+			_, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+				WorkspaceId: ws, ClientId: "c1", Cursor: cursor,
+				Subscriptions: []*syncplanev1.Subscription{windowed()},
+			}))
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodeUnavailable))
+
+			Expect(openDropped(cursor).GetReason()).To(Equal(syncplanev1.WorkspaceDropped_REASON_ERROR),
+				"a store outage must not send the client to re-bootstrap")
+		})
+
+		It("drops the scope with a reset when its entry was evicted", func() {
+			fill(client)
+			cursor := bootstrapCursor(client)
+			state.wipe()
+
+			Expect(openDropped(cursor).GetReason()).To(Equal(syncplanev1.WorkspaceDropped_REASON_RESET))
+		})
 	})
 
 	It("inlines the sets while the store cannot be written, and recovers", func() {

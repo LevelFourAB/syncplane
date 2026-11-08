@@ -1019,7 +1019,7 @@ Single-process deployments use `sqlitestore.Open(path)`. Multi-node deployments 
 
 ## Cursor state
 
-A cursor-state store caches membership state for windowed and reference-following subscriptions, allowing pull cursors to carry compact identifiers rather than full row key sets. If a cursor reference expires or is evicted, the client receives a reset and performs a bootstrap.
+A cursor-state store caches membership state for windowed and reference-following subscriptions, allowing pull cursors to carry compact identifiers rather than full row key sets. If a cursor reference expires or is evicted, the client receives a reset and performs a bootstrap. If the store cannot be read, `Pull` returns `unavailable` and `Subscribe` drops the workspace with `REASON_ERROR`. The client keeps its rows and retries with the same cursor.
 
 Available backends:
 

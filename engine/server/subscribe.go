@@ -264,6 +264,19 @@ func (s *Server) validateSubscribe(msg *syncplanev1.SubscribeRequest) error {
 	return nil
 }
 
+// gateDropReason is the drop reason for err, an error of the workspace gate or
+// of work the gate did not refuse: a denial is permanent, a revocation is
+// reported as one, and anything else is worth a retry.
+func gateDropReason(err error) syncplanev1.WorkspaceDropped_Reason {
+	if errors.Is(err, ErrNoAccess) {
+		return syncplanev1.WorkspaceDropped_REASON_NO_ACCESS
+	}
+	if _, denied := AsWorkspaceDenial(err); denied {
+		return syncplanev1.WorkspaceDropped_REASON_ACCESS_REVOKED
+	}
+	return syncplanev1.WorkspaceDropped_REASON_ERROR
+}
+
 // openScope resolves one workspace's stream state. On failure it returns the
 // drop reason the client should act on: a denial is permanent, a bad cursor is
 // fixed by re-bootstrapping, everything else is worth a retry.
@@ -279,18 +292,18 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 	adm, err := s.enterWorkspace(ctx, ws)
 	principal := adm.principal
 	if err != nil {
-		if errors.Is(err, ErrNoAccess) {
-			return nil, syncplanev1.WorkspaceDropped_REASON_NO_ACCESS, err
-		}
-		if _, denied := AsWorkspaceDenial(err); denied {
-			return nil, syncplanev1.WorkspaceDropped_REASON_ACCESS_REVOKED, err
-		}
-		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
+		return nil, gateDropReason(err), err
 	}
 	cur, err := s.decodeCursor(ctx, ws, want.GetCursor(), adm.verdict)
 	if err != nil {
 		// An undecodable cursor cannot be advanced from; a clean snapshot can.
-		return nil, syncplanev1.WorkspaceDropped_REASON_RESET, err
+		// Any other failure says nothing about the cursor: a cursor-state
+		// store that cannot be read now is retried with the same cursor, as
+		// Pull answers it, and a refusal of the gate is reported as one.
+		if connect.CodeOf(err) == connect.CodeInvalidArgument {
+			return nil, syncplanev1.WorkspaceDropped_REASON_RESET, err
+		}
+		return nil, gateDropReason(err), err
 	}
 	wantHash, err := subscriptionHash(want.GetSubscriptions())
 	if err != nil {
