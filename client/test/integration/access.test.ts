@@ -3,7 +3,8 @@ import { createConnectTransport } from '@connectrpc/connect-node';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
-import type { RejectionInfo } from '../../src/client.js';
+import type { RejectionInfo, SyncClientOptions } from '../../src/client.js';
+import { CodeAccessDenied } from '../../src/codes.js';
 import {
 	AccountMemberSchema,
 	AccountSchema,
@@ -114,6 +115,7 @@ function clientAs(
 	kvStore: KVStore = new MemoryKVStore(),
 	onMutationRejected?: (info: RejectionInfo) => void,
 	pulls?: PullResponse[],
+	overrides: Partial<SyncClientOptions> = {},
 ): SyncClient {
 	const client = new SyncClient({
 		onMutationRejected,
@@ -134,6 +136,7 @@ function clientAs(
 		entities,
 		pollIntervalMs: 0,
 		streamEnabled: false,
+		...overrides,
 	});
 	open.push(client);
 	return client;
@@ -1053,5 +1056,89 @@ describe('teams on the client', () => {
 		const dave = await synced(clientAs('dave', ws));
 		expect(await dave.get(RepoMemberSchema, 'rm-rita')).toBeUndefined();
 		expect(await dave.get(RepoMemberSchema, 'rm-design')).toBeDefined();
+	});
+
+	it('applies queued writes to a row in order around a write that gives up access to it', async () => {
+		// Given rita writes issues in r1, and reads r2 so she stays in the workspace
+		const ws = freshWorkspace();
+		await trusted(ws, [
+			{ entity: 'repo', value: { id: 'r1' } },
+			{ entity: 'repo', value: { id: 'r2' } },
+			{
+				entity: 'repo_member',
+				value: { id: 'rm-rita', repo: { id: 'r1' }, userId: 'rita', role: 'repo_writer' },
+			},
+			{
+				entity: 'repo_member',
+				value: { id: 'rm-rita-r2', repo: { id: 'r2' }, userId: 'rita', role: 'repo_reader' },
+			},
+			{
+				entity: 'repo_member',
+				value: { id: 'rm-admin', repo: { id: 'r1' }, userId: 'admin', role: 'repo_admin' },
+			},
+			{ entity: 'issue', value: { id: 'i1', repo: { id: 'r1' }, title: 'one' } },
+		]);
+		const rejections: RejectionInfo[] = [];
+		// The writes stay queued until syncNow, so all three are in one push.
+		const rita = await synced(
+			clientAs('rita', ws, new MemoryKVStore(), (info) => rejections.push(info), undefined, {
+				pushDebounceMs: 60_000,
+				pushMaxDelayMs: 60_000,
+			}),
+		);
+
+		// When she edits i1, leaves r1, and edits i1 again
+		await rita.mutate.patch(IssueSchema, 'i1', { title: 'before leaving' });
+		await rita.mutate.del(RepoMemberSchema, 'rm-rita');
+		await rita.mutate.patch(IssueSchema, 'i1', { title: 'after leaving' });
+		await rita.syncNow();
+		await rita.syncNow();
+
+		// Then the server applies the writes in the order she made them: the
+		// first edit is stored, the edit after she left is refused
+		const admin = await synced(clientAs('admin', ws));
+		expect(await admin.get(RepoMemberSchema, 'rm-rita')).toBeUndefined();
+		// And must not store an edit made after she gave up write access
+		expect((await admin.get(IssueSchema, 'i1'))?.title).toBe('before leaving');
+		expect(rejections.map((r) => r.errorCode)).toEqual([ CodeAccessDenied ]);
+	});
+
+	it('control: the same writes pushed one at a time refuse the edit made after leaving', async () => {
+		// Given rita writes issues in r1, and reads r2 so she stays in the workspace
+		const ws = freshWorkspace();
+		await trusted(ws, [
+			{ entity: 'repo', value: { id: 'r1' } },
+			{ entity: 'repo', value: { id: 'r2' } },
+			{
+				entity: 'repo_member',
+				value: { id: 'rm-rita', repo: { id: 'r1' }, userId: 'rita', role: 'repo_writer' },
+			},
+			{
+				entity: 'repo_member',
+				value: { id: 'rm-rita-r2', repo: { id: 'r2' }, userId: 'rita', role: 'repo_reader' },
+			},
+			{
+				entity: 'repo_member',
+				value: { id: 'rm-admin', repo: { id: 'r1' }, userId: 'admin', role: 'repo_admin' },
+			},
+			{ entity: 'issue', value: { id: 'i1', repo: { id: 'r1' }, title: 'one' } },
+		]);
+		const rejections: RejectionInfo[] = [];
+		const rita = await synced(
+			clientAs('rita', ws, new MemoryKVStore(), (info) => rejections.push(info)),
+		);
+
+		// When she edits i1, leaves r1, and edits i1 again, with a push after each
+		await rita.mutate.patch(IssueSchema, 'i1', { title: 'before leaving' });
+		await rita.syncNow();
+		await rita.mutate.del(RepoMemberSchema, 'rm-rita');
+		await rita.syncNow();
+		await rita.mutate.patch(IssueSchema, 'i1', { title: 'after leaving' });
+		await rita.syncNow();
+
+		// Then the first edit is stored and the edit after she left is refused
+		const admin = await synced(clientAs('admin', ws));
+		expect((await admin.get(IssueSchema, 'i1'))?.title).toBe('before leaving');
+		expect(rejections.map((r) => r.errorCode)).toEqual([ CodeAccessDenied ]);
 	});
 });

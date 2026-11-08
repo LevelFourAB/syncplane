@@ -8,6 +8,7 @@ import {
 	toBinary,
 } from '@bufbuild/protobuf';
 
+import { writeChangesAccess } from '../access.js';
 import {
 	type CrudMutation,
 	CrudMutationSchema,
@@ -68,6 +69,11 @@ import { clearOverlayAndReplay, type MirrorMap } from './rebase.js';
  *    are merely remapped). A write that carries fields this build does not
  *    declare (queued by a newer build on a shared store) is a barrier too, so
  *    it reaches the server with those fields.
+ *  - A write that can change what the caller holds — a write to a grant row,
+ *    or the delete of a row that rows of another entity sit below — is a
+ *    barrier across every other key. The server decides access to a row from
+ *    other rows at the position of each write, so a later write folded onto a
+ *    slot before such a write would be judged as if made before it.
  *  - Successive ops on one key fold only when their compare-and-swap guards
  *    AGREE — both absent, or both naming the same version, in which case the
  *    folded slot keeps that guard. Folding across disagreeing guards would
@@ -181,6 +187,16 @@ export function planCompaction(
 		const crud = m.payload.value;
 		const def = registry.get(crud.entity);
 		const keyStr = `${crud.entity}\u0000${crud.key}`;
+		// A write that can change what the caller holds (a grant row, the delete
+		// of a row others sit below) changes what the server admits for other
+		// keys, so no later write may fold back before it. It still folds onto
+		// its own key's slot when that slot is the last one, as nothing sits
+		// between the two.
+		if (writeChangesAccess(registry, crud.entity, crud.op === CrudOp.DELETE)) {
+			const own = openByKey.get(keyStr);
+			openByKey.clear();
+			if (own !== undefined && own === slots.at(-1)) openByKey.set(keyStr, own);
+		}
 		// An undo-referenced edit or an unknown entity is a single-key barrier:
 		// kept distinct so its semantics (and any undo inverse computed against
 		// it) survive untouched. So is a write a newer build queued with fields

@@ -2,6 +2,11 @@ import { create, fromBinary, type MessageInitShape, toBinary } from '@bufbuild/p
 import { describe, expect, it } from 'vitest';
 
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
+import {
+	IssueSchema,
+	RepoMemberSchema,
+	RepoSchema,
+} from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import {
 	type CrudMutation,
@@ -559,6 +564,93 @@ describe('planCompaction', () => {
 			for (const m of plan.mutations) {
 				expect(unknownFields(m)).toEqual({ envelope: [ 14 ], crud: [ 15 ] });
 			}
+		});
+	});
+
+	// The server decides access to a row from other rows (grant rows, the rows
+	// it sits below) at the position of each write.
+	describe('writes that change what the caller holds', () => {
+		const access = new EntityRegistry([ RepoSchema, RepoMemberSchema, IssueSchema ]);
+
+		function titleIssue(id: bigint, title: string): Mutation {
+			return mutation(
+				id,
+				create(CrudMutationSchema, {
+					entity: 'issue',
+					key: 'i1',
+					op: CrudOp.PATCH,
+					value: toBinary(IssueSchema, create(IssueSchema, { title })),
+					fieldMask: { paths: [ 'title' ] },
+				}),
+			);
+		}
+
+		function roleMember(id: bigint, role: string): Mutation {
+			return mutation(
+				id,
+				create(CrudMutationSchema, {
+					entity: 'repo_member',
+					key: 'rm1',
+					op: CrudOp.PATCH,
+					value: toBinary(RepoMemberSchema, create(RepoMemberSchema, { role })),
+					fieldMask: { paths: [ 'role' ] },
+				}),
+			);
+		}
+
+		it('keeps a later write of another row after a write to a grant row', () => {
+			// Given an edit, a grant row given up, and the same edit again
+			const original = [
+				titleIssue(1n, 'before'),
+				mutation(
+					2n,
+					create(CrudMutationSchema, { entity: 'repo_member', key: 'rm1', op: CrudOp.DELETE }),
+				),
+				titleIssue(3n, 'after'),
+			];
+
+			// When the tail is compacted
+			const plan = planCompaction(access, original, 0n, NO_PROTECTED, STORED);
+
+			// Then the second edit stays after the grant write
+			expect(plan.changed).toBe(false);
+		});
+
+		it('keeps a later write of another row after the delete of a row others sit below', () => {
+			const original = [
+				titleIssue(1n, 'before'),
+				mutation(2n, create(CrudMutationSchema, { entity: 'repo', key: 'r2', op: CrudOp.DELETE })),
+				titleIssue(3n, 'after'),
+			];
+			const plan = planCompaction(access, original, 0n, NO_PROTECTED, STORED);
+			expect(plan.changed).toBe(false);
+		});
+
+		it('keeps a later write of another row after an undo-referenced write to a grant row', () => {
+			const original = [
+				titleIssue(1n, 'before'),
+				roleMember(2n, 'repo_reader'),
+				titleIssue(3n, 'after'),
+			];
+			const plan = planCompaction(access, original, 0n, new Set([ 2n ]), STORED);
+			expect(plan.changed).toBe(false);
+		});
+
+		it('folds successive writes of one grant row', () => {
+			const original = [ roleMember(1n, 'repo_reader'), roleMember(2n, 'repo_writer') ];
+			const plan = planCompaction(access, original, 0n, NO_PROTECTED, STORED);
+			expect(plan.mutations).toHaveLength(1);
+		});
+
+		it('keeps writes of one grant row apart around a write of another row', () => {
+			// Folded, the second grant write would apply before the edit.
+			const original = [
+				roleMember(1n, 'repo_reader'),
+				titleIssue(2n, 'between'),
+				roleMember(3n, 'repo_writer'),
+			];
+			const plan = planCompaction(access, original, 0n, NO_PROTECTED, STORED);
+			expect(plan.changed).toBe(false);
 		});
 	});
 
