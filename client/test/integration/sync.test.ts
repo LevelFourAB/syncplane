@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { RejectionInfo } from '../../src/client.js';
 import { CodeConflict, CodePoisonDropped } from '../../src/codes.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
-import { PairSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import { PairSchema, WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { freshWorkspace, newClient } from './helpers.js';
 
 describe('sync (poll-driven)', () => {
@@ -358,4 +358,74 @@ describe('sync (poll-driven)', () => {
 		await a.close();
 		await b.close();
 	});
+
+	// The testserver keeps the engine's default request limit (16 MiB), and
+	// each value below stays under the default value limit (1 MiB). The queue
+	// as a whole is over the request limit, so it must reach the server in
+	// more than one request.
+	it('pushes a queue whose values add up to more than one request may carry', async () => {
+		// Given 20 widgets, each with a 900 KiB value, queued offline
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, {
+			pushDebounceMs: 60_000,
+			pushMaxDelayMs: 60_000,
+			onMutationRejected: (info) => rejections.push(info),
+		});
+		await a.start();
+		const raw = new Uint8Array(900 * 1024).map((_, i) => (i * 31) & 0xff);
+		for (let i = 0; i < 20; i++) {
+			await a.mutate.put(WidgetSchema, { id: `w${i}`, label: `n${i}`, raw });
+		}
+
+		// When the client syncs a few times
+		for (let i = 0; i < 4; i++) await a.syncNow().catch(() => undefined);
+
+		// Then every write reached the server and the queue is empty
+		expect(rejections).toEqual([]);
+		expect(await a.pendingCount()).toBe(0);
+		// And the push must not fail on every attempt because of its size
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		expect((await b.get(WidgetSchema, 'w19'))?.label).toBe('n19');
+
+		await a.close();
+		await b.close();
+	}, 60_000);
+
+	it(
+		'reports a single write larger than one request may carry, and pushes the writes behind it',
+		async () => {
+			// Given a widget whose value alone is over the 16 MiB request limit,
+			// queued ahead of an ordinary write
+			const ws = freshWorkspace();
+			const rejections: RejectionInfo[] = [];
+			const a = newClient(ws, {
+				pushDebounceMs: 60_000,
+				pushMaxDelayMs: 60_000,
+				poisonThreshold: 2,
+				onMutationRejected: (info) => rejections.push(info),
+			});
+			await a.start();
+			await a.mutate.put(WidgetSchema, { id: 'huge', raw: new Uint8Array(17 * 1024 * 1024).fill(7) });
+			await a.mutate.put(TodoSchema, { id: 't1', title: 'behind the huge write' });
+
+			// When the client syncs a few times
+			for (let i = 0; i < 6; i++) await a.syncNow().catch(() => undefined);
+
+			// Then the huge write is reported to the app
+			expect(rejections.map((r) => r.mutationId)).toEqual([ 1n ]);
+			// And the write behind it reaches the server
+			expect(await a.pendingCount()).toBe(0);
+			const b = newClient(ws);
+			await b.start();
+			await b.syncNow();
+			expect((await b.get(TodoSchema, 't1'))?.title).toBe('behind the huge write');
+
+			await a.close();
+			await b.close();
+		},
+		60_000,
+	);
 });

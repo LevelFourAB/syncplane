@@ -230,6 +230,22 @@ const MAX_DROPPED_PAGES = 3;
 export const DEFAULT_MAX_MUTATIONS_PER_PUSH = 256;
 
 /**
+ * Starting byte budget of one push request, matching the engine's default
+ * Limits.MaxRequestBytes. Each mutation is counted at its binary-encoded size,
+ * so the count cap alone cannot carry a queue of large values past that wall.
+ * A server with a lower limit refuses the request as resource_exhausted, and
+ * the coordinator then halves the budget for the rest of the session.
+ */
+const DEFAULT_MAX_PUSH_BYTES = 16 << 20;
+
+/**
+ * Bytes the packer adds per mutation and per workspace batch for the protobuf
+ * framing around them (field tags, length prefixes, the workspace id's own
+ * framing), on top of the encoded mutation itself.
+ */
+const PUSH_FRAMING_BYTES = 16;
+
+/**
  * Default cap on how many workspaces one request may name. Matches the engine's
  * Limits.MaxWorkspacesPerRequest; a client holding more workspaces than this
  * splits its push across requests and its Subscribe across streams.
@@ -339,7 +355,8 @@ export interface CoordinatorOptions {
 	priorityEntities?: string[];
 	/**
 	 * How many times the head mutation may fail the same way — an
-	 * invalid-argument push error, or a batch the server refuses as a whole with
+	 * invalid-argument push error, a resource-exhausted push error for the head
+	 * pushed alone, or a batch the server refuses as a whole with
 	 * "mutation_failed" or an unrecognized code — before the client gives up and
 	 * drops it to the dead-letter surface (onMutationRejected, code
 	 * "poison_dropped"). Counted only while the verdict repeats unchanged. An
@@ -620,6 +637,12 @@ export class Coordinator {
 	 * the first push the server answers.
 	 */
 	private splitPush = false;
+	/**
+	 * Largest encoded size one push request may have. Starts at the engine's
+	 * default request limit and is halved each time the server refuses a request
+	 * of several mutations as resource_exhausted; never raised again.
+	 */
+	private pushBytesBudget = DEFAULT_MAX_PUSH_BYTES;
 	/**
 	 * The unanswered-push mark (metaUnresolvedPush) of each workspace, as this
 	 * tab last read or wrote it. A hint only, so that an answered push opens a
@@ -1563,9 +1586,23 @@ export class Coordinator {
 				// have written; the server answers with ids alone.
 				const inFlight = new Map<string, Mutation>();
 				let budget = this.maxMutationsPerPush;
+				let bytes = 0;
 				for (const [ ws, entry ] of remaining) {
 					if (batches.length >= maxWorkspaces || budget <= 0) break;
-					const take = Math.min(budget, entry.pending.length);
+					// A request always carries at least one mutation, so a write larger
+					// than the budget still goes out alone: the server is the one that
+					// knows its limit, and its refusal is what dead-letters the write.
+					let take = 0;
+					let wsBytes = ws.length + PUSH_FRAMING_BYTES;
+					while (take < Math.min(budget, entry.pending.length)) {
+						const size = toBinary(MutationSchema, entry.pending[take]!).byteLength
+							+ PUSH_FRAMING_BYTES;
+						if (bytes + wsBytes + size > this.pushBytesBudget && (bytes > 0 || take > 0)) break;
+						wsBytes += size;
+						take++;
+					}
+					if (take === 0) break;
+					bytes += wsBytes;
 					const slice = entry.pending.slice(0, take);
 					for (const m of slice) inFlight.set(`${ws}\u0000${m.mutationId}`, m);
 					batches.push({ workspaceId: ws, mutations: slice });
@@ -1588,7 +1625,17 @@ export class Coordinator {
 						durationMs: performance.now() - pushStarted,
 						outcome: Coordinator.outcomeOf(err),
 					});
-					if (err instanceof ConnectError && err.code === Code.InvalidArgument) {
+					if (
+						err instanceof ConnectError && err.code === Code.ResourceExhausted && submitted > 1
+					) {
+						// The request was over the server's size wall, which refuses it
+						// before any mutation runs, so nothing was applied. Pack smaller
+						// requests and try again at once.
+						this.pushBytesBudget = Math.max(1, Math.floor(bytes / 2));
+						continue;
+					}
+					const tooLarge = err instanceof ConnectError && err.code === Code.ResourceExhausted;
+					if (err instanceof ConnectError && (err.code === Code.InvalidArgument || tooLarge)) {
 						const lone = shipped.length === 1 ? shipped[0]! : undefined;
 						if (lone?.atHead && this.poisonThreshold > 0) {
 							// Deterministic head failure of a single workspace. Normally such

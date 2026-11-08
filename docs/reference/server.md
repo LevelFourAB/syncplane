@@ -116,7 +116,7 @@ The following table lists request and data bounds in `server.Limits`:
 | `MaxParticipantsPerRoom`  | 128     | Maximum participant records retained per room. When full, the room retains the lowest session IDs, reports snapshot truncation, and rejects additional sessions.                                                                                                                                                                                                                            |
 | `MaxBlobBytes`            | 4 GiB   | Maximum size of one blob. `BeginUpload` of a larger blob fails with `resource_exhausted`.                                                                                                                                                                                                                                                                                                   |
 
-Increasing `MaxMutationsPerPush` or `MaxValueBytes` requires increasing `MaxRequestBytes` accordingly.
+Increasing `MaxMutationsPerPush` or `MaxValueBytes` requires increasing `MaxRequestBytes` accordingly. The TypeScript client splits a push that the server refuses as `resource_exhausted` into smaller pushes. It drops a single mutation larger than `MaxRequestBytes` with `poison_dropped`.
 
 Each limit applies to a single request or stream. Limits do not constrain overall request rates or concurrent stream counts. See [the default posture is open](../explanation/limits-and-trade-offs.md#the-default-posture-is-open).
 

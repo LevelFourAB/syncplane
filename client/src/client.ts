@@ -839,7 +839,8 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	debugVerifyIndexReads?: boolean;
 	/**
 	 * Identical push failures of the head mutation — an invalid-argument RPC
-	 * error, or a batch the server refuses as a whole with "mutation_failed" or
+	 * error, a resource-exhausted RPC error for the head pushed alone (a write
+	 * larger than the server's request limit), or a batch the server refuses as a whole with "mutation_failed" or
 	 * an unrecognized code — before the client drops it to the dead-letter
 	 * surface (onMutationRejected, code "poison_dropped"). Backstop against a
 	 * queue no amount of retrying can drain. An "internal" batch failure (a
@@ -853,7 +854,10 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 * offline burst is split across sequential pushes. Also the largest number
 	 * of writes one transact() batch may hold; a larger batch rejects. Default
 	 * 256 (the engine's default limit). Set this to match a server configured
-	 * with another MaxMutationsPerPush.
+	 * with another MaxMutationsPerPush. Pushes are also split to stay within
+	 * 16 MiB of encoded mutations (the engine's default MaxRequestBytes); a
+	 * server that refuses a request as too large makes the client halve that
+	 * budget.
 	 */
 	maxMutationsPerPush?: number;
 	/**
