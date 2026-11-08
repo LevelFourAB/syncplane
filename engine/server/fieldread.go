@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -131,8 +132,10 @@ func (e *rowEmitter) project(info *entityInfo, key string, msg proto.Message) ([
 
 // rowChange builds the RowChange that sends row to the bound caller: a
 // tombstone for a deleted row, and otherwise the row without the units a
-// guard hides from the caller, which RowChange.hidden names. A row whose
-// entity can hide nothing from the caller ships as stored.
+// guard hides from the caller, which RowChange.hidden names. A row of an
+// entity in the access model also ships without the top-level fields this
+// server's schema does not declare. A row whose entity can hide nothing from
+// the caller and that holds no such field ships as stored.
 func (e *rowEmitter) rowChange(row storage.Row) (*syncplanev1.RowChange, error) {
 	rc := rowChange(row)
 	if row.Deleted {
@@ -143,8 +146,16 @@ func (e *rowEmitter) rowChange(row storage.Row) (*syncplanev1.RowChange, error) 
 		return rc, nil
 	}
 	hides, err := e.mayHide(info)
-	if err != nil || !hides {
-		return rc, err
+	if err != nil {
+		return nil, err
+	}
+	// A newer schema can guard a field this schema does not declare, and this
+	// server cannot tell who may read it. Such a field stays on the server.
+	// Outside the access model every caller reads every row, so there it
+	// ships.
+	undeclared := info.access != nil && hasUndeclaredFields(info.msgType.Descriptor(), row.Value)
+	if !hides && !undeclared {
+		return rc, nil
 	}
 	// classify decodes every row of an entity that can hide units, so a row
 	// that reaches here decodes. One that does not anyway must not ship as
@@ -153,9 +164,17 @@ func (e *rowEmitter) rowChange(row storage.Row) (*syncplanev1.RowChange, error) 
 	if err != nil {
 		return nil, fmt.Errorf("server: entity %q row %q: %w", row.Entity, row.Key, err)
 	}
-	hidden, err := e.project(info, row.Key, msg)
-	if err != nil || len(hidden) == 0 {
-		return rc, err
+	var hidden []string
+	if hides {
+		if hidden, err = e.project(info, row.Key, msg); err != nil {
+			return nil, err
+		}
+	}
+	if len(hidden) == 0 && !undeclared {
+		return rc, nil
+	}
+	if undeclared {
+		msg.ProtoReflect().SetUnknown(nil)
 	}
 	value, err := proto.Marshal(msg)
 	if err != nil {
@@ -164,6 +183,27 @@ func (e *rowEmitter) rowChange(row storage.Row) (*syncplanev1.RowChange, error) 
 	rc.Body = &syncplanev1.RowChange_Value{Value: value}
 	rc.Hidden = hidden
 	return rc, nil
+}
+
+// hasUndeclaredFields reports whether raw, an encoded message of desc, holds a
+// top-level field that desc does not declare.
+func hasUndeclaredFields(desc protoreflect.MessageDescriptor, raw []byte) bool {
+	fields := desc.Fields()
+	for len(raw) > 0 {
+		n, typ, tagLen := protowire.ConsumeTag(raw)
+		if tagLen < 0 {
+			return false
+		}
+		valLen := protowire.ConsumeFieldValue(n, typ, raw[tagLen:])
+		if valLen < 0 {
+			return false
+		}
+		if fields.ByNumber(n) == nil {
+			return true
+		}
+		raw = raw[tagLen+valLen:]
+	}
+	return false
 }
 
 // refuseHiddenPaths refuses a request that names, in a condition, an order,

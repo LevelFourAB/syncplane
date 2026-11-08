@@ -3,6 +3,7 @@ package server_test
 import (
 	"encoding/binary"
 	"fmt"
+	"net/http/httptest"
 	"slices"
 
 	"connectrpc.com/connect"
@@ -13,6 +14,7 @@ import (
 
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/text"
@@ -26,6 +28,28 @@ import (
 // In seedOrg, admin holds edit_projects at the root, owner at p1 alone, and
 // guest, padmin and member read the tasks of p1 (member of every project)
 // without it.
+
+// withoutBonus is the access schema one release earlier: staff has no bonus
+// field yet, and so no guard over it.
+func withoutBonus(file *descriptorpb.FileDescriptorProto) {
+	m := messageNamed(file, "Staff")
+	kept := m.Field[:0]
+	for _, fl := range m.Field {
+		if fl.GetName() != "bonus" {
+			kept = append(kept, fl)
+		}
+	}
+	m.Field = kept
+	opts := proto.GetExtension(m.GetOptions(), syncplanev1.E_Entity).(*syncplanev1.EntityOptions)
+	guards := opts.GetAccess().GetGuard()[:0]
+	for _, g := range opts.GetAccess().GetGuard() {
+		if !slices.Equal(g.GetFields(), []string{"bonus"}) {
+			guards = append(guards, g)
+		}
+	}
+	opts.Access.Guard = guards
+	proto.SetExtension(m.Options, syncplanev1.E_Entity, opts)
+}
 
 var _ = Describe("Access model registration of field read rules", func() {
 	var srv *server.Server
@@ -623,6 +647,34 @@ var _ = Describe("Access model field read rules", func() {
 			Expect(r.GetErrorCode()).To(Equal("invalid_argument"))
 			Expect(r.GetErrorMessage()).NotTo(ContainSubstring(fmt.Sprint(at-lo)),
 				"padmin could compute the hidden document's highest counter from the step")
+		})
+	})
+
+	// In a rolling deploy or after a rollback, a node whose schema does not
+	// declare a field yet serves and writes rows a newer node stored. The
+	// field's guard still holds for every caller.
+	Describe("a node on the schema before the field was added", func() {
+		var older syncplanev1connect.SyncServiceClient
+
+		BeforeEach(func() {
+			srv := mustNewServer(f.store, headerAuthenticator())
+			DeferCleanup(srv.Close)
+			_, err := srv.RegisterDescriptorSet(accessFileSet(withoutBonus))
+			Expect(err).NotTo(HaveOccurred())
+			ts := httptest.NewServer(srv.HTTPHandler())
+			DeferCleanup(ts.Close)
+			older = syncplanev1connect.NewSyncServiceClient(ts.Client(), ts.URL)
+		})
+
+		It("ships no value of a guarded field the node does not declare", func() {
+			req := connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: ws, ClientId: "c-guest"})
+			as("guest", req.Header())
+			resp, err := older.Pull(f.ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+
+			got := decoded(staffIn(resp.Msg.GetPatch().GetChanges())["s1"])
+			Expect(got.GetName()).To(Equal("ann"))
+			Expect(got.GetBonus()).To(BeZero(), "the schema lets no client read bonus")
 		})
 	})
 
