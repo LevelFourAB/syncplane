@@ -282,7 +282,9 @@ sequence. After a restore, this gives these results:
 
 Garbage collection deletes lineage marks on the tombstone retention. A cursor
 whose sequence is older than the retention has no mark to compare, and the
-server accepts it without this check.
+server accepts it without this check. Garbage collection keeps the mark of the
+current sequence. Thus a client at the head of an idle workspace keeps the
+check, although its sequence is older than the retention.
 
 ## A bootstrap survives a dropped connection
 

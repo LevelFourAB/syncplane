@@ -38,7 +38,8 @@ type Cursor struct {
 	// ErrCursorTooOld: the store was restored from a backup taken before Seq
 	// and written past it since, which Epoch cannot see because the backup
 	// carried it. 0 means unknown and is always accepted, as is a cursor whose
-	// Seq is older than the GC retention. Opaque and 64 bits wide, like Epoch.
+	// Seq is older than the GC retention and below the workspace's current
+	// sequence. Opaque and 64 bits wide, like Epoch.
 	Lineage uint64
 }
 

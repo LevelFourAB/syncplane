@@ -1626,9 +1626,13 @@ func (t *pgTx) PruneSeqLineage(cutoff time.Time) (int, error) {
 	// By sequence rather than by age alone: a record that survived among
 	// pruned older ones would answer for their sequences too, since a lookup
 	// takes the greatest start_seq at or below the sequence it asks about.
+	// The newest record stays whatever its age: it covers the head, and in an
+	// idle workspace the head is old too.
 	tag, err := t.exec(
 		`DELETE FROM seq_lineage WHERE workspace_id = $1 AND start_seq <= (
 			SELECT MAX(start_seq) FROM seq_lineage WHERE workspace_id = $1 AND written_at < $2
+		) AND start_seq < (
+			SELECT MAX(start_seq) FROM seq_lineage WHERE workspace_id = $1
 		)`,
 		t.ws, cutoff.UnixMilli(),
 	)

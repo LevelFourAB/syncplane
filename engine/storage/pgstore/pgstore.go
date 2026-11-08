@@ -557,7 +557,9 @@ func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []a
 		exists(scoped("rows") + " AND t.deleted AND t.updated_at < " + next(at))
 		exists(scoped("clients") + " AND t.updated_at < " + next(at) + " AND t.rejections IS NOT NULL")
 		exists(scoped("consumer_positions") + " AND t.updated_at < " + next(at))
-		exists(scoped("seq_lineage") + " AND t.written_at < " + next(at))
+		// The newest record is never pruned, so only an old one below it counts.
+		exists(scoped("seq_lineage") + " AND t.written_at < " + next(at) +
+			" AND EXISTS (SELECT 1 FROM seq_lineage n WHERE n.workspace_id = t.workspace_id AND n.start_seq > t.start_seq)")
 	}
 	if !cutoffs.Clients.IsZero() {
 		exists(scoped("clients") + " AND t.updated_at < " + next(cutoffs.Clients.UnixMilli()))

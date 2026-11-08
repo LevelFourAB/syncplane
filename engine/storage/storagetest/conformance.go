@@ -335,12 +335,14 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				write("ws1", func(tx storage.WriteTx) {
 					n, err := tx.PruneSeqLineage(time.Now().Add(time.Hour))
 					Expect(err).NotTo(HaveOccurred())
-					Expect(n).To(Equal(2))
+					Expect(n).To(Equal(1), "the newest record stays")
 				})
 				read("ws1", func(tx storage.ReadTx) {
-					for seq := range uint64(4) {
+					for seq := range uint64(3) {
 						Expect(lineage(tx, seq)).To(BeZero())
 					}
+					Expect(lineage(tx, 3)).To(Equal(marks[3]),
+						"the head keeps its mark however old it is")
 				})
 				read("ws2", func(tx storage.ReadTx) {
 					Expect(lineage(tx, 1)).NotTo(BeZero(), "pruning is per workspace")
@@ -2084,17 +2086,35 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				Entry("a live row of an aging entity", func(tx storage.WriteTx) {
 					Expect(tx.PutRow("audit", "a1", []byte("v"), 1, storage.Actor{})).To(Succeed())
 				}),
-				Entry("a sequence lineage record", func(tx storage.WriteTx) {
-					_, err := tx.NextSeq()
-					Expect(err).NotTo(HaveOccurred())
-				}),
 			)
 
-			It("leaves out a workspace whose lineage records were pruned", func() {
+			It("reports a workspace holding a lineage record below the newest one", func() {
+				for range 2 {
+					write("ws1", func(tx storage.WriteTx) {
+						_, err := tx.NextSeq()
+						Expect(err).NotTo(HaveOccurred())
+					})
+				}
+				Expect(collectable(storage.GCCutoffs{Tombstones: future()}, "", 10)).To(Equal([]string{"ws1"}))
+			})
+
+			It("leaves out a workspace whose only lineage record is the newest one", func() {
+				// PruneSeqLineage never deletes it, so reporting it would visit
+				// every idle workspace on every pass.
 				write("ws1", func(tx storage.WriteTx) {
 					_, err := tx.NextSeq()
 					Expect(err).NotTo(HaveOccurred())
 				})
+				Expect(collectable(storage.GCCutoffs{Tombstones: future()}, "", 10)).To(BeEmpty())
+			})
+
+			It("leaves out a workspace whose lineage records were pruned", func() {
+				for range 2 {
+					write("ws1", func(tx storage.WriteTx) {
+						_, err := tx.NextSeq()
+						Expect(err).NotTo(HaveOccurred())
+					})
+				}
 				write("ws1", func(tx storage.WriteTx) {
 					_, err := tx.PruneSeqLineage(future())
 					Expect(err).NotTo(HaveOccurred())

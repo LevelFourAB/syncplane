@@ -970,8 +970,9 @@ type WriteTx interface {
 	// PruneSeqLineage deletes the lineage records (see ReadTx.SeqLineage) of
 	// write transactions committed before cutoff, together with every record
 	// of a lower sequence, and returns how many records it deleted. The
-	// sequences those records covered report 0 from SeqLineage afterwards. A
-	// zero cutoff deletes nothing.
+	// sequences those records covered report 0 from SeqLineage afterwards. It
+	// never deletes the workspace's newest record, whatever its age, so
+	// CurrentSeq keeps its mark. A zero cutoff deletes nothing.
 	PruneSeqLineage(cutoff time.Time) (int, error)
 	// PurgeEntityRows deletes rows of ONE entity — LIVE rows included — together
 	// with the secondary-index entries those rows occupied, and returns how many

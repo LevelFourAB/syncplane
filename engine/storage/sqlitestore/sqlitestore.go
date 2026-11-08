@@ -1206,7 +1206,9 @@ func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []a
 		exists(scoped("rows") + " AND t.deleted = 1 AND t.updated_at < " + next(at))
 		exists(scoped("clients") + " AND t.updated_at < " + next(at) + " AND t.rejections IS NOT NULL")
 		exists(scoped("consumer_positions") + " AND t.updated_at < " + next(at))
-		exists(scoped("seq_lineage") + " AND t.written_at < " + next(at))
+		// The newest record is never pruned, so only an old one below it counts.
+		exists(scoped("seq_lineage") + " AND t.written_at < " + next(at) +
+			" AND EXISTS (SELECT 1 FROM seq_lineage n WHERE n.workspace_id = t.workspace_id AND n.start_seq > t.start_seq)")
 	}
 	if !cutoffs.Clients.IsZero() {
 		exists(scoped("clients") + " AND t.updated_at < " + next(cutoffs.Clients.UnixMilli()))
@@ -1528,11 +1530,15 @@ func (t *sqliteTx) PruneSeqLineage(cutoff time.Time) (int, error) {
 	// By sequence rather than by age alone: a record that survived among
 	// pruned older ones would answer for their sequences too, since a lookup
 	// takes the greatest start_seq at or below the sequence it asks about.
+	// The newest record stays whatever its age: it covers the head, and in an
+	// idle workspace the head is old too.
 	res, err := t.exec(
 		`DELETE FROM seq_lineage WHERE workspace_id = ? AND start_seq <= (
 			SELECT MAX(start_seq) FROM seq_lineage WHERE workspace_id = ? AND written_at < ?
+		) AND start_seq < (
+			SELECT MAX(start_seq) FROM seq_lineage WHERE workspace_id = ?
 		)`,
-		t.ws, t.ws, cutoff.UnixMilli(),
+		t.ws, t.ws, cutoff.UnixMilli(), t.ws,
 	)
 	if err != nil {
 		return 0, err

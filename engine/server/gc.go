@@ -71,7 +71,8 @@ const defaultIdempotencyRetention = 24 * time.Hour
 // than tombstones because nothing syncs them. On the tombstone retention it
 // also deletes the sequence lineage records that let a pull detect a store
 // restored from backup: a cursor whose sequence is older than the retention is
-// served without that check.
+// served without that check, unless it sits at the workspace's current
+// sequence, whose record the pass keeps.
 //
 // Idle clients' watermark records are kept whatever the retention: they are
 // what makes a resend idempotent, and a client's pending queue outlives any
@@ -412,7 +413,9 @@ func (s *Server) collectRows(ctx context.Context, workspaceID string) error {
 		}
 		// On the tombstone retention because both bound the same thing: how
 		// long a cursor stays fully checked. A cursor whose sequence lost its
-		// lineage record is still served, without the restore check.
+		// lineage record is still served, without the restore check. The
+		// adapter keeps the head's record, so a reader of an idle workspace
+		// keeps the check.
 		if lineageRemoved, err = tx.PruneSeqLineage(cutoff); err != nil {
 			return err
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -208,11 +209,112 @@ var _ = Describe("Garbage collection", func() {
 		Expect(err).NotTo(HaveOccurred())
 		Expect(pull(foreign).GetReset_()).To(BeTrue(), "the record still names another write at this seq")
 
-		Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+		// The pass keeps the head's record, so a later write must move the
+		// head before the record of seq 1 goes.
 		push(putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2"}))
+		Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
 		resp := pull(foreign)
 		Expect(resp.GetReset_()).To(BeFalse(), "no record is left to compare the mark with")
 		Expect(resp.GetPatch().GetChanges()).To(HaveLen(1))
+	})
+
+	// In an idle workspace the head sequence is itself older than the
+	// retention, so a pass reaches the record for a cursor a reader got a
+	// second ago. That reader is not a long-offline one and keeps its
+	// restore protection.
+	Describe("an idle workspace's head cursor", func() {
+		lineageOf := func(raw []byte) uint64 {
+			GinkgoHelper()
+			var cur syncplanecursorv1.Cursor
+			Expect(proto.Unmarshal(raw, &cur)).To(Succeed())
+			return cur.GetSeqLineage()
+		}
+
+		It("keeps its lineage mark through an idle poll after a pass", func() {
+			srv := newTestServer(server.WithGC(-time.Second, 0))
+			DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
+			start(srv)
+
+			// Given a reader at the head of a workspace nobody writes to
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+			cursor := pull(nil).GetNextCursor()
+			mark := lineageOf(cursor)
+			Expect(mark).NotTo(BeZero())
+
+			// When a pass runs and the reader polls again
+			Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+			idle := pull(cursor)
+
+			// Then the cursor it gets back still carries the mark
+			Expect(idle.GetReset_()).To(BeFalse())
+			Expect(lineageOf(idle.GetNextCursor())).To(Equal(mark),
+				"nothing was written, so the write at this sequence is still the one the reader saw")
+		})
+
+		It("resets the reader when the store is restored from a backup and written past it", func() {
+			dir := GinkgoT().TempDir()
+			live := filepath.Join(dir, "live.db")
+			backup := filepath.Join(dir, "backup.db")
+
+			var (
+				store *sqlitestore.Store
+				srv   *server.Server
+			)
+			open := func() {
+				var err error
+				store, err = sqlitestore.Open(live)
+				Expect(err).NotTo(HaveOccurred())
+				srv = mustNewServer(store, server.WithEntities(&todov1.Todo{}), server.WithGC(-time.Second, 0))
+				start(srv)
+			}
+			shut := func() {
+				Expect(srv.Close()).To(Succeed())
+				Expect(store.Close()).To(Succeed())
+			}
+			// copyStore copies the database file and its WAL sidecars, the way
+			// an operator's file-level backup or restore would.
+			copyStore := func(from, to string) {
+				for _, suffix := range []string{"", "-wal", "-shm"} {
+					data, err := os.ReadFile(from + suffix)
+					if os.IsNotExist(err) {
+						Expect(os.Remove(to + suffix)).To(Or(Succeed(), MatchError(os.ErrNotExist)))
+						continue
+					}
+					Expect(err).NotTo(HaveOccurred())
+					Expect(os.WriteFile(to+suffix, data, 0o600)).To(Succeed())
+				}
+			}
+
+			// Given a backup taken at seq 3, and a reader at seq 5 of a
+			// workspace that then goes idle past the retention
+			open()
+			for i, key := range []string{"t1", "t2", "t3"} {
+				push(putMutation("w", uint64(i+1), "todo", key, &todov1.Todo{Id: key}))
+			}
+			shut()
+			copyStore(live, backup)
+			open()
+			push(putMutation("w", 4, "todo", "t4", &todov1.Todo{Id: "t4"}))
+			push(putMutation("w", 5, "todo", "t5", &todov1.Todo{Id: "t5"}))
+			cursor := pull(nil).GetNextCursor()
+			Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+			cursor = pull(cursor).GetNextCursor()
+			shut()
+
+			// When the backup is restored and other clients write seq 4..6
+			copyStore(backup, live)
+			open()
+			DeferCleanup(shut)
+			for i, key := range []string{"r4", "r5", "r6"} {
+				push(putMutation("w2", uint64(i+1), "todo", key, &todov1.Todo{Id: key}))
+			}
+
+			// Then the reader re-bootstraps rather than keep t4 and t5,
+			// which the store no longer holds, and miss r4 and r5
+			resp := pull(cursor)
+			Expect(resp.GetReset_()).To(BeTrue(),
+				"the write at the cursor's sequence is not the one the reader saw")
+		})
 	})
 
 	It("requires WithGC for manual collection", func() {

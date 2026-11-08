@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -301,6 +302,88 @@ var _ = Describe("Server.Changes", func() {
 			Expect(calls).To(BeZero())
 			Expect(resume.Seq).To(BeEquivalentTo(2))
 			Expect(resume.Lineage).NotTo(BeZero())
+		})
+
+		// In an idle workspace the head sequence is itself older than the GC
+		// retention, so a pass prunes the record for a cursor the consumer got
+		// a moment ago. That consumer keeps its restore protection.
+		Describe("of an idle workspace's head cursor", func() {
+			It("keeps the mark through an idle pass after GC", func() {
+				srv = newTestServer(server.WithGC(-time.Second, 0))
+				push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+				_, head, _ := drain(server.Cursor{}, 0)
+				Expect(head.Lineage).NotTo(BeZero())
+
+				Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+				got, idle, _ := drain(head, 0)
+
+				Expect(got).To(BeEmpty())
+				Expect(idle.Lineage).To(Equal(head.Lineage),
+					"nothing was written, so the write at this sequence is still the one the consumer read")
+			})
+
+			It("returns ErrCursorTooOld once the store is restored from a backup and written past it", func() {
+				dir := GinkgoT().TempDir()
+				live := filepath.Join(dir, "live.db")
+				backup := filepath.Join(dir, "backup.db")
+				var store *sqlitestore.Store
+				open := func() {
+					var err error
+					store, err = sqlitestore.Open(live)
+					Expect(err).NotTo(HaveOccurred())
+					srv = mustNewServer(store, server.WithEntities(&todov1.Todo{}), server.WithGC(-time.Second, 0))
+				}
+				shut := func() {
+					Expect(srv.Close()).To(Succeed())
+					Expect(store.Close()).To(Succeed())
+				}
+				// copyStore copies the database file and its WAL sidecars, the
+				// way a file-level backup or restore would.
+				copyStore := func(from, to string) {
+					for _, suffix := range []string{"", "-wal", "-shm"} {
+						data, err := os.ReadFile(from + suffix)
+						if os.IsNotExist(err) {
+							Expect(os.Remove(to + suffix)).To(Or(Succeed(), MatchError(os.ErrNotExist)))
+							continue
+						}
+						Expect(err).NotTo(HaveOccurred())
+						Expect(os.WriteFile(to+suffix, data, 0o600)).To(Succeed())
+					}
+				}
+
+				// Given a backup at seq 3, and a consumer at seq 5 that made
+				// an idle pass after GC
+				open()
+				for i, key := range []string{"t1", "t2", "t3"} {
+					push(putMutation("w", uint64(i+1), "todo", key, &todov1.Todo{Id: key}))
+				}
+				shut()
+				copyStore(live, backup)
+				open()
+				push(putMutation("w", 4, "todo", "t4", &todov1.Todo{Id: "t4"}))
+				push(putMutation("w", 5, "todo", "t5", &todov1.Todo{Id: "t5"}))
+				_, cursor, _ := drain(server.Cursor{}, 0)
+				Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+				_, cursor, _ = drain(cursor, 0)
+				shut()
+
+				// When the backup is restored and other clients write seq 4..6
+				copyStore(backup, live)
+				open()
+				DeferCleanup(shut)
+				for i, key := range []string{"r4", "r5", "r6"} {
+					push(putMutation("w2", uint64(i+1), "todo", key, &todov1.Todo{Id: key}))
+				}
+
+				// Then the consumer is told to resync rather than read only r6
+				var keys []string
+				_, _, err := srv.Changes(ctx, ws, cursor, 0, func(ch server.Change) error {
+					keys = append(keys, ch.Key)
+					return nil
+				})
+				Expect(err).To(MatchError(server.ErrCursorTooOld),
+					"the consumer read t4 and t5, which the restored store does not hold; got %v", keys)
+			})
 		})
 
 		It("accepts an epoch-less cursor and stamps it going forward", func() {
