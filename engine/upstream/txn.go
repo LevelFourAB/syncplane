@@ -924,7 +924,10 @@ func textCollision(e *entry, r resultRecord) bool {
 // remint queues e again, after the writes queued behind it, with each of its
 // text documents written afresh under a peer unique to the link and the
 // entry: the text it shows, without the formatting marks, as new items the
-// origin cannot hold already. Its id changes; its ref stays.
+// origin cannot hold already. Its id changes; its ref stays. The writes
+// behind it that touch its rows are folded into it (see rebase.Requeue), so
+// it does not undo them; an entry they leave nothing of is dropped as
+// applied.
 func (t *txn) remint(e *entry) error {
 	peer := fmt.Sprintf("upstream:%s:%d", t.w.clientID, e.ref)
 	for i := range e.ops {
@@ -943,10 +946,18 @@ func (t *txn) remint(e *entry) error {
 			op.text[path] = fresh.Encode()
 		}
 	}
+	ops, err := t.requeueOps(e)
+	if err != nil {
+		return err
+	}
+	if len(ops) == 0 {
+		return t.drop(e, nil)
+	}
 	rows := e.rows()
 	if err := t.st.deleteEntry(e); err != nil {
 		return err
 	}
+	e.ops = ops
 	t.cache[e.id] = nil
 	t.q.unsettled = slices.DeleteFunc(t.q.unsettled, func(id uint64) bool { return id == e.id })
 	id, _ := t.w.l.allocate(t.w.id, t.q.nextID, nil)
@@ -956,7 +967,7 @@ func (t *txn) remint(e *entry) error {
 	if err := t.st.putEntry(e); err != nil {
 		return err
 	}
-	for _, r := range rows {
+	for _, r := range e.rows() {
 		ids, err := t.st.touched(r.Entity, r.Key)
 		if err != nil {
 			return err
@@ -968,4 +979,68 @@ func (t *txn) remint(e *entry) error {
 	t.cache[id] = e
 	t.touch(rows...)
 	return nil
+}
+
+// requeueOps returns the ops of e as remint sends them again: each folded
+// with the ops that later entries make on its row (see rebase.Requeue), and
+// without the ops those leave nothing of. A custom entry keeps its ops: the
+// origin runs the mutator, not the ops.
+func (t *txn) requeueOps(e *entry) ([]entryOp, error) {
+	if e.custom != nil {
+		return e.ops, nil
+	}
+	out := make([]entryOp, 0, len(e.ops))
+	for _, op := range e.ops {
+		m := t.b.models[op.entity]
+		if m == nil {
+			out = append(out, op)
+			continue
+		}
+		later, err := t.laterOps(RowRef{Entity: op.entity, Key: op.key}, e.id)
+		if err != nil {
+			return nil, err
+		}
+		next, keep, err := m.Requeue(op.rebaseOp(), later)
+		if err != nil {
+			// A value that does not fold goes as captured, as before the
+			// fold: the origin decides it.
+			out = append(out, op)
+			continue
+		}
+		if !keep {
+			continue
+		}
+		op.kind, op.value, op.mask, op.text = next.Kind, next.Value, next.Mask, next.Text
+		out = append(out, op)
+	}
+	return out, nil
+}
+
+// laterOps returns the ops that the entries after id make on row r, in queue
+// order.
+func (t *txn) laterOps(r RowRef, id uint64) ([]rebase.Op, error) {
+	ids, err := t.st.touched(r.Entity, r.Key)
+	if err != nil {
+		return nil, err
+	}
+	slices.Sort(ids)
+	var ops []rebase.Op
+	for _, later := range ids {
+		if later <= id {
+			continue
+		}
+		e, err := t.entry(later)
+		if err != nil {
+			return nil, err
+		}
+		if e == nil {
+			continue
+		}
+		for _, op := range e.ops {
+			if op.entity == r.Entity && op.key == r.Key {
+				ops = append(ops, op.rebaseOp())
+			}
+		}
+	}
+	return ops, nil
 }

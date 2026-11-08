@@ -112,6 +112,32 @@ var _ = Describe("Convergence repros", Label("convergence"), func() {
 		Expect(bodyText(widgetAt(o.srv, "w1"))).To(ContainSubstring("bye"))
 	})
 
+	It("keeps a later write to a row outside the subscribed scope over an earlier text write queued again", func() {
+		o := newCOrigin()
+		n := newCNode(o, "n0", nil)
+		addConv(n)
+		_, err := n.ws().Put(ctx, &testdatav1.Widget{Id: "w1", Label: "zero"}, server.WithTextString("body", "hello"), server.WithTextPeer("app"))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(n.flush(5 * time.Second)).To(Succeed())
+		Expect(n.link.SetSubscriptions(ctx, convWS, &syncplanev1.Subscription{Entity: "widget", Predicate: query.Eq("flag", true)})).To(Succeed())
+		Eventually(func() *testdatav1.Widget { return widgetAt(n.srv, "w1") }).Should(BeNil())
+
+		// The PUT's text reuses the peer's text ids, so the origin refuses it
+		// once and the link queues it again; the PATCH was made after it.
+		n.part.blockPush.Store(true)
+		_, err = n.ws().Put(ctx, &testdatav1.Widget{Id: "w1", Label: "first"}, server.WithTextString("body", "bye"), server.WithTextPeer("app"))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = n.ws().Patch(ctx, &testdatav1.Widget{Id: "w1", Label: "second"}, []string{"label"}, nil)
+		Expect(err).NotTo(HaveOccurred())
+		n.part.blockPush.Store(false)
+		Expect(n.flush(10 * time.Second)).To(Succeed())
+
+		Expect(n.rejected()).To(BeEmpty())
+		w := widgetAt(o.srv, "w1")
+		Expect(bodyText(w)).To(ContainSubstring("bye"))
+		Expect(w.GetLabel()).To(Equal("second"))
+	})
+
 	It("settles a write-through receipt while the live stream is silent", func() {
 		o := newCOrigin()
 		n := newCNode(o, "n0", nil)
