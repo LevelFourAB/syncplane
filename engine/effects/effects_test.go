@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -471,6 +472,73 @@ var _ = Describe("Effects runtime", func() {
 			f.put(ctx, ws, &testdatav1.Widget{Id: "new"})
 			Expect(f.rt.Drain(ctx, "widgets", ws)).To(Succeed())
 			Expect(rec.keys()).To(Equal([]string{"new"}))
+		})
+	})
+
+	Describe("across a workspace delete and restore", func() {
+		// restoredMidPass runs a pass over 20 widgets whose handler is still
+		// busy when the workspace is deleted and restored, lets the pass
+		// finish, and then writes n widgets to the restored workspace.
+		restoredMidPass := func(n int) (*fixture, *recorder) {
+			GinkgoHelper()
+			f := newFixture()
+			gate := newBlocker(64)
+			rec := newRecorder()
+			Expect(effects.On(f.rt, "widgets", func(ctx context.Context, ev effects.Event[*testdatav1.Widget]) error {
+				if err := gate.handle(ctx, ev); err != nil {
+					return err
+				}
+				return rec.handle(ctx, ev)
+			})).To(Succeed())
+			for i := range 20 {
+				f.put(ctx, ws, &testdatav1.Widget{Id: fmt.Sprintf("old-%02d", i)})
+			}
+
+			done := make(chan struct{})
+			go func() {
+				defer GinkgoRecover()
+				defer close(done)
+				_ = f.rt.Drain(ctx, "widgets", ws)
+			}()
+			Eventually(gate.entered).Should(Receive())
+			Expect(f.srv.DeleteWorkspace(ctx, ws)).To(Succeed())
+			Expect(f.srv.RestoreWorkspace(ctx, ws)).To(Succeed())
+			gate.releaseAll()
+			Eventually(done).Should(BeClosed())
+
+			for i := range n {
+				f.put(ctx, ws, &testdatav1.Widget{Id: fmt.Sprintf("new-%02d", i)})
+			}
+			return f, rec
+		}
+
+		restored := func(rec *recorder) []string {
+			var keys []string
+			for _, k := range rec.keys() {
+				if strings.HasPrefix(k, "new-") {
+					keys = append(keys, k)
+				}
+			}
+			return keys
+		}
+
+		It("delivers every write of the restored workspace after a pass that spanned the delete", func() {
+			f, rec := restoredMidPass(30)
+
+			err := f.rt.Drain(ctx, "widgets", ws)
+
+			Expect(restored(rec)).To(HaveLen(30),
+				"the deleted workspace's position must not hide the restored one's first writes")
+			Expect(err).NotTo(HaveOccurred())
+		})
+
+		It("delivers the restored workspace's writes while it is still below the deleted one's position", func() {
+			f, rec := restoredMidPass(5)
+
+			err := f.rt.Drain(ctx, "widgets", ws)
+
+			Expect(restored(rec)).To(HaveLen(5), "a restored workspace is new history, not a gap to skip")
+			Expect(err).NotTo(HaveOccurred())
 		})
 	})
 

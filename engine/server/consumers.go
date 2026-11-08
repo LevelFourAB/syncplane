@@ -46,10 +46,12 @@ type ConsumerShadowWrite struct {
 // ConsumerUpdate is the durable bookkeeping one drained page produces: how far
 // the consumer got, and the shadows it derived along the way.
 type ConsumerUpdate struct {
-	// Cursor is the position the consumer has now fully acted on. Its Epoch is
-	// not retained and ConsumerPosition reads back 0: the position is held in
-	// the workspace's own store, so it is swapped or restored along with the
-	// changes it points into and has no lineage of its own to be stranded from.
+	// Cursor is the position the consumer has now fully acted on. Its Epoch
+	// and Lineage are not retained and ConsumerPosition reads them back as 0:
+	// the position is held in the workspace's own store, so it is swapped or
+	// restored along with the changes it points into. AdvanceConsumer checks
+	// them against the store before it records the position (see
+	// ErrCursorForeign).
 	Cursor Cursor
 	// Shadows are the per-row snapshot writes to land with that position.
 	Shadows []ConsumerShadowWrite
@@ -200,6 +202,13 @@ func (s *Server) PendingWorkspaces(ctx context.Context, consumer string) iter.Se
 // Callers therefore run handlers FIRST and call this after, never the reverse.
 // It opens a write transaction, so it must not be called from inside a mutator;
 // a context threaded from one fails fast rather than deadlocking.
+//
+// It returns ErrCursorForeign and records nothing when up.Cursor names a
+// history the store does not hold: a nonzero Epoch or Lineage that the store
+// does not report, or a Seq above the current sequence. That is the case when
+// the workspace was deleted and restored, or the store swapped or restored,
+// after Changes returned the cursor. A cursor with zero Epoch and Lineage is
+// checked by its Seq alone.
 func (s *Server) AdvanceConsumer(ctx context.Context, workspaceID, consumer string, up ConsumerUpdate) error {
 	if err := validateConsumerName(consumer); err != nil {
 		return err
@@ -211,6 +220,14 @@ func (s *Server) AdvanceConsumer(ctx context.Context, workspaceID, consumer stri
 		return fmt.Errorf("server: AdvanceConsumer called re-entrantly inside a write transaction (workspace %q): effect handlers run post-commit, never inside the write they react to", workspaceID)
 	}
 	return s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+		// The page was read in an earlier transaction. A position from a
+		// history the store no longer holds would skip every change of the
+		// new history at or below its sequence, with no error anywhere.
+		if foreign, err := cursorForeign(tx, up.Cursor); err != nil {
+			return err
+		} else if foreign {
+			return ErrCursorForeign
+		}
 		for _, sh := range up.Shadows {
 			if sh.Snapshot == nil {
 				if err := tx.DeleteConsumerShadow(consumer, sh.Entity, sh.Key); err != nil {
@@ -228,6 +245,27 @@ func (s *Server) AdvanceConsumer(ctx context.Context, workspaceID, consumer stri
 			Key:    up.Cursor.Key,
 		})
 	})
+}
+
+// cursorForeign reports whether cur names a history tx does not hold: another
+// store lineage, a sequence above the current one, or a write the store holds
+// under another mark. Zero marks are unknown and pass, as in Changes.
+func cursorForeign(tx storage.ReadTx, cur Cursor) (bool, error) {
+	epoch, err := tx.StoreEpoch()
+	if err != nil {
+		return false, err
+	}
+	if cur.Epoch != 0 && cur.Epoch != epoch {
+		return true, nil
+	}
+	current, err := tx.CurrentSeq()
+	if err != nil {
+		return false, err
+	}
+	if cur.Seq > current {
+		return true, nil
+	}
+	return lineageForeign(tx, cursorState{seq: cur.Seq, lineage: cur.Lineage})
 }
 
 // ConsumerShadow returns the snapshot a consumer recorded for one row, or nil

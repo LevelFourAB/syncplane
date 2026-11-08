@@ -171,7 +171,7 @@ func (rt *Runtime) drain(ctx context.Context, c *consumer, workspaceID string) (
 			// feed's (seq, entity, key) order exists for. Changes the consumer
 			// filtered out sort before it and are skipped again anyway.
 			last := page[delivered-1]
-			up.Cursor = server.Cursor{Seq: last.Seq, Entity: last.Entity, Key: last.Key}
+			up.Cursor = server.Cursor{Seq: last.Seq, Entity: last.Entity, Key: last.Key, Epoch: next.Epoch}
 			if err := rt.srv.AdvanceConsumer(ctx, workspaceID, c.name, up); err != nil {
 				return cur.Seq, errors.Join(deliverErr, err)
 			}

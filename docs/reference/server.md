@@ -547,7 +547,7 @@ func (s *Server) ConsumerPendingWorkspaces(ctx, consumer, after string, limit in
 func (s *Server) PendingWorkspaces(ctx, consumer string) iter.Seq2[string, error]
 ```
 
-`AdvanceConsumer` commits an updated cursor position and shadow state in a single transaction.
+`AdvanceConsumer` commits an updated cursor position and shadow state in a single transaction. It returns `ErrCursorForeign` and records nothing when the cursor names a history the store does not hold: an `Epoch` or `Lineage` the store does not report, or a sequence above the current one. This occurs when the workspace is deleted and restored, or the store is swapped or restored, after `Changes` returned the cursor. Pass the cursor that `Changes` returned, with its `Epoch` and `Lineage`, to get the full check.
 
 `ConsumerPendingWorkspaces` returns workspace IDs with unprocessed changes for a consumer, paginated after an exclusive `after` workspace ID. `PendingWorkspaces` yields all of them in ID order and reads one page at a time. Each page is a separate snapshot.
 
