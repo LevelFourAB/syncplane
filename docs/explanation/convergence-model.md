@@ -417,6 +417,15 @@ function (see [Writes](../reference/typescript-client.md#which-write-verb)).
 Collaborative-text fields are the exception to whole-row replacement: they union
 with the stored document on every `PUT` path.
 
+A `PUT` can also name the units it replaces with a field mask: top-level fields
+and oneofs, each by name. Every other unit keeps its stored value, and a `PUT`
+that creates the row leaves them unset. Unlike a `PATCH`, such a `PUT` creates
+a row that does not exist. A server that forwards writes to another server
+uses it: a caller's `PUT` keeps the fields that caller may not write, and the
+forwarded `PUT` names the fields the caller may write. The other server then
+keeps its own values of the rest, also where the forwarding server's principal
+may write them.
+
 ### A client holds only the entities it declares
 
 Clients and servers maintain separate schema registries that can diverge. When

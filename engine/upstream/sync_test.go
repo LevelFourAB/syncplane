@@ -22,6 +22,16 @@ import (
 	"github.com/levelfourab/syncplane/engine/upstream"
 )
 
+// protectCompleted keeps every caller from writing a todo's completed field.
+type protectCompleted struct{ server.AllowAll }
+
+func (protectCompleted) ProtectedFields(_ context.Context, _ server.Principal, _, entity string) ([]string, error) {
+	if entity == "todo" {
+		return []string{"completed"}, nil
+	}
+	return nil, nil
+}
+
 var _ = Describe("Sync", func() {
 	var (
 		o   *origin
@@ -218,6 +228,29 @@ var _ = Describe("Sync", func() {
 	It("refuses a subscription to an entity that is not bound", func() {
 		err := n.link.SetSubscriptions(ctx, ws, &syncplanev1.Subscription{Entity: "widget"})
 		Expect(err).To(HaveOccurred())
+	})
+
+	It("keeps an origin change to a field the downstream caller may not write across the caller's PUT", func() {
+		m := newLocal(o, nil, server.WithPermissions(protectCompleted{}))
+		m.add()
+		m.flush()
+		o.put(&todov1.Todo{Id: "t1", Title: "a"})
+		Eventually(func() string { return title(m.todo("t1")) }).Should(Equal("a"))
+
+		m.part.Cut()
+		o.patch(&todov1.Todo{Id: "t1", Completed: true}, "completed")
+		dc, err := client.New(m.ts.URL)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = dc.Workspace(ws).Put(ctx, &todov1.Todo{Id: "t1", Title: "b"})
+		Expect(err).NotTo(HaveOccurred())
+		m.part.Heal()
+		m.flush()
+
+		Expect(m.rejected()).To(BeEmpty())
+		for _, t := range []*todov1.Todo{o.todo("t1"), m.todo("t1")} {
+			Expect(t.GetTitle()).To(Equal("b"))
+			Expect(t.GetCompleted()).To(BeTrue(), "the PUT wrote the local engine's stale value of a field its caller may not write")
+		}
 	})
 
 	It("serves a downstream client the converged rows", func() {

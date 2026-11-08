@@ -710,7 +710,7 @@ func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 	for path := range o.texts {
 		named = append(named, protectedHead(path))
 	}
-	if err := aw.carryGuarded(e.tx, msg, named); err != nil {
+	if _, err := aw.carryGuarded(e.tx, msg, named); err != nil {
 		return err
 	}
 	carryUnknownFields(base, msg)

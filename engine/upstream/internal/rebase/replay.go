@@ -3,6 +3,7 @@ package rebase
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -28,7 +29,9 @@ type Op struct {
 	// Value is the entity message the write submitted, encoded. Ignored for
 	// DELETE.
 	Value []byte
-	// Mask holds the field-mask paths of a PATCH. Ignored for PUT and DELETE.
+	// Mask holds the field-mask paths of a PATCH. For a PUT it names the
+	// top-level fields and oneofs the PUT replaces, and nil means all of them.
+	// Ignored for DELETE.
 	Mask []string
 	// Text maps instance paths to full text documents (see TextDocuments). A
 	// document here stands in for the bytes Value carries at that path, which
@@ -126,10 +129,13 @@ func (m *Model) applyPut(row Row, op Op) (Row, error) {
 	if err := m.resolveText(next, op.Text, nil); err != nil {
 		return row, err
 	}
-	if row.Present && len(m.text) > 0 {
+	if row.Present && (len(m.text) > 0 || len(op.Mask) > 0) {
 		// A stored row that does not decode is no base: the PUT replaces it,
 		// as it repairs such a row on the origin.
 		if base, err := m.decode(row.Value); err == nil {
+			if len(op.Mask) > 0 {
+				keepUnnamed(base, next, op.Mask)
+			}
 			if err := m.unionText(base, next); err != nil {
 				return row, refused("%v", err)
 			}
@@ -141,6 +147,39 @@ func (m *Model) applyPut(row Row, op Op) (Row, error) {
 		return row, err
 	}
 	return Row{Present: true, Value: out}, nil
+}
+
+// keepUnnamed gives next the value base holds for every top-level field and
+// oneof that mask does not name, as the origin keeps them for a PUT with a
+// field mask. Key fields are left out of such a mask and hold the same value
+// on both sides.
+func keepUnnamed(base, next protoreflect.Message, mask []string) {
+	desc := next.Descriptor()
+	named := func(name protoreflect.Name) bool { return slices.Contains(mask, string(name)) }
+	oneofs := desc.Oneofs()
+	for i := 0; i < oneofs.Len(); i++ {
+		od := oneofs.Get(i)
+		if od.IsSynthetic() || named(od.Name()) {
+			continue
+		}
+		if fd := next.WhichOneof(od); fd != nil {
+			next.Clear(fd)
+		}
+		if fd := base.WhichOneof(od); fd != nil {
+			next.Set(fd, base.Get(fd))
+		}
+	}
+	fields := desc.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if od := fd.ContainingOneof(); (od != nil && !od.IsSynthetic()) || named(fd.Name()) {
+			continue
+		}
+		next.Clear(fd)
+		if base.Has(fd) {
+			next.Set(fd, base.Get(fd))
+		}
+	}
 }
 
 func (m *Model) applyPatch(row Row, op Op) (Row, error) {

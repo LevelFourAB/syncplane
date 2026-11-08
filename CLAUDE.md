@@ -39,9 +39,11 @@ wire contract:
 - PUT replaces whole rows — except collaborative-text fields, which union with
   the stored document on every PUT path, fields a client may not write, which
   keep their stored value, and top-level fields the server's schema does not
-  declare, which also keep their stored value. Partial updates use PATCH with a
-  field mask, and a mask reaching a field the caller may not write is refused.
-  Schema evolution is additive.
+  declare, which also keep their stored value. A PUT with a field mask replaces
+  only the top-level fields and oneofs it names, and is how a linked engine
+  forwards a caller's PUT. Partial updates use PATCH with a field mask, and a
+  mask reaching a field the caller may not write is refused. Schema evolution
+  is additive.
 - Wire cursors are opaque bytes to clients.
 
 ### Where things live

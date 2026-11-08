@@ -416,9 +416,9 @@ type WorkspaceResults struct {
 	Results []*MutationResult `protobuf:"bytes,2,rep,name=results,proto3" json:"results,omitempty"`
 	// Set when the whole batch failed. Codes: "mutation_id_gap" (resend in
 	// order from the client's watermark), "client_id_in_use" (another writer
-	// used the client_id, see WorkspaceBatch.sent_through; resend under a new
-	// client_id), "workspace_replaced" (the queue was written against another
-	// store history, see WorkspaceBatch.basis; drop it), "workspace_access_revoked"
+	// used the client_id, see WorkspaceBatch.sent_through),
+	// "workspace_replaced" (the queue was written against another store
+	// history, see WorkspaceBatch.basis; drop it), "workspace_access_revoked"
 	// (permanent — stop syncing this workspace, see the client's purge path),
 	// "invalid_argument" (deterministic; the batch will never apply),
 	// "mutation_failed" (a custom mutator returned an error; retry, and drop

@@ -9,6 +9,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
@@ -275,6 +276,71 @@ var _ = Describe("Field guards and protected fields", func() {
 			}))[0])
 
 			Expect(read("g1").GetSettings().GetColor()).To(Equal("blue"))
+		})
+	})
+
+	Describe("PUT with a field mask", func() {
+		putMasked := func(id uint64, g *testdatav1.Guarded, paths ...string) *syncplanev1.MutationResult {
+			GinkgoHelper()
+			m := putMutation("c1", id, "guarded", g.GetId(), g)
+			m.GetCrud().FieldMask = &fieldmaskpb.FieldMask{Paths: paths}
+			res := push(m)
+			Expect(res).To(HaveLen(1))
+			return res[0]
+		}
+
+		It("replaces the named fields and keeps the rest", func() {
+			seed(&testdatav1.Guarded{Id: "g1", Label: "old", Owner: "alice", Settings: &testdatav1.Settings{Color: "red"}})
+			res := putMasked(1, &testdatav1.Guarded{Id: "g1", Label: "new"}, "label")
+			Expect(res.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED), res.GetErrorMessage())
+			got := read("g1")
+			Expect(got.GetLabel()).To(Equal("new"))
+			Expect(got.GetSettings().GetColor()).To(Equal("red"), "a field the mask leaves out keeps its value")
+			Expect(got.GetOwner()).To(Equal("alice"))
+		})
+
+		It("clears a named field the value leaves unset", func() {
+			seed(&testdatav1.Guarded{Id: "g1", Label: "old", Settings: &testdatav1.Settings{Color: "red"}})
+			res := putMasked(1, &testdatav1.Guarded{Id: "g1"}, "settings")
+			Expect(res.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED), res.GetErrorMessage())
+			got := read("g1")
+			Expect(got.GetSettings()).To(BeNil())
+			Expect(got.GetLabel()).To(Equal("old"))
+		})
+
+		It("creates a row with only the named fields", func() {
+			res := putMasked(1, &testdatav1.Guarded{Id: "g2", Label: "new", Settings: &testdatav1.Settings{Color: "red"}}, "label", "id")
+			Expect(res.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED), res.GetErrorMessage())
+			got := read("g2")
+			Expect(got.GetLabel()).To(Equal("new"))
+			Expect(got.GetSettings()).To(BeNil())
+		})
+
+		It("refuses a path that names no top-level field or oneof", func() {
+			seed(&testdatav1.Guarded{Id: "g1", Label: "old"})
+			for _, path := range []string{"settings.color", "state_name", "nope"} {
+				res := putMasked(1, &testdatav1.Guarded{Id: "g1", Label: "new"}, path)
+				Expect(res.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED), path)
+				Expect(res.GetErrorCode()).To(Equal(server.CodeInvalidArgument), path)
+			}
+			Expect(read("g1").GetLabel()).To(Equal("old"))
+		})
+
+		It("refuses a named field the caller may not write", func() {
+			seed(&testdatav1.Guarded{Id: "g1", Label: "old", Owner: "alice"})
+			res := putMasked(1, &testdatav1.Guarded{Id: "g1", Label: "new", Owner: "mallory"}, "label", "owner")
+			Expect(res.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(read("g1").GetOwner()).To(Equal("alice"))
+			Expect(read("g1").GetLabel()).To(Equal("old"))
+		})
+
+		It("refuses a named field the permission policy protects", func() {
+			policy.protect = map[string][]string{"guarded": {"settings"}}
+			seed(&testdatav1.Guarded{Id: "g1", Label: "old"})
+			res := putMasked(1, &testdatav1.Guarded{Id: "g1", Settings: &testdatav1.Settings{Color: "red"}}, "settings")
+			Expect(res.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(res.GetErrorCode()).To(Equal(server.CodePermissionDenied))
+			Expect(read("g1").GetSettings()).To(BeNil())
 		})
 	})
 

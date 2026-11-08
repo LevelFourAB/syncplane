@@ -95,7 +95,10 @@ func mutationOf(b *bound, st stateTx, e *entry, inBatch map[uint64]bool) (_ *syn
 			}
 			crud.Value = v
 		}
-		if op.kind == syncplanev1.CrudOp_CRUD_OP_PATCH {
+		// A PUT goes with the fields the local caller wrote, so the origin keeps
+		// its own values of the rest: the link's principal may write fields
+		// that the local caller may not.
+		if op.kind == syncplanev1.CrudOp_CRUD_OP_PATCH || (op.kind == syncplanev1.CrudOp_CRUD_OP_PUT && len(op.mask) > 0) {
 			crud.FieldMask = &fieldmaskpb.FieldMask{Paths: op.mask}
 		}
 		switch op.cas.mode {

@@ -71,7 +71,11 @@ type CapturedOp struct {
 	// collaborative-text field holds the submitted document or fragment, not
 	// the union stored in After.
 	Value []byte
-	// Mask is the PATCH field mask the write merged, nil for PUT and DELETE.
+	// Mask is the PATCH field mask the write merged. For a PUT it names the
+	// units the write replaced: the field mask the PUT named, or else every
+	// top-level field and oneof the caller may write, or the key fields alone
+	// when the caller may write none of them. It is nil for a DELETE, and for a
+	// PUT that did not come from a client push.
 	Mask []string
 	// ExpectedVersion is the version the write required the row to be at, nil
 	// for an unguarded write.

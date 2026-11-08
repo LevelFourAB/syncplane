@@ -239,7 +239,18 @@ type CrudMutation struct {
 	// from `field_mask`.
 	Value []byte `protobuf:"bytes,4,opt,name=value,proto3" json:"value,omitempty"`
 	// Specifies fields to merge for a `CRUD_OP_PATCH` operation with
-	// last-write-wins (LWW) resolution. Unset for other operations.
+	// last-write-wins (LWW) resolution.
+	//
+	// For a `CRUD_OP_PUT`, optionally names the units the PUT replaces: a
+	// top-level field outside a oneof, or a oneof by its name. Every other
+	// unit keeps the stored value, or stays unset when the PUT creates the
+	// row. Key fields are always written and may be left out. The server
+	// refuses with `invalid_argument` a path that names no such unit, and
+	// refuses a path that names a field the caller may not write, as it
+	// refuses such a PATCH. Without a mask, a PUT replaces every unit (see
+	// `CrudOp`). A server that forwards writes to another server sends a PUT
+	// with the units the original caller may write, so the other server
+	// keeps the fields that caller could not change. Unset for DELETE.
 	FieldMask *fieldmaskpb.FieldMask `protobuf:"bytes,5,opt,name=field_mask,json=fieldMask,proto3" json:"field_mask,omitempty"`
 	// Optional compare-and-swap guard. When set, the server applies this
 	// mutation only if the target row version matches this value. If the

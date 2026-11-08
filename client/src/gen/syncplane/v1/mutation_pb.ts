@@ -133,7 +133,18 @@ export type CrudMutation = Message<"syncplane.v1.CrudMutation"> & {
 
   /**
    * Specifies fields to merge for a `CRUD_OP_PATCH` operation with
-   * last-write-wins (LWW) resolution. Unset for other operations.
+   * last-write-wins (LWW) resolution.
+   *
+   * For a `CRUD_OP_PUT`, optionally names the units the PUT replaces: a
+   * top-level field outside a oneof, or a oneof by its name. Every other
+   * unit keeps the stored value, or stays unset when the PUT creates the
+   * row. Key fields are always written and may be left out. The server
+   * refuses with `invalid_argument` a path that names no such unit, and
+   * refuses a path that names a field the caller may not write, as it
+   * refuses such a PATCH. Without a mask, a PUT replaces every unit (see
+   * `CrudOp`). A server that forwards writes to another server sends a PUT
+   * with the units the original caller may write, so the other server
+   * keeps the fields that caller could not change. Unset for DELETE.
    *
    * @generated from field: google.protobuf.FieldMask field_mask = 5;
    */

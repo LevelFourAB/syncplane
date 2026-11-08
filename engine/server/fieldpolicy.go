@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -136,14 +137,15 @@ func protectedPath(path string, protected []string) bool {
 	return false
 }
 
-// refuseProtectedMask rejects a PATCH whose mask reaches a protected field.
+// refuseProtectedMask rejects a PATCH, or a PUT with a field mask, whose mask
+// reaches a protected field.
 //
-// Only PATCH: it is the op that names what it writes, so a mask reaching one of
-// these fields is a request to do the forbidden thing, and the client should ack
-// and drop it rather than retry a write that can never land. A PUT names no
-// field and keeps the stored value instead.
+// Only a write that names what it writes: a mask reaching one of these fields
+// is a request to do the forbidden thing, and the client should ack and drop
+// it rather than retry a write that can never land. A PUT without a mask names
+// no field and keeps the stored value instead.
 func refuseProtectedMask(info *entityInfo, crud *syncplanev1.CrudMutation, protected []string) error {
-	if crud.GetOp() != syncplanev1.CrudOp_CRUD_OP_PATCH {
+	if crud.GetOp() != syncplanev1.CrudOp_CRUD_OP_PATCH && crud.GetOp() != syncplanev1.CrudOp_CRUD_OP_PUT {
 		return nil
 	}
 	path, hit := maskProtected(crud.GetFieldMask().GetPaths(), protected)
@@ -151,9 +153,53 @@ func refuseProtectedMask(info *entityInfo, crud *syncplanev1.CrudMutation, prote
 		return nil
 	}
 	return Reject(CodePermissionDenied, fmt.Sprintf(
-		"entity %q: field %q may not be written by this caller, so a PATCH masking %q is refused; "+
+		"entity %q: field %q may not be written by this caller, so a %s masking %q is refused; "+
 			"drop the path from the mask, or make the change through a custom mutator",
-		info.name, protectedHead(path), path))
+		info.name, protectedHead(path), opWord(crud.GetOp()), path))
+}
+
+// opWord names a CRUD op in a rejection message.
+func opWord(op syncplanev1.CrudOp) string {
+	if op == syncplanev1.CrudOp_CRUD_OP_PUT {
+		return "PUT"
+	}
+	return "PATCH"
+}
+
+// putUnits checks the field mask of a PUT and returns the units it names, nil
+// for a PUT without one. Key fields may be named and are left out, as a PUT
+// always writes them.
+func putUnits(info *entityInfo, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	units := entityUnits(info)
+	desc := info.msgType.Descriptor()
+	named := make([]string, 0, len(paths))
+	for _, path := range paths {
+		if fd := desc.Fields().ByName(protoreflect.Name(path)); fd != nil && slices.Contains(info.keyFields, fd) {
+			continue
+		}
+		if !slices.Contains(units, path) {
+			return nil, Reject(CodeInvalidArgument, fmt.Sprintf(
+				"entity %q: PUT field mask path %q names no top-level field or oneof", info.name, path))
+		}
+		if !slices.Contains(named, path) {
+			named = append(named, path)
+		}
+	}
+	return named, nil
+}
+
+// unnamedUnits returns the units of info that named leaves out.
+func unnamedUnits(info *entityInfo, named []string) []string {
+	var out []string
+	for _, unit := range entityUnits(info) {
+		if !slices.Contains(named, unit) {
+			out = append(out, unit)
+		}
+	}
+	return out
 }
 
 // protectedHead is the unit a mask path was matched against — the path itself

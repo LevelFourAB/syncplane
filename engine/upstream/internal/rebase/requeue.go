@@ -3,6 +3,7 @@ package rebase
 import (
 	"maps"
 	"slices"
+	"strings"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/internal/textpath"
@@ -71,6 +72,19 @@ func (m *Model) Requeue(op Op, later []Op) (Op, bool, error) {
 	}
 	out := op
 	out.Value = row.Value
+	if op.Mask != nil {
+		// A PUT that names its fields replaces only those, so it names the
+		// fields the folded patches wrote too.
+		out.Mask = slices.Clone(op.Mask)
+		for _, p := range patches {
+			for _, path := range p.Mask {
+				head, _, _ := strings.Cut(path, ".")
+				if !slices.Contains(out.Mask, head) {
+					out.Mask = append(out.Mask, head)
+				}
+			}
+		}
+	}
 	return out, true, nil
 }
 

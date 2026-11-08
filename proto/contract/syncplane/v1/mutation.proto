@@ -72,7 +72,18 @@ message CrudMutation {
 	// from `field_mask`.
 	bytes value = 4;
 	// Specifies fields to merge for a `CRUD_OP_PATCH` operation with
-	// last-write-wins (LWW) resolution. Unset for other operations.
+	// last-write-wins (LWW) resolution.
+	//
+	// For a `CRUD_OP_PUT`, optionally names the units the PUT replaces: a
+	// top-level field outside a oneof, or a oneof by its name. Every other
+	// unit keeps the stored value, or stays unset when the PUT creates the
+	// row. Key fields are always written and may be left out. The server
+	// refuses with `invalid_argument` a path that names no such unit, and
+	// refuses a path that names a field the caller may not write, as it
+	// refuses such a PATCH. Without a mask, a PUT replaces every unit (see
+	// `CrudOp`). A server that forwards writes to another server sends a PUT
+	// with the units the original caller may write, so the other server
+	// keeps the fields that caller could not change. Unset for DELETE.
 	google.protobuf.FieldMask field_mask = 5;
 	// Optional compare-and-swap guard. When set, the server applies this
 	// mutation only if the target row version matches this value. If the

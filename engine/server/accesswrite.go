@@ -1368,21 +1368,31 @@ func guardRefusal(info *entityInfo, key, unit string) error {
 //
 // named are units the write names outright, as a PATCH mask does; a guarded
 // one the caller may not write is refused rather than carried over.
-func (w *accessWrite) carryGuarded(tx storage.ReadTx, msg proto.Message, named []string) error {
+//
+// It returns the units it kept at their stored value or cleared, which the
+// caller did not write.
+func (w *accessWrite) carryGuarded(tx storage.ReadTx, msg proto.Message, named []string) ([]string, error) {
 	if w == nil {
-		return nil
+		return nil, nil
 	}
-	var base proto.Message
+	var (
+		base proto.Message
+		kept []string
+	)
+	carry := func(units []string) error {
+		kept = append(kept, units...)
+		return carryProtectedFields(w.info, units, base, msg)
+	}
 	if w.live {
 		base = w.stored.Interface()
 		if units := w.unlistedUnits(); len(units) > 0 {
-			if err := carryProtectedFields(w.info, units, base, msg); err != nil {
-				return err
+			if err := carry(units); err != nil {
+				return nil, err
 			}
 		}
 	}
 	if len(w.info.access.guards) == 0 {
-		return nil
+		return kept, nil
 	}
 	op := opCreate
 	if w.live {
@@ -1393,7 +1403,7 @@ func (w *accessWrite) carryGuarded(tx storage.ReadTx, msg proto.Message, named [
 		g := &w.info.access.guards[i]
 		ok, err := w.guardAdmits(tx, g, op, fr)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if ok {
 			if !w.live || !g.hides() {
@@ -1401,7 +1411,7 @@ func (w *accessWrite) carryGuarded(tx storage.ReadTx, msg proto.Message, named [
 			}
 			reads, err := w.guardReads(tx, g)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if reads {
 				continue
@@ -1415,8 +1425,8 @@ func (w *accessWrite) carryGuarded(tx storage.ReadTx, msg proto.Message, named [
 					carried = append(carried, unit)
 				}
 			}
-			if err := carryProtectedFields(w.info, carried, base, msg); err != nil {
-				return err
+			if err := carry(carried); err != nil {
+				return nil, err
 			}
 			continue
 		}
@@ -1425,14 +1435,14 @@ func (w *accessWrite) carryGuarded(tx storage.ReadTx, msg proto.Message, named [
 				w.gate.logRefusal(op, w.info, w.key, func() []string {
 					return []string{fmt.Sprintf("guard of %q admits no %s of the field by this caller", unit, opName(op))}
 				})
-				return guardRefusal(w.info, w.key, unit)
+				return nil, guardRefusal(w.info, w.key, unit)
 			}
 		}
-		if err := carryProtectedFields(w.info, g.units, base, msg); err != nil {
-			return err
+		if err := carry(g.units); err != nil {
+			return nil, err
 		}
 	}
-	return nil
+	return kept, nil
 }
 
 // unlistedUnits returns the units an update may not change because no update

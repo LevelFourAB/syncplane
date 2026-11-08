@@ -1208,8 +1208,13 @@ func (s *Server) applyCrud(
 			return Reject(CodeInvalidArgument,
 				fmt.Sprintf("entity %q: key %q does not match key fields (%q)", info.name, crud.GetKey(), derived))
 		}
-		// A PUT names no field, so a protected one is not refused: it keeps what
-		// the row already holds, and the rest of the write lands. Done here,
+		named, err := putUnits(info, crud.GetFieldMask().GetPaths())
+		if err != nil {
+			return err
+		}
+		// A PUT without a mask names no field, so a protected one is not
+		// refused: it keeps what the row already holds, and the rest of the
+		// write lands. A masked PUT naming one was refused before this. Done here,
 		// before the text guard, so bytes a client sent in a protected
 		// collaborative-text field are gone before anything decodes them.
 		protected, err := g.protected(info)
@@ -1230,7 +1235,8 @@ func (s *Server) applyCrud(
 		}
 		// The fields the access model keeps from this caller get the same
 		// treatment, which depends on the caller and the row.
-		if err := aw.carryGuarded(tx, msg, nil); err != nil {
+		kept, err := aw.carryGuarded(tx, msg, named)
+		if err != nil {
 			return err
 		}
 		// Every PUT reads the stored row for this, also when nothing else needs
@@ -1241,13 +1247,40 @@ func (s *Server) applyCrud(
 			return baseErr
 		}
 		carryUnknownFields(base, msg)
+		// The units a masked PUT leaves out keep the stored value, as if a
+		// protected field. Before the text union, which then folds a stored
+		// document into itself.
+		if named != nil {
+			if err := carryProtectedFields(info, unnamedUnits(info, named), base, msg); err != nil {
+				return err
+			}
+		}
 		// What the capture reports as submitted: the fields the caller may not
 		// write and the fields the schema does not know are replaced by now, and
-		// the text union is still to come. A linked engine forwards this value,
-		// so the origin keeps the fields this server could not see.
+		// the text union is still to come. The units the caller wrote go with
+		// it: a linked engine forwards the PUT naming those, so the origin keeps
+		// its own values of the rest, where its caller may write more.
 		submitted, err := marshalIfLogged(log, msg)
 		if err != nil {
 			return err
+		}
+		var wrote []string
+		if log != nil {
+			wrote = named
+			if wrote == nil {
+				for _, unit := range entityUnits(info) {
+					if !slices.Contains(protected, unit) && !slices.Contains(kept, unit) {
+						wrote = append(wrote, unit)
+					}
+				}
+			}
+			if len(wrote) == 0 {
+				// An empty mask is no mask on the wire, so a PUT that writes no
+				// unit names the key fields, which every PUT writes.
+				for _, fd := range info.keyFields {
+					wrote = append(wrote, string(fd.Name()))
+				}
+			}
 		}
 		var prevText map[string][]byte
 		if len(info.textFields) > 0 {
@@ -1362,7 +1395,7 @@ func (s *Server) applyCrud(
 		}
 		g.accessOf().noteWrite(info)
 		log.add(CapturedOp{
-			Entity: info.name, Key: crud.GetKey(), Op: crud.GetOp(), Value: submitted,
+			Entity: info.name, Key: crud.GetKey(), Op: crud.GetOp(), Value: submitted, Mask: wrote,
 			ExpectedVersion: crud.ExpectedVersion, PrevVersion: prev, Before: before, After: value,
 		})
 		return nil
