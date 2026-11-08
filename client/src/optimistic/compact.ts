@@ -84,7 +84,9 @@ import { clearOverlayAndReplay, type MirrorMap } from './rebase.js';
  *    accepted one, and nothing ever pushes it again. Writes of the same op to
  *    the same fields get the same verdict from every check that does not read
  *    values; for a check that does, the fold keeps the later value of each
- *    field, which is the one the user last asked for.
+ *    field, which is the one the user last asked for. Text has no "later
+ *    value": a PUT unions its documents with the stored ones, so a PUT folds
+ *    onto an earlier PUT only when it already carries all of that PUT's text.
  */
 export interface CompactionPlan {
 	/** New queue in id order: the untouched pushed prefix + renumbered tail. */
@@ -223,21 +225,29 @@ function foldCrud(
 			if (keepsGuarded(def, base, incoming.value)) return 'barrier';
 			// Text fields are the other exception to "a PUT overwrites": a PUT
 			// unions each document with the stored one and keeps a stored one it
-			// carries no bytes for. So the earlier PUT's documents union into this
-			// one, as the server's sequential apply would. An earlier PATCH may
-			// clear a document, which a PUT without one would not carry.
+			// carries no bytes for. So the earlier PUT's documents would have to
+			// union into this one, as the server's sequential apply does. That
+			// gives this PUT text it did not carry, and a check that reads the
+			// text then refuses both writes where alone it refused only the
+			// earlier one. The fold is kept only when the union adds nothing:
+			// this PUT already carries every document the earlier one did. An
+			// earlier PATCH may clear a document, which a PUT without one would
+			// not carry.
 			const textPaths = registry.textPathsOf(def.name);
 			if (textPaths.length > 0) {
 				if (base.op === CrudOp.PATCH && patchReachesText(textPaths, base)) return 'barrier';
 				if (base.op === CrudOp.PUT) {
 					const next = fromBinary(def.schema, incoming.value);
+					const alone = toBinary(def.schema, next);
 					try {
 						mergeTextFieldsInto(def.schema, textPaths, fromBinary(def.schema, base.value), next);
 					} catch {
 						return 'barrier';
 					}
+					const value = toBinary(def.schema, next);
+					if (!bytesEqual(alone, value)) return 'barrier';
 					const out = clone(CrudMutationSchema, incoming);
-					out.value = toBinary(def.schema, next);
+					out.value = value;
 					return out;
 				}
 			}
@@ -588,4 +598,12 @@ export async function compactPending(
 		tx.release();
 		throw err;
 	}
+}
+
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
 }

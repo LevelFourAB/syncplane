@@ -260,6 +260,72 @@ describe('compaction stores what the separate writes store', () => {
 		await b.close();
 	});
 
+	it('a later PUT without text is not refused for text an earlier refused PUT carried', async () => {
+		// Given a widget with text, which another client changed after this
+		// client read it
+		const ws = freshWorkspace();
+		const a = newClient(ws, HOLD);
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'one', body: 'hello' });
+		await a.syncNow();
+		const base = (await a.getRow(WidgetSchema, 'w1'))!.version;
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		await b.mutate.patch(WidgetSchema, 'w1', { label: 'two' });
+		await b.syncNow();
+
+		// And this client deletes the row guarded by the version it read (the
+		// server refuses this), creates it again with new text, and then saves
+		// a new label with a PUT that carries no text
+		await a.mutate.del(WidgetSchema, 'w1', { expectedVersion: base });
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'three', body: 'world' });
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'four' });
+
+		// When the client pushes the three writes in one compaction pass
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then the server stores the last label, as the separate writes give
+		await b.syncNow();
+		// And must not lose the last PUT with a refusal of the text it did not carry
+		expect((await b.get(WidgetSchema, 'w1'))?.label).toBe('four');
+
+		await a.close();
+		await b.close();
+	});
+
+	it('a later PUT without text is not refused for text over the value limit that an earlier PUT carried', async () => {
+		// Given a widget that the server holds
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { ...HOLD, onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'one' });
+		await a.syncNow();
+
+		// And the client writes text that passes the server's value limit (the
+		// server refuses this write), and then saves a new label with a PUT that
+		// carries no text
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'big', body: 'x'.repeat(1_200_000) });
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'four' });
+
+		// When the client pushes the two writes in one compaction pass
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then only the write with the large text is refused
+		expect(rejections).toHaveLength(1);
+		// And the server stores the last label, as the separate writes give
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		expect((await b.get(WidgetSchema, 'w1'))?.label).toBe('four');
+
+		await a.close();
+		await b.close();
+	});
+
 	it('control: the accepted PATCH is stored when it is pushed alone', async () => {
 		// Given a todo row that the server holds
 		const ws = freshWorkspace();
@@ -341,5 +407,37 @@ describe('compaction stores what the separate writes store', () => {
 		// Then the row keeps the typed text
 		expect(plainTextOf((await a.get(WidgetSchema, 'w1'))?.body)).toBe('base typed offline');
 		await a.close();
+	});
+
+	it('control: a refused delete, a text PUT and a PUT without text pushed one at a time store the last label', async () => {
+		// Given a widget with text, which another client changed after this
+		// client read it
+		const ws = freshWorkspace();
+		const a = newClient(ws, HOLD);
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'one', body: 'hello' });
+		await a.syncNow();
+		const base = (await a.getRow(WidgetSchema, 'w1'))!.version;
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		await b.mutate.patch(WidgetSchema, 'w1', { label: 'two' });
+		await b.syncNow();
+
+		// When the three writes go in separate pushes
+		await a.mutate.del(WidgetSchema, 'w1', { expectedVersion: base });
+		await a.syncNow();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'three', body: 'world' });
+		await a.syncNow();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'four' });
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then the server stores the last label
+		await b.syncNow();
+		expect((await b.get(WidgetSchema, 'w1'))?.label).toBe('four');
+
+		await a.close();
+		await b.close();
 	});
 });

@@ -762,26 +762,40 @@ describe('text field compaction', () => {
 			return plainTextOf(fromBinary(WidgetSchema, record!.v).body);
 		}
 
-		it('keeps the typed text when the later PUT carries no document', async () => {
+		// Folded, the later PUT would carry the earlier PUT's text, so a server
+		// check that refuses that text would refuse the later PUT too.
+		it('keeps a later PUT that carries no document apart, with the typed text', async () => {
 			const original = [
 				widgetPut(1n, { label: 'a', body: typedBody }),
 				widgetPut(2n, { label: 'b' }),
 			];
 			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED);
-			expect(plan.mutations).toHaveLength(1);
+			expect(plan.mutations).toHaveLength(2);
 			expect(await overlayBody(original)).toBe('base typed offline');
 			await expectSameOverlay(widgetRegistry, original, plan.mutations, confirmed);
 		});
 
-		it('keeps the typed text when the later PUT carries a stale document', async () => {
+		it('keeps a later PUT that carries a stale document apart, with the typed text', async () => {
 			// `put({ ...row, label })` from a row read before the first PUT.
 			const original = [
 				widgetPut(1n, { label: 'a', body: typedBody }),
 				widgetPut(2n, { label: 'b', body: baseBody }),
 			];
 			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED);
-			expect(plan.mutations).toHaveLength(1);
+			expect(plan.mutations).toHaveLength(2);
 			expect(await overlayBody(original)).toBe('base typed offline');
+			await expectSameOverlay(widgetRegistry, original, plan.mutations, confirmed);
+		});
+
+		it('folds a later PUT that already carries the typed text', async () => {
+			// `put({ ...row, label })` from a row read after the first PUT.
+			const original = [
+				widgetPut(1n, { label: 'a', body: typedBody }),
+				widgetPut(2n, { label: 'b', body: typedBody }),
+			];
+			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED);
+			expect(plan.mutations).toHaveLength(1);
+			expect(await overlayBody(plan.mutations)).toBe('base typed offline');
 			await expectSameOverlay(widgetRegistry, original, plan.mutations, confirmed);
 		});
 
