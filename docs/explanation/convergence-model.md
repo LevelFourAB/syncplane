@@ -371,6 +371,14 @@ The rule has limits:
   field through that server. A `PUT` keeps the stored value, and the server
   refuses a `PATCH` that names the field. Send the write to a server whose
   schema declares the field.
+- A member added to an existing oneof is additive on the wire, but not while
+  two schemas write. A server that does not declare the member cannot tell it
+  belongs to the group. It refuses a write of the group that sets only that
+  member, with `invalid_argument`. When it writes another member over a row
+  that holds the new one, the stored row holds both. A reader on the older
+  schema then sees the member the server wrote, and a reader on the newer
+  schema sees the new member. Deploy the new member to every server first, and
+  let clients write it only after that.
 
 To prevent data loss, use `PATCH` with field masks for partial updates, and
 design entity schema changes to be additive.

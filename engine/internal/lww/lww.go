@@ -107,8 +107,7 @@ func mergePath(dst, src protoreflect.Message, path, prefix, instPrefix string, m
 			if rest != "" {
 				return fmt.Errorf("oneof %q does not support sub-paths", seg)
 			}
-			copyOneof(dst, src, od)
-			return nil
+			return copyOneof(dst, src, od)
 		}
 		return fmt.Errorf("unknown field %q", seg)
 	}
@@ -1247,14 +1246,24 @@ func applyMerger(dst, src protoreflect.Message, fd protoreflect.FieldDescriptor,
 // a member clears the sibling dst held, which is what makes the group — rather
 // than the member — the unit of last-writer-wins: a member-granular mask could
 // say "a is unset" without saying which sibling, if any, takes its place.
-func copyOneof(dst, src protoreflect.Message, od protoreflect.OneofDescriptor) {
+//
+// It refuses a src that sets no member but carries unknown fields. A newer
+// schema can add a member to the group, and src then holds that member as
+// unknown bytes. Clearing the group would drop the member the writer set and
+// the one dst held, and nothing tells the unknown bytes of a new member from
+// those of an unrelated new field.
+func copyOneof(dst, src protoreflect.Message, od protoreflect.OneofDescriptor) error {
 	if fd := src.WhichOneof(od); fd != nil {
 		copyField(dst, src, fd)
-		return
+		return nil
+	}
+	if len(src.GetUnknown()) > 0 {
+		return fmt.Errorf("oneof %q: the value sets no member this schema declares but carries fields it does not know, which can be a member a newer schema added", od.Name())
 	}
 	if cur := dst.WhichOneof(od); cur != nil {
 		dst.Clear(cur)
 	}
+	return nil
 }
 
 func copyField(dst, src protoreflect.Message, fd protoreflect.FieldDescriptor) {
