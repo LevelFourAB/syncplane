@@ -506,6 +506,62 @@ describe('planCompaction', () => {
 		expect(plan.mutations).toHaveLength(2);
 	});
 
+	// A tab of a newer build can queue a write with a field this build has no
+	// descriptor for, and a tab of this build can be the one that compacts it.
+	describe('fields this build does not know', () => {
+		/** Appends varint field `field` = 1 to the encoded message, as a newer schema writes it. */
+		function withUnknown(bytes: Uint8Array, field: number): Uint8Array {
+			return new Uint8Array([ ...bytes, field << 3, 1 ]);
+		}
+
+		/** `m` as a newer build stores it: unknown field 15 on the crud, 14 on the envelope. */
+		function fromNewerBuild(m: Mutation): Mutation {
+			if (m.payload.case !== 'crud') throw new Error('crud mutations only');
+			const crud = fromBinary(
+				CrudMutationSchema,
+				withUnknown(toBinary(CrudMutationSchema, m.payload.value), 15),
+			);
+			const envelope = create(MutationSchema, { ...m, payload: { case: 'crud', value: crud } });
+			return fromBinary(MutationSchema, withUnknown(toBinary(MutationSchema, envelope), 14));
+		}
+
+		function unknownFields(m: Mutation): { envelope: number[]; crud: number[] } {
+			return {
+				envelope: (m.$unknown ?? []).map((f) => f.no),
+				crud: m.payload.case === 'crud' ? (m.payload.value.$unknown ?? []).map((f) => f.no) : [],
+			};
+		}
+
+		it('keeps them on every write of a PATCH fold', () => {
+			// Given two PATCHes of one field, each carrying unknown fields
+			const original = [
+				patch(1n, 't1', { title: 'a' }, [ 'title' ]),
+				patch(2n, 't1', { title: 'b' }, [ 'title' ]),
+			].map(fromNewerBuild);
+
+			// When the tail is compacted
+			const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
+
+			// Then no write leaves without them
+			for (const m of plan.mutations) {
+				expect(unknownFields(m)).toEqual({ envelope: [ 14 ], crud: [ 15 ] });
+			}
+		});
+
+		it('keeps them on every write of a PUT fold', () => {
+			const original = [
+				put(1n, { id: 't1', title: 'a' }),
+				put(2n, { id: 't1', title: 'b' }),
+			].map(fromNewerBuild);
+
+			const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
+
+			for (const m of plan.mutations) {
+				expect(unknownFields(m)).toEqual({ envelope: [ 14 ], crud: [ 15 ] });
+			}
+		});
+	});
+
 	it('reports no change when the tail cannot be compacted', () => {
 		const original = [ put(1n, { id: 't1' }), put(2n, { id: 't2' }) ];
 		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);

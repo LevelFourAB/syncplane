@@ -65,7 +65,9 @@ import { clearOverlayAndReplay, type MirrorMap } from './rebase.js';
  *    bookkeeping references ids, so a remap of old→new id is returned.
  *  - custom/batch mutations and mutations an undo/redo entry still references
  *    act as barriers: they are never merged away, so undo stays exact (its ids
- *    are merely remapped).
+ *    are merely remapped). A write that carries fields this build does not
+ *    declare (queued by a newer build on a shared store) is a barrier too, so
+ *    it reaches the server with those fields.
  *  - Successive ops on one key fold only when their compare-and-swap guards
  *    AGREE — both absent, or both naming the same version, in which case the
  *    folded slot keeps that guard. Folding across disagreeing guards would
@@ -181,8 +183,11 @@ export function planCompaction(
 		const keyStr = `${crud.entity}\u0000${crud.key}`;
 		// An undo-referenced edit or an unknown entity is a single-key barrier:
 		// kept distinct so its semantics (and any undo inverse computed against
-		// it) survive untouched.
-		if (protectedIds.has(m.mutationId) || !def) {
+		// it) survive untouched. So is a write a newer build queued with fields
+		// this build has no descriptor for: a fold rebuilds the messages and
+		// would drop them, and this build cannot tell whether such a field is a
+		// guard that must stop the fold.
+		if (protectedIds.has(m.mutationId) || !def || hasUnknownFields(m, crud)) {
 			openByKey.delete(keyStr);
 			slots.push({ passthrough: m, clientId: m.clientId, sources: [ m.mutationId ] });
 			continue;
@@ -236,6 +241,11 @@ export function planCompaction(
 		out.push(mutation);
 	}
 	return { mutations: out, remap, changed: slots.length !== tail.length };
+}
+
+/** Whether the envelope or the crud of `m` carries fields this build does not declare. */
+function hasUnknownFields(m: Mutation, crud: CrudMutation): boolean {
+	return (m.$unknown?.length ?? 0) > 0 || (crud.$unknown?.length ?? 0) > 0;
 }
 
 /** The engine's default Limits.MaxValueBytes. */
