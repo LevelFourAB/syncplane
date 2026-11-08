@@ -2448,8 +2448,14 @@ export function crudHasPlainString(
  * not widen the mask; outside the mask it is cleared rather than left to ride
  * along, since the server refuses an unresolved value in any position.
  *
+ * A string with no document under it in `prevRow` starts a new document. That
+ * document allocates past the version of the field's document in
+ * `confirmedRow`, the row as the server last confirmed it, so its ids differ
+ * from every id that document holds.
+ *
  * `prevRow` is read only when there is a string to diff, keeping a write that
- * touches no text off the O(document) merged-row read. `peer` may be undefined
+ * touches no text off the O(document) merged-row read. `confirmedRow` is read
+ * only for a string with no document under it. `peer` may be undefined
  * only when there is nothing to convert — the caller takes the lease before its
  * transaction opens (`crudHasPlainString`) — and converting without one throws.
  *
@@ -2466,6 +2472,7 @@ export async function applyTextStringsToCrud(
 	texts: PendingTexts | undefined,
 	peer: string | undefined,
 	textPaths: readonly string[],
+	confirmedRow?: () => Promise<Uint8Array | undefined>,
 ): Promise<TextStringEdits | undefined> {
 	if (texts === undefined && textPaths.length === 0) return undefined;
 
@@ -2510,6 +2517,7 @@ export async function applyTextStringsToCrud(
 		? fromBinary(def.schema, prevBytes) as unknown as Rec
 		: undefined;
 	const edits: TextStringEdits = new Map();
+	let confirmed: Rec | null | undefined;
 	for (const [ path, s ] of pending) {
 		const steps = textFieldSteps(def.schema, path);
 		const base = texts?.bases?.get(path);
@@ -2518,7 +2526,22 @@ export async function applyTextStringsToCrud(
 			if (edit !== undefined) edits.set(path, edit);
 			setBytesAt(value, steps, encodeTextDoc(doc));
 		} else {
-			const doc = decodeTextDoc(getBytesAt(prev, steps), peer);
+			const current = getBytesAt(prev, steps);
+			const doc = decodeTextDoc(current, peer);
+			if ((current === undefined || current.length === 0) && confirmedRow !== undefined) {
+				// The merged view has no document here (a local delete or a PUT
+				// without one), but the server can still hold the confirmed one:
+				// a refused delete leaves it live, and a PUT unions with it. A new
+				// document under the reused peer would mint the ids that document
+				// already holds, which the union refuses as a conflict.
+				confirmed ??= await confirmedRow().then((bytes) =>
+					bytes !== undefined ? fromBinary(def.schema, bytes) as unknown as Rec : null
+				);
+				const stored = confirmed === null ? undefined : getBytesAt(confirmed, steps);
+				if (stored !== undefined && stored.length > 0 && !isPlainString(stored)) {
+					doc.observeVersion(decodeTextDoc(stored, '').versionVector());
+				}
+			}
 			edits.set(path, doc.setString(s));
 			setBytesAt(value, steps, encodeTextDoc(doc));
 		}

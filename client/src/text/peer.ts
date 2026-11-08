@@ -20,7 +20,9 @@
 //   - Across time a slot is reused the moment it is free. That is safe because
 //     a new holder only re-speaks the peer through documents loaded from the
 //     same local store that persisted the previous holder's writes, so the
-//     version vector it allocates past already covers them. The slot pool and
+//     version vector it allocates past already covers them. A document started
+//     where the merged view has none (after a local delete) allocates past the
+//     confirmed row's document for the same reason. The slot pool and
 //     the clientId also live and die together: wiping the store mints a fresh
 //     clientId, and the retired peers are never spoken again.
 //   - Without Web Locks the registry is in-process, which carries the guarantee

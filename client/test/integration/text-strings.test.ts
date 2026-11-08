@@ -6,6 +6,8 @@
 import { inject } from 'vitest';
 import { describe, expect, it } from 'vitest';
 
+import type { RejectionInfo } from '../../src/client.js';
+import { CodeConflict } from '../../src/codes.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { decodeTextDoc, encodeTextDoc, plainTextOf, TextDoc } from '../../src/text/index.js';
 import { freshWorkspace, newClient } from './helpers.js';
@@ -206,5 +208,80 @@ describe('string writes over the wire', () => {
 		const row = await b.get(WidgetSchema, 'w1');
 		expect(plainTextOf(row?.body)).toBe('﻿hello');
 		await b.close();
+	});
+});
+
+// A delete the server refuses leaves the row live on the server, while the
+// writer's own view has no row. A PUT of the same key with a text string must
+// then write text the server can union with the document it still holds.
+describe('re-create after a refused delete', () => {
+	/** Keeps the writes in the queue until the spec calls syncNow. */
+	const HOLD = { pushDebounceMs: 60_000, pushMaxDelayMs: 60_000 };
+
+	/** A widget with text that client `a` wrote, and that another client then
+	 * changed, so a delete guarded by `a`'s version conflicts. */
+	async function rowChangedBehindTheWriter() {
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { ...HOLD, onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'one', body: 'hello' });
+		await a.syncNow();
+		const version = (await a.getRow(WidgetSchema, 'w1'))!.version;
+
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		await b.mutate.patch(WidgetSchema, 'w1', { label: 'two' });
+		await b.syncNow();
+		await b.close();
+		return { ws, a, rejections, version };
+	}
+
+	async function serverRow(ws: string) {
+		const c = newClient(ws);
+		await c.start();
+		await c.syncNow();
+		const row = await c.get(WidgetSchema, 'w1');
+		await c.close();
+		return row;
+	}
+
+	it('a PUT with text after a refused guarded delete is stored', async () => {
+		// Given a widget that another client changed after this client read it
+		const { ws, a, rejections, version } = await rowChangedBehindTheWriter();
+
+		// When the client, before it pulls, deletes the row guarded by the
+		// version it read, and then creates it again with new text
+		await a.mutate.del(WidgetSchema, 'w1', { expectedVersion: version });
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'three', body: 'world' });
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then only the delete is refused, as a conflict
+		expect(rejections.map((r) => r.errorCode)).toEqual([ CodeConflict ]);
+		// And the server stores the PUT
+		expect((await serverRow(ws))?.label).toBe('three');
+
+		await a.close();
+	});
+
+	it('control: a PUT with text after an accepted delete is stored', async () => {
+		// Given a widget that another client changed after this client read it
+		const { ws, a, rejections } = await rowChangedBehindTheWriter();
+
+		// When the client deletes the row without a guard and creates it again
+		await a.mutate.del(WidgetSchema, 'w1');
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'three', body: 'world' });
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then both writes apply, and the new row holds the new text only
+		expect(rejections).toEqual([]);
+		const row = await serverRow(ws);
+		expect(row?.label).toBe('three');
+		expect(plainTextOf(row?.body)).toBe('world');
+
+		await a.close();
 	});
 });

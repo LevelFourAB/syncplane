@@ -6817,6 +6817,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 									texts,
 									peerLease?.peer,
 									this.entityRegistry.textPathsOf(def.name),
+									async () =>
+										(at !== undefined
+											? pre[at + 2] as ConfirmedRecord | undefined
+											: ((await tx.get(confirmedKey(crud.entity, workspaceId, crud.key))) as
+												| ConfirmedRecord
+												| undefined))?.v,
 								);
 							}
 							// Expand bare collection masks into per-item paths so concurrent
