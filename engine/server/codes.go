@@ -76,6 +76,12 @@ const (
 	// queue under a new one. Deterministic: retrying the identical batch fails
 	// identically.
 	CodeClientIDInUse = "client_id_in_use"
+	// CodeWorkspaceReplaced reports that the batch's basis cursor names
+	// another store history than the workspace's current one
+	// (WorkspaceBatch.basis): the workspace was deleted and restored, or the
+	// server serves another store. NOTHING in the batch was applied. The
+	// client drops the queue it wrote against that cursor. Deterministic.
+	CodeWorkspaceReplaced = "workspace_replaced"
 	// CodeInternal reports a failure the caller cannot act on and that may not
 	// persist — a storage error, or a permission hook that could not decide.
 	// Retry with backoff. It never means "denied": a denial is always typed.

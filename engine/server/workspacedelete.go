@@ -168,6 +168,14 @@ func (s *Server) whileDeleted(ctx context.Context, workspaceID string, fn func()
 // workspace re-bootstraps instead of resuming. Restoring a workspace that is
 // not deleted is not an error.
 //
+// No write queued against the deleted workspace applies to the new one when
+// its push names the cursor it was queued against (WorkspaceBatch.basis): the
+// push fails with CodeWorkspaceReplaced, and the client drops the queue. A
+// push without a basis is judged by its mutation ids alone. The watermarks
+// went with the deleted workspace, so the server adopts the push's first id,
+// and the queue applies to the new workspace, including writes the deleted
+// one had already applied.
+//
 // It runs no permission hook, and must not be called from inside a mutator or
 // another write transaction, exactly as DeleteWorkspace.
 func (s *Server) RestoreWorkspace(ctx context.Context, workspaceID string) error {

@@ -98,6 +98,19 @@ message WorkspaceBatch {
 	// must not resend them under their old ids, where the server holds the
 	// other writer's mutations.
 	optional uint64 sent_through = 3;
+	// The opaque cursor the client held when it queued the batch's mutations,
+	// from a Pull, Bootstrap or Subscribe of this workspace. Empty means the
+	// client does not say, for example before its first sync.
+	//
+	// A cursor names the store history that issued it. When the workspace's
+	// history is another one, the queue was written against data the server no
+	// longer holds: the workspace was deleted and restored
+	// (`Server.DeleteWorkspace` and `Server.RestoreWorkspace`), or the server
+	// now serves another store. The server applies nothing and fails the batch
+	// with "workspace_replaced". The client drops the mutations it queued
+	// against that cursor and bootstraps again. A store restored from a backup
+	// of itself keeps its history, and a garbage-collection reset keeps it too.
+	bytes basis = 4;
 }
 
 message PushRequest {
@@ -163,12 +176,13 @@ message WorkspaceResults {
 	// Set when the whole batch failed. Codes: "mutation_id_gap" (resend in
 	// order from the client's watermark), "client_id_in_use" (another writer
 	// used the client_id, see WorkspaceBatch.sent_through; resend under a new
-	// client_id), "workspace_access_revoked"
-	// (permanent — stop syncing this workspace, see the client's purge path),
-	// "invalid_argument" (deterministic; the batch will never apply),
-	// "mutation_failed" (a custom mutator returned an error; retry, and drop
-	// the mutation after repeated identical failures), "internal" (transient;
-	// retry).
+	// client_id), "workspace_replaced" (the queue was written against another
+	// store history, see WorkspaceBatch.basis; drop it),
+	// "workspace_access_revoked" (permanent — stop syncing this workspace, see
+	// the client's purge path), "invalid_argument" (deterministic; the batch
+	// will never apply), "mutation_failed" (a custom mutator returned an error;
+	// retry, and drop the mutation after repeated identical failures),
+	// "internal" (transient; retry).
 	string error_code = 3;
 	string error_message = 4;
 }

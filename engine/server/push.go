@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
 
+	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/internal/lww"
 	"github.com/levelfourab/syncplane/engine/internal/naming"
@@ -143,6 +144,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 	// their answers.
 	gate := s.newWriteGate(ctx, adm, ws, true)
 	muts := batch.GetMutations()
+	basisEpoch := basisStoreEpoch(batch.GetBasis())
 	authz := make([]error, len(muts))
 	for i, m := range muts {
 		if err := s.authorize(ctx, principal, ws, gate, m); err != nil {
@@ -168,6 +170,9 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// inUse is the batch-level verdict for a watermark above the batch's
 		// sent_through.
 		inUse string
+		// replaced is the batch-level verdict for a basis cursor from another
+		// store history.
+		replaced string
 		// gapLog holds what the server logs about a gap but does not send:
 		// the id the server expected. Any caller may push under any anonymous
 		// client_id, so a reply that named it would tell that caller which ids
@@ -197,7 +202,17 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// so a retried attempt does not duplicate results.
 		results = nil
 		applied = false
-		gap, badArg, gapLog, inUse = "", "", "", ""
+		gap, badArg, gapLog, inUse, replaced = "", "", "", "", ""
+		if basisEpoch != 0 {
+			epoch, err := tx.StoreEpoch()
+			if err != nil {
+				return err
+			}
+			if epoch != basisEpoch {
+				replaced = "the queue was written against a store history the workspace no longer has: it was deleted and restored, or the server serves another store"
+				return errAbortBatch
+			}
+		}
 		adopted = adopted[:0]
 		// Watermarks per client, by watermarkKey, loaded lazily and tracked as
 		// we bump them. bumped names the clients whose watermark this batch
@@ -337,8 +352,10 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			case last == 0:
 				// Watermark adoption: 0 means either a brand-new client
 				// (mutation_id 1, the ordinary case) or a returning client
-				// whose watermark record was deleted — which only
-				// WithClientRetention does. Adopt mutation_id-1 and apply.
+				// whose watermark record was deleted, by WithClientRetention
+				// or with the whole workspace by DeleteWorkspace. Adopt
+				// mutation_id-1 and apply. A queue from a deleted workspace
+				// that names its basis cursor was refused above.
 				// Nothing here can tell such a client's fresh work from a
 				// resend of mutations it already had applied; that hazard, and
 				// the buggy NEW client starting above 1 that is accepted
@@ -503,6 +520,8 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		return fail(CodeInvalidArgument, "workspace %q: %s", ws, badArg)
 	case inUse != "":
 		return fail(CodeClientIDInUse, "workspace %q: %s", ws, inUse)
+	case replaced != "":
+		return fail(CodeWorkspaceReplaced, "workspace %q: %s", ws, replaced)
 	case err != nil:
 		// A mutator's own error gets its own code: the client counts repeats of
 		// it toward dropping the mutation, which it must never do for an outage.
@@ -551,6 +570,22 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		)
 	}
 	return out
+}
+
+// basisStoreEpoch returns the store epoch of a push's basis cursor
+// (WorkspaceBatch.basis), or 0 when the batch names no basis or one that does
+// not decode or carries no epoch. 0 makes no claim: the batch is judged by its
+// mutation ids alone, so a client is never refused for a cursor this build
+// cannot read.
+func basisStoreEpoch(raw []byte) uint64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var c syncplanecursorv1.Cursor
+	if err := proto.Unmarshal(raw, &c); err != nil {
+		return 0
+	}
+	return c.GetStoreEpoch()
 }
 
 // maxRejectionRecordBytes bounds the code and message text one client's

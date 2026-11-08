@@ -212,6 +212,68 @@ var _ = Describe("Deleting a workspace", func() {
 		})).To(Succeed())
 	})
 
+	Describe("a queue written before the deletion", func() {
+		// pushBasis pushes one PUT that names basis as the cursor its queue was
+		// written against.
+		pushBasis := func(basis []byte, clientID string, mutationID uint64, key string) *syncplanev1.WorkspaceResults {
+			GinkgoHelper()
+			resp, err := client.Push(ctx, connect.NewRequest(&syncplanev1.PushRequest{Batches: []*syncplanev1.WorkspaceBatch{{
+				WorkspaceId: ws,
+				Mutations:   []*syncplanev1.Mutation{putMutation(clientID, mutationID, "todo", key, &todov1.Todo{Id: key, Title: key})},
+				Basis:       basis,
+			}}}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetResults()).To(HaveLen(1))
+			return resp.Msg.GetResults()[0]
+		}
+		stored := func(key string) bool {
+			GinkgoHelper()
+			found := false
+			Expect(store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
+				row, err := tx.GetRow("todo", key)
+				if errors.Is(err, storage.ErrNotFound) {
+					return nil
+				}
+				found = err == nil && !row.Deleted
+				return err
+			})).To(Succeed())
+			return found
+		}
+
+		It("is refused in the restored workspace, before and after its first write", func() {
+			before, err := pull(nil)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(srv.DeleteWorkspace(ctx, ws)).To(Succeed())
+			Expect(srv.RestoreWorkspace(ctx, ws)).To(Succeed())
+
+			res := pushBasis(before.GetNextCursor(), "c1", 2, "old")
+			Expect(res.GetErrorCode()).To(Equal(server.CodeWorkspaceReplaced))
+			Expect(stored("old")).To(BeFalse())
+
+			Expect(push("c2", 1, "fresh").GetErrorCode()).To(BeEmpty())
+			res = pushBasis(before.GetNextCursor(), "c1", 2, "old")
+			Expect(res.GetErrorCode()).To(Equal(server.CodeWorkspaceReplaced))
+			Expect(res.GetResults()).To(BeEmpty())
+			Expect(stored("old")).To(BeFalse())
+		})
+
+		It("applies when the basis names the workspace's own history", func() {
+			before, err := pull(nil)
+			Expect(err).NotTo(HaveOccurred())
+			res := pushBasis(before.GetNextCursor(), "c1", 2, "t2")
+			Expect(res.GetErrorCode()).To(BeEmpty(), res.GetErrorMessage())
+			Expect(stored("t2")).To(BeTrue())
+		})
+
+		It("is judged by its mutation ids alone without a basis", func() {
+			Expect(srv.DeleteWorkspace(ctx, ws)).To(Succeed())
+			Expect(srv.RestoreWorkspace(ctx, ws)).To(Succeed())
+			res := pushBasis(nil, "c1", 2, "adopted")
+			Expect(res.GetErrorCode()).To(BeEmpty(), res.GetErrorMessage())
+			Expect(stored("adopted")).To(BeTrue())
+		})
+	})
+
 	// A read replica's floor is a bare sequence, which cannot tell the deleted
 	// workspace from the one restored under its id. A Bootstrap whose Begin
 	// read the restored workspace must not take its pages from a replica that
