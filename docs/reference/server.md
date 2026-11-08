@@ -549,6 +549,8 @@ func (s *Server) PendingWorkspaces(ctx, consumer string) iter.Seq2[string, error
 
 `AdvanceConsumer` commits an updated cursor position and shadow state in a single transaction. It returns `ErrCursorForeign` and records nothing when the cursor names a history the store does not hold: an `Epoch` or `Lineage` the store does not report, or a sequence above the current one. This occurs when the workspace is deleted and restored, or the store is swapped or restored, after `Changes` returned the cursor. Pass the cursor that `Changes` returned, with its `Epoch` and `Lineage`, to get the full check.
 
+Set `ConsumerUpdate.From` to the position that `ConsumerPosition` returned before the page was handled. `AdvanceConsumer` then returns `ErrConsumerMoved` and records nothing when the stored position is not `From` any more, because another pass committed in the meantime. A consumer with no position matches the zero cursor. When `From` is nil, there is no check.
+
 `ConsumerPendingWorkspaces` returns workspace IDs with unprocessed changes for a consumer, paginated after an exclusive `after` workspace ID. `PendingWorkspaces` yields all of them in ID order and reads one page at a time. Each page is a separate snapshot.
 
 Every method that takes a consumer name refuses one that starts with `ReservedConsumerPrefix` (`syncplane.`). The engine keeps its own state under such names.

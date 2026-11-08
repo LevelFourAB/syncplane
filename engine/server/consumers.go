@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
 	"slices"
@@ -55,7 +56,20 @@ type ConsumerUpdate struct {
 	Cursor Cursor
 	// Shadows are the per-row snapshot writes to land with that position.
 	Shadows []ConsumerShadowWrite
+	// From, when set, is the position the caller read before it acted on the
+	// page, as ConsumerPosition returned it. AdvanceConsumer then records
+	// nothing and returns ErrConsumerMoved unless the stored position is still
+	// From. Only Seq, Entity and Key are compared, and a consumer with no
+	// position matches the zero cursor. Nil skips the check.
+	From *Cursor
 }
+
+// ErrConsumerMoved is returned by AdvanceConsumer when ConsumerUpdate.From is
+// set and the consumer's stored position is no longer From: another pass
+// committed since the caller read it. Nothing is recorded. The caller's
+// shadows were derived against the older position, so it reads the position
+// again before it continues.
+var ErrConsumerMoved = errors.New("server: consumer position moved since the update was read")
 
 // ConsumerPosition returns where a named effect consumer has reached in the
 // workspace's change feed, and whether it has ever recorded a position. A
@@ -209,6 +223,9 @@ func (s *Server) PendingWorkspaces(ctx context.Context, consumer string) iter.Se
 // the workspace was deleted and restored, or the store swapped or restored,
 // after Changes returned the cursor. A cursor with zero Epoch and Lineage is
 // checked by its Seq alone.
+//
+// It returns ErrConsumerMoved and records nothing when up.From is set and the
+// stored position differs from it.
 func (s *Server) AdvanceConsumer(ctx context.Context, workspaceID, consumer string, up ConsumerUpdate) error {
 	if err := validateConsumerName(consumer); err != nil {
 		return err
@@ -227,6 +244,19 @@ func (s *Server) AdvanceConsumer(ctx context.Context, workspaceID, consumer stri
 			return err
 		} else if foreign {
 			return ErrCursorForeign
+		}
+		if up.From != nil {
+			// The read and this write are in different transactions, and a
+			// pass that lost its lease can still be running. Without this
+			// check its older position and shadows would replace the newer
+			// ones another pass committed in between.
+			pos, _, err := tx.ConsumerPosition(consumer)
+			if err != nil {
+				return err
+			}
+			if pos.Seq != up.From.Seq || pos.Entity != up.From.Entity || pos.Key != up.From.Key {
+				return ErrConsumerMoved
+			}
 		}
 		for _, sh := range up.Shadows {
 			if sh.Snapshot == nil {

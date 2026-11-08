@@ -104,6 +104,6 @@ When multiple runtime instances share a store, they distribute workspaces using 
 - With `pgstore`, instances coordinate automatically through the shared database locker.
 - Adapters without locker support fall back to process-local leases and do not coordinate across separate processes.
 
-Advisory leases guarantee at-least-once processing across instances, not strict single execution. During rolling updates or network interruptions, a lease connection can drop, allowing a second instance to acquire the lease while the first finishes processing. Handlers must remain idempotent to handle this overlap.
+Advisory leases guarantee at-least-once processing across instances, not strict single execution. During rolling updates or network interruptions, a lease connection can drop, allowing a second instance to acquire the lease while the first finishes processing. Handlers must remain idempotent to handle this overlap. The overlap cannot move a consumer back: each pass commits its position only if the stored position is still the one the pass read. A pass that lost that race fails with `server.ErrConsumerMoved` and keeps nothing, and the next pass continues from the newer position.
 
 Calling `Runtime.Close` waits for in-flight passes to complete before releasing resources, which minimizes lease overlap windows. When an instance cannot acquire a lease, `Drain` returns `effects.ErrLeaseHeld`, leaving the consumer position unchanged for subsequent sweeps or other instances to process.

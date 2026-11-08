@@ -143,7 +143,7 @@ func (rt *Runtime) drain(ctx context.Context, c *consumer, workspaceID string) (
 			if err := rt.srv.ResetConsumer(ctx, workspaceID, c.name); err != nil {
 				return cur.Seq, err
 			}
-			if err := rt.srv.AdvanceConsumer(ctx, workspaceID, c.name, server.ConsumerUpdate{Cursor: next}); err != nil {
+			if err := rt.srv.AdvanceConsumer(ctx, workspaceID, c.name, server.ConsumerUpdate{Cursor: next, From: &server.Cursor{}}); err != nil {
 				return cur.Seq, err
 			}
 			continue
@@ -152,7 +152,7 @@ func (rt *Runtime) drain(ctx context.Context, c *consumer, workspaceID string) (
 			return cur.Seq, err
 		}
 
-		up := server.ConsumerUpdate{Cursor: next}
+		up := server.ConsumerUpdate{Cursor: next, From: &cur}
 		delivered, deliverErr := rt.deliverPage(ctx, c, workspaceID, page, &up)
 		// Counted even when the page then failed to commit: the sink was
 		// handed these, and at-least-once means it may be handed them again.
