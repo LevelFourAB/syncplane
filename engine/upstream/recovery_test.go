@@ -86,6 +86,31 @@ var _ = Describe("Recovery", func() {
 		Expect(n.status().State).To(Equal(upstream.StateRevoked))
 	})
 
+	It("reports the stored pending writes as soon as a restarted link starts", func() {
+		o := newOrigin()
+		n := newLocal(o, nil)
+		n.add()
+		n.flush()
+
+		// Given three local writes the origin cannot receive
+		n.part.Cut()
+		n.put(&todov1.Todo{Id: "t1", Title: "one"})
+		n.put(&todov1.Todo{Id: "t2", Title: "two"})
+		n.put(&todov1.Todo{Id: "t3", Title: "three"})
+		Eventually(func() int { return n.status().Pending }).Should(Equal(3))
+
+		// When the link restarts while the origin is still cut off
+		n.restart()
+
+		// Then its first status already counts them
+		Expect(n.status().Pending).To(Equal(3))
+
+		n.part.Heal()
+		n.flush()
+		Expect(n.status().Pending).To(BeZero())
+		Expect(title(o.todo("t3"))).To(Equal("three"))
+	})
+
 	It("converges concurrent edits of a collaborative text field", func() {
 		o := newOrigin()
 		n := newLocal(o, nil)

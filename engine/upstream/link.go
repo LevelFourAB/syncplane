@@ -788,6 +788,7 @@ func (l *Link) load(ctx context.Context, id string) (w *workspace, purge bool, e
 		q      queueMeta
 		meta   syncMeta
 		linked bool
+		heads  []pendRef
 	)
 	err = b.srv.ReadState(ctx, id, func(tx storage.ReadTx) error {
 		st := readState(tx)
@@ -802,8 +803,20 @@ func (l *Link) load(ctx context.Context, id string) (w *workspace, purge bool, e
 			return nil
 		}
 		linked = true
-		meta, err = st.sync()
-		return err
+		if meta, err = st.sync(); err != nil {
+			return err
+		}
+		heads = heads[:0]
+		for id := q.lowID; id < q.nextID; id++ {
+			h, ok, err := st.head(id)
+			if err != nil {
+				return err
+			}
+			if ok {
+				heads = append(heads, pendRef{h.ref, h.localSeq})
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, false, err
@@ -811,7 +824,18 @@ func (l *Link) load(ctx context.Context, id string) (w *workspace, purge bool, e
 	if !linked {
 		return nil, purge, nil
 	}
-	return l.newWorkspace(id, meta, q), purge, nil
+	w = l.newWorkspace(id, meta, q)
+	// Without this, Status reports no pending writes until the worker's first
+	// transaction reads the queue. That transaction reads these entries again
+	// (maxID stays 0), so the view it leaves is the same. w.last keeps the
+	// empty count, so that transaction still reports the change.
+	for _, h := range heads {
+		w.pend[h.ref] = h.localSeq
+		if h.localSeq != 0 {
+			w.bySeq[h.localSeq] = h.ref
+		}
+	}
+	return w, purge, nil
 }
 
 // failedWorkspace is the runtime of a workspace whose link state does not
