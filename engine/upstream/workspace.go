@@ -46,6 +46,13 @@ type workspace struct {
 	// read in this process; pushes wait for it.
 	ackKnown atomic.Bool
 
+	// sendMu guards sends.
+	sendMu sync.Mutex
+	// sends counts the pushes of each mutation id this runtime sent, so that
+	// ALREADY_APPLIED for an id sent once tells another writer of the client
+	// id from a resend. Ids below the queue's lowest id are forgotten.
+	sends map[uint64]int
+
 	// pullMu is held by whatever pulls pages into the workspace, so two
 	// sources never apply pages out of order.
 	pullMu sync.Mutex
@@ -120,6 +127,7 @@ func (l *Link) newWorkspace(id string, meta syncMeta, q queueMeta) *workspace {
 		done:        make(chan struct{}),
 		wake:        make(chan struct{}, 1),
 		deliverWake: make(chan struct{}, 1),
+		sends:       map[uint64]int{},
 		unreported:  map[uint64]bool{},
 		handed:      map[uint64]bool{},
 		meta:        meta,

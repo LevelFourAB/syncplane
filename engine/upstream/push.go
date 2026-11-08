@@ -194,9 +194,41 @@ func casVersionOf(r resultRecord, cas casRef) uint64 {
 	return max(r.seq, cas.version)
 }
 
+// noteSend counts a push of the batch's entries, and forgets the ids below low,
+// the queue's lowest id: no entry holds them.
+func (w *workspace) noteSend(bt batch, low uint64) {
+	w.sendMu.Lock()
+	defer w.sendMu.Unlock()
+	if low > 0 {
+		for id := range w.sends {
+			if id < low {
+				delete(w.sends, id)
+			}
+		}
+	}
+	for _, e := range bt.ents {
+		w.sends[e.id]++
+	}
+}
+
+// firstSend reports a mutation id that no push before the one just answered
+// carried: this runtime captured it and sent it once. The origin cannot have
+// applied it before, so ALREADY_APPLIED for it means another writer uses the
+// client id.
+func (w *workspace) firstSend(id uint64) bool {
+	if id < w.startNext {
+		return false
+	}
+	w.sendMu.Lock()
+	defer w.sendMu.Unlock()
+	return w.sends[id] == 1
+}
+
 // recordResults stores the origin's verdicts on a pushed batch. A resend
-// answered ALREADY_APPLIED keeps the verdict an earlier answer recorded.
-func recordResults(st stateTx, q *queueMeta, bt batch, wr *syncplanev1.WorkspaceResults) ([]verdictEvent, uint64, error) {
+// answered ALREADY_APPLIED keeps the verdict an earlier answer recorded. A
+// first send answered ALREADY_APPLIED (see firstSend) is recorded as rejected
+// with CodeClientIDInUse, and its id is returned in inUse.
+func recordResults(st stateTx, q *queueMeta, bt batch, wr *syncplanev1.WorkspaceResults, first func(uint64) bool) (_ []verdictEvent, _ uint64, inUse []uint64, _ error) {
 	byID := make(map[uint64]*entry, len(bt.ents))
 	for _, e := range bt.ents {
 		byID[e.id] = e
@@ -214,13 +246,21 @@ func recordResults(st stateTx, q *queueMeta, bt batch, wr *syncplanev1.Workspace
 		}
 		if rec.status == syncplanev1.MutationStatus_MUTATION_STATUS_ALREADY_APPLIED {
 			if _, ok, err := st.result(e.id); err != nil {
-				return nil, 0, err
+				return nil, 0, nil, err
 			} else if ok {
 				continue
 			}
+			if first(e.id) {
+				// The origin holds another writer's mutation under this id,
+				// so this one never applies. Reporting it keeps the loss
+				// visible; recording it as applied would drop it silently.
+				rec = resultRecord{status: syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED, code: CodeClientIDInUse,
+					message: fmt.Sprintf("the origin holds mutation %d of client id %q from another writer", e.id, bt.muts[0].GetClientId())}
+				inUse = append(inUse, e.id)
+			}
 		}
 		if err := st.putResult(e.id, rec); err != nil {
-			return nil, 0, err
+			return nil, 0, nil, err
 		}
 		ackedSeq = max(ackedSeq, rec.seq)
 		if rec.status == syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED {
@@ -231,7 +271,7 @@ func recordResults(st stateTx, q *queueMeta, bt batch, wr *syncplanev1.Workspace
 			evs = append(evs, verdictEvent{ref: e.ref, localSeq: e.localSeq})
 		}
 	}
-	return evs, ackedSeq, advancePushFrom(st, q)
+	return evs, ackedSeq, inUse, advancePushFrom(st, q)
 }
 
 // push sends the queue to the origin until nothing unanswered is left.
@@ -241,11 +281,13 @@ func (w *workspace) push(ctx context.Context) error {
 			return nil
 		}
 		var bt batch
+		var low uint64
 		_, err := w.txn(ctx, func(t *txn) error {
 			var err error
 			bt, err = buildBatch(t.b, t.st, t.q, w.clientID, batchLimits{
 				maxN: w.l.cfg.MaxPushMutations, maxBytes: w.l.cfg.MaxPushBytes, single: w.isolate,
 			})
+			low = t.q.lowID
 			return err
 		})
 		if err != nil {
@@ -254,6 +296,7 @@ func (w *workspace) push(ctx context.Context) error {
 		if len(bt.muts) == 0 {
 			return nil
 		}
+		w.noteSend(bt, low)
 		wr, err := w.send(ctx, bt)
 		if err != nil {
 			// A failure the link resolved (a realigned queue, a dropped
@@ -263,11 +306,13 @@ func (w *workspace) push(ctx context.Context) error {
 			}
 			continue
 		}
+		var inUse []uint64
 		res, err := w.txn(ctx, func(t *txn) error {
-			evs, ackedSeq, err := recordResults(t.st, &t.q, bt, wr)
+			evs, ackedSeq, iu, err := recordResults(t.st, &t.q, bt, wr, w.firstSend)
 			if err != nil {
 				return err
 			}
+			inUse = iu
 			t.res.verdicts = append(t.res.verdicts, evs...)
 			if ackedSeq > t.meta.ackedSeq {
 				t.meta.ackedSeq, t.metaDirty = ackedSeq, true
@@ -276,6 +321,10 @@ func (w *workspace) push(ctx context.Context) error {
 		})
 		if err != nil {
 			return fmt.Errorf("upstream: record push results: %w", err)
+		}
+		for _, id := range inUse {
+			w.logger().LogAttrs(ctx, slog.LevelWarn, "another writer uses this link's client id; rejecting a write the origin never applied",
+				slog.Uint64("mutation_id", id), slog.String("client_id", w.clientID))
 		}
 		w.isolate = false
 		w.poison = poisonCount{}

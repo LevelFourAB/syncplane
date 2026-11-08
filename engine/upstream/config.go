@@ -209,6 +209,12 @@ type RowRef struct {
 	Key    string
 }
 
+// CodeClientIDInUse is the Rejection.Code of a write whose mutation id the
+// origin reports as applied before the link ever sent it: another writer, for
+// example a second link started over a copy of this link's store, writes
+// under the same client id. The origin did not apply the write.
+const CodeClientIDInUse = "client_id_in_use"
+
 // Rejection is a local write the origin rejected.
 type Rejection struct {
 	Workspace string
@@ -218,7 +224,7 @@ type Rejection struct {
 	// MutationID is the id the link pushed the write under.
 	MutationID uint64
 	// Code is the origin's rejection code, for example "conflict" or
-	// "permission_denied".
+	// "permission_denied", or CodeClientIDInUse.
 	Code string
 	// Message is human-readable detail for logs.
 	Message string

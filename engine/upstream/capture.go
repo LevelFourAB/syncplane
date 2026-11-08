@@ -388,9 +388,11 @@ func (l *Link) writeThrough(ctx context.Context, w *workspace, b *bound, st stat
 			return fmt.Errorf("upstream: write-through: nothing to push for mutation %d", e.id)
 		}
 		l.noteThrough(w.id, e.id, payload, nil)
+		// The queue's lowest id here is uncommitted, so it forgets no ids.
+		w.noteSend(bt, 0)
 		wr, err := w.send(ctx, bt)
 		if err == nil {
-			if _, _, err := recordResults(st, q, bt, wr); err != nil {
+			if _, _, _, err := recordResults(st, q, bt, wr, w.firstSend); err != nil {
 				return err
 			}
 			continue

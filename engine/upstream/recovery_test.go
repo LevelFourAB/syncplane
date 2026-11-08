@@ -177,6 +177,34 @@ var _ = Describe("Recovery", func() {
 		Eventually(func() string { return bodyOf(n.srv) }).Should(Equal("oh hello world!"))
 	})
 
+	It("does not drop the writes of a link started over a copy of another link's store", func() {
+		o := newOrigin()
+		a := newLocal(o, nil)
+		a.add()
+		a.flush()
+		// b starts over a copy of a's store, as a copied data directory
+		// does: same client id, same queue.
+		a.stop()
+		b := newLocal(o, nil)
+		b.stop()
+		dir := GinkgoT().TempDir()
+		copyDB(a.path, dir)
+		restoreDB(dir, b.path)
+		a.start()
+		b.start()
+		a.flush()
+		b.flush()
+		Expect(b.link.ClientID()).To(Equal(a.link.ClientID()))
+
+		a.put(&todov1.Todo{Id: "t1", Title: "from a"})
+		a.flush()
+		Eventually(func() string { return title(b.todo("t1")) }).Should(Equal("from a"))
+		b.put(&todov1.Todo{Id: "t2", Title: "from b"})
+		b.flush()
+		Expect(title(o.todo("t2")) == "from b" || len(b.rejected()) > 0).To(BeTrue(),
+			"b's write neither reached the origin nor was reported: local row %v", b.todo("t2"))
+	})
+
 	It("keeps a row it cannot store at its confirmed state until the origin decides the write that blocks it", func() {
 		folders := server.WithEntities(&accessv1.Folder{}, &accessv1.FolderMember{}, &accessv1.Doc{})
 		o := newOrigin(folders, server.WithAuthenticator(server.AuthenticatorFunc(

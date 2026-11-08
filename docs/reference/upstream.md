@@ -122,15 +122,15 @@ The callbacks run on the link's goroutines, and two of them can run at the same 
 
 ### `Rejection`
 
-| Field        | Meaning                                                                                    |
-| ------------ | ------------------------------------------------------------------------------------------ |
-| `Workspace`  | The workspace of the write.                                                                |
-| `LocalSeq`   | The local sequence the write took; 0 for a custom mutation that wrote no local row.        |
-| `MutationID` | The id the link pushed the write under.                                                    |
-| `Code`       | The origin's rejection code, for example `conflict` or `permission_denied`.                |
-| `Message`    | Human-readable detail for logs.                                                            |
-| `Mutator`    | The custom mutation's name, `""` for a CRUD write.                                         |
-| `Rows`       | The bound rows (`RowRef{Entity, Key}`) the write touched locally, which the link reverted. |
+| Field        | Meaning                                                                                                                                                                                                                                                                                                                                          |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Workspace`  | The workspace of the write.                                                                                                                                                                                                                                                                                                                      |
+| `LocalSeq`   | The local sequence the write took; 0 for a custom mutation that wrote no local row.                                                                                                                                                                                                                                                              |
+| `MutationID` | The id the link pushed the write under.                                                                                                                                                                                                                                                                                                          |
+| `Code`       | The origin's rejection code, for example `conflict` or `permission_denied`. `client_id_in_use` (`CodeClientIDInUse`) when the origin reports the write's mutation id as applied before the link sent it: another writer uses the same client id, for example a second link started over a copy of the store. The origin did not apply the write. |
+| `Message`    | Human-readable detail for logs.                                                                                                                                                                                                                                                                                                                  |
+| `Mutator`    | The custom mutation's name, `""` for a CRUD write.                                                                                                                                                                                                                                                                                               |
+| `Rows`       | The bound rows (`RowRef{Entity, Key}`) the write touched locally, which the link reverted.                                                                                                                                                                                                                                                       |
 
 `*RejectedError` embeds a `Rejection`. `Await` and `Receipt.Wait` return it.
 
@@ -234,6 +234,7 @@ A local write that the link refuses fails with a `server.Rejection` (test with `
 | `workspace_access_revoked` | A write to a bound entity of a workspace the origin revoked.                                             |
 | `invalid_argument`         | A compare-and-swap on a row that an earlier operation of the same mutation wrote.                        |
 | the origin's code          | A write-through write the origin rejected.                                                               |
+| `client_id_in_use`         | A write-through write whose mutation id another writer of the same client id used at the origin.         |
 
 A push from a downstream client gets the same codes as `REJECTED` results.
 
