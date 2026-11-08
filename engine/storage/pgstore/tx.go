@@ -100,6 +100,10 @@ func beginTx(ctx context.Context, pool *pgxpool.Pool, ws string, opening ...queu
 	return t, nil
 }
 
+// commitTimeout bounds the wait for the reply to COMMIT, which does not end
+// with the transaction's context.
+const commitTimeout = 10 * time.Second
+
 // commit sends what is still queued and COMMIT as one batch. It returns the
 // error of a statement in the batch that failed, and pgx.ErrTxCommitRollback
 // for a COMMIT the server turned into a rollback.
@@ -107,13 +111,29 @@ func beginTx(ctx context.Context, pool *pgxpool.Pool, ws string, opening ...queu
 // A transaction that has sent nothing and queued nothing past its opening has
 // nothing on the server to commit, so it sends nothing, and fails only when
 // its context has ended.
+//
+// A context that has ended before COMMIT is sent fails the commit. Once
+// COMMIT is sent, the end of the context does not stop the wait for its
+// reply; commitTimeout bounds that wait.
 func (t *pgTx) commit() error {
 	if t.failed != nil {
 		return t.failed
 	}
-	if t.sends == 0 && len(t.queued) == t.opening {
-		return t.ctx.Err()
+	if err := t.ctx.Err(); err != nil {
+		return err
 	}
+	if t.sends == 0 && len(t.queued) == t.opening {
+		return nil
+	}
+	// The server can commit after a cancelled context made the client give up
+	// on the reply, and the caller then sees a failure for a write that
+	// landed. Waiting out the reply closes that window; what remains is a lost
+	// connection, where no client can learn the outcome.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(t.ctx), commitTimeout)
+	defer cancel()
+	callerCtx := t.ctx
+	t.ctx = ctx
+	defer func() { t.ctx = callerCtx }()
 	tag, err := t.exec(`COMMIT`)
 	if err != nil {
 		return err

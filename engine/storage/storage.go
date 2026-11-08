@@ -62,7 +62,8 @@
 //     creations", never "this read path skips the column".
 //   - Context: every method honors ctx. A call made with a cancelled or
 //     expired context fails without committing — the engine never observes a
-//     partial commit from a cancelled write.
+//     partial commit from a cancelled write. A context that ends while the
+//     commit is in flight does not make a committed write report failure.
 //   - The collaborative-text delta log (PutFieldDelta, FieldDeltas,
 //     PruneFieldDeltas, FieldDeltaHorizon) is an append-only side table the
 //     pull path reads over a sequence span. It exists only to make pulls
