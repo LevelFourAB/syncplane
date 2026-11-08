@@ -98,6 +98,8 @@ type Link struct {
 type bound struct {
 	srv    *server.Server
 	models map[string]*rebase.Model
+	// maxValue is the origin's MaxValueBytes (Config.OriginLimits).
+	maxValue int
 }
 
 // New validates cfg and returns a Link that is not started. It does not
@@ -240,7 +242,7 @@ func (l *Link) Start(ctx context.Context, srv *server.Server) (err error) {
 		}
 	}()
 
-	b := &bound{srv: srv, models: make(map[string]*rebase.Model, len(l.names))}
+	b := &bound{srv: srv, models: make(map[string]*rebase.Model, len(l.names)), maxValue: l.cfg.OriginLimits.MaxValueBytes}
 	for _, name := range l.names {
 		meta, ok := srv.Entity(name)
 		if !ok {

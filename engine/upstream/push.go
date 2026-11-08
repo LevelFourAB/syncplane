@@ -89,7 +89,11 @@ func mutationOf(b *bound, st stateTx, e *entry, inBatch map[uint64]bool) (_ *syn
 	for _, op := range e.ops {
 		crud := &syncplanev1.CrudMutation{Entity: op.entity, Key: op.key, Op: op.kind}
 		if op.kind != syncplanev1.CrudOp_CRUD_OP_DELETE {
-			crud.Value = forwardedValue(b, op)
+			v, err := forwardedValue(b, st, op, b.maxValue)
+			if err != nil {
+				return nil, false, err
+			}
+			crud.Value = v
 		}
 		if op.kind == syncplanev1.CrudOp_CRUD_OP_PATCH {
 			crud.FieldMask = &fieldmaskpb.FieldMask{Paths: op.mask}
@@ -118,20 +122,39 @@ func mutationOf(b *bound, st stateTx, e *entry, inBatch map[uint64]bool) (_ *syn
 	return m, wait, nil
 }
 
-// forwardedValue is the value the origin receives for a PUT or PATCH op.
-func forwardedValue(b *bound, op entryOp) []byte {
+// forwardedValue is the value the origin receives for a PUT or PATCH op. A
+// PATCH whose full text documents make the value larger than maxValue carries
+// them as fragments against the confirmed row, when the link holds the
+// origin's own state of it.
+func forwardedValue(b *bound, st stateTx, op entryOp, maxValue int) ([]byte, error) {
 	value := op.value
-	if model := b.models[op.entity]; model != nil {
+	model := b.models[op.entity]
+	if model != nil {
 		// A value that cannot be completed goes as captured; the origin's
 		// verdict on it is reported like any other.
 		if v, err := model.UpstreamValue(op.rebaseOp()); err == nil {
 			value = v
 		}
 	}
+	// Full documents are the default: a fragment cut against a confirmed row
+	// the origin replaced since (a delete and a new row) is refused, where
+	// the full document merges. A value over the origin's limit is refused
+	// in full anyway.
+	if len(value) > maxValue && model != nil && model.HasText() && op.kind == syncplanev1.CrudOp_CRUD_OP_PATCH {
+		c, ok, err := st.confirmed(op.entity, op.key)
+		if err != nil {
+			return nil, err
+		}
+		if ok && c.present && !c.elided && !c.stale {
+			if v, err := model.UpstreamFragments(op.rebaseOp(), c.value); err == nil {
+				value = v
+			}
+		}
+	}
 	if value == nil {
 		value = []byte{}
 	}
-	return value
+	return value, nil
 }
 
 // baseVersion resolves a compare-and-swap whose base is another entry: the

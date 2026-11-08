@@ -2,11 +2,15 @@ package upstream_test
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	"github.com/levelfourab/syncplane/engine/client"
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
@@ -14,6 +18,7 @@ import (
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/text"
 	"github.com/levelfourab/syncplane/engine/upstream"
 )
 
@@ -262,6 +267,57 @@ var _ = Describe("Sync", func() {
 		n.flush()
 		Expect(title(o.todo("t2"))).To(Equal("after the crash"))
 		Expect(title(n.todo("ghost"))).To(Equal("applied upstream only"))
+	})
+
+	It("forwards a small edit of a collaborative text document larger than the origin's value limit", func() {
+		limits := server.WithLimits(server.Limits{MaxValueBytes: 64 << 10})
+		o := newOrigin(limits)
+		m := newLocal(o, func(c *upstream.Config) { c.OriginLimits = server.Limits{MaxValueBytes: 64 << 10} }, limits)
+		m.add()
+		m.flush()
+		// An in-process write skips the per-value limit; clients grow a
+		// document to this size through many fragments below it.
+		big := strings.Repeat("abcdefghij", 8_000)
+		Expect(o.srv.Apply(ctx, ws, func(tx *server.ApplyTx) error {
+			return tx.Put(&todov1.Note{Id: "n1"}, server.WithTextString("body", big), server.WithTextPeer("origin"))
+		})).To(Succeed())
+		Expect(len(getRow[*todov1.Note](o.srv, "n1").GetBody())).To(BeNumerically(">", 64<<10))
+		Eventually(func() int {
+			s, _ := text.PlainText(getRow[*todov1.Note](m.srv, "n1").GetBody())
+			return len(s)
+		}).Should(Equal(len(big)))
+
+		// A downstream client appends to the document with a fragment.
+		stored := getRow[*todov1.Note](m.srv, "n1").GetBody()
+		base, err := text.Decode(stored, "browser")
+		Expect(err).NotTo(HaveOccurred())
+		doc, err := text.Decode(stored, "browser")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(doc.Insert(doc.Len(), " local")).To(Succeed())
+		frag, err := text.EncodeFragment(doc, base)
+		Expect(err).NotTo(HaveOccurred())
+		value, err := proto.Marshal(&todov1.Note{Id: "n1", Body: frag})
+		Expect(err).NotTo(HaveOccurred())
+		resp, err := m.srv.Push(ctx, connect.NewRequest(&syncplanev1.PushRequest{
+			Batches: []*syncplanev1.WorkspaceBatch{{WorkspaceId: ws, Mutations: []*syncplanev1.Mutation{{
+				ClientId: "browser", MutationId: 1,
+				Payload: &syncplanev1.Mutation_Crud{Crud: &syncplanev1.CrudMutation{
+					Entity: "note", Key: "n1", Op: syncplanev1.CrudOp_CRUD_OP_PATCH, Value: value,
+					FieldMask: &fieldmaskpb.FieldMask{Paths: []string{"body"}},
+				}},
+			}}}},
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(resp.Msg.GetResults()[0].GetResults()[0].GetStatus()).
+			To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+
+		m.flush()
+		Expect(m.rejected()).To(BeEmpty())
+		for _, srv := range []*server.Server{o.srv, m.srv} {
+			s, err := text.PlainText(getRow[*todov1.Note](srv, "n1").GetBody())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(s).To(HaveSuffix(" local"))
+		}
 	})
 
 	It("reports the status of a workspace through the callback", func() {

@@ -117,9 +117,6 @@ func (l *Link) capture(ctx context.Context, cw *server.CapturedWrite) error {
 		}
 		e.ops = append(e.ops, eop)
 	}
-	if err := l.checkOriginLimits(b, cw.Workspace, e); err != nil {
-		return err
-	}
 
 	w := l.workspace(cw.Workspace)
 	through := l.cfg.WriteMode == ModeWriteThrough
@@ -171,6 +168,11 @@ func (l *Link) capture(ctx context.Context, cw *server.CapturedWrite) error {
 		if err := st.putTouched(r.Entity, r.Key, ids); err != nil {
 			return err
 		}
+	}
+	// After the rows' confirmed records got their values back: a text edit
+	// is measured as the fragment the push sends against them.
+	if err := l.checkOriginLimits(b, st, cw.Workspace, e); err != nil {
+		return err
 	}
 	switch {
 	case known != nil:

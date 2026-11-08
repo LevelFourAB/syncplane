@@ -32,7 +32,7 @@ func originLimits(l server.Limits) server.Limits {
 // refuse for its size. The capture calls it before the local write commits:
 // the origin checks only what it receives, and a write it refuses after the
 // local commit is reverted under every reader that saw it.
-func (l *Link) checkOriginLimits(b *bound, ws string, e *entry) error {
+func (l *Link) checkOriginLimits(b *bound, st stateTx, ws string, e *entry) error {
 	lim := l.cfg.OriginLimits
 	if e.custom != nil {
 		if n := len(e.custom.GetArgs().GetValue()); n > lim.MaxValueBytes {
@@ -50,7 +50,7 @@ func (l *Link) checkOriginLimits(b *bound, ws string, e *entry) error {
 	// The size is measured with an unresolved compare-and-swap at its widest
 	// and, below, with the longest client id, so it does not depend on what
 	// the push is built with.
-	m, _, err := mutationOf(b, stateTx{}, &entry{id: e.id, ops: withoutCASBase(e.ops)}, nil)
+	m, _, err := mutationOf(b, st, &entry{id: e.id, ops: withoutCASBase(e.ops)}, nil)
 	if err != nil {
 		return err
 	}

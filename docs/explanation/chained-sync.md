@@ -62,7 +62,7 @@ Delivery of `OnRejected` is at least once. The link removes a rejection from its
 
 A write that the origin keeps failing in the same way (`mutation_failed`, `invalid_argument`, or an unknown code) would block every write behind it. After `Config.PoisonThreshold` failures in a row, the link drops it and reports it as rejected with that code.
 
-The origin checks the size of each write it receives against its own limits. A write can fit the local engine's limits and not the origin's: an `Apply` has no per-value or per-push limit, the link forwards each local write as one origin mutation, and it forwards a collaborative-text edit as the full document. So the link checks the forwarded form of each local write against `Config.OriginLimits` before the write commits, and refuses a write that is too large with `invalid_argument`. Nothing commits locally, so no reader sees the write and then sees it reverted. Set `OriginLimits` to the limits the origin uses.
+The origin checks the size of each write it receives against its own limits. A write can fit the local engine's limits and not the origin's: an `Apply` has no per-value or per-push limit, the link forwards each local write as one origin mutation, and it forwards a collaborative-text edit as the full document or as a fragment. So the link checks the forwarded form of each local write against `Config.OriginLimits` before the write commits, and refuses a write that is too large with `invalid_argument`. Nothing commits locally, so no reader sees the write and then sees it reverted. Set `OriginLimits` to the limits the origin uses.
 
 ## Write-through trades availability for a final answer
 
@@ -128,7 +128,7 @@ When the scope changes, the origin sends the rows that enter it, and the link re
 
 A collaborative-text field takes the union of documents at every step, so a text edit converges across the hop in the same way as between two clients:
 
-- **Upward**, the link sends the full document the local row holds after the write, never a fragment. The origin takes the union with its document, so edits from both sides stay.
+- **Upward**, the link sends the full document the local row holds after the write. The origin takes the union with its document, so edits from both sides stay. When the full document is larger than the origin's `MaxValueBytes` (`Config.OriginLimits`), a `PATCH` goes as a fragment instead: the state the local document holds beyond the confirmed document, which came from the origin. Full documents stay the default because the origin refuses a fragment cut against a document it replaced since, for example after a delete and a new row, and merges the full document.
 - **Downward**, the link asks the origin for text deltas when it can, and merges each fragment into the confirmed document it holds. The local engine then serves its own clients with its own text delta log.
 
 Each writer keeps its own peer id in the document. A browser edit through the local engine keeps the browser's peer id at the origin. A Go write through `upstream.Workspace` uses the peer id that `server.WithTextPeer` gives it.

@@ -115,7 +115,9 @@ type Config struct {
 	// refused before it commits, with a server Rejection of code
 	// invalid_argument: an Apply returns it, and a downstream client's
 	// mutation is rejected with it. A collaborative-text field is measured as
-	// the full document the link forwards. One local write is one origin
+	// the full document the link forwards; a PATCH whose full document is over
+	// MaxValueBytes forwards a fragment against the origin's document the
+	// link holds, and is measured as that. One local write is one origin
 	// mutation, so the rows of one write count against MaxMutationsPerPush,
 	// and its encoded form must fit one request of MaxRequestBytes.
 	OriginLimits server.Limits

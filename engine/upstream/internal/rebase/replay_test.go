@@ -219,6 +219,42 @@ var _ = Describe("Upstream values", func() {
 		Expect(model.Equal(got, want)).To(BeTrue())
 	})
 
+	It("forwards a fragment that the origin merges as it merges the full document", func() {
+		model := mustModel(&testdatav1.Widget{})
+		origin := newNode()
+		base := doc("setup", "hello")
+		Expect(origin.push("setup", crud(syncplanev1.CrudOp_CRUD_OP_PUT, "widget", "w1",
+			&testdatav1.Widget{Id: "w1", Body: base}))).To(BeTrue())
+		confirmed := origin.row(&testdatav1.Widget{}, "w1")
+		// The origin moves past the confirmed row before the link pushes.
+		Expect(origin.push("other", crud(syncplanev1.CrudOp_CRUD_OP_PATCH, "widget", "w1",
+			&testdatav1.Widget{Body: edited(base, "other", " world")}, "body"))).To(BeTrue())
+
+		full := edited(base, "local", "!")
+		c := crud(syncplanev1.CrudOp_CRUD_OP_PATCH, "widget", "w1", &testdatav1.Widget{Body: full}, "body")
+		op := opOf(c)
+		op.Text = map[string][]byte{"body": full}
+		value, err := model.UpstreamFragments(op, confirmed.Value)
+		Expect(err).NotTo(HaveOccurred())
+		var sent testdatav1.Widget
+		Expect(proto.Unmarshal(value, &sent)).To(Succeed())
+		Expect(text.IsFragment(sent.GetBody())).To(BeTrue())
+
+		up := proto.Clone(c).(*syncplanev1.CrudMutation)
+		up.Value = value
+		Expect(origin.push("link", up)).To(BeTrue())
+		var w testdatav1.Widget
+		Expect(proto.Unmarshal(origin.row(&testdatav1.Widget{}, "w1").Value, &w)).To(Succeed())
+		Expect(plain(w.GetBody())).To(Or(Equal("hello world!"), Equal("hello! world")))
+	})
+
+	It("refuses to cut a fragment for a PUT", func() {
+		model := mustModel(&testdatav1.Widget{})
+		op := opOf(crud(syncplanev1.CrudOp_CRUD_OP_PUT, "widget", "w1", &testdatav1.Widget{Id: "w1"}))
+		_, err := model.UpstreamFragments(op, nil)
+		Expect(err).To(HaveOccurred())
+	})
+
 	It("keeps a cleared document cleared", func() {
 		model := mustModel(&testdatav1.Widget{})
 		op := opOf(crud(syncplanev1.CrudOp_CRUD_OP_PATCH, "widget", "w1", &testdatav1.Widget{Label: "x"}, "label", "body"))

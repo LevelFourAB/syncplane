@@ -61,6 +61,54 @@ func (m *Model) UpstreamValue(op Op) ([]byte, error) {
 	if op.Kind == syncplanev1.CrudOp_CRUD_OP_DELETE {
 		return nil, nil
 	}
+	return m.upstream(op, func(_ string, doc []byte) ([]byte, error) { return doc, nil })
+}
+
+// UpstreamFragments returns the value to send the origin for the PATCH op
+// when the origin holds the encoded row confirmed: UpstreamValue's value
+// with every text document the write reaches replaced by a fragment of the
+// state it holds beyond the document confirmed holds at that position. A
+// position where confirmed holds no document keeps the full document.
+//
+// The fragment applies at a receiver whose document covers confirmed's. It
+// returns the errors UpstreamValue returns, an error for an op that is not a
+// PATCH, and an error when confirmed does not decode or a document does not
+// merge with confirmed's.
+func (m *Model) UpstreamFragments(op Op, confirmed []byte) ([]byte, error) {
+	if op.Kind != syncplanev1.CrudOp_CRUD_OP_PATCH {
+		return nil, fmt.Errorf("rebase: a %v carries no text fragment", op.Kind)
+	}
+	bases, err := m.TextDocuments(confirmed)
+	if err != nil {
+		return nil, err
+	}
+	return m.upstream(op, func(path string, doc []byte) ([]byte, error) {
+		base := bases[path]
+		if len(base) == 0 {
+			return doc, nil
+		}
+		// The union holds confirmed's document whole, so the fragment can be
+		// cut against it also when the origin moved on after the write.
+		merged, err := text.Merge(base, doc)
+		if err != nil {
+			return nil, err
+		}
+		d, err := text.Decode(merged, "")
+		if err != nil {
+			return nil, err
+		}
+		b, err := text.Decode(base, "")
+		if err != nil {
+			return nil, err
+		}
+		return text.EncodeFragment(d, b)
+	})
+}
+
+// upstream returns op.Value with every text document the write reaches
+// replaced by what form returns for its document in op.Text, or op.Value
+// unchanged when nothing is replaced.
+func (m *Model) upstream(op Op, form func(path string, doc []byte) ([]byte, error)) ([]byte, error) {
 	if len(m.text) == 0 {
 		return op.Value, nil
 	}
@@ -76,7 +124,11 @@ func (m *Model) UpstreamValue(op Op) ([]byte, error) {
 			continue
 		}
 		if doc := op.Text[ti.Path]; len(doc) > 0 {
-			ti.Set(doc)
+			v, err := form(ti.Path, doc)
+			if err != nil {
+				return nil, err
+			}
+			ti.Set(v)
 			replaced = true
 			continue
 		}
