@@ -182,8 +182,10 @@ func (rt *Runtime) drain(ctx context.Context, c *consumer, workspaceID string) (
 		// the write keeps an idle runtime from taking every workspace's write
 		// lock on every tick, which at N consumers over M workspaces is a
 		// steady drip of transactions that contend with real writes and change
-		// nothing.
-		if next != cur || len(up.Shadows) > 0 {
+		// nothing. Only the position is compared: Changes stamps Epoch and
+		// Lineage on next, and ConsumerPosition reads them back as 0.
+		moved := next.Seq != cur.Seq || next.Entity != cur.Entity || next.Key != cur.Key
+		if moved || len(up.Shadows) > 0 {
 			if err := rt.srv.AdvanceConsumer(ctx, workspaceID, c.name, up); err != nil {
 				return cur.Seq, err
 			}

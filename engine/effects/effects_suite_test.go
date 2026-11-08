@@ -14,6 +14,7 @@ import (
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	"github.com/levelfourab/syncplane/engine/internal/pubsub"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
 
@@ -41,11 +42,18 @@ func newFixture(opts ...func(*effects.Config)) *fixture {
 // specs that need GC (and with it a moving tombstone horizon) pass WithGC here.
 func newFixtureFull(srvOpts []server.Option, opts ...func(*effects.Config)) *fixture {
 	GinkgoHelper()
+	return newFixtureOver(func(a storage.Adapter) storage.Adapter { return a }, srvOpts, opts...)
+}
+
+// newFixtureOver builds the fixture over the adapter wrap returns for the temp
+// store, for specs that observe what the runtime asks of storage.
+func newFixtureOver(wrap func(storage.Adapter) storage.Adapter, srvOpts []server.Option, opts ...func(*effects.Config)) *fixture {
+	GinkgoHelper()
 	store, err := sqlitestore.Open(filepath.Join(GinkgoT().TempDir(), "engine.db"))
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
 
-	srv, err := server.New(store, append(srvOpts,
+	srv, err := server.New(wrap(store), append(srvOpts,
 		server.WithEntities(&testdatav1.Widget{}, &testdatav1.Pair{}))...)
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
@@ -58,6 +66,35 @@ func newFixtureFull(srvOpts []server.Option, opts ...func(*effects.Config)) *fix
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(func() { Expect(rt.Close()).To(Succeed()) })
 	return &fixture{srv: srv, rt: rt}
+}
+
+// writeCounter is an adapter that counts the write transactions opened per
+// workspace, which is how a spec sees whether a pass took the write lock.
+type writeCounter struct {
+	storage.Adapter
+
+	mu     sync.Mutex
+	writes map[string]int
+}
+
+func countWrites(a storage.Adapter) *writeCounter {
+	return &writeCounter{Adapter: a, writes: make(map[string]int)}
+}
+
+func (w *writeCounter) WithWriteTx(ctx context.Context, workspaceID string, fn func(storage.WriteTx) error) error {
+	w.mu.Lock()
+	w.writes[workspaceID]++
+	w.mu.Unlock()
+	return w.Adapter.WithWriteTx(ctx, workspaceID, fn)
+}
+
+// Unwrap keeps the inner adapter's capabilities reachable through storage.As.
+func (w *writeCounter) Unwrap() storage.Adapter { return w.Adapter }
+
+func (w *writeCounter) count(workspaceID string) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writes[workspaceID]
 }
 
 // put writes a widget through the trusted server API, the same linearization

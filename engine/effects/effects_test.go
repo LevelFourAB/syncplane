@@ -77,6 +77,25 @@ var _ = Describe("Effects runtime", func() {
 			Expect(positions[0].Consumer).To(Equal("widgets"))
 		})
 
+		It("writes nothing on a pass after the feed is drained", func() {
+			var counter *writeCounter
+			f := newFixtureOver(func(a storage.Adapter) storage.Adapter {
+				counter = countWrites(a)
+				return counter
+			}, nil)
+			rec := newRecorder()
+			Expect(effects.On(f.rt, "widgets", rec.handle)).To(Succeed())
+			f.put(ctx, ws, &testdatav1.Widget{Id: "w1"})
+			Expect(f.rt.Drain(ctx, "widgets", ws)).To(Succeed())
+			before := counter.count(ws)
+
+			Expect(f.rt.Drain(ctx, "widgets", ws)).To(Succeed())
+
+			Expect(counter.count(ws)).To(Equal(before),
+				"a pass that finds the position already at the head must not take the write lock")
+			Expect(rec.keys()).To(Equal([]string{"w1"}))
+		})
+
 		It("delivers only the entities the consumer registered for", func() {
 			f := newFixture()
 			rec := newRecorder()
