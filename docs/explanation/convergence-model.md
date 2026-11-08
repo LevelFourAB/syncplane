@@ -409,11 +409,12 @@ Tabs also share the pending mutation queue. When a tab pulls changes, it rebases
 the queue against its local schema registry. If the queue contains mutations for
 unknown entities or fields declared only in newer builds, the tab skips
 optimistic application, logs an error to `console.error`, and retains the entry
-in the queue until push retirement. The confirmed row displays in that tab until
-the server acknowledges the write, while tabs with the updated schema display
-optimistic updates. The tab skips replaying unknown mutations rather than
-failing the rebase, which prevents stalled cursor advancement in the shared
-workspace.
+in the queue until push retirement. The overlay is shared too, so the tab keeps
+the overlay rows of the skipped writes as it found them: every tab continues to
+display the optimistic value that the tab with the updated schema wrote, on the
+confirmed row that tab last saw, until the server acknowledges the write or that
+tab rebases again. The tab skips replaying unknown mutations rather than failing
+the rebase, which prevents stalled cursor advancement in the shared workspace.
 
 ## Related
 

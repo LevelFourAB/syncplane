@@ -820,6 +820,33 @@ describe('replay across builds', () => {
 		errSpy.mockRestore();
 	});
 
+	it('leaves the overlay row of a PATCH it could not replay', async () => {
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const kv = new MemoryKVStore();
+		await seedBase(kv);
+		await enqueueForeign(kv, foreignFieldPatch(1n, 't1'));
+		// The overlay the newer tab built from that PATCH, in the shared store.
+		const overlay = {
+			v: toBinary(TodoSchema, create(TodoSchema, { id: 't1', title: 'confirmed' })),
+		};
+		const write = await kv.write();
+		await write.put(overlayKey('todo', WS, 't1'), overlay);
+		await write.commit();
+
+		await rebase(kv, registry, noMirrors, WS, {
+			changes: [],
+			nextCursor: cursor(2),
+			lastAckedMutationId: 0n,
+		});
+
+		// Not cleared: this rebase could not replay the write behind it, so the
+		// tab that queued it would lose its own pending edit until the ack.
+		const tx = await kv.read();
+		expect(await tx.get(overlayKey('todo', WS, 't1'))).toEqual(overlay);
+		tx.release();
+		errSpy.mockRestore();
+	});
+
 	it('steps over a queued crud whose value will not decode', async () => {
 		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		const kv = new MemoryKVStore();

@@ -448,10 +448,12 @@ function withoutUnapplicableText(
  * What is skipped is optimism, not the write. The entry stays queued, and the
  * push retires it: the server acks it, rejects it (a rejection is an ack), or the
  * poison backstop dead-letters it after repeated deterministic refusals
- * (sync/coordinator.ts). The tab whose build can apply it holds the optimistic
- * state meanwhile, rebuilt from the same queue on its own next rebase; this one
- * shows the confirmed row until the ack lands. It is the pending queue's half of
- * the rule entities.ts states for confirmed rows.
+ * (sync/coordinator.ts). The overlay row of the key keeps the optimistic state
+ * the tab whose build can apply the entry wrote (see clearOverlayAndReplay), and
+ * that tab rebuilds it from the same queue on its own next rebase. It is the
+ * pending queue's half of the rule entities.ts states for confirmed rows.
+ *
+ * `skipped` receives the entity and key of a crud it skips.
  */
 async function replayCrud(
 	tx: KVWrite,
@@ -460,6 +462,7 @@ async function replayCrud(
 	crud: CrudMutation,
 	touched: TouchSet,
 	slot: TextLogSlot,
+	skipped: ((entity: string, key: string) => void) | undefined,
 ): Promise<void> {
 	try {
 		await applyCrudLocally(tx, registry, workspaceId, crud, touched, undefined, slot);
@@ -468,6 +471,7 @@ async function replayCrud(
 			`replay: a queued ${crud.entity} write ("${crud.key}") could not be applied locally`,
 			err,
 		);
+		skipped?.(crud.entity, crud.key);
 	}
 }
 
@@ -482,6 +486,8 @@ async function replayCrud(
  * ordinary. Neither skip covers a locally issued crud: that one reaches
  * applyCrudLocally directly, where an unregistered entity or an unapplicable mask
  * is a programming error and throws.
+ *
+ * `skipped` receives the entity and key of each registered crud it cannot apply.
  */
 export async function applyMutationLocally(
 	tx: KVWrite,
@@ -490,6 +496,7 @@ export async function applyMutationLocally(
 	workspaceId: string,
 	mutation: Mutation,
 	touched: TouchSet,
+	skipped?: (entity: string, key: string) => void,
 ): Promise<void> {
 	switch (mutation.payload.case) {
 		case 'crud': {
@@ -498,7 +505,7 @@ export async function applyMutationLocally(
 			await replayCrud(tx, registry, workspaceId, crud, touched, {
 				mutationId: mutation.mutationId,
 				index: 0,
-			});
+			}, skipped);
 			return;
 		}
 		case 'batch': {
@@ -514,7 +521,7 @@ export async function applyMutationLocally(
 				await replayCrud(tx, registry, workspaceId, crud, touched, {
 					mutationId: mutation.mutationId,
 					index,
-				});
+				}, skipped);
 			}
 			return;
 		}
@@ -1050,7 +1057,10 @@ export interface FinalizeInput {
  * Replay is isolated per mutation: an entry this build cannot apply is skipped
  * and reported over console.error, and no failure to replay one reaches the
  * caller's transaction. See replayCrud for why a shared queue makes such an entry
- * ordinary, and what retires it.
+ * ordinary, and what retires it. The row of a skipped crud keeps the overlay row
+ * and text log it had before the call, because the overlay is shared: the tab
+ * that queued the entry reads it from the same rows. Until that tab rebases, the
+ * row shows that tab's optimistic value on the confirmed row it last saw.
  *
  * Reports ROWS: every overlay row it clears and every row the replay writes,
  * each by key, so a rebase costs a watcher the rows that moved rather than a
@@ -1064,20 +1074,45 @@ export async function clearOverlayAndReplay(
 	remaining: Mutation[],
 	touched: TouchSet,
 ): Promise<void> {
+	// Only a row the queue still names can have its replay skipped, so only those
+	// rows keep their cleared state in memory for the restore below.
+	const named = new Map<string, Set<string>>();
+	for (const mutation of remaining) {
+		const cruds = mutation.payload.case === 'crud'
+			? [ mutation.payload.value ]
+			: mutation.payload.case === 'batch'
+			? mutation.payload.value.mutations
+			: [];
+		for (const crud of cruds) {
+			let keys = named.get(crud.entity);
+			if (keys === undefined) named.set(crud.entity, keys = new Set());
+			keys.add(crud.key);
+		}
+	}
+	const saved = new Map<string, ClearedRow>();
+	const savedRow = (entity: string, key: string): ClearedRow => {
+		const id = `${entity}\u0000${key}`;
+		let row = saved.get(id);
+		if (row === undefined) saved.set(id, row = { text: [] });
+		return row;
+	};
 	for (const entity of registry.names()) {
+		const keys = named.get(entity);
 		// The scan has each cleared row's key in hand, so this reports rows rather
 		// than the entity: a wildcard here would put every watcher of the entity
 		// back on a full scan of its scope, once per rebase (see WatcherHub).
 		const rows = overlayWsPrefix(entity, workspaceId);
-		for await (const [ k ] of tx.scan(rows)) {
+		for await (const [ k, v ] of tx.scan(rows)) {
 			await tx.del(k);
-			touched.row(workspaceId, entity, k.slice(rows.length));
+			const key = k.slice(rows.length);
+			touched.row(workspaceId, entity, key);
+			if (keys?.has(key)) savedRow(entity, key).row = v;
 		}
 		// The text log is overlay state under a different key, so it clears with
 		// the overlay; the replay below rebuilds it from the same queue entries the
 		// fragments came from in the first place.
 		const log = overlayTextPrefix(entity);
-		for await (const [ k ] of tx.scan(overlayTextWsPrefix(entity, workspaceId))) {
+		for await (const [ k, v ] of tx.scan(overlayTextWsPrefix(entity, workspaceId))) {
 			await tx.del(k);
 			// The ROW the fragment belongs to: one row logs a fragment per edit per
 			// field, and TouchSet folds the repeats. The fallback is a fence, not a
@@ -1085,12 +1120,18 @@ export async function clearOverlayAndReplay(
 			// that will not split gives up the whole entity instead.
 			const parts = splitOverlayTextSuffix(k.slice(log.length));
 			if (parts === undefined) touched.entity(workspaceId, entity);
-			else touched.row(workspaceId, entity, parts.key);
+			else {
+				touched.row(workspaceId, entity, parts.key);
+				if (keys?.has(parts.key)) savedRow(entity, parts.key).text.push([ k, v ]);
+			}
 		}
 	}
+	const skipped = new Map<string, [string, string]>();
+	const skip = (entity: string, key: string) =>
+		skipped.set(`${entity}\u0000${key}`, [ entity, key ]);
 	for (const mutation of remaining) {
 		try {
-			await applyMutationLocally(tx, registry, mirrors, workspaceId, mutation, touched);
+			await applyMutationLocally(tx, registry, mirrors, workspaceId, mutation, touched, skip);
 		} catch (err) {
 			// The backstop for what replayCrud does not cover: a custom mutation's
 			// mirror is app code running inside this transaction, and its args unpack
@@ -1101,6 +1142,29 @@ export async function clearOverlayAndReplay(
 			);
 		}
 	}
+	// The cleared state is put back whole rather than merged with what the replay
+	// wrote: it was built from the same queue by a tab that could apply all of it,
+	// so it already holds what this replay could apply. A row that had no overlay
+	// state keeps the replay's result, as there is nothing to put back.
+	for (const [ id, [ entity, key ] ] of skipped) {
+		const before = saved.get(id);
+		if (before === undefined) continue;
+		const row = overlayKey(entity, workspaceId, key);
+		if (before.row === undefined) await tx.del(row);
+		else await tx.put(row, before.row);
+		const stale: string[] = [];
+		for await (const [ k ] of tx.scan(overlayTextRowPrefix(entity, workspaceId, key))) {
+			if (isRowTextKey(entity, key, k)) stale.push(k);
+		}
+		for (const k of stale) await tx.del(k);
+		for (const [ k, v ] of before.text) await tx.put(k, v);
+	}
+}
+
+/** The overlay state of one row as clearOverlayAndReplay found it. */
+interface ClearedRow {
+	row?: unknown;
+	text: [string, unknown][];
 }
 
 /**
