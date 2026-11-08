@@ -102,7 +102,15 @@ describe('key-set subscriptions', () => {
 	it('rejects a set above the server maximum', async () => {
 		const ws = freshWorkspace();
 		const many = Array.from({ length: 5_000 }, (_, i) => `k${i}`);
-		const reader = newClient(ws, { subscriptions: [ subscription(WidgetSchema, { keys: many }) ] });
+		// The client refuses it where the app sets it.
+		expect(() => newClient(ws, { subscriptions: [ subscription(WidgetSchema, { keys: many }) ] }))
+			.toThrow(/maxSubscriptionKeys/);
+		// A client told a higher cap than the server's sends it, and the server
+		// refuses it.
+		const reader = newClient(ws, {
+			maxSubscriptionKeys: 10_000,
+			subscriptions: [ subscription(WidgetSchema, { keys: many }) ],
+		});
 		await reader.start();
 		await expect(reader.syncNow()).rejects.toThrow(/MaxSubscriptionKeys/);
 		await reader.close();
