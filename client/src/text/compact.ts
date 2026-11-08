@@ -35,38 +35,28 @@ export interface CompactResult {
 }
 
 /**
- * The mark operations that can no longer affect resolution — in this document
- * or in any document reachable from it by further edits — and which compaction
- * may therefore drop. Nothing else may be dropped: a mark op is state, and
- * merging is a union, so an op removed while it still matters comes straight
- * back from the next replica that holds it.
+ * The mark operations that can no longer affect resolution — in this document,
+ * in any document reachable from it by further edits, and in any document it
+ * merges with — and which compaction may therefore drop. Nothing else may be
+ * dropped: a mark op is state, and merging is a union, so an op removed while
+ * it still matters comes straight back from the next replica that holds it.
  *
- * Two rules, both of which have to hold for EVERY FUTURE document and not just
- * this one. That distinction is the whole difficulty: "shadowed today" is not
- * sufficient, because ops with different expand policies diverge at their
- * boundaries. Op A covering [3,7) with ExpandBoth is entirely shadowed by a
- * higher-id B covering [3,7) with ExpandNone — until one character is typed at
- * edge 3, which A covers and B does not, and A is revealed.
+ * An op A is dead when a higher-id op on the same key has IDENTICAL anchors.
+ * Identical anchors mean identical coverage under every future insert, and the
+ * higher id wins every character they both cover, so A can never be the winner
+ * anywhere. The survivor still shadows any op that arrives later with a lower
+ * id, so a concurrent op from a replica that was offline resolves as it would
+ * against the uncompacted document. This is the toggle-the-same-range case —
+ * the bulk of what a long editing session accumulates, and exactly what a
+ * collapsed mark plus its cancelling unmark look like.
  *
- *  1. A is dead when a higher-id op on the same key has IDENTICAL anchors.
- *     Identical anchors mean identical coverage under every future insert, and
- *     the higher id wins every character they both cover, so A can never be the
- *     winner anywhere. This is the toggle-the-same-range case — the bulk of
- *     what a long editing session accumulates, and exactly what a collapsed
- *     mark plus its cancelling unmark look like.
- *
- *  2. A group of surviving ops on one key that overlap or TOUCH each other, and
- *     nothing else on that key, is dead when every op in it is null-valued.
- *     Removal ops exist only to shadow marks beneath them; with none left they
- *     paint "removed" over a stretch where nothing paints anything, which is
- *     what the absence of the ops paints too. Touching counts as overlapping
- *     because an insert at the shared edge can fall inside both, so a group has
- *     to be separated from the rest of the key by a real gap to be judged
- *     alone.
- *
- * Ops whose anchors do not resolve are left alone, and so is every other op on
- * their key: compaction cannot fail, and a document assembled from foreign
- * parts is not one to start reclaiming state from.
+ * "Shadowed today" is not enough to be dead, because ops with different expand
+ * policies diverge at their boundaries. Op A covering [3,7) with ExpandBoth is
+ * entirely shadowed by a higher-id B covering [3,7) with ExpandNone — until one
+ * character is typed at edge 3, which A covers and B does not, and A is
+ * revealed. Nor is a removal op that shadows no mark dead: a mark from a
+ * concurrent replica, with a lower id, can still arrive and needs the removal
+ * to lose to.
  *
  * What this deliberately does NOT use is "covers nothing". A collapsed mark
  * covers nothing permanently and by design (doc.ts), so emptiness stops being a
@@ -76,16 +66,6 @@ export interface CompactResult {
 function deadMarks(doc: TextDoc): Set<string> {
 	const dead = new Set<string>();
 	if (doc.marks.length === 0) return dead;
-	const order = doc.order();
-	const fullIndex = new Map<string, number>();
-	for (let i = 0; i < order.length; i++) fullIndex.set(order[i]!.key, i);
-	const anchorPos = (a: Anchor): number | undefined => {
-		if (a.kind === AnchorDocStart) return 0;
-		if (a.kind === AnchorDocEnd) return order.length;
-		const i = fullIndex.get(idKey(a.item!));
-		if (i === undefined) return undefined;
-		return a.kind === AnchorBefore ? i : i + 1;
-	};
 	// (start anchor, end anchor, key) as one string, so "same shape" is a map
 	// lookup. Anchors hold no other state, so this is exactly the structural
 	// equality the Go mirror gets from a struct key. The mark key goes LAST
@@ -96,9 +76,7 @@ function deadMarks(doc: TextDoc): Set<string> {
 		const side = (a: Anchor): string => (a.item ? `${a.kind}:${idKey(a.item)}` : `${a.kind}`);
 		return `${side(m.start)}\u0000${side(m.end)}\u0000${m.key}`;
 	};
-
-	// Rule 1: per (key, start anchor, end anchor), everything but the highest
-	// id goes.
+	// Per (key, start anchor, end anchor), everything but the highest id goes.
 	const top = new Map<string, MarkOp>();
 	for (const m of doc.marks) {
 		const s = shapeOf(m);
@@ -107,49 +85,6 @@ function deadMarks(doc: TextDoc): Set<string> {
 	}
 	for (const m of doc.marks) {
 		if (compareIds(top.get(shapeOf(m))!.id, m.id) !== 0) dead.add(idKey(m.id));
-	}
-
-	// Rule 2: group the survivors per key into runs of touching-or-overlapping
-	// CLOSED edge intervals, and drop any run that is all removals.
-	interface Interval {
-		lo: number;
-		hi: number;
-		op: MarkOp;
-	}
-	const perKey = new Map<string, Interval[]>();
-	const opaque = new Set<string>(); // keys holding an op whose anchors don't resolve
-	for (const m of doc.marks) {
-		if (dead.has(idKey(m.id))) continue;
-		const lo = anchorPos(m.start);
-		let hi = anchorPos(m.end);
-		if (lo === undefined || hi === undefined) {
-			opaque.add(m.key);
-			continue;
-		}
-		// Inverted anchors cover nothing; judge it as the point it is.
-		if (hi < lo) hi = lo;
-		const ivs = perKey.get(m.key);
-		if (ivs) ivs.push({ lo, hi, op: m });
-		else perKey.set(m.key, [ { lo, hi, op: m } ]);
-	}
-	for (const [ key, ivs ] of perKey) {
-		if (opaque.has(key)) continue;
-		// Total order, so both languages sweep the same sequence.
-		ivs.sort((a, b) => a.lo - b.lo || a.hi - b.hi || compareIds(a.op.id, b.op.id));
-		for (let i = 0; i < ivs.length;) {
-			let j = i;
-			let reach = ivs[i]!.hi;
-			let allNull = ivs[i]!.op.value === null;
-			while (j + 1 < ivs.length && ivs[j + 1]!.lo <= reach) {
-				j++;
-				if (ivs[j]!.hi > reach) reach = ivs[j]!.hi;
-				if (ivs[j]!.op.value !== null) allNull = false;
-			}
-			if (allNull) {
-				for (let k = i; k <= j; k++) dead.add(idKey(ivs[k]!.op.id));
-			}
-			i = j + 1;
-		}
 	}
 	return dead;
 }

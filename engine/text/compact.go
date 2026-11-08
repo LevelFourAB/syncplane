@@ -63,37 +63,28 @@ func (e stale) Unwrap() error { return e.error }
 func (e stale) Is(target error) bool { return target == ErrStateStale }
 
 // deadMarks reports the mark operations that can no longer affect resolution —
-// in this document or in any document reachable from it by further edits — and
-// which compaction may therefore drop. Nothing else may be dropped: a mark op
-// is state, and merge is a union, so an op removed while it still matters comes
-// straight back from the next replica that holds it.
+// in this document, in any document reachable from it by further edits, and in
+// any document it merges with — and which compaction may therefore drop.
+// Nothing else may be dropped: a mark op is state, and merge is a union, so an
+// op removed while it still matters comes straight back from the next replica
+// that holds it.
 //
-// Two rules, both of which have to hold for EVERY FUTURE document and not just
-// this one. That distinction is the whole difficulty: "shadowed today" is not
-// sufficient, because ops with different expand policies diverge at their
-// boundaries. Op A covering [3,7) with ExpandBoth is entirely shadowed by a
-// higher-id B covering [3,7) with ExpandNone — until one character is typed at
-// edge 3, which A covers and B does not, and A is revealed.
+// An op A is dead when a higher-id op on the same key has IDENTICAL anchors.
+// Identical anchors mean identical coverage under every future insert, and the
+// higher id wins every character they both cover, so A can never be the winner
+// anywhere. The survivor still shadows any op that arrives later with a lower
+// id, so a concurrent op from a replica that was offline resolves as it would
+// against the uncompacted document. This is the toggle-the-same-range case —
+// the bulk of what a long editing session accumulates, and exactly what a
+// collapsed mark plus its cancelling unmark look like.
 //
-//  1. A is dead when a higher-id op on the same key has IDENTICAL anchors.
-//     Identical anchors mean identical coverage under every future insert, and
-//     the higher id wins every character they both cover, so A can never be the
-//     winner anywhere. This is the toggle-the-same-range case — the bulk of
-//     what a long editing session accumulates, and exactly what a collapsed
-//     mark plus its cancelling unmark look like.
-//
-//  2. A group of surviving ops on one key that overlap or TOUCH each other,
-//     and nothing else on that key, is dead when every op in it is nil-valued.
-//     Removal ops exist only to shadow marks beneath them; with none left they
-//     paint "removed" over a stretch where nothing paints anything, which is
-//     what the absence of the ops paints too. Touching counts as overlapping
-//     because an insert at the shared edge can fall inside both, so a group has
-//     to be separated from the rest of the key by a real gap to be judged
-//     alone.
-//
-// Ops whose anchors do not resolve are left alone, and so is every other op on
-// their key: Compact cannot fail, and a document assembled from foreign parts
-// is not one to start reclaiming state from.
+// "Shadowed today" is not enough to be dead, because ops with different expand
+// policies diverge at their boundaries. Op A covering [3,7) with ExpandBoth is
+// entirely shadowed by a higher-id B covering [3,7) with ExpandNone — until
+// one character is typed at edge 3, which A covers and B does not, and A is
+// revealed. Nor is a removal op that shadows no mark dead: a mark from a
+// concurrent replica, with a lower id, can still arrive and needs the removal
+// to lose to.
 //
 // What this deliberately does NOT use is "covers nothing". A collapsed mark
 // covers nothing permanently and by design (marks.go), so emptiness stops being
@@ -103,32 +94,8 @@ func (d *Doc) deadMarks() map[ID]bool {
 	if len(d.marks) == 0 {
 		return nil
 	}
-	d.ensureOrder()
-	fullIndex := make(map[ID]int, len(d.order))
-	for i, it := range d.order {
-		fullIndex[it.id] = i
-	}
-	anchorPos := func(a Anchor) (int, bool) {
-		switch a.Kind {
-		case AnchorDocStart:
-			return 0, true
-		case AnchorDocEnd:
-			return len(d.order), true
-		}
-		i, ok := fullIndex[a.Item]
-		if !ok {
-			return 0, false
-		}
-		if a.Kind == AnchorBefore {
-			return i, true
-		}
-		return i + 1, true
-	}
-
 	dead := make(map[ID]bool)
-
-	// Rule 1: per (key, start anchor, end anchor), everything but the highest
-	// id goes.
+	// Per (key, start anchor, end anchor), everything but the highest id goes.
 	type shape struct {
 		key        string
 		start, end Anchor
@@ -143,63 +110,6 @@ func (d *Doc) deadMarks() map[ID]bool {
 	for _, m := range d.marks {
 		if top[shape{key: m.key, start: m.start, end: m.end}] != m.id {
 			dead[m.id] = true
-		}
-	}
-
-	// Rule 2: group the survivors per key into runs of touching-or-overlapping
-	// CLOSED edge intervals, and drop any run that is all removals.
-	type interval struct {
-		lo, hi int
-		op     *markOp
-	}
-	perKey := make(map[string][]interval, len(d.marks))
-	opaque := make(map[string]bool) // keys holding an op whose anchors don't resolve
-	for _, m := range d.marks {
-		if dead[m.id] {
-			continue
-		}
-		lo, okLo := anchorPos(m.start)
-		hi, okHi := anchorPos(m.end)
-		if !okLo || !okHi {
-			opaque[m.key] = true
-			continue
-		}
-		if hi < lo {
-			hi = lo // inverted anchors cover nothing; judge it as the point it is
-		}
-		perKey[m.key] = append(perKey[m.key], interval{lo: lo, hi: hi, op: m})
-	}
-	for key, ivs := range perKey {
-		if opaque[key] {
-			continue
-		}
-		// Total order, so both languages sweep the same sequence.
-		sort.Slice(ivs, func(i, j int) bool {
-			if ivs[i].lo != ivs[j].lo {
-				return ivs[i].lo < ivs[j].lo
-			}
-			if ivs[i].hi != ivs[j].hi {
-				return ivs[i].hi < ivs[j].hi
-			}
-			return ivs[i].op.id.less(ivs[j].op.id)
-		})
-		for i := 0; i < len(ivs); {
-			j, reach, allNil := i, ivs[i].hi, ivs[i].op.value == nil
-			for j+1 < len(ivs) && ivs[j+1].lo <= reach {
-				j++
-				if ivs[j].hi > reach {
-					reach = ivs[j].hi
-				}
-				if ivs[j].op.value != nil {
-					allNil = false
-				}
-			}
-			if allNil {
-				for _, iv := range ivs[i : j+1] {
-					dead[iv.op.id] = true
-				}
-			}
-			i = j + 1
 		}
 	}
 	return dead

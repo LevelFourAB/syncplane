@@ -3357,7 +3357,7 @@
 			]
 		},
 		{
-			"name": "compaction reclaims a mark and the unmark that turned it off",
+			"name": "compaction reclaims a mark that an unmark of the same range turned off, and keeps the unmark",
 			"steps": [
 				{
 					"op": "new",
@@ -3391,7 +3391,7 @@
 					"op": "compact",
 					"doc": "a",
 					"purged": 0,
-					"purgedMarks": 2
+					"purgedMarks": 1
 				}
 			],
 			"checks": [
@@ -3415,7 +3415,7 @@
 				{
 					"check": "encodedHex",
 					"doc": "a",
-					"value": "010105616c6963650701000105060568656c6c6f00"
+					"value": "010105616c6963650701000105060568656c6c6f01000704626f6c640002000103000500"
 				}
 			]
 		},
@@ -3545,7 +3545,7 @@
 			]
 		},
 		{
-			"name": "compaction reclaims a cancelled pending format and the tombstone it pinned",
+			"name": "compaction reclaims a cancelled pending format, and keeps the tombstone its unmark pins",
 			"steps": [
 				{
 					"op": "new",
@@ -3584,8 +3584,8 @@
 				{
 					"op": "compact",
 					"doc": "a",
-					"purged": 6,
-					"purgedMarks": 2
+					"purged": 5,
+					"purgedMarks": 1
 				}
 			],
 			"checks": [
@@ -3614,7 +3614,7 @@
 				{
 					"check": "encodedHex",
 					"doc": "a",
-					"value": "010105616c6963650d01000105060568656c6c6f00"
+					"value": "010105616c6963650d02000105060568656c6c6f000601050005012001000d04626f6c640003000502000603"
 				}
 			]
 		},

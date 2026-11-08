@@ -106,22 +106,26 @@ describe('compactDoc', () => {
 
 // Mark operations are state like any other, so compaction may only drop the
 // ones that can never win again — in this document or in any document reachable
-// from it. See deadMarks in src/text/compact.ts for the two rules; these pin the
-// line between them and what has to stay, and mirror the Go suite.
+// from it, or in any document it merges with. See deadMarks in
+// src/text/compact.ts for the rule; these pin the line between it and what has
+// to stay, and mirror the Go suite.
 describe('compactDoc of mark operations', () => {
-	it('reclaims a mark and the unmark that turned it off', () => {
+	// The unmark stays: a mark from a concurrent replica, with a lower id, can
+	// still arrive and must lose to it.
+	it('reclaims a mark that an unmark of the same range turned off, and keeps the unmark', () => {
 		const d = new TextDoc('alice');
 		d.insert(0, 'hello');
 		d.mark(0, 5, 'bold', true, ExpandNone);
 		d.unmark(0, 5, 'bold', ExpandNone);
 		expect(d.resolveMarks()).toEqual([]);
 
-		expect(compactDoc(d)).toEqual({ items: 0, marks: 2 });
+		expect(compactDoc(d)).toEqual({ items: 0, marks: 1 });
 		expect(d.resolveMarks()).toEqual([]);
 		expect(d.plainText()).toBe('hello');
+		expect(compactDoc(d).marks, 'the unmark is not reclaimed on a later pass either').toBe(0);
 	});
 
-	it('reclaims a cancelled pending format and the item it pinned', () => {
+	it('reclaims a cancelled pending format, and keeps the item its unmark pins', () => {
 		const d = new TextDoc('alice');
 		d.insert(0, 'hello world');
 		d.delete(5, 6);
@@ -132,7 +136,7 @@ describe('compactDoc of mark operations', () => {
 		expect(compactDoc(d)).toEqual({ items: 5, marks: 0 });
 
 		d.unmark(5, 5, 'bold', ExpandBoth);
-		expect(compactDoc(d)).toEqual({ items: 1, marks: 2 });
+		expect(compactDoc(d)).toEqual({ items: 0, marks: 1 });
 		expect(d.plainText()).toBe('hello');
 		expect(compactDoc(d)).toEqual({ items: 0, marks: 0 });
 	});
@@ -210,6 +214,49 @@ describe('compactDoc of mark operations', () => {
 	});
 });
 
+// A removal that shadows no mark is dead for later edits of this document, but a
+// replica that was offline can still hold a mark it minted before the removal,
+// with a lower id. That mark must lose to the removal whether or not a
+// compaction ran before it arrived.
+describe('compactDoc against a mark that raced a removal', () => {
+	/**
+	 * The document after alice marked and unmarked "hello", and a replica that
+	 * forked before both and marked the same range. With `mintAfter`, the
+	 * replica first sees alice's ops, so its mark is newer than the removal.
+	 */
+	function raced(mintAfter: boolean): { doc: TextDoc; offline: TextDoc } {
+		const doc = new TextDoc('alice');
+		doc.insert(0, 'hello');
+		let offline = forked(doc, 'bob');
+		doc.mark(0, 5, 'bold', true, ExpandNone);
+		doc.unmark(0, 5, 'bold', ExpandNone);
+		if (mintAfter) offline = forked(doc, 'bob');
+		offline.mark(0, 5, 'bold', true, ExpandNone);
+		return { doc, offline };
+	}
+
+	function merged(doc: TextDoc, offline: TextDoc) {
+		return decodeTextDoc(mergeText(encodeTextDoc(doc), encodeTextDoc(offline)), '').resolveMarks();
+	}
+
+	it('still lets the removal win after a compaction', () => {
+		const { doc, offline } = raced(false);
+		expect(merged(doc, offline)).toEqual([]);
+
+		expect(compactDoc(doc).marks, 'the bold goes, the unbold stays').toBe(1);
+		expect(merged(doc, offline), 'the compaction let a concurrent mark undo the removal').toEqual([]);
+	});
+
+	it('lets a mark minted after the removal win', () => {
+		const { doc, offline } = raced(true);
+		const want = [ { start: 0, end: 5, key: 'bold', value: true } ];
+		expect(merged(doc, offline)).toEqual(want);
+
+		expect(compactDoc(doc).marks).toBe(1);
+		expect(merged(doc, offline)).toEqual(want);
+	});
+});
+
 describe('purgedByRemote', () => {
 	it('is false for ordinary remote state', () => {
 		const local = new TextDoc('alice');
@@ -245,7 +292,7 @@ describe('purgedByRemote', () => {
 		local.mark(0, 5, 'bold', true, ExpandNone);
 		local.unmark(0, 5, 'bold', ExpandNone);
 		const remote = forked(local, '');
-		expect(compactDoc(remote)).toEqual({ items: 0, marks: 2 });
+		expect(compactDoc(remote)).toEqual({ items: 0, marks: 1 });
 		expect(purgedByRemote(local, remote)).toBe(true);
 	});
 

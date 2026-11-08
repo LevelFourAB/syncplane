@@ -187,7 +187,7 @@ var _ = Describe("CouldReclaim", func() {
 		Expect(err).NotTo(HaveOccurred())
 		could, reclaimed := couldAndDid(d, 1)
 		Expect(could).To(BeTrue())
-		Expect(reclaimed).To(Equal(2))
+		Expect(reclaimed).To(Equal(1), "the mark goes, the unmark that turned it off stays")
 	})
 
 	// The bound is over what a tombstone COULD give up, so a document whose
@@ -244,10 +244,12 @@ var _ = Describe("Version vector encoding", func() {
 
 // Mark operations are state like any other, so compaction may only drop the
 // ones that can never win again — in this document or in any document reachable
-// from it. See deadMarks for the two rules; these pin the line between them and
-// what has to stay.
+// from it, or in any document it merges with. See deadMarks for the rule; these
+// pin the line between it and what has to stay.
 var _ = Describe("Compact of mark operations", func() {
-	It("reclaims a mark and the unmark that turned it off", func() {
+	// The unmark stays: a mark from a concurrent replica, with a lower id, can
+	// still arrive and must lose to it.
+	It("reclaims a mark that an unmark of the same range turned off, and keeps the unmark", func() {
 		d := text.New("alice")
 		Expect(d.Insert(0, "hello")).To(Succeed())
 		_, err := d.Mark(0, 5, "bold", true, text.ExpandNone)
@@ -258,12 +260,14 @@ var _ = Describe("Compact of mark operations", func() {
 
 		items, marks := d.Compact()
 		Expect(items).To(Equal(0))
-		Expect(marks).To(Equal(2))
+		Expect(marks).To(Equal(1))
 		Expect(d.Marks()).To(BeEmpty())
 		Expect(d.PlainText()).To(Equal("hello"))
+		_, marks = d.Compact()
+		Expect(marks).To(Equal(0), "the unmark is not reclaimed on a later pass either")
 	})
 
-	It("reclaims a cancelled pending format and the item it pinned", func() {
+	It("reclaims a cancelled pending format, and keeps the item its unmark pins", func() {
 		d := text.New("alice")
 		Expect(d.Insert(0, "hello world")).To(Succeed())
 		Expect(d.Delete(5, 6)).To(Succeed())
@@ -279,8 +283,8 @@ var _ = Describe("Compact of mark operations", func() {
 		_, err = d.Unmark(5, 5, "bold", text.ExpandBoth)
 		Expect(err).NotTo(HaveOccurred())
 		items, marks = d.Compact()
-		Expect(marks).To(Equal(2))
-		Expect(items).To(Equal(1), "the last tombstone went with the ops that anchored it")
+		Expect(marks).To(Equal(1))
+		Expect(items).To(Equal(0), "the unmark still anchors the last tombstone")
 		Expect(d.PlainText()).To(Equal("hello"))
 		Expect(d.Compact()).To(Equal(0), "nothing left to reclaim")
 	})
@@ -447,8 +451,9 @@ var _ = Describe("MergeWithFloor", func() {
 	// the floor deciding this the next write from any replica that still holds
 	// the op puts it straight back, and the reclaim never sticks.
 	Describe("purged mark operations", func() {
-		// toggled returns a document whose bold-on/bold-off pair has been
-		// reclaimed, plus its floor and a replica still holding both ops.
+		// toggled returns a document whose bold-on op has been reclaimed (the
+		// bold-off that turned it off stays), plus its floor and a replica still
+		// holding both ops.
 		toggled := func() (server *text.Doc, floor map[string]uint64, stale *text.Doc) {
 			server = text.New("alice")
 			Expect(server.Insert(0, "hello")).To(Succeed())
@@ -459,7 +464,7 @@ var _ = Describe("MergeWithFloor", func() {
 			stale = forked(server, "bob")
 			items, marks := server.Compact()
 			Expect(items).To(Equal(0))
-			Expect(marks).To(Equal(2))
+			Expect(marks).To(Equal(1))
 			return server, server.VersionVector(), stale
 		}
 
@@ -496,10 +501,10 @@ var _ = Describe("MergeWithFloor", func() {
 			Expect(out).To(Equal(viaFull), "fragment apply diverged from full merge")
 		})
 
-		// The op and the items its boundaries named can be reclaimed in the
-		// same pass, which would make the anchor check below report the write
-		// as stale if the op were not skipped first.
-		It("skips an op whose anchor items were reclaimed with it", func() {
+		// The reclaimed op names the same anchor items as the op that survives
+		// it, and those items stay, so the op is skipped by the floor, not
+		// reported as anchored to purged text.
+		It("skips an op whose anchor items the surviving op keeps", func() {
 			server := text.New("alice")
 			Expect(server.Insert(0, "hello world")).To(Succeed())
 			Expect(server.Delete(5, 6)).To(Succeed())
@@ -509,8 +514,8 @@ var _ = Describe("MergeWithFloor", func() {
 			Expect(err).NotTo(HaveOccurred())
 			stale := forked(server, "bob")
 			items, marks := server.Compact()
-			Expect(items).To(Equal(6))
-			Expect(marks).To(Equal(2))
+			Expect(items).To(Equal(5))
+			Expect(marks).To(Equal(1))
 			floor := server.VersionVector()
 
 			// Bob edits inside the surviving text, so nothing but the reclaimed
@@ -538,6 +543,81 @@ var _ = Describe("MergeWithFloor", func() {
 			Expect(merged.Marks()).To(Equal([]text.Span{
 				{Start: 0, End: 5, Key: "italic", Value: true},
 			}))
+		})
+	})
+
+	// A removal that shadows no mark is dead for later edits of this
+	// document, but a replica that was offline can still hold a mark it minted
+	// before the removal, with a lower id. That mark must lose to the removal
+	// whether or not a compaction ran before it arrived.
+	Describe("a mark that raced a removal", func() {
+		// raced returns the server state after alice marked and unmarked
+		// "hello", and a replica that forked before both and marked the same
+		// range. With mintAfter, the replica first sees alice's ops, so its
+		// mark is newer than the removal instead of concurrent with it.
+		raced := func(mintAfter bool) (server, offline *text.Doc) {
+			server = text.New("alice")
+			Expect(server.Insert(0, "hello")).To(Succeed())
+			offline = forked(server, "bob")
+			_, err := server.Mark(0, 5, "bold", true, text.ExpandNone)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = server.Unmark(0, 5, "bold", text.ExpandNone)
+			Expect(err).NotTo(HaveOccurred())
+			if mintAfter {
+				offline = forked(server, "bob")
+			}
+			_, err = offline.Mark(0, 5, "bold", true, text.ExpandNone)
+			Expect(err).NotTo(HaveOccurred())
+			return server, offline
+		}
+
+		// resolved is what the offline write gives against the server with no
+		// compaction in between.
+		resolved := func(server, offline *text.Doc) []text.Span {
+			GinkgoHelper()
+			out, err := text.MergeWithFloor(server.Encode(), offline.Encode(), nil)
+			Expect(err).NotTo(HaveOccurred())
+			merged, err := text.Decode(out, "")
+			Expect(err).NotTo(HaveOccurred())
+			marks, err := merged.Marks()
+			Expect(err).NotTo(HaveOccurred())
+			return marks
+		}
+
+		It("still loses to the removal after a compaction", func() {
+			// Given a concurrent bold and a server whose bold/unbold is quiet
+			server, offline := raced(false)
+			Expect(resolved(server, offline)).To(BeEmpty())
+			_, marks := server.Compact()
+			Expect(marks).To(Equal(1), "the bold goes, the unbold stays")
+			floor := server.VersionVector()
+
+			// When the offline replica pushes after the compaction
+			out, err := text.MergeWithFloor(server.Encode(), offline.Encode(), floor)
+
+			// Then the removal still wins. Refusing the write as stale also
+			// keeps the bold out of the stored document.
+			if err != nil {
+				Expect(err).To(MatchError(text.ErrStateStale))
+				return
+			}
+			merged, err := text.Decode(out, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(merged.Marks()).To(BeEmpty(), "the compaction let a concurrent mark undo the removal")
+		})
+
+		It("wins when it was minted after the removal", func() {
+			server, offline := raced(true)
+			want := []text.Span{{Start: 0, End: 5, Key: "bold", Value: true}}
+			Expect(resolved(server, offline)).To(Equal(want))
+			_, marks := server.Compact()
+			Expect(marks).To(Equal(1))
+
+			out, err := text.MergeWithFloor(server.Encode(), offline.Encode(), server.VersionVector())
+			Expect(err).NotTo(HaveOccurred())
+			merged, err := text.Decode(out, "")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(merged.Marks()).To(Equal(want))
 		})
 	})
 
