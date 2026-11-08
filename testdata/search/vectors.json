@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the Go (engine/search) and TS (client/src/search) text analyzers. analyzeCases pin Analyze: the exact terms, in order, for a document string. queryCases pin AnalyzeQuery: terms in order plus the prefix flag, which only the final term may carry and only when the query ends inside it. options.keepDiacritics disables the diacritic fold; an absent options object is the default analyzer. Both languages must produce these terms exactly — term-for-term agreement is what makes a locally evaluated match and a server evaluated match interchangeable. Combining marks in expectations are written as \\u escapes so the file survives editors that normalize text.",
+	"comment": "Shared conformance vectors for the Go (engine/search) and TS (client/src/search) text analyzers. analyzeCases pin Analyze: the exact terms, in order, for a document string. queryCases pin AnalyzeQuery: terms in order plus the prefix flag, which only the final term may carry and only when the query ends inside it. options.keepDiacritics disables the diacritic fold; an absent options object is the default analyzer. Both analyzers follow the Unicode 15.0.0 tables, and a code point that version does not assign is a separator, whatever tables the runtime has. Both languages must produce these terms exactly — term-for-term agreement is what makes a locally evaluated match and a server evaluated match interchangeable. Combining marks in expectations are written as \\u escapes so the file survives editors that normalize text.",
 	"analyzeCases": [
 		{
 			"name": "empty string",
@@ -41,6 +41,21 @@
 			"text": "Café",
 			"options": { "keepDiacritics": true },
 			"want": ["café"]
+		},
+		{
+			"name": "a letter assigned after Unicode 15.0 splits its word",
+			"text": "a\u1c8ab",
+			"want": ["a", "b"]
+		},
+		{
+			"name": "a capital assigned after Unicode 15.0 does not lowercase",
+			"text": "\u1c89x x\ua7cbz",
+			"want": ["x", "x", "z"]
+		},
+		{
+			"name": "a compatibility letter assigned after Unicode 15.0 does not normalize",
+			"text": "\ua7f1x",
+			"want": ["x"]
 		},
 		{
 			"name": "turkish capital dotted i folds to plain i",
@@ -485,6 +500,11 @@
 			"name": "empty query",
 			"query": "",
 			"want": []
+		},
+		{
+			"name": "a letter assigned after Unicode 15.0 ends the final term",
+			"query": "ab\u1c8a",
+			"want": [{ "term": "ab", "prefix": false }]
 		},
 		{
 			"name": "separators only",

@@ -20,6 +20,7 @@
 
 import type { DescMessage } from '@bufbuild/protobuf';
 
+import { UNICODE_VERSION } from '../search/assigned.js';
 import { analyze, type QueryTerm } from '../search/index.js';
 import type { Cond } from './ast.js';
 import { resolvePath } from './evaluate.js';
@@ -76,13 +77,13 @@ export function searchEntries(decl: SearchDecl, value: unknown, schema: DescMess
 
 /**
  * Fingerprints everything the stored search entries depend on: the
- * declaration, the per-row term cap, and the encoding version. It
- * fingerprints this side's copy of the index only, so it need not equal the
- * Go side's.
+ * declaration, the per-row term cap, the encoding version and the Unicode
+ * version the analyzer follows. It fingerprints this side's copy of the index
+ * only, so it need not equal the Go side's.
  */
 export function searchSpecHash(decl: SearchDecl): string {
 	return fingerprint(
-		`searchv${SEARCH_INDEX_ENCODING_VERSION}|${decl.spec}|cap:${SEARCH_TERMS_PER_ROW}`,
+		`searchv${SEARCH_INDEX_ENCODING_VERSION}|${decl.spec}|cap:${SEARCH_TERMS_PER_ROW}|unicode:${UNICODE_VERSION}`,
 	);
 }
 

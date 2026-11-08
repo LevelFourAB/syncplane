@@ -7,7 +7,9 @@
 // testdata/search/vectors.json. Term-for-term agreement between the two is
 // the contract that makes a locally executed match and a server-executed
 // match return the same rows, so every stage is defined without reference to
-// locale, ICU, or any other environment-dependent tables:
+// locale, ICU, or any other environment-dependent tables. Every stage follows
+// the tables of Unicode [UnicodeVersion], and a code point that version does
+// not assign is a separator:
 //
 //  1. Unicode NFKC normalization, so full-width forms, ligatures and
 //     compatibility characters compare equal to their plain spellings.
@@ -43,6 +45,11 @@ import (
 	"golang.org/x/text/language"
 	"golang.org/x/text/unicode/norm"
 )
+
+// UnicodeVersion is the Unicode version whose tables the analyzer follows.
+// Text in letters a later version assigns analyzes the same in every
+// runtime: those code points split terms.
+const UnicodeVersion = "15.0.0"
 
 // maxTermLength is the cap, in code points, past which a term is truncated.
 const maxTermLength = 64
@@ -207,8 +214,8 @@ func classify(r rune) int {
 }
 
 // isCJK reports membership in the fixed ranges the package doc lists. The
-// ranges are literal rather than unicode.Script tables so both languages
-// agree independent of their Unicode table versions, and so U+30FC
+// ranges are literal rather than unicode.Script tables so the CJK class does
+// not move with a Unicode version, and so U+30FC
 // (KATAKANA-HIRAGANA PROLONGED SOUND MARK, script Common) stays inside a
 // Katakana run instead of splitting it.
 func isCJK(r rune) bool {

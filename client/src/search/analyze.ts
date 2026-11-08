@@ -8,7 +8,9 @@
  * Term-for-term agreement between the two is the contract that makes a
  * locally evaluated match and a server evaluated match return the same rows,
  * so every stage is defined without reference to locale, ICU, or any other
- * environment-dependent tables:
+ * environment-dependent tables. Every stage follows the tables of Unicode
+ * 15.0.0 (UNICODE_VERSION in ./assigned.ts), and a code point that version
+ * does not assign is a separator:
  *
  * 1. Unicode NFKC normalization, so full-width forms, ligatures and
  *    compatibility characters compare equal to their plain spellings.
@@ -33,6 +35,8 @@
  * A term's position is its index in the returned array; scoring measures
  * proximity as index distance.
  */
+
+import { ASSIGNED_RUNS } from './assigned.js';
 
 /** Cap, in code points, past which a term is truncated. */
 const MAX_TERM_LENGTH = 64;
@@ -98,7 +102,7 @@ function normalize(s: string, options?: AnalyzeOptions): string {
 	// keeps analysis of ordinary prose off the slow path, since every
 	// searchable field of every candidate row is analyzed on every ranked read.
 	if (!nonAscii.test(s)) return s.toLowerCase();
-	s = s.normalize('NFKC').toLowerCase();
+	s = maskUnassigned(s).normalize('NFKC').toLowerCase();
 	if (!options?.keepDiacritics) {
 		s = s
 			.normalize('NFD')
@@ -106,6 +110,58 @@ function normalize(s: string, options?: AnalyzeOptions): string {
 			.normalize('NFC');
 	}
 	return s;
+}
+
+// Starts of the alternating assigned and unassigned runs of ASSIGNED_RUNS,
+// then the start of the unassigned code points after the last run: a code
+// point is assigned when the last start at or below it has an even index.
+const assignedBounds = ((): Uint32Array => {
+	const runs = ASSIGNED_RUNS.trim().split(/[\s,]+/);
+	const out = new Uint32Array(runs.length + 1);
+	let at = 0;
+	for (let i = 0; i < runs.length; i++) {
+		out[i] = at;
+		at += parseInt(runs[i]!, 36);
+	}
+	out[runs.length] = at;
+	return out;
+})();
+
+function isAssigned(cp: number): boolean {
+	// Unicode 1.1 assigns every code point below U+0378, and assignments are
+	// permanent, so text in the Latin, IPA and accent blocks skips the search.
+	if (cp < 0x378) return true;
+	let lo = 0;
+	let hi = assignedBounds.length;
+	while (hi - lo > 1) {
+		const mid = (lo + hi) >>> 1;
+		if (assignedBounds[mid]! <= cp) lo = mid;
+		else hi = mid;
+	}
+	return lo % 2 === 0;
+}
+
+// The runtime's normalization, case and letter tables can be newer than
+// UNICODE_VERSION, and the Go analyzer reads tables of exactly that version.
+// A code point that version does not assign is a separator there, so it
+// becomes a space here before any table is read: a newer NFKC or case mapping
+// cannot turn it into a letter (U+1CCD6 OUTLINED LATIN CAPITAL LETTER A
+// becomes "a" under Unicode 16.0). A space has no decomposition and no case,
+// so it changes nothing around it. A code point in the CJK ranges stays: the
+// Go side classifies those ranges by number, assigned or not.
+function maskUnassigned(s: string): string {
+	let out: string | undefined;
+	let copied = 0;
+	let at = 0;
+	for (const ch of s) {
+		const cp = ch.codePointAt(0)!;
+		if (!isAssigned(cp) && !isCjk(cp)) {
+			out = (out ?? '') + s.slice(copied, at) + ' ';
+			copied = at + ch.length;
+		}
+		at += ch.length;
+	}
+	return out === undefined ? s : out + s.slice(copied);
 }
 
 const enum CharClass {
