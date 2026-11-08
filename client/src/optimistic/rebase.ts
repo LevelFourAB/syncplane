@@ -1054,6 +1054,13 @@ export interface FinalizeInput {
  * one cannot rebuild, since it does not replay the mutations behind them
  * either — those stay queued until that tab rebases.
  *
+ * `dropped` holds the mutations the caller removed from the queue in this
+ * transaction. The overlay row and text log of a row that one of them wrote, of
+ * an entity this build does not register, are deleted when no mutation in
+ * `remaining` names that row: no mutation is behind that state any more, and
+ * the tab that wrote it may not rebase before a reader sees it. A row that a
+ * remaining mutation names keeps its state for that tab to rebuild.
+ *
  * Replay is isolated per mutation: an entry this build cannot apply is skipped
  * and reported over console.error, and no failure to replay one reaches the
  * caller's transaction. See replayCrud for why a shared queue makes such an entry
@@ -1073,20 +1080,29 @@ export async function clearOverlayAndReplay(
 	workspaceId: string,
 	remaining: Mutation[],
 	touched: TouchSet,
+	dropped: readonly Mutation[] = [],
 ): Promise<void> {
 	// Only a row the queue still names can have its replay skipped, so only those
 	// rows keep their cleared state in memory for the restore below.
 	const named = new Map<string, Set<string>>();
 	for (const mutation of remaining) {
-		const cruds = mutation.payload.case === 'crud'
-			? [ mutation.payload.value ]
-			: mutation.payload.case === 'batch'
-			? mutation.payload.value.mutations
-			: [];
-		for (const crud of cruds) {
+		for (const crud of crudsOf(mutation)) {
 			let keys = named.get(crud.entity);
 			if (keys === undefined) named.set(crud.entity, keys = new Set());
 			keys.add(crud.key);
+		}
+	}
+	// Overlay rows are plain keys, so this needs no schema for the entity.
+	for (const mutation of dropped) {
+		for (const { entity, key } of crudsOf(mutation)) {
+			if (registry.get(entity) || named.get(entity)?.has(key)) continue;
+			await tx.del(overlayKey(entity, workspaceId, key));
+			const stale: string[] = [];
+			for await (const [ k ] of tx.scan(overlayTextRowPrefix(entity, workspaceId, key))) {
+				if (isRowTextKey(entity, key, k)) stale.push(k);
+			}
+			for (const k of stale) await tx.del(k);
+			touched.row(workspaceId, entity, key);
 		}
 	}
 	const saved = new Map<string, ClearedRow>();
@@ -1158,6 +1174,18 @@ export async function clearOverlayAndReplay(
 		}
 		for (const k of stale) await tx.del(k);
 		for (const [ k, v ] of before.text) await tx.put(k, v);
+	}
+}
+
+/** The cruds of a crud or batch mutation; none for a custom one. */
+function crudsOf(mutation: Mutation): CrudMutation[] {
+	switch (mutation.payload.case) {
+		case 'crud':
+			return [ mutation.payload.value ];
+		case 'batch':
+			return mutation.payload.value.mutations;
+		default:
+			return [];
 	}
 }
 
@@ -1281,6 +1309,7 @@ export async function finalizeRebase(
 		else await tx.del(metaUnresolvedPush(workspaceId));
 	}
 	let remaining: Mutation[];
+	let dropped: Mutation[] = [];
 	if (defer) {
 		remaining = pending ?? await readPending(tx, workspaceId);
 	} else {
@@ -1290,8 +1319,9 @@ export async function finalizeRebase(
 			await recountPendingAccess(tx, registry, workspaceId, acked.remaining);
 		}
 		remaining = acked.remaining;
+		dropped = acked.dropped;
 	}
-	await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched);
+	await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched, dropped);
 	return remaining.length;
 }
 
@@ -1334,7 +1364,7 @@ export async function rollbackRejected(
 		// In the store, not only in this tab's memory: the tab whose undo stack
 		// recorded a dropped mutation may not be the tab running this rollback.
 		await noteDeadUndoTokens(tx, workspaceId, [ ...undoTokens.values() ].flat());
-		await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched);
+		await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched, dropped);
 		await beforeCommit?.(tx);
 		await tx.commit();
 		return { touched, pendingCount: remaining.length, undoTokens };
@@ -1753,6 +1783,7 @@ async function runResequence(
 			}
 		}
 		const survivors: Mutation[] = [];
+		const removed = drop === undefined ? [] : [ drop ];
 		let dropped = false;
 		let undoTokens: bigint[] = [];
 		for (const m of pending) {
@@ -1774,7 +1805,7 @@ async function runResequence(
 			// those ids instead.
 			if (dropped) {
 				await recountPendingAccess(tx, registry, workspaceId, survivors);
-				await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, survivors, touched);
+				await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, survivors, touched, removed);
 				await tx.commit();
 			} else {
 				tx.release();
@@ -1799,7 +1830,15 @@ async function runResequence(
 			firstId,
 		);
 		if (dropped || renumbered.length > 0) {
-			await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, renumbered, touched);
+			await clearOverlayAndReplay(
+				tx,
+				registry,
+				mirrors,
+				workspaceId,
+				renumbered,
+				touched,
+				removed,
+			);
 		}
 		await tx.commit();
 		return {

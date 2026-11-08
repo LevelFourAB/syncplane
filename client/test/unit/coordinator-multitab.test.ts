@@ -1,8 +1,10 @@
-import { create, toBinary } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { createRouterTransport, type Transport } from '@connectrpc/connect';
 import { describe, expect, it, vi } from 'vitest';
 
+import { reconcileStoreEntities } from '../../src/entities.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
+import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import {
 	CrudMutationSchema,
 	CrudOp,
@@ -16,16 +18,24 @@ import {
 	SubscriptionSchema,
 } from '../../src/gen/syncplane/v1/patch_pb.js';
 import { MutationStatus, SyncService } from '../../src/gen/syncplane/v1/service_pb.js';
-import { intentKey, metaCursor, metaLastMutationId, metaServerSeq } from '../../src/keys.js';
+import {
+	intentKey,
+	metaCursor,
+	metaLastMutationId,
+	metaServerSeq,
+	overlayKey,
+} from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
-import { EntityRegistry } from '../../src/mutations.js';
+import { buildPut, EntityRegistry } from '../../src/mutations.js';
 import { ChainMutex } from '../../src/mutex.js';
 import { enqueuePending, readPending, writeUndoTokens } from '../../src/optimistic/queue.js';
+import { applyMutationLocally } from '../../src/optimistic/rebase.js';
 import { readMergedRow } from '../../src/read.js';
 import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator, type CoordinatorOptions } from '../../src/sync/coordinator.js';
 import { IntentRegistry, SUBS_TTL_MS } from '../../src/sync/intent.js';
 import { StatusTracker } from '../../src/sync/status.js';
+import { TouchSet } from '../../src/touch.js';
 import { pushApplied, pushedMutations, pushFailed, pushResults } from './pushfake.js';
 
 /** The single workspace these specs drive. */
@@ -337,6 +347,80 @@ describe('coordinator multi-tab (shared store, intent union)', () => {
 
 		await tabA.stop();
 		await tabB.stop();
+	});
+
+	it("clears a newer build's overlay row when an older build's tab acks its mutation", async () => {
+		// Given a store a newer build opened (it registers widget, the older build
+		// does not), with that build's PUT of widget w1 queued and overlaid
+		const h = harness();
+		const newer = new EntityRegistry([ TodoSchema, WidgetSchema ]);
+		const widget = (label: string) =>
+			toBinary(WidgetSchema, create(WidgetSchema, { id: 'w1', label }));
+		const write = create(MutationSchema, {
+			clientId: 'c1',
+			mutationId: 1n,
+			payload: {
+				case: 'crud',
+				value: buildPut(
+					newer.bySchema(WidgetSchema),
+					WidgetSchema,
+					create(WidgetSchema, { id: 'w1', label: 'mine' }),
+				),
+			},
+		});
+		const tx = await h.kv.write();
+		await reconcileStoreEntities(tx, newer);
+		await tx.put(metaCursor(WS), new Uint8Array([ 1 ]));
+		await enqueuePending(tx, WS, write);
+		await applyMutationLocally(tx, newer, {}, WS, write, new TouchSet());
+		await tx.put(metaLastMutationId(WS), '1');
+		await tx.commit();
+
+		// When the older build's tab pushes it, and pulls a page that acks it and
+		// carries another user's later write of w1
+		const transport = createRouterTransport(({ service }) => {
+			service(SyncService, {
+				push: (req) => pushApplied(req),
+				pull: () => ({
+					patch: {
+						changes: [
+							create(RowChangeSchema, {
+								entity: 'widget',
+								key: 'w1',
+								version: 3n,
+								body: { case: 'value', value: widget('theirs') },
+							}),
+						],
+						dropEntities: [],
+					},
+					nextCursor: new Uint8Array([ 3 ]),
+					lastAckedMutationId: 1n,
+					reset: false,
+					hasMore: false,
+					seq: 3n,
+				}),
+				// eslint-disable-next-line require-yield
+				async *bootstrap() {
+					throw new Error('bootstrap should not run with a seeded cursor');
+				},
+				query: () => ({ rows: [] }),
+			});
+		});
+		const older = h.tab(transport);
+		await older.syncNow();
+		expect(await h.pendingIds()).toEqual([]);
+
+		// Then the newer build reads the other user's value, with no overlay left
+		expect.soft(await h.getMeta(overlayKey('widget', WS, 'w1'))).toBeUndefined();
+		const rx = await h.kv.read();
+		try {
+			const bytes = await readMergedRow(rx, newer, 'widget', WS, 'w1');
+			expect(fromBinary(WidgetSchema, bytes!).label).toBe('theirs');
+		} finally {
+			rx.release();
+		}
+
+		await older.stop();
 	});
 
 	it("stop() deletes the intent record; a crashed tab's record ages out of the union", async () => {
