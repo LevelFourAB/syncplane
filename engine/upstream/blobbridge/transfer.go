@@ -39,9 +39,10 @@ func (b *Bridge) work(ctx context.Context, st *runState) {
 }
 
 // runCheck checks a batch of the digests of check job j: each blob that is
-// committed locally, named by a live row that counts, and not complete at the
-// origin is queued for upload. With prefetch on, each blob that a row names
-// and the local store lacks is queued for a fetch.
+// committed locally, named by a committed row that counts, and not complete
+// at the origin is queued for upload. A digest the job does not know to be
+// named must be named by a live row. With prefetch on, each blob that a row
+// names and the local store lacks is queued for a fetch.
 func (b *Bridge) runCheck(ctx context.Context, st *runState, j *job) outcome {
 	ws := j.key.ws
 	batch := st.sched.takeDigests(j, checkBatch)
@@ -54,7 +55,7 @@ func (b *Bridge) runCheck(ctx context.Context, st *runState, j *job) outcome {
 		return retry
 	}
 	var local, absent []blob.Digest
-	for _, d := range batch {
+	for d := range batch {
 		_, err := b.inner.Stat(ctx, ws, d)
 		switch {
 		case err == nil:
@@ -70,10 +71,26 @@ func (b *Bridge) runCheck(ctx context.Context, st *runState, j *job) outcome {
 	if len(local)+len(absent) == 0 {
 		return done
 	}
-	named, err := st.srv.ReferencedBlobs(ctx, ws, append(local, absent...), b.entityFilter())
-	if err != nil {
-		return fail("find rows that name blobs", err)
+	var unknown []blob.Digest
+	for _, d := range append(local, absent...) {
+		if !batch[d] {
+			unknown = append(unknown, d)
+		}
 	}
+	if len(unknown) > 0 {
+		live, err := st.srv.ReferencedBlobs(ctx, ws, unknown, b.entityFilter())
+		if err != nil {
+			return fail("find rows that name blobs", err)
+		}
+		// Kept in the batch: a retry after a failure below must not need the
+		// row again, which can leave the local engine in between.
+		for d, ok := range live {
+			if ok {
+				batch[d] = true
+			}
+		}
+	}
+	named := batch
 	for _, d := range absent {
 		if named[d] {
 			st.sched.want(ws, d, b.cfg.patience)

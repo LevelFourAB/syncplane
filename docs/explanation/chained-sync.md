@@ -146,7 +146,7 @@ Presence crosses the hop through `engine/upstream/presencebridge` and collapses 
 
 ## Blobs across the hop
 
-Rows that hold a `BlobRef` sync through the link, but the bytes do not. `engine/upstream/blobbridge` moves them. It wraps the local engine's blob store. It uploads a blob to the origin when a live row of a synced entity names it, and it fetches a blob from the origin when a local reader asks for one that the local store does not hold. It uses its own identity at the origin, so the origin's upload policy and read rule apply to that identity. See [Blobs](blobs.md) for the model of blobs on one server.
+Rows that hold a `BlobRef` sync through the link, but the bytes do not. `engine/upstream/blobbridge` moves them. It wraps the local engine's blob store. It uploads a blob to the origin when a row of a synced entity names it, also when that row leaves the local engine before the upload, as a row outside the link's scope does once the origin confirms the write. It fetches a blob from the origin when a local reader asks for one that the local store does not hold. It uses its own identity at the origin, so the origin's upload policy and read rule apply to that identity. See [Blobs](blobs.md) for the model of blobs on one server.
 
 ## What the confirmed copy costs
 

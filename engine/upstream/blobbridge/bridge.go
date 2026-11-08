@@ -218,11 +218,12 @@ func New(inner blob.Store, origin syncplanev1connect.BlobServiceClient, opts ...
 // Uploads: Run uploads a blob when it is committed locally, and when a row
 // that names it is committed. It follows the change feed of each local
 // workspace from a position it keeps in the local engine (see
-// WithConsumerName), so its work follows the workspaces being written. At
-// start it also checks every blob committed in the local store, a bounded
-// number at a time, and uploads those that a live row names and the origin
-// does not report complete. An interrupted upload resumes from the chunks the
-// origin holds. Failed transfers are retried with backoff; a refusal by the
+// WithConsumerName), so its work follows the workspaces being written. A blob
+// that a row names when Run reads the row from the feed is uploaded also when
+// the row leaves the local engine before the upload. At start it also checks
+// every blob committed in the local store, a bounded number at a time, and
+// uploads those that a live row names and the origin does not report
+// complete. An interrupted upload resumes from the chunks the origin holds. Failed transfers are retried with backoff; a refusal by the
 // origin (invalid_argument, resource_exhausted, permission_denied) is logged
 // and retried at the next Run.
 //
@@ -323,7 +324,7 @@ func (b *Bridge) rescanWorkspace(ctx context.Context, st *runState, ws string) {
 	batch := make([]blob.Digest, 0, checkBatch)
 	flush := func() {
 		st.sched.waitLoad(ctx, rescanLoad)
-		st.sched.check(ws, batch)
+		st.sched.check(ws, batch, false)
 		batch = batch[:0]
 	}
 	for d, err := range b.inner.List(ctx, ws) {

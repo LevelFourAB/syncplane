@@ -41,8 +41,10 @@ type job struct {
 	again    bool
 	failures int
 
-	// digests are the digests a check job has still to check.
-	digests map[blob.Digest]struct{}
+	// digests are the digests a check job has still to check. A digest maps
+	// to true when a committed row that counts is known to name it, so the
+	// check need not find a live row that names it.
+	digests map[blob.Digest]bool
 	// wantUntil is when a fetch job stops retrying.
 	wantUntil time.Time
 	// settled closes when the run of a fetch job in progress, or the next
@@ -89,28 +91,32 @@ func newScheduler(minBackoff, maxBackoff time.Duration) *scheduler {
 	}
 }
 
-// check queues the digests for a check in the workspace.
-func (s *scheduler) check(ws string, ds []blob.Digest) {
+// check queues the digests for a check in the workspace. named reports that
+// a committed row that counts names each of them.
+func (s *scheduler) check(ws string, ds []blob.Digest, named bool) {
 	if len(ds) == 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j := s.jobLocked(jobKey{kind: kindCheck, ws: ws})
-	s.addDigestsLocked(j, ds)
+	for _, d := range ds {
+		s.addDigestLocked(j, d, named)
+	}
 	s.triggerLocked(j)
 }
 
-func (s *scheduler) addDigestsLocked(j *job, ds []blob.Digest) {
+// addDigestLocked adds d to check job j. A digest known to be named stays
+// known.
+func (s *scheduler) addDigestLocked(j *job, d blob.Digest, named bool) {
 	if j.digests == nil {
-		j.digests = map[blob.Digest]struct{}{}
+		j.digests = map[blob.Digest]bool{}
 	}
-	for _, d := range ds {
-		if _, ok := j.digests[d]; !ok {
-			j.digests[d] = struct{}{}
-			s.load++
-		}
+	was, ok := j.digests[d]
+	if !ok {
+		s.load++
 	}
+	j.digests[d] = was || named
 }
 
 // upload queues an upload of the blob.
@@ -301,16 +307,17 @@ func (s *scheduler) forgetLocked(j *job) {
 	}
 }
 
-// takeDigests removes up to n digests from check job j and returns them.
-func (s *scheduler) takeDigests(j *job, n int) []blob.Digest {
+// takeDigests removes up to n digests from check job j and returns them, each
+// with whether a committed row is known to name it.
+func (s *scheduler) takeDigests(j *job, n int) map[blob.Digest]bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := make([]blob.Digest, 0, min(n, len(j.digests)))
-	for d := range j.digests {
+	out := make(map[blob.Digest]bool, min(n, len(j.digests)))
+	for d, named := range j.digests {
 		if len(out) == n {
 			break
 		}
-		out = append(out, d)
+		out[d] = named
 		delete(j.digests, d)
 	}
 	s.load -= len(out)
@@ -318,10 +325,12 @@ func (s *scheduler) takeDigests(j *job, n int) []blob.Digest {
 }
 
 // returnDigests puts digests back into check job j, for a run that failed.
-func (s *scheduler) returnDigests(j *job, ds []blob.Digest) {
+func (s *scheduler) returnDigests(j *job, ds map[blob.Digest]bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.addDigestsLocked(j, ds)
+	for d, named := range ds {
+		s.addDigestLocked(j, d, named)
+	}
 }
 
 // backoff is the wait after the nth failure in a row: minBackoff doubled

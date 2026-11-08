@@ -33,7 +33,7 @@ func (b *Bridge) Complete(ctx context.Context, workspaceID string, digest blob.D
 	err := b.inner.Complete(ctx, workspaceID, digest)
 	if err == nil {
 		if st := b.running(ctx); st != nil {
-			st.sched.check(workspaceID, []blob.Digest{digest})
+			st.sched.check(workspaceID, []blob.Digest{digest}, false)
 		}
 	}
 	return err

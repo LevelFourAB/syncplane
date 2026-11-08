@@ -183,7 +183,10 @@ func (f *feed) visit(ctx context.Context, ws string) bool {
 		f.b.logFailure(ctx, "read change feed", ws, "", err)
 		return false
 	}
-	f.st.sched.check(ws, found)
+	// The rows are committed: the uploads they call for stand even when a
+	// row leaves the local engine before its check runs, as a row outside
+	// the link's scope does once the origin confirms it.
+	f.st.sched.check(ws, found, true)
 	if err := f.st.srv.AdvanceConsumer(ctx, ws, f.b.cfg.consumer, server.ConsumerUpdate{Cursor: next}); err != nil {
 		f.b.logFailure(ctx, "save change feed position", ws, "", err)
 		return false
