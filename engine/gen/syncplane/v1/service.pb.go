@@ -165,8 +165,23 @@ type WorkspaceBatch struct {
 	// Identifies the workspace for this batch of mutations. Serves as the
 	// partition key for sequences, cursors, write exclusion, and access
 	// control.
-	WorkspaceId   string      `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
-	Mutations     []*Mutation `protobuf:"bytes,2,rep,name=mutations,proto3" json:"mutations,omitempty"`
+	WorkspaceId string      `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	Mutations   []*Mutation `protobuf:"bytes,2,rep,name=mutations,proto3" json:"mutations,omitempty"`
+	// The highest `mutation_id` this client sent under its `client_id` to this
+	// workspace before this request, or 0 when it sent none. Count every id the
+	// client put in a request, answered or not. Unset means the client does not
+	// say. When it is set, every mutation in the batch must carry the same
+	// `client_id`, or the server refuses the batch with "invalid_argument".
+	//
+	// A watermark above this value means that another writer used the
+	// `client_id`: a second install that copied the client's store, a store
+	// that went back to an older copy of itself, or another caller. The ids at
+	// or below the watermark then name that writer's mutations, not this
+	// client's, and an ack for one would report a write that never applied.
+	// The server applies nothing and fails the batch with "client_id_in_use".
+	// The client must not push under the `client_id` again. It must take a new
+	// `client_id` and resend its queue under it from `mutation_id` 1.
+	SentThrough   *uint64 `protobuf:"varint,3,opt,name=sent_through,json=sentThrough,proto3,oneof" json:"sent_through,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -213,6 +228,13 @@ func (x *WorkspaceBatch) GetMutations() []*Mutation {
 		return x.Mutations
 	}
 	return nil
+}
+
+func (x *WorkspaceBatch) GetSentThrough() uint64 {
+	if x != nil && x.SentThrough != nil {
+		return *x.SentThrough
+	}
+	return 0
 }
 
 type PushRequest struct {
@@ -371,7 +393,9 @@ type WorkspaceResults struct {
 	// error_code is set.
 	Results []*MutationResult `protobuf:"bytes,2,rep,name=results,proto3" json:"results,omitempty"`
 	// Set when the whole batch failed. Codes: "mutation_id_gap" (resend in
-	// order from the client's watermark), "workspace_access_revoked"
+	// order from the client's watermark), "client_id_in_use" (another writer
+	// used the client_id, see WorkspaceBatch.sent_through; resend under a new
+	// client_id), "workspace_access_revoked"
 	// (permanent — stop syncing this workspace, see the client's purge path),
 	// "invalid_argument" (deterministic; the batch will never apply),
 	// "mutation_failed" (a custom mutator returned an error; retry, and drop
@@ -2573,10 +2597,12 @@ var File_syncplane_v1_service_proto protoreflect.FileDescriptor
 
 const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\n" +
-	"\x1asyncplane/v1/service.proto\x12\fsyncplane.v1\x1a\x1bsyncplane/v1/mutation.proto\x1a\x18syncplane/v1/patch.proto\x1a\x18syncplane/v1/query.proto\"i\n" +
+	"\x1asyncplane/v1/service.proto\x12\fsyncplane.v1\x1a\x1bsyncplane/v1/mutation.proto\x1a\x18syncplane/v1/patch.proto\x1a\x18syncplane/v1/query.proto\"\xa2\x01\n" +
 	"\x0eWorkspaceBatch\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x124\n" +
-	"\tmutations\x18\x02 \x03(\v2\x16.syncplane.v1.MutationR\tmutations\"E\n" +
+	"\tmutations\x18\x02 \x03(\v2\x16.syncplane.v1.MutationR\tmutations\x12&\n" +
+	"\fsent_through\x18\x03 \x01(\x04H\x00R\vsentThrough\x88\x01\x01B\x0f\n" +
+	"\r_sent_through\"E\n" +
 	"\vPushRequest\x126\n" +
 	"\abatches\x18\x01 \x03(\v2\x1c.syncplane.v1.WorkspaceBatchR\abatches\"\xbd\x01\n" +
 	"\x0eMutationResult\x12\x1f\n" +
@@ -2868,6 +2894,7 @@ func file_syncplane_v1_service_proto_init() {
 	file_syncplane_v1_mutation_proto_init()
 	file_syncplane_v1_patch_proto_init()
 	file_syncplane_v1_query_proto_init()
+	file_syncplane_v1_service_proto_msgTypes[0].OneofWrappers = []any{}
 	file_syncplane_v1_service_proto_msgTypes[5].OneofWrappers = []any{}
 	file_syncplane_v1_service_proto_msgTypes[15].OneofWrappers = []any{
 		(*BootstrapResponse_Begin_)(nil),

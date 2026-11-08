@@ -165,6 +165,9 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// treat them as infrastructure failures.
 		gap    string
 		badArg string
+		// inUse is the batch-level verdict for a watermark above the batch's
+		// sent_through.
+		inUse string
 		// gapLog holds what the server logs about a gap but does not send:
 		// the id the server expected. Any caller may push under any anonymous
 		// client_id, so a reply that named it would tell that caller which ids
@@ -194,7 +197,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// so a retried attempt does not duplicate results.
 		results = nil
 		applied = false
-		gap, badArg, gapLog = "", "", ""
+		gap, badArg, gapLog, inUse = "", "", "", ""
 		adopted = adopted[:0]
 		// Watermarks per client, by watermarkKey, loaded lazily and tracked as
 		// we bump them. bumped names the clients whose watermark this batch
@@ -264,6 +267,11 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 				results = nil
 				return errAbortBatch
 			}
+			if batch.SentThrough != nil && m.GetClientId() != muts[0].GetClientId() {
+				badArg = "a batch that sets sent_through must carry one client_id"
+				results = nil
+				return errAbortBatch
+			}
 			key := watermarkKey(principal, m.GetClientId())
 			if _, ok := firstID[key]; !ok {
 				firstID[key] = m.GetMutationId()
@@ -276,6 +284,15 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 					return err
 				}
 				watermarks[key] = last
+				// Checked before any id is judged against the watermark: the
+				// ids at or below it name another writer's mutations, so an
+				// ALREADY_APPLIED or a replayed verdict for one of them would
+				// answer a write the server never saw.
+				if st := batch.SentThrough; st != nil && last > *st {
+					inUse = fmt.Sprintf("client_id %q is in use by another writer: the client says it sent up to mutation %d, and the server holds a later one", m.GetClientId(), *st)
+					results = nil
+					return errAbortBatch
+				}
 			}
 
 			switch {
@@ -484,6 +501,8 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		return fail(CodeMutationIDGap, "workspace %q: %s", ws, gap)
 	case badArg != "":
 		return fail(CodeInvalidArgument, "workspace %q: %s", ws, badArg)
+	case inUse != "":
+		return fail(CodeClientIDInUse, "workspace %q: %s", ws, inUse)
 	case err != nil:
 		// A mutator's own error gets its own code: the client counts repeats of
 		// it toward dropping the mutation, which it must never do for an outage.

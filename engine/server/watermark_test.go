@@ -232,6 +232,91 @@ var _ = Describe("Client watermarks", func() {
 		})
 	})
 
+	Describe("a batch that says what the client sent", func() {
+		// pushSent pushes muts as anonymous with sent_through set.
+		pushSent := func(sent uint64, muts ...*syncplanev1.Mutation) *syncplanev1.WorkspaceResults {
+			GinkgoHelper()
+			req := connect.NewRequest(&syncplanev1.PushRequest{Batches: []*syncplanev1.WorkspaceBatch{{
+				WorkspaceId: ws, Mutations: muts, SentThrough: proto.Uint64(sent),
+			}}})
+			resp, err := client.Push(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetResults()).To(HaveLen(1))
+			return resp.Msg.GetResults()[0]
+		}
+		todo := func(client string, id uint64, key string) *syncplanev1.Mutation {
+			return putMutation(client, id, "todo", key, &todov1.Todo{Id: key, Title: key})
+		}
+
+		It("applies a first mutation", func() {
+			res := pushSent(0, todo("c1", 1, "t1"))
+			Expect(res.GetErrorCode()).To(BeEmpty(), res.GetErrorMessage())
+			Expect(title("t1")).To(Equal("t1"))
+		})
+
+		It("answers a resend of an applied mutation as ALREADY_APPLIED", func() {
+			Expect(pushSent(0, todo("c1", 1, "t1")).GetErrorCode()).To(BeEmpty())
+			res := pushSent(1, todo("c1", 1, "t1"), todo("c1", 2, "t2"))
+			Expect(res.GetErrorCode()).To(BeEmpty(), res.GetErrorMessage())
+			Expect(res.GetResults()[0].GetStatus()).To(Equal(already))
+			Expect(res.GetResults()[1].GetStatus()).To(Equal(applied))
+		})
+
+		It("refuses the batch when another writer used the client's next ids", func() {
+			for id := uint64(1); id <= 3; id++ {
+				Expect(pushSent(id-1, todo("victim", id, fmt.Sprintf("v%d", id))).GetErrorCode()).To(BeEmpty())
+			}
+			// Another anonymous caller pushes the victim's next ten ids.
+			var burn []*syncplanev1.Mutation
+			for id := uint64(4); id <= 13; id++ {
+				burn = append(burn, todo("victim", id, fmt.Sprintf("junk%d", id)))
+			}
+			Expect(statuses(anonymous, burn...)).To(HaveEach(applied))
+
+			res := pushSent(3, todo("victim", 4, "important"))
+			Expect(res.GetErrorCode()).To(Equal(server.CodeClientIDInUse))
+			Expect(res.GetResults()).To(BeEmpty())
+			Expect(res.GetErrorMessage()).NotTo(ContainSubstring("13"),
+				"the reply must not tell the caller the watermark")
+			Expect(title("important")).To(BeEmpty())
+		})
+
+		It("refuses the batch rather than replay a verdict another writer's mutation got", func() {
+			Expect(pushSent(0, todo("c1", 1, "t1")).GetErrorCode()).To(BeEmpty())
+			// The other writer's id 2 is rejected: a PATCH of a missing row.
+			other := patchMutation("c1", 2, "todo", "missing", &todov1.Todo{Title: "x"}, "title")
+			Expect(statuses(anonymous, other)).To(Equal([]syncplanev1.MutationStatus{rejected}))
+
+			res := pushSent(1, todo("c1", 2, "mine"))
+			Expect(res.GetErrorCode()).To(Equal(server.CodeClientIDInUse))
+			Expect(title("mine")).To(BeEmpty())
+		})
+
+		It("refuses a batch that mixes client ids", func() {
+			res := pushSent(0, todo("c1", 1, "t1"), todo("c2", 1, "t2"))
+			Expect(res.GetErrorCode()).To(Equal(server.CodeInvalidArgument))
+			Expect(title("t1")).To(BeEmpty())
+		})
+
+		It("keeps judging a batch that does not say by the watermark alone", func() {
+			Expect(pushSent(0, todo("c1", 1, "t1")).GetErrorCode()).To(BeEmpty())
+			Expect(statuses(anonymous, todo("c1", 2, "t2"))).To(Equal([]syncplanev1.MutationStatus{applied}))
+			Expect(statuses(anonymous, todo("c1", 2, "t2"))).To(Equal([]syncplanev1.MutationStatus{already}))
+		})
+
+		It("judges each principal by its own watermark", func() {
+			Expect(statuses(mallory, todo("c-alice", 1, "m1"))).To(Equal([]syncplanev1.MutationStatus{applied}))
+			req := connect.NewRequest(&syncplanev1.PushRequest{Batches: []*syncplanev1.WorkspaceBatch{{
+				WorkspaceId: ws, Mutations: []*syncplanev1.Mutation{todo("c-alice", 1, "a1")}, SentThrough: proto.Uint64(0),
+			}}})
+			as(req.Header(), alice)
+			resp, err := client.Push(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetResults()[0].GetErrorCode()).To(BeEmpty())
+			Expect(title("a1")).To(Equal("a1"))
+		})
+	})
+
 	Describe("client_id validation", func() {
 		It("refuses a push whose client_id holds a control character", func() {
 			res := pushAs(anonymous, putMutation("c\u001f1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))

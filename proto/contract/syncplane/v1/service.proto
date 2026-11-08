@@ -81,6 +81,21 @@ message WorkspaceBatch {
 	// control.
 	string workspace_id = 1;
 	repeated Mutation mutations = 2;
+	// The highest `mutation_id` this client sent under its `client_id` to this
+	// workspace before this request, or 0 when it sent none. Count every id the
+	// client put in a request, answered or not. Unset means the client does not
+	// say. When it is set, every mutation in the batch must carry the same
+	// `client_id`, or the server refuses the batch with "invalid_argument".
+	//
+	// A watermark above this value means that another writer used the
+	// `client_id`: a second install that copied the client's store, a store
+	// that went back to an older copy of itself, or another caller. The ids at
+	// or below the watermark then name that writer's mutations, not this
+	// client's, and an ack for one would report a write that never applied.
+	// The server applies nothing and fails the batch with "client_id_in_use".
+	// The client must not push under the `client_id` again. It must take a new
+	// `client_id` and resend its queue under it from `mutation_id` 1.
+	optional uint64 sent_through = 3;
 }
 
 message PushRequest {
@@ -144,7 +159,9 @@ message WorkspaceResults {
 	// error_code is set.
 	repeated MutationResult results = 2;
 	// Set when the whole batch failed. Codes: "mutation_id_gap" (resend in
-	// order from the client's watermark), "workspace_access_revoked"
+	// order from the client's watermark), "client_id_in_use" (another writer
+	// used the client_id, see WorkspaceBatch.sent_through; resend under a new
+	// client_id), "workspace_access_revoked"
 	// (permanent — stop syncing this workspace, see the client's purge path),
 	// "invalid_argument" (deterministic; the batch will never apply),
 	// "mutation_failed" (a custom mutator returned an error; retry, and drop

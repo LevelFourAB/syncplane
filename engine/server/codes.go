@@ -69,6 +69,13 @@ const (
 	// applied. The client resends in order from its watermark. Deterministic:
 	// retrying the identical batch fails identically.
 	CodeMutationIDGap = "mutation_id_gap"
+	// CodeClientIDInUse reports that the client's watermark is above the
+	// highest id the batch says the client sent (WorkspaceBatch.sent_through),
+	// so another writer used the client_id, and NOTHING in the batch was
+	// applied. The client must stop pushing under the client_id and resend its
+	// queue under a new one. Deterministic: retrying the identical batch fails
+	// identically.
+	CodeClientIDInUse = "client_id_in_use"
 	// CodeInternal reports a failure the caller cannot act on and that may not
 	// persist — a storage error, or a permission hook that could not decide.
 	// Retry with backoff. It never means "denied": a denial is always typed.
