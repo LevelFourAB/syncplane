@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sort"
+	"time"
 
 	"connectrpc.com/connect"
 
@@ -48,6 +49,11 @@ import (
 // storage.RowCounter and the snapshot ships every live row of every announced
 // entity. A read filter, the access model or a narrowing subscription that
 // hides rows from the snapshot means no estimate (see rowEmitter.rowEstimates).
+//
+// Access is re-checked while the snapshot streams: once a heartbeat interval
+// (WithHeartbeat) has passed since the workspace gate last admitted the
+// caller, the gate runs again before the next page, and a refusal ends the
+// stream with the gate's error. Rows sent before that stay sent.
 //
 // With subscriptions, only subscribed entities are visited and only rows
 // matching their predicates ship; read-filtered rows are skipped the same
@@ -338,6 +344,25 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		return nil
 	}
 
+	// Each page reads the rows as they are when it is read, and a client that
+	// reads slowly holds the stream open for as long as it likes. The gate is
+	// therefore run again once a heartbeat interval has passed since it last
+	// admitted the caller, as a Subscribe stream does, so a revocation ends
+	// the snapshot within that interval. The access binding stays the one of
+	// the Begin position: the pull from the Begin cursor settles any change
+	// to it.
+	gatedAt := time.Now()
+	regate := func() error {
+		if time.Since(gatedAt) < s.heartbeat {
+			return nil
+		}
+		if _, err := s.enterWorkspace(ctx, msg.GetWorkspaceId()); err != nil {
+			return err
+		}
+		gatedAt = time.Now()
+		return nil
+	}
+
 	for _, entity := range order {
 		// Delivered in full by an earlier attempt of this same snapshot.
 		if resume != nil && resume.done[entity] {
@@ -358,6 +383,9 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			candidates = candidates[sort.Search(len(candidates), func(i int) bool { return candidates[i] > afterKey }):]
 			for start := 0; start < len(candidates); start += maxRowBatch {
 				batch := candidates[start:min(start+maxRowBatch, len(candidates))]
+				if err := regate(); err != nil {
+					return err
+				}
 				var (
 					page    []storage.Row
 					visible []*syncplanev1.RowChange
@@ -397,6 +425,9 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 				page    []storage.Row
 				visible []*syncplanev1.RowChange
 			)
+			if err := regate(); err != nil {
+				return err
+			}
 			// Floored at the Begin seq: pages of one snapshot must not read
 			// from before the position the Begin frame promised.
 			if err := s.readTx(ctx, msg.GetWorkspaceId(), begin.GetSeq(), func(tx storage.ReadTx) error {

@@ -3,8 +3,10 @@ package server_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -468,6 +470,38 @@ var _ = Describe("Subscribe", func() {
 				msg := nextScoped(stream)
 				Expect(msg.GetWorkspaceId()).To(Equal(wsA))
 				Expect(msg.GetDropped().GetReason()).To(Equal(syncplanev1.WorkspaceDropped_REASON_ERROR))
+			})
+
+			It("drops the scope during a catch-up that outlasts a heartbeat", func() {
+				// The catch-up runs before the tail loop and its heartbeats. A
+				// backlog too large for the transport's buffers keeps the server
+				// in it for as long as the client reads slowly.
+				pad := strings.Repeat("p", 2048)
+				Expect(srv.Mutate(server.Trusted(ctx), wsA, func(tx *server.EntityTx) error {
+					for i := range 4000 {
+						if err := tx.Put(&todov1.Todo{Id: fmt.Sprintf("t%05d", i), Title: "before " + pad}); err != nil {
+							return err
+						}
+					}
+					return nil
+				})).To(Succeed())
+				stream := subscribe(&syncplanev1.SubscribeRequest{ClientId: "c1", Limit: 1, Scopes: scopes(wsA)})
+				Expect(recv(stream).GetPage()).NotTo(BeNil())
+
+				gate.deny(wsA, "removed from the project")
+				Expect(srv.Mutate(server.Trusted(ctx), wsA, func(tx *server.EntityTx) error {
+					return tx.Put(&todov1.Todo{Id: "t03999", Title: "written after the revocation"})
+				})).To(Succeed())
+				time.Sleep(100 * time.Millisecond)
+
+				var dropped *syncplanev1.WorkspaceDropped
+				for dropped == nil && stream.Receive() {
+					msg := stream.Msg()
+					Expect(msg.GetCaughtUp()).To(BeFalse(), "the catch-up finished after the revocation")
+					Expect(titles(msg.GetPage().GetPatch().GetChanges())).NotTo(ContainElement("written after the revocation"))
+					dropped = msg.GetDropped()
+				}
+				Expect(dropped.GetReason()).To(Equal(syncplanev1.WorkspaceDropped_REASON_ACCESS_REVOKED))
 			})
 
 			It("ends the stream once every scope has been revoked", func() {

@@ -3,16 +3,20 @@ package server_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"google.golang.org/protobuf/proto"
 
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
+	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/server"
@@ -533,5 +537,67 @@ var _ = Describe("Workspace-access authorization", func() {
 				server.Reject(server.CodePermissionDenied, "nope"))
 			Expect(isDenial).To(BeFalse())
 		})
+	})
+})
+
+// A Bootstrap stream lasts as long as the client takes to read it, and each
+// page is read when it is sent. Like a Subscribe stream, it must not outlive
+// the decision that admitted it by more than a heartbeat.
+var _ = Describe("Workspace access withdrawn during a Bootstrap stream", func() {
+	const wsID = "w-long-read"
+
+	It("ends the stream as permission_denied and ships nothing written after the revocation", func() {
+		ctx := context.Background()
+		gate := &midStreamGate{}
+		srv := newTestServer(server.WithPermissions(gate), server.WithChunkSize(1),
+			server.WithHeartbeat(20*time.Millisecond))
+		path, handler := srv.Handler()
+		mux := http.NewServeMux()
+		mux.Handle(path, handler)
+		ts := httptest.NewServer(mux)
+		DeferCleanup(ts.Close)
+		client := syncplanev1connect.NewSyncServiceClient(ts.Client(), ts.URL)
+
+		// Given a snapshot too large to sit in the transport's buffers, and a
+		// client that has read Begin and one chunk
+		pad := strings.Repeat("p", 2048)
+		Expect(srv.Mutate(server.Trusted(ctx), wsID, func(tx *server.EntityTx) error {
+			for i := range 4000 {
+				if err := tx.Put(&testdatav1.Widget{Id: fmt.Sprintf("w%05d", i), Label: "before " + pad}); err != nil {
+					return err
+				}
+			}
+			return nil
+		})).To(Succeed())
+		stream, err := client.Bootstrap(ctx, connect.NewRequest(&syncplanev1.BootstrapRequest{
+			WorkspaceId: wsID, ClientId: "c1",
+			Subscriptions: []*syncplanev1.Subscription{{Entity: "widget"}},
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stream.Receive()).To(BeTrue())
+		Expect(stream.Msg().GetBegin()).NotTo(BeNil())
+		Expect(stream.Receive()).To(BeTrue())
+
+		// When the caller loses access and the last row is rewritten
+		gate.deny(wsID, "removed from the project")
+		Expect(srv.Mutate(server.Trusted(ctx), wsID, func(tx *server.EntityTx) error {
+			return tx.Put(&testdatav1.Widget{Id: "w03999", Label: "written after the revocation"})
+		})).To(Succeed())
+		time.Sleep(100 * time.Millisecond)
+
+		// Then the stream ends with the gate's verdict, before it reads the
+		// rewritten row
+		var last string
+		for stream.Receive() {
+			for _, rc := range stream.Msg().GetChunk().GetRows() {
+				if rc.GetKey() == "w03999" {
+					var w testdatav1.Widget
+					Expect(proto.Unmarshal(rc.GetValue(), &w)).To(Succeed())
+					last = w.GetLabel()
+				}
+			}
+		}
+		Expect(last).NotTo(Equal("written after the revocation"))
+		Expect(connect.CodeOf(stream.Err())).To(Equal(connect.CodePermissionDenied))
 	})
 })

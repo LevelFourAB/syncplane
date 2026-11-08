@@ -184,7 +184,8 @@ The `client_id` parameter is an unauthenticated idempotency handle, not an ident
 
 Active streams re-check access permissions periodically, but do not re-verify credentials:
 
-- `Subscribe` re-evaluates `CanAccessWorkspace` for open scopes on each heartbeat (default 30 seconds). The server disconnects a user whose access is revoked within one heartbeat interval.
+- `Subscribe` re-evaluates `CanAccessWorkspace` for open scopes on each heartbeat (default 30 seconds), and during a catch-up before each page when the last check is one heartbeat interval old. The server disconnects a user whose access is revoked within one heartbeat interval.
+- `Bootstrap` re-evaluates `CanAccessWorkspace` before each page when the last check is one heartbeat interval old. A revocation ends the snapshot with the gate's error.
 - `Subscribe` reads `FilterEpoch` again before each page it sends, as `Pull` does on each call. When the epoch moves, the scope resyncs before the stream sends more rows. As a result, a row that the new read filter hides does not reach the client.
 - Authentication occurs only when opening the stream. If credentials expire while a stream is open, the connection remains active until closed. Limit stream lifetimes if strict credential expiration is required.
 

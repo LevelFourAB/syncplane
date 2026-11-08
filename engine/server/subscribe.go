@@ -64,6 +64,9 @@ type subScope struct {
 	// A dropped scope is silently skipped by the tail loop; the client has
 	// already been told and will reopen when it is ready.
 	live bool
+	// gatedAt is when the workspace gate last admitted the scope's caller.
+	// See regateScope.
+	gatedAt time.Time
 }
 
 // Subscribe is the payload-carrying change stream: "a Pull that never closes",
@@ -88,9 +91,10 @@ type subScope struct {
 // one partition had a bad day would take the other nine down with it.
 //
 // Access is re-checked while the stream runs, not only at open: every heartbeat
-// re-runs the workspace gate for each live scope, so being removed from a
-// project drops that scope within one heartbeat interval instead of whenever
-// the client next reconnects. Authentication is NOT re-run — a credential that
+// re-runs the workspace gate for each live scope, and a catch-up re-runs it
+// before a page once a heartbeat interval has passed since the last run, so
+// being removed from a project drops that scope within one heartbeat interval
+// instead of whenever the client next reconnects. Authentication is NOT re-run — a credential that
 // expires mid-stream still rides to the end of the stream (see authn.go).
 //
 // Row visibility follows the filter epoch page by page, as it does for Pull.
@@ -343,6 +347,7 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 		cursorSent:   len(want.GetCursor()) > 0,
 		logger:       s.reqLog(ctx, "subscribe", ws, clientID),
 		live:         true,
+		gatedAt:      time.Now(),
 	}, syncplanev1.WorkspaceDropped_REASON_UNSPECIFIED, nil
 }
 
@@ -398,27 +403,36 @@ func (s *Server) regateScopes(ctx context.Context, stream *connect.ServerStream[
 		if !sc.live {
 			continue
 		}
-		adm, err := s.enterWorkspace(ctx, sc.ws)
-		if err == nil {
-			// The hooks may answer differently now, and the next drain binds
-			// the caller's access from what they say.
-			sc.emitter.admit(adm)
-			continue
-		}
-		reason := syncplanev1.WorkspaceDropped_REASON_ERROR
-		if errors.Is(err, ErrNoAccess) {
-			reason = syncplanev1.WorkspaceDropped_REASON_NO_ACCESS
-		} else if _, denied := AsWorkspaceDenial(err); denied {
-			reason = syncplanev1.WorkspaceDropped_REASON_ACCESS_REVOKED
-		}
-		sc.logger.LogAttrs(ctx, slog.LevelInfo, "subscribe scope dropped by access re-check",
-			slog.String("reason", reason.String()),
-			slog.String("cause", err.Error()))
-		if err := s.dropScope(stream, sc, reason, err); err != nil {
+		if err := s.regateScope(ctx, stream, sc); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// regateScope re-runs the workspace-access gate for one live scope and drops
+// the scope when the gate no longer admits its caller. It returns an error
+// only when the drop frame could not be sent.
+//
+// regateScopes calls it on every heartbeat. drainScope calls it too, before a
+// page, when the gate last ran a heartbeat interval ago or more: a catch-up
+// over a long backlog, or over many scopes, runs before the tail loop and its
+// first heartbeat, and must not outlive a revocation by more than the tail
+// does.
+func (s *Server) regateScope(ctx context.Context, stream *connect.ServerStream[syncplanev1.SubscribeResponse], sc *subScope) error {
+	adm, err := s.enterWorkspace(ctx, sc.ws)
+	if err == nil {
+		// The hooks may answer differently now, and the next drain binds
+		// the caller's access from what they say.
+		sc.emitter.admit(adm)
+		sc.gatedAt = time.Now()
+		return nil
+	}
+	reason := gateDropReason(err)
+	sc.logger.LogAttrs(ctx, slog.LevelInfo, "subscribe scope dropped by access re-check",
+		slog.String("reason", reason.String()),
+		slog.String("cause", err.Error()))
+	return s.dropScope(stream, sc, reason, err)
 }
 
 // checkpointDue reports whether the page being sent must carry next_cursor.
@@ -469,6 +483,11 @@ func (sc *subScope) checkpointDue(next cursorState, pageBytes, cursorBytes int) 
 // returns nil.
 func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[syncplanev1.SubscribeResponse], sc *subScope, limit int, keepalive bool) error {
 	for {
+		if time.Since(sc.gatedAt) >= s.heartbeat {
+			if err := s.regateScope(ctx, stream, sc); err != nil || !sc.live {
+				return err
+			}
+		}
 		if err := s.refreshEpoch(ctx, sc); err != nil {
 			return s.dropScope(stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)
 		}

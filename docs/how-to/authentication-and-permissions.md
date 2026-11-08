@@ -78,7 +78,7 @@ srv, err := server.New(store, server.WithPermissions(myPermissions{}))
 
 The engine executes `CanAccessWorkspace` before opening a read snapshot, subscribing to the notifier, resolving `FilterEpoch`, or writing a client watermark. A rejected caller leaves no trace in the denied workspace.
 
-For `Subscribe`, `CanAccessWorkspace` also runs on every heartbeat. A revocation drops the revoked scope from an active stream without waiting for the client to reconnect.
+For `Subscribe`, `CanAccessWorkspace` also runs on every heartbeat. A revocation drops the revoked scope from an active stream without waiting for the client to reconnect. For `Bootstrap`, it runs again once per heartbeat interval while the snapshot streams, and a revocation ends the stream with the gate's error.
 
 Return the appropriate error type based on the failure condition:
 
