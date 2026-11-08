@@ -891,7 +891,8 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 * collection is lost. A collection whose elements hold collaborative text
 	 * is never replaced whole. A PATCH that still names more paths than this
 	 * (through such a collection, or through explicit `paths`) makes the write
-	 * reject, and nothing of it is written. Set this to match a server
+	 * reject, and nothing of it is written. Queue compaction does not fold two
+	 * queued writes into one that names more paths. Set this to match a server
 	 * configured with another MaxFieldMaskPaths.
 	 */
 	maxFieldMaskPaths?: number;
@@ -907,8 +908,9 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 * Largest encoded entity value the server accepts in one write: its
 	 * Limits.MaxValueBytes. A collaborative-text edit the server can take only
 	 * as a whole document is re-sent whole when the document fits, and reported
-	 * through onMutationRejected with code "conflict" when it does not. Set this
-	 * to match a server with another MaxValueBytes.
+	 * through onMutationRejected with code "conflict" when it does not. Queue
+	 * compaction does not fold two queued writes into one with a larger value.
+	 * Set this to match a server with another MaxValueBytes.
 	 *
 	 * @defaultValue 1048576 (1 MiB)
 	 */
@@ -3486,6 +3488,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			maxMutationsPerPush: this.opts.maxMutationsPerPush,
 			maxWorkspacesPerRequest: this.opts.maxWorkspacesPerRequest,
 			maxValueBytes: this.opts.maxValueBytes,
+			maxFieldMaskPaths: this.opts.maxFieldMaskPaths,
 			// Undo references forward mutations by undo token; let compaction keep
 			// the ones whose inverse is a snapshot of one specific mutation from
 			// folding. Tokens move with renumbered mutations, so squashing a queue

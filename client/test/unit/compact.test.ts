@@ -254,6 +254,22 @@ describe('planCompaction', () => {
 			];
 			expect(planCompaction(registry, original, 0n, NO_PROTECTED, STORED).changed).toBe(false);
 		});
+
+		it('keeps writes apart past the limits the client was given, not only the engine defaults', () => {
+			const original = [
+				patch(1n, 't1', { title: 'x'.repeat(600) }, [ 'title' ], 5n),
+				patch(2n, 't1', { sortKey: 'y'.repeat(600) }, [ 'sort_key' ], 5n),
+			];
+			expect(planCompaction(registry, original, 0n, NO_PROTECTED, STORED).changed).toBe(true);
+			expect(
+				planCompaction(registry, original, 0n, NO_PROTECTED, STORED, { maxValueBytes: 1000 }).changed,
+				'a server with a 1000-byte value limit refuses the fold',
+			).toBe(false);
+			expect(
+				planCompaction(registry, original, 0n, NO_PROTECTED, STORED, { maxFieldMaskPaths: 1 }).changed,
+				'a server with a 1-path mask limit refuses the fold',
+			).toBe(false);
+		});
 	});
 
 	// A refusal of the later PUT would take the row with it, where alone it

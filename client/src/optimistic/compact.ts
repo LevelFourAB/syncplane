@@ -125,6 +125,15 @@ interface Slot {
 }
 
 /**
+ * The server's write limits a fold must stay within. An omitted limit is the
+ * engine's default: 1 MiB for `maxValueBytes`, 64 for `maxFieldMaskPaths`.
+ */
+export interface CompactionLimits {
+	maxValueBytes?: number;
+	maxFieldMaskPaths?: number;
+}
+
+/**
  * Plans a compaction of the pending queue. Pure; does no I/O.
  *
  * `stored` tells whether the confirmed store holds the row of an entity and
@@ -137,6 +146,7 @@ export function planCompaction(
 	pushedThrough: bigint,
 	protectedIds: ReadonlySet<bigint>,
 	stored: (entity: string, key: string) => boolean = () => false,
+	limits: CompactionLimits = {},
 ): CompactionPlan {
 	const head: Mutation[] = [];
 	const tail: Mutation[] = [];
@@ -217,7 +227,7 @@ export function planCompaction(
 			&& (crud.expectedVersion !== undefined
 				|| (sameWrite(open.crud, crud) && !(open.creates && crud.op === CrudOp.PUT)));
 		const folded = foldable ? foldCrud(registry, def, open!.crud!, crud) : undefined;
-		if (open?.crud && folded && folded !== 'barrier' && !pastLimits(folded)) {
+		if (open?.crud && folded && folded !== 'barrier' && !pastLimits(folded, limits)) {
 			open.crud = folded;
 			open.sources.push(m.mutationId);
 			continue;
@@ -265,9 +275,9 @@ function hasUnknownFields(m: Mutation, crud: CrudMutation): boolean {
 }
 
 /** The engine's default Limits.MaxValueBytes. */
-const MAX_VALUE_BYTES = 1 << 20;
+const DEFAULT_MAX_VALUE_BYTES = 1 << 20;
 /** The engine's default Limits.MaxFieldMaskPaths. */
-const MAX_FIELD_MASK_PATHS = 64;
+const DEFAULT_MAX_FIELD_MASK_PATHS = 64;
 
 /**
  * Whether `folded` passes a write limit. The queued size of a text value can
@@ -275,9 +285,10 @@ const MAX_FIELD_MASK_PATHS = 64;
  * delta), so this can keep apart writes the server would take folded. That
  * costs one unfolded slot.
  */
-function pastLimits(folded: CrudMutation): boolean {
-	return folded.value.length > MAX_VALUE_BYTES
-		|| (folded.fieldMask?.paths.length ?? 0) > MAX_FIELD_MASK_PATHS;
+function pastLimits(folded: CrudMutation, limits: CompactionLimits): boolean {
+	return folded.value.length > (limits.maxValueBytes ?? DEFAULT_MAX_VALUE_BYTES)
+		|| (folded.fieldMask?.paths.length ?? 0)
+			> (limits.maxFieldMaskPaths ?? DEFAULT_MAX_FIELD_MASK_PATHS);
 }
 
 /**
@@ -631,6 +642,7 @@ export async function compactPending(
 	mirrors: MirrorMap,
 	workspaceId: string,
 	readProtectedTokens: (tx: KVRead) => ReadonlySet<bigint> | Promise<ReadonlySet<bigint>>,
+	limits: CompactionLimits = {},
 ): Promise<CompactionResult> {
 	const tx = await kv.write();
 	try {
@@ -658,6 +670,7 @@ export async function compactPending(
 			pushedThrough,
 			protectedIds,
 			(entity, key) => stored.has(`${entity}\u0000${key}`),
+			limits,
 		);
 		if (!plan.changed) {
 			tx.release();

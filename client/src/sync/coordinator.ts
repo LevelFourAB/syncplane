@@ -447,6 +447,12 @@ export interface CoordinatorOptions {
 	 */
 	maxValueBytes?: number;
 	/**
+	 * Largest field mask the server accepts in one write. Compaction keeps
+	 * writes apart that a fold would take past it. Default 64 (the engine's
+	 * default limit).
+	 */
+	maxFieldMaskPaths?: number;
+	/**
 	 * This client build's schema revision. When set, the coordinator compares it
 	 * against the revision the server advertises (on every stream frame, pull, and
 	 * bootstrap) and runs onSchemaSkew on a mismatch. Unset disables the
@@ -2199,6 +2205,7 @@ export class Coordinator {
 					if (saved.size === 0) return live;
 					return new Set([ ...live, ...saved ]);
 				},
+				{ maxValueBytes: this.maxValueBytes, maxFieldMaskPaths: this.opts.maxFieldMaskPaths },
 			)
 		);
 		if (result.changed) {
