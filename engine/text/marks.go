@@ -148,7 +148,8 @@ func validateValue(v any) (any, error) {
 // whether text later typed at a boundary joins the mark; it is baked into the
 // anchor sides at creation time. The returned ID identifies the operation
 // (higher-id operations on the same key win where ranges overlap). It fails
-// with ErrCounterCeiling when the document has no counter left.
+// with ErrCounterCeiling when the document has no counter left, and when key or
+// a string value is not valid UTF-8.
 //
 // start == end is a COLLAPSED mark: it covers no character and Marks never
 // reports it, but MarksAt does, and with ExpandBoth the first character typed
@@ -184,6 +185,9 @@ func (d *Doc) markOpAt(start, end int, key string, value any, expand Expand) (ID
 	if key == "" {
 		return ID{}, fmt.Errorf("text: empty mark key")
 	}
+	if err := requireWellFormed("mark key", key); err != nil {
+		return ID{}, err
+	}
 	l := d.Len()
 	if start < 0 || end > l || start > end {
 		return ID{}, fmt.Errorf("text: mark range [%d,%d) invalid for length %d", start, end, l)
@@ -191,6 +195,11 @@ func (d *Doc) markOpAt(start, end int, key string, value any, expand Expand) (ID
 	value, err := validateValue(value)
 	if err != nil {
 		return ID{}, err
+	}
+	if sv, ok := value.(string); ok {
+		if err := requireWellFormed("mark value", sv); err != nil {
+			return ID{}, err
+		}
 	}
 
 	var startAnchor, endAnchor Anchor

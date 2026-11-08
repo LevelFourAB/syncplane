@@ -110,7 +110,7 @@ Honest edits cannot reach this ceiling. The danger is one write that puts a very
 
 ## The write boundary takes text, not bytes
 
-Items are code points. The engine rejects a string that cannot be represented as code points (invalid UTF-8 in Go, or an unpaired surrogate in JavaScript) rather than storing it with replacement character U+FFFD.
+Items are code points. The engine rejects a string that cannot be represented as code points (invalid UTF-8 in Go, or an unpaired surrogate in JavaScript) rather than storing it with replacement character U+FFFD. The same rule applies to a mark key and to a string mark value.
 
 A substituted document would be well-formed and pass subsequent checks, so a writer would discover data loss only when reading the field back. A connector would not detect the failure, because source comparisons would mismatch and rewrite the row on every pass. Connectors skip invalid items (logged per item, leaving shadow state untouched) so that one mis-encoded file does not block ingress for the rest of the source. Connectors converge on the first pass after you fix the encoding.
 

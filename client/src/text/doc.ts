@@ -802,7 +802,7 @@ export class TextDoc {
 	 * collapsedAnchors.
 	 *
 	 * Throws, and changes nothing, when the document has no counter left below
-	 * 2^53−1.
+	 * 2^53−1, and when key or a string value holds an unpaired surrogate.
 	 */
 	mark(
 		start: number,
@@ -840,6 +840,7 @@ export class TextDoc {
 	): ItemID {
 		this.requirePeer();
 		if (key === '') throw new Error('text: empty mark key');
+		requireWellFormed('mark key', key);
 		const len = this.length;
 		if (start < 0 || end > len || start > end) {
 			throw new RangeError(`text: mark range [${start},${end}) invalid for length ${len}`);
@@ -851,6 +852,7 @@ export class TextDoc {
 		if (typeof value === 'number' && !Number.isFinite(value)) {
 			throw new Error('text: non-finite mark value');
 		}
+		if (typeof value === 'string') requireWellFormed('mark value', value);
 
 		let startAnchor: Anchor;
 		let endAnchor: Anchor;

@@ -608,6 +608,24 @@ var _ = Describe("Marks", func() {
 		Entry("-Inf", math.Inf(-1)),
 		Entry("float32 +Inf", float32(math.Inf(1))),
 	)
+
+	// The encoding carries strings as UTF-8 and Decode refuses anything else,
+	// so a mark holding such a string would make the document's own bytes
+	// undecodable. Insert refuses the same input.
+	DescribeTable("rejects a mark key or string value that is not valid UTF-8",
+		func(key string, value any) {
+			d := text.New("a")
+			Expect(d.Insert(0, "abc")).To(Succeed())
+			before := d.Encode()
+
+			_, err := d.Mark(0, 3, key, value, text.ExpandNone)
+			Expect(err).To(HaveOccurred())
+			Expect(d.Encode()).To(Equal(before))
+			Expect(text.Decode(d.Encode(), "")).Error().NotTo(HaveOccurred())
+		},
+		Entry("value", "link", "https://x/\xff"),
+		Entry("key", "\xff", true),
+	)
 })
 
 // Collapsed marks are the pending-format and point-annotation states: a mark

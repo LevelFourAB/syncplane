@@ -398,6 +398,24 @@ describe('marks', () => {
 		expect(() => d.mark(0, 3, 'size', v, ExpandNone)).toThrow('text: non-finite mark value');
 	});
 
+	// An unpaired surrogate has no UTF-8 encoding, so the encoded document
+	// would carry U+FFFD where the local one holds the surrogate. insert
+	// refuses the same input.
+	it.each(
+		[
+			[ 'value', 'link', 'https://x/\ud800' ],
+			[ 'key', '\udc00', true ],
+		] as const,
+	)('rejects a mark %s holding an unpaired surrogate', (_, key, value) => {
+		const d = new TextDoc('a');
+		d.insert(0, 'abc');
+		const before = encodeTextDoc(d);
+
+		expect(() => d.mark(0, 3, key, value, ExpandNone)).toThrow(/surrogate/);
+		expect(encodeTextDoc(d)).toEqual(before);
+		expect(decodeTextDoc(encodeTextDoc(d), '').resolveMarks()).toEqual(d.resolveMarks());
+	});
+
 	// Unreachable through decode (anchors are validated there) or mark (built
 	// from live items), but mergeInto takes in-memory documents. Go painted
 	// the whole prefix here and TS painted nothing; both now refuse.
