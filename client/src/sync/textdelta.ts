@@ -399,7 +399,7 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  * cut the fragments, so the page as a whole is untrustworthy: the only recovery
  * is to drop it and re-bootstrap. Never a normal outcome — the server declines
  * to send delta state wherever the client's prior state is not knowable, and
- * the client separately names the entities it holds no schema for.
+ * the client separately names the entities it cannot fold fragments for.
  */
 export class TextDeltaUnusableError extends Error {
 	constructor(entity: string, key: string, field: string, cause?: unknown) {
@@ -408,6 +408,19 @@ export class TextDeltaUnusableError extends Error {
 			cause === undefined ? undefined : { cause },
 		);
 		this.name = 'TextDeltaUnusableError';
+	}
+}
+
+/**
+ * A TextDeltaUnusableError for delta state on a field that this build's schema
+ * of `entity` does not declare as collaborative text: a field added to the
+ * entity by a later build. The client cannot rebuild such a field from a
+ * fragment, so it asks for full state of the entity from then on.
+ */
+export class TextFieldUndeclaredError extends TextDeltaUnusableError {
+	constructor(readonly entity: string, key: string, field: string) {
+		super(entity, key, field);
+		this.name = 'TextFieldUndeclaredError';
 	}
 }
 
@@ -451,6 +464,12 @@ export async function applyTextDeltas(
 		throw new TextDeltaUnusableError(change.entity, change.key, change.textDeltas[0]!.field, err);
 	}
 	for (const delta of change.textDeltas) {
+		// Checked before the confirmed row is read: textFieldBytes throws a plain
+		// error for a path the schema does not have, and a plain error fails the
+		// pull on every retry of the same page.
+		if (textSchemaPathOf(def.schema, delta.field) === undefined) {
+			throw new TextFieldUndeclaredError(change.entity, change.key, delta.field);
+		}
 		const base = confirmed && textFieldBytes(def.schema, delta.field, confirmed);
 		if (delta.fragment.length === 0) {
 			// "Unchanged over the span." The server only says that about a field

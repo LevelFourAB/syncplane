@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
+import { defineSchema, entity, text } from '../../src/schema/builder.js';
 import { decodeTextDoc, encodeTextDoc, plainTextOf, TextDoc } from '../../src/text/index.js';
 import { freshWorkspace, newClient } from './helpers.js';
 
@@ -178,6 +179,115 @@ describe('downstream text delta state', () => {
 		expect(plainTextOf((await after.get(WidgetSchema, 'w1'))?.body)).toMatch(/^HELLO lorem/);
 
 		await after.close();
+		await writer.close();
+	});
+
+	// An older build that declares "widget" but not its later text field
+	// `body`. It cannot fold a delta for a field it does not hold, and must
+	// keep syncing the rest of the row and the workspace.
+	const olderWidget = defineSchema(entity('widget', { id: text().key(), label: text() }))
+		.descMessage('widget');
+	const olderLabel = async (c: ReturnType<typeof newClient>, key: string) =>
+		((await c.get(olderWidget, key)) as { label?: string } | undefined)?.label;
+
+	it('keeps syncing a build whose schema lacks the edited text field', async () => {
+		// Given a reader whose widget has no body, holding w1 with label "one"
+		const ws = freshWorkspace();
+		const writer = newClient(ws);
+		await writer.start();
+		await writer.mutate.put(WidgetSchema, { id: 'w1', label: 'one', body: bigDoc('seed', 50) });
+		await writer.syncNow();
+		const older = newClient(ws, { entities: [ olderWidget ] });
+		await older.start();
+		await older.syncNow();
+		expect(await olderLabel(older, 'w1')).toBe('one');
+
+		// When a newer client edits the body, and then sets the label to "two"
+		await typeInto(writer, 'alice', (d) => d.insert(0, 'HELLO '));
+		await writer.mutate.patch(WidgetSchema, 'w1', { label: 'two' });
+		await writer.syncNow();
+		const failed = await older.syncNow().then(() => undefined, (err: unknown) => String(err));
+
+		// Then the reader's sync succeeds and shows the new label
+		// And it must not fail every pull on the body delta
+		expect({ failed, label: await olderLabel(older, 'w1') }).toEqual({
+			failed: undefined,
+			label: 'two',
+		});
+
+		await older.close();
+		await writer.close();
+	});
+
+	it('asks for full state once a build finds a text field it lacks', async () => {
+		// Given a reader whose widget has no body, holding w1
+		const ws = freshWorkspace();
+		const writer = newClient(ws);
+		await writer.start();
+		await writer.mutate.put(WidgetSchema, { id: 'w1', label: 'one', body: bigDoc('seed', 50) });
+		await writer.syncNow();
+		let bootstraps = 0;
+		const older = newClient(ws, {
+			entities: [ olderWidget ],
+			onSyncEvent: (e) => {
+				if (e.type === 'bootstrap') bootstraps++;
+			},
+		});
+		await older.start();
+		await older.syncNow();
+		bootstraps = 0;
+
+		// When a newer client edits the body three times, the reader syncing
+		// after each edit
+		for (const word of [ 'ONE ', 'TWO ', 'THREE ' ]) {
+			await typeInto(writer, 'alice', (d) => d.insert(0, word));
+			await older.syncNow();
+		}
+		await writer.mutate.patch(WidgetSchema, 'w1', { label: 'two' });
+		await writer.syncNow();
+		await older.syncNow();
+
+		// Then only the first edit costs the reader a bootstrap
+		expect({ label: await olderLabel(older, 'w1'), bootstraps }).toEqual({
+			label: 'two',
+			bootstraps: 1,
+		});
+
+		await older.close();
+		await writer.close();
+	});
+
+	it('delivers a row with the text field to a build that lacks it without a bootstrap', async () => {
+		// Given a reader whose widget has no body, synced
+		const ws = freshWorkspace();
+		const writer = newClient(ws);
+		await writer.start();
+		await writer.mutate.put(WidgetSchema, { id: 'w1', label: 'one' });
+		await writer.syncNow();
+		let bootstraps = 0;
+		const older = newClient(ws, {
+			entities: [ olderWidget ],
+			onSyncEvent: (e) => {
+				if (e.type === 'bootstrap') bootstraps++;
+			},
+		});
+		await older.start();
+		await older.syncNow();
+		bootstraps = 0;
+
+		// When a newer client creates w2 with a body document
+		await writer.mutate.put(WidgetSchema, { id: 'w2', label: 'new', body: bigDoc('seed', 50) });
+		await writer.syncNow();
+		const failed = await older.syncNow().then(() => undefined, (err: unknown) => String(err));
+
+		// Then the reader receives w2 on its pull, without a bootstrap
+		expect({ failed, label: await olderLabel(older, 'w2'), bootstraps }).toEqual({
+			failed: undefined,
+			label: 'new',
+			bootstraps: 0,
+		});
+
+		await older.close();
 		await writer.close();
 	});
 
