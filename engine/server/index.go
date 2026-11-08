@@ -212,7 +212,8 @@ func (info *entityInfo) indexByName(name string) *compiledIndex {
 // updateRowIndexes refreshes every index entry of one row from its current
 // value. Called wherever a row is written — PUT, PATCH, and the text
 // compaction rewrite — immediately next to the text-floor bookkeeping, which
-// is where same-transaction derived state belongs.
+// is where same-transaction derived state belongs, and before the row itself
+// is stored.
 //
 // The whole set is replaced rather than diffed: the caller rarely has the
 // row's PREVIOUS value in hand (a PATCH merges into stored bytes; compaction
@@ -223,28 +224,29 @@ func (info *entityInfo) indexByName(name string) *compiledIndex {
 // count is no longer bounded by the number of declared indexes — it is bounded
 // by the data, which is what makes the per-row limit below load-bearing rather
 // than a formality.
+//
+// An entry over storage.MaxIndexEntryBytes that the stored row already
+// produces is kept out of the set instead of refusing the write: the value
+// predates the index, which then cannot be ready (see keepOverlongEntries).
 func (info *entityInfo) updateRowIndexes(tx storage.WriteTx, limits Limits, key string, msg proto.Message) error {
+	return info.putRowIndexes(tx, limits, key, msg, true)
+}
+
+// buildRowIndexes is updateRowIndexes for an index build, which reads msg from
+// the stored row. Every over-long entry fails it: the build must not mark an
+// index ready that holds no entry for a row.
+func (info *entityInfo) buildRowIndexes(tx storage.WriteTx, limits Limits, key string, msg proto.Message) error {
+	return info.putRowIndexes(tx, limits, key, msg, false)
+}
+
+func (info *entityInfo) putRowIndexes(tx storage.WriteTx, limits Limits, key string, msg proto.Message, keepStored bool) error {
 	if err := info.dropForeignIndexes(tx); err != nil {
 		return err
 	}
 	if len(info.indexes) == 0 && info.search == nil {
 		return nil
 	}
-	refl := msg.ProtoReflect()
-	entries := make([]storage.IndexEntry, 0, len(info.indexes))
-	for i := range info.indexes {
-		for _, k := range info.indexes[i].encoder.Encode(refl, key) {
-			entries = append(entries, storage.IndexEntry{Index: info.indexes[i].name, Key: k})
-		}
-	}
-	if info.search != nil {
-		// Bounded on its own by the per-row term cap (an oversized document
-		// stores the overflow marker alone), so the shared limit below stays
-		// about value indexes plus a constant.
-		for _, k := range info.search.decl.SearchEntries(refl) {
-			entries = append(entries, storage.IndexEntry{Index: info.search.name, Key: k})
-		}
-	}
+	entries := info.rowIndexEntries(msg, key)
 	if max := limits.maxIndexEntriesPerRow(); len(entries) > max {
 		// A row cannot be allowed to write an unbounded number of entries: the
 		// count is what an index costs on every single write of that row, and
@@ -263,13 +265,112 @@ func (info *entityInfo) updateRowIndexes(tx storage.WriteTx, limits Limits, key 
 	// Refused for the same reason, and on every store: the bound is what
 	// Postgres can hold, and a store that holds more would accept a value
 	// that a move to Postgres then breaks.
+	var overlong []storage.IndexEntry
 	for _, e := range entries {
 		if len(e.Key) > storage.MaxIndexEntryBytes {
+			overlong = append(overlong, e)
+		}
+	}
+	if len(overlong) > 0 {
+		kept := keepStored
+		if kept {
+			var err error
+			if kept, err = info.keepOverlongEntries(tx, key, overlong); err != nil {
+				return err
+			}
+		}
+		if !kept {
+			e := overlong[0]
 			return Reject(CodeInvalidArgument, fmt.Sprintf("entity %q row %q: an entry of index %q is %d bytes, the limit is %d; a value this index holds is too long",
 				info.name, key, e.Index, len(e.Key), storage.MaxIndexEntryBytes))
 		}
+		short := entries[:0]
+		for _, e := range entries {
+			if len(e.Key) <= storage.MaxIndexEntryBytes {
+				short = append(short, e)
+			}
+		}
+		entries = short
 	}
 	return tx.PutIndexEntries(info.name, key, entries)
+}
+
+// rowIndexEntries is every index entry msg, stored under key, occupies.
+func (info *entityInfo) rowIndexEntries(msg proto.Message, key string) []storage.IndexEntry {
+	refl := msg.ProtoReflect()
+	entries := make([]storage.IndexEntry, 0, len(info.indexes))
+	for i := range info.indexes {
+		for _, k := range info.indexes[i].encoder.Encode(refl, key) {
+			entries = append(entries, storage.IndexEntry{Index: info.indexes[i].name, Key: k})
+		}
+	}
+	if info.search != nil {
+		// Bounded on its own by the per-row term cap (an oversized document
+		// stores the overflow marker alone), so the shared limit stays
+		// about value indexes plus a constant.
+		for _, k := range info.search.decl.SearchEntries(refl) {
+			entries = append(entries, storage.IndexEntry{Index: info.search.name, Key: k})
+		}
+	}
+	return entries
+}
+
+// keepOverlongEntries reports whether the row stored under key produces every
+// entry of overlong too, and when it does, makes sure each index they belong to
+// reads as unready.
+//
+// Such a value was written while no index held it, so no write can have stored
+// its entry, and the index build fails on it. Refusing the write would leave
+// the row unwritable by PUT, where the value is not what the write changes. A
+// write that brings in a new over-long value is still refused.
+func (info *entityInfo) keepOverlongEntries(tx storage.WriteTx, key string, overlong []storage.IndexEntry) (bool, error) {
+	row, err := tx.GetRow(info.name, key)
+	if errors.Is(err, storage.ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if row.Deleted {
+		return false, nil
+	}
+	stored, err := info.decode(row.Value)
+	if err != nil {
+		return false, nil
+	}
+	type entry struct{ index, key string }
+	held := map[entry]bool{}
+	for _, e := range info.rowIndexEntries(stored, key) {
+		held[entry{e.Index, string(e.Key)}] = true
+	}
+	for _, e := range overlong {
+		if !held[entry{e.Index, string(e.Key)}] {
+			return false, nil
+		}
+	}
+	// The index is unready already unless a node that does not check this
+	// limit built it. Marked as dropForeignIndexes marks one, so that no
+	// read trusts an index without this row's entry.
+	marked := false
+	for _, e := range overlong {
+		_, ready, err := tx.IndexState(info.name, e.Index)
+		if err != nil {
+			return false, err
+		}
+		if !ready {
+			continue
+		}
+		if err := tx.SetIndexState(info.name, e.Index, "", false); err != nil {
+			return false, err
+		}
+		marked = true
+	}
+	if marked {
+		if err := tx.SetIndexBuildMark(""); err != nil {
+			return false, err
+		}
+	}
+	return true, nil
 }
 
 // maskTouchesIndexes reports whether any path of a field mask could change any

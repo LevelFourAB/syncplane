@@ -388,7 +388,7 @@ func (s *Server) buildEntityIndexes(ctx context.Context, ws string, info *entity
 					// one bad row.
 					return nil
 				}
-				if err := info.updateRowIndexes(tx, s.limits, row.Key, msg); err != nil {
+				if err := info.buildRowIndexes(tx, s.limits, row.Key, msg); err != nil {
 					return err
 				}
 				// Cut the batch on the clock as well as on the row cap. A row's

@@ -182,6 +182,37 @@ var _ = Describe("Index entry limits", func() {
 		Expect(queryKeys(long)).To(Equal([]string{"n1"}), "the unready index must leave the read to the scan")
 	})
 
+	It("accepts a PUT that keeps a stored value longer than an index added after it", func() {
+		// The value predates the index and the PUT does not change it, so the
+		// row stands as the index found it: unready, and served by the scan.
+		first, store := newTestServerStore()
+		use(first, server.DynamicEntity{Name: "note", KeyFields: []string{"id"}, Fields: noteFields})
+		Expect(push(putMutation("c1", 1, "note", "n1", buildNote(mt, map[string]any{"id": "n1", "body": long}))).
+			GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+		use(mustNewServer(store), indexed)
+
+		row := buildNote(mt, map[string]any{"id": "n1", "body": long})
+		row.ProtoReflect().Mutable(mt.Descriptor().Fields().ByName("labels")).List().Append(protoreflect.ValueOfString("second"))
+		r := push(putMutation("c1", 2, "note", "n1", row))
+
+		Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED), r.GetErrorMessage())
+		Expect(queryKeys(long)).To(Equal([]string{"n1"}))
+		Expect(srv.BuildIndexes(ctx, ws)).To(MatchError(ContainSubstring("by_body")), "the row still blocks the build")
+	})
+
+	It("rejects a PUT that replaces a stored over-long value with another over-long value", func() {
+		first, store := newTestServerStore()
+		use(first, server.DynamicEntity{Name: "note", KeyFields: []string{"id"}, Fields: noteFields})
+		Expect(push(putMutation("c1", 1, "note", "n1", buildNote(mt, map[string]any{"id": "n1", "body": long}))).
+			GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+		use(mustNewServer(store), indexed)
+
+		expectRejected(push(putMutation("c1", 2, "note", "n1", buildNote(mt, map[string]any{"id": "n1", "body": long + "b"}))))
+
+		got, _ := body("n1")
+		Expect(got).To(Equal(long))
+	})
+
 	It("still builds the indexes of other entities when one entity cannot build", func() {
 		first, store := newTestServerStore()
 		use(first, server.DynamicEntity{Name: "note", KeyFields: []string{"id"}, Fields: noteFields})
