@@ -200,6 +200,11 @@ together:
 - `testdata/fractional/` — order keys. `engine/fractional` and
   `client/src/fractional.ts` + `client/src/ordering.ts` must make the same key
   from the same bounds and refuse the same bounds. Hand-written.
+- `testdata/setelem/` — the text form of a scalar set element, the mask-path
+  segment a PATCH add/remove names an element of a repeated scalar field by.
+  `engine/internal/naming` and `client/src/naming.ts` must render the same
+  value to the same text; when they do not, the server matches no element and
+  drops the edit without an error. Hand-written.
 
 ## Documentation
 
