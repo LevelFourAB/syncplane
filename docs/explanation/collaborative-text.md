@@ -155,7 +155,7 @@ A snapshot inverse on a state CRDT merges into a no-op. Handle edits therefore r
 
 Undoing a mark or an unmark restores the prior formatting only on the characters that still carry the value your operation set. Formatting a peer applied afterwards over part of the range stays. The match is by value, not by operation: an undo or redo writes its values through new mark operations, so the original operation no longer wins where a later undo step must find it. As a result, a later operation that set the same value on the same key is undone with yours.
 
-Typing coalesces into word-sized undo groups based on idle timeouts and whitespace boundaries. Selection restoration uses the standard delta subscription mechanism.
+Typing coalesces into word-sized undo groups based on idle timeouts and whitespace boundaries. A group holds the typing of one text handle only: any other write in between, such as an edit of another field or typing in another handle, ends the group. Selection restoration uses the standard delta subscription mechanism.
 
 Undoing a deletion restores text content and formatting, but not original item identities. Tombstones are monotone, so restored content receives new identifiers. The inverse carries marks resolved over the text at deletion time to re-apply them. Formatting and comment ranges survive deletion, undo, and repeated undo/redo cycles. Anchors held outside the document do not follow restored text, so applications must read positions back from marks rather than retaining external anchors across an undo. Restoring through re-marking has two side effects: a concurrent unmark operation can be undone with the deletion, and the engine does not retain the original `expand` policy, defaulting restored marks to `ExpandNone`.
 

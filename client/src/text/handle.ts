@@ -12,6 +12,7 @@
 
 import { CodeTextMergeFailed } from '../codes.js';
 import { reportError, safeInvoke, safeRun } from '../report.js';
+import type { TypingEdit } from '../undo.js';
 import { decodeTextDoc, encodeTextDoc } from './codec.js';
 import { purgedByRemote, reapplyUnseen } from './compact.js';
 import {
@@ -171,10 +172,11 @@ export interface TextHandleDeps {
 	 * text/merge.ts), so the queue holds O(edit) bytes per keystroke while
 	 * rows, the overlay and every read path keep whole documents.
 	 *
-	 * inverseOps is the symbolic op-level undo record for this edit; coalesce
-	 * joins it onto the previous undo group (typing).
+	 * inverseOps is the symbolic op-level undo record for this edit; typing
+	 * marks it as an edit of this handle's typing run, which may join the undo
+	 * group of the run's previous edit (see UndoManager.recordGroup).
 	 */
-	patch(state: Uint8Array, inverseOps?: TextInverseOp[], coalesce?: boolean): Promise<void>;
+	patch(state: Uint8Array, inverseOps?: TextInverseOp[], typing?: TypingEdit): Promise<void>;
 	/** Watches the row's field bytes; fires on every row change. */
 	watch(cb: (state: Uint8Array | undefined) => void): () => void;
 }
@@ -290,6 +292,9 @@ function buildHandle(deps: TextHandleDeps, initial: Uint8Array, lease: PeerLease
 	// and when it happened.
 	let chainOpen = false;
 	let lastEditAt = 0;
+	// Names this handle's typing run to the undo manager, which joins an edit
+	// only onto a group this run recorded.
+	const chain = {};
 	/**
 	 * The most recent state already folded into `doc` — what this handle last
 	 * merged in, or last pushed as full state. Merging is a union, so a row
@@ -347,7 +352,8 @@ function buildHandle(deps: TextHandleDeps, initial: Uint8Array, lease: PeerLease
 		chainOpen = typing?.keepChainOpen ?? false;
 		lastEditAt = Date.now();
 		const ops = inverseOps && inverseOps.length > 0 ? inverseOps : undefined;
-		writeChain = writeChain.then(() => deps.patch(state, ops, coalesce));
+		const run: TypingEdit | undefined = typing !== undefined ? { chain, join: coalesce } : undefined;
+		writeChain = writeChain.then(() => deps.patch(state, ops, run));
 		return writeChain;
 	};
 

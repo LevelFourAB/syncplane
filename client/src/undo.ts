@@ -21,7 +21,9 @@
 //   - a transact() batch is ONE undo group: undo/redo replays its inverses
 //     together (as one atomic batch), in reverse application order
 //   - typing coalesces: a text edit may join the previous undo group
-//     (idle-timeout/word-boundary policy decided by the text handle)
+//     (idle-timeout/word-boundary policy decided by the text handle), but only
+//     a group the same handle's typing recorded; any other edit in between
+//     ends the chain
 //   - a new user edit clears the redo stack
 //   - undoing a row a peer edited concurrently clobbers the peer's fields
 //     named in the inverse mask — accepted per-field LWW semantics
@@ -119,6 +121,16 @@ export interface UndoEntry {
 export type StackName = 'undo' | 'redo';
 
 /**
+ * One text edit of a typing run (see UndoManager.recordGroup). `chain` names
+ * the run, and is the same object for every edit of one text handle; `join`
+ * asks to join the group the previous edit of the run recorded.
+ */
+export interface TypingEdit {
+	readonly chain: object;
+	readonly join: boolean;
+}
+
+/**
  * Computes the inverse of a CRUD mutation given the merged row bytes as they
  * were BEFORE the mutation applied. Returns undefined for no-ops (deleting
  * a row that did not exist). The inverse of a DELETE asserts
@@ -196,6 +208,8 @@ export class UndoManager {
 	private redoStack: UndoEntry[] = [];
 	private readonly maxDepth: number;
 	private nextGroupId = 1;
+	/** The typing run that recorded the top undo group, if one did. */
+	private typing: { chain: object; groupId: number } | undefined;
 	/** Listeners notified whenever canUndo()/canRedo() may have changed. */
 	private listeners = new Set<() => void>();
 
@@ -238,19 +252,26 @@ export class UndoManager {
 	 * means a new user edit, which clears the redo stack (even when every inverse
 	 * is a no-op).
 	 *
-	 * `coalesce` joins the entries onto the TOP undo group instead of minting
-	 * a new one — how typing collapses into word-sized undo steps. It only
-	 * applies to new user edits (captureStack undefined) with a non-empty
-	 * undo stack; the redo stack still clears (a coalesced edit is still an
-	 * edit).
+	 * `typing` marks the entries as one edit of a typing run. With `join` set,
+	 * they join the TOP undo group instead of minting a new one — how typing
+	 * collapses into word-sized undo steps — when an earlier edit of the same
+	 * run recorded that group and no other recordGroup call came after it. It
+	 * only applies to new user edits (captureStack undefined); the redo stack
+	 * still clears (a coalesced edit is still an edit).
 	 */
 	recordGroup(
 		token: bigint,
 		inverses: (Inverse | undefined)[],
 		captureStack?: StackName,
-		coalesce?: boolean,
+		typing?: TypingEdit,
 	): void {
 		const target = captureStack ?? 'undo';
+		const run = captureStack === undefined ? typing : undefined;
+		const prev = this.typing;
+		// Any other write ends the run, so the next typing edit opens a group
+		// of its own rather than joining one that holds the other write. An
+		// edit of the run that records nothing keeps it.
+		this.typing = run !== undefined && prev?.chain === run.chain ? prev : undefined;
 		if (captureStack === undefined) {
 			this.redoStack = [];
 		}
@@ -262,11 +283,13 @@ export class UndoManager {
 		}
 		const stack = target === 'undo' ? this.undoStack : this.redoStack;
 		const top = this.undoStack[this.undoStack.length - 1];
-		// One enqueue commits one group unless the caller asked to coalesce
-		// onto the previous one.
-		const groupId = coalesce && captureStack === undefined && top !== undefined
+		// One enqueue commits one group unless it continues the typing run that
+		// recorded the top group.
+		const groupId = run?.join === true && top !== undefined && prev?.chain === run.chain
+				&& prev.groupId === top.groupId
 			? top.groupId
 			: this.nextGroupId++;
+		if (run !== undefined) this.typing = { chain: run.chain, groupId };
 		const at = Date.now();
 		for (const inverse of defined) {
 			stack.push({ groupId, token, at, inverse });

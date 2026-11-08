@@ -319,6 +319,7 @@ import {
 	type Inverse,
 	invertCrud,
 	type StackName,
+	type TypingEdit,
 	type UndoEntry,
 	UndoManager,
 	type UndoOptions,
@@ -3100,7 +3101,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				}
 				return fieldOf(row?.value);
 			},
-			patch: (state, inverseOps, coalesce) => {
+			patch: (state, inverseOps, typing) => {
 				const crud = buildPatch(
 					def,
 					schema,
@@ -3119,7 +3120,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				};
 				return this.enqueue(scope, { case: 'crud', value: crud }, undefined, {
 					overrides: [ override ],
-					coalesce,
+					typing,
 				});
 			},
 			watch: (cb) => {
@@ -6679,8 +6680,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			 * no-op — the override carries the symbolic op-level inverse instead.
 			 */
 			overrides?: (Inverse | undefined)[];
-			/** Join the previous undo group (typing coalescence). */
-			coalesce?: boolean;
+			/** An edit of a text handle's typing run (see UndoManager.recordGroup). */
+			typing?: TypingEdit;
 			/**
 			 * Undo tokens of the group an undo or redo replays. The write is
 			 * refused with StaleUndoGroupError, before anything is written, when
@@ -7094,7 +7095,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			// tabs' stacks drop theirs through the barrier written above.
 			for (const mgr of scope.undoManagers()) mgr.barrier();
 		} else if (undoMgr && capturedToken !== undefined) {
-			undoMgr.recordGroup(capturedToken, capturedInverses, captureStack, undoOpts?.coalesce);
+			undoMgr.recordGroup(capturedToken, capturedInverses, captureStack, undoOpts?.typing);
 		}
 		this.statusTracker.incrementPending(workspaceId);
 		await this.notifyChange(touched, deliver);

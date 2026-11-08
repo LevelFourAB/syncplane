@@ -15,6 +15,7 @@ import {
 } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { DEAD_TOKEN_TTL_MS } from '../../src/optimistic/undojournal.js';
+import { encodeTextDoc, TextDoc } from '../../src/text/index.js';
 import { type Inverse, invertCrud, UndoManager } from '../../src/undo.js';
 
 function newLocalClient(undo: { enabled?: boolean; maxDepth?: number } | undefined = {}) {
@@ -188,6 +189,38 @@ describe('undo/redo', () => {
 		await c.close();
 	});
 
+	it('ends a typing group at an edit of another field', async () => {
+		// Given widget w1 with label 'old' and body 'hello'
+		const c = new SyncClient({
+			workspaceId: 'ws-undo',
+			kvStore: new MemoryKVStore(),
+			entities: [ WidgetSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+			undo: {},
+		});
+		const seed = new TextDoc('seed');
+		seed.insert(0, 'hello');
+		await c.db.widget.mutate.put({ id: 'w1', label: 'old', body: encodeTextDoc(seed) });
+		const body = await c.db.widget.text('w1', 'body');
+
+		// When the user types 'ab', sets the label, and types 'cd', all within
+		// the typing coalesce window
+		await body.insert(5, 'ab');
+		await c.db.widget.mutate.patch('w1', { label: 'new' });
+		await body.insert(7, 'cd');
+
+		// Then one undo takes back 'cd' alone, and the next one the label
+		expect(await c.undo()).toBe(true);
+		await vi.waitFor(() => expect(body.value).toBe('helloab'));
+		expect((await c.db.widget.get('w1'))?.label).toBe('new');
+		expect(await c.undo()).toBe(true);
+		expect((await c.db.widget.get('w1'))?.label).toBe('old');
+
+		body.close();
+		await c.close();
+	});
+
 	it('custom mutations clear both stacks (barrier)', async () => {
 		const c = newLocalClient();
 		await c.mutate.put(TodoSchema, { id: 't1', title: 'x' });
@@ -310,5 +343,59 @@ describe('UndoManager.predictedRefIds', () => {
 		expect(predicted).toEqual(new Set([ 1n ]));
 		mgr.recordGroup(3n, [ undefined ]);
 		expect(mgr.foldBarrierTokens()).toEqual(predicted);
+	});
+});
+
+describe('UndoManager typing runs', () => {
+	function inverse(key: string): Inverse {
+		return {
+			kind: 'crud',
+			crud: create(CrudMutationSchema, { entity: 'todo', key, op: CrudOp.DELETE }),
+		};
+	}
+
+	function groups(mgr: UndoManager): bigint[][] {
+		const out: bigint[][] = [];
+		for (let g = mgr.takeUndoGroup(); g.length > 0; g = mgr.takeUndoGroup()) {
+			out.push(g.map((e) => e.token));
+		}
+		return out;
+	}
+
+	it('joins the edits of one run', () => {
+		const mgr = new UndoManager();
+		const chain = {};
+		mgr.recordGroup(1n, [ inverse('a') ], undefined, { chain, join: false });
+		mgr.recordGroup(2n, [ inverse('a') ], undefined, { chain, join: true });
+		expect(groups(mgr)).toEqual([ [ 2n, 1n ] ]);
+	});
+
+	it('does not join a group another run recorded', () => {
+		// Two text handles typing in turn.
+		const mgr = new UndoManager();
+		const a = {};
+		const b = {};
+		mgr.recordGroup(1n, [ inverse('a') ], undefined, { chain: a, join: false });
+		mgr.recordGroup(2n, [ inverse('b') ], undefined, { chain: b, join: false });
+		mgr.recordGroup(3n, [ inverse('a') ], undefined, { chain: a, join: true });
+		expect(groups(mgr)).toEqual([ [ 3n ], [ 2n ], [ 1n ] ]);
+	});
+
+	it('keeps a run across an edit of the run that records nothing', () => {
+		const mgr = new UndoManager();
+		const chain = {};
+		mgr.recordGroup(1n, [ inverse('a') ], undefined, { chain, join: false });
+		mgr.recordGroup(2n, [ undefined ], undefined, { chain, join: true });
+		mgr.recordGroup(3n, [ inverse('a') ], undefined, { chain, join: true });
+		expect(groups(mgr)).toEqual([ [ 3n, 1n ] ]);
+	});
+
+	it('ends a run at a write without inverses', () => {
+		const mgr = new UndoManager();
+		const chain = {};
+		mgr.recordGroup(1n, [ inverse('a') ], undefined, { chain, join: false });
+		mgr.recordGroup(2n, [ undefined ]);
+		mgr.recordGroup(3n, [ inverse('a') ], undefined, { chain, join: true });
+		expect(groups(mgr)).toEqual([ [ 3n ], [ 1n ] ]);
 	});
 });
