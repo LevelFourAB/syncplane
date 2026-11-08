@@ -200,16 +200,13 @@ function validateIdentifier(what: string, name: string, where: string | undefine
 }
 
 /**
- * The scalar types a key field may have. They are the ones whose values
- * `scalarKeyString` renders identically here and in Go.
+ * The scalar types a key field may have.
  *
- * Everything else is refused rather than rendered on a best effort. A message,
- * list or map has no canonical text form at all. Bytes and floats have one per
- * language: the server stringifies bytes through protoreflect while this side
- * holds a Uint8Array, and Go's `%v` and JS's `String()` disagree on float
- * exponents (1e7 renders "1e+07" against "10000000"). A key that means one row
- * on the server and another on the client is worse than a schema that will not
- * register.
+ * Everything else is refused. A message, list or map has no canonical text
+ * form at all. Bytes and floats have one (see `scalarKeyString`), but it does
+ * not make a usable key: a float key names a different row after any rounding
+ * of the value, and a bytes key reads as hex rather than as the id the app
+ * wrote.
  */
 const KEY_SCALARS: ReadonlySet<ScalarType> = new Set([
 	ScalarType.STRING,
@@ -300,13 +297,17 @@ function utf8Length(what: string, s: string): number {
 }
 
 /**
- * Canonicalizes one key-field value as text: strings verbatim, integers
- * base-10, bools "true"/"false", enums by number. It is the exact rendering the
- * server performs, and the reason validateKeyField admits only those kinds.
+ * Canonicalizes one scalar value as text: strings verbatim, integers base-10,
+ * bools "true"/"false", enums by number. The server renders every value to the
+ * same text, which makes the result usable as an identity on both sides: of a
+ * row (a key field), of a keyed list's element, and of a scalar set element in
+ * a mask path (see mutations.ts).
  *
- * It also renders the identity of a keyed list's element (see mutations.ts),
- * which is the same question asked of a nested field — hence the tolerance for
- * kinds a row key never sees.
+ * Set elements also reach the kinds a key field may not have. A float or
+ * double renders as `String(value)` ("1000000", "1e-7", "1e+21", "Infinity",
+ * "NaN"; -0 as "0"), a decoded float32 as the double it widens to, and bytes as
+ * lowercase hex, the empty value as "". The shared vectors in testdata/setelem
+ * pin these renderings.
  */
 export function scalarKeyString(
 	value: unknown,
@@ -331,6 +332,11 @@ export function scalarKeyString(
 		case ScalarType.UINT64:
 		case ScalarType.FIXED64:
 			return String(protoInt64.uParse(value as string | number | bigint));
+		case ScalarType.BYTES: {
+			let hex = '';
+			for (const b of value as Uint8Array) hex += b.toString(16).padStart(2, '0');
+			return hex;
+		}
 		default:
 			return String(value); // numbers and bigints render base-10
 	}

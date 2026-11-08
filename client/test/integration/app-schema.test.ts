@@ -12,12 +12,15 @@ import type { Row } from '../../src/read.js';
 import { fetchSchema, registerSchema } from '../../src/schema/admin.js';
 import {
 	bool,
+	bytes,
 	defineSchema,
+	double,
 	entity,
 	type Infer,
 	int32,
 	int64,
 	keyedList,
+	list,
 	map,
 	message,
 	ref,
@@ -285,6 +288,111 @@ describe('runtime app schema registration', () => {
 		expect(((await a.get(fetched, 'f1')) as Todo | undefined)?.title).toBe('from fetched schema');
 
 		await a.close();
+	});
+});
+
+// Scalar lists merge as sets: a PATCH names each added or removed element in
+// its mask path, rendered by the client and matched by the server. The test
+// schema has no floating-point or bytes list, so this one is registered at
+// runtime.
+describe('per-element merge of floating-point and bytes sets', () => {
+	const reading = entity('reading', {
+		id: text().key(),
+		values: list(double()),
+		hashes: list(bytes()),
+	});
+	const readings = defineSchema(reading);
+	type Reading = Infer<typeof reading>;
+	const Reading = readings.descMessage('reading');
+	// Runtime descriptors read back as a bare Message; see `Todo` above.
+	const asReading = (m: unknown) => m as Reading;
+
+	beforeAll(async () => {
+		await registerSchema(adminTransport(), 'readings', readings, { token: TOKEN });
+	});
+
+	/** Writes `initial`, then applies `edit` as a second write, and returns the
+	 * row as the writer and as a client that only saw the server's copy. */
+	async function editAndRead(
+		initial: Partial<Reading>,
+		edit: (c: SyncClient) => Promise<void>,
+	): Promise<{ writer: Reading; server: Reading }> {
+		const ws = freshWorkspace();
+		const a = appClient('readings', ws, readings.descMessages());
+		await a.start();
+		await a.mutate.put(Reading, { id: 'r1', ...initial });
+		await a.syncNow();
+		await edit(a);
+		await a.syncNow();
+		await a.syncNow();
+		const b = appClient('readings', ws, readings.descMessages());
+		await b.start();
+		await b.syncNow();
+		const writer = asReading(await a.get(Reading, 'r1'));
+		const server = asReading(await b.get(Reading, 'r1'));
+		await a.close();
+		await b.close();
+		return { writer, server };
+	}
+
+	it('adds a large double to a set', async () => {
+		// Given a row whose values hold [1.5]
+		// When the client adds 1000000 and syncs
+		const { writer, server } = await editAndRead({ values: [ 1.5 ] }, async (c) => {
+			await c.mutate.update(Reading, 'r1', (r) => {
+				asReading(r).values.push(1_000_000);
+			});
+		});
+
+		// Then the server stores both values
+		expect([ ...server.values ].sort((x, y) => x - y)).toEqual([ 1.5, 1_000_000 ]);
+		// And the writer must not lose the added value when the write is acked
+		expect([ ...writer.values ].sort((x, y) => x - y)).toEqual([ 1.5, 1_000_000 ]);
+	});
+
+	it('removes a large double from a set', async () => {
+		// Given a row whose values hold [1.5, 1000000]
+		// When the client removes 1000000 and syncs
+		const { writer, server } = await editAndRead({ values: [ 1.5, 1_000_000 ] }, async (c) => {
+			await c.mutate.update(Reading, 'r1', (r) => {
+				const row = asReading(r);
+				row.values = row.values.filter((v) => v !== 1_000_000);
+			});
+		});
+
+		// Then the server stores [1.5]
+		expect(server.values).toEqual([ 1.5 ]);
+		// And the removed value must not come back on the writer
+		expect(writer.values).toEqual([ 1.5 ]);
+	});
+
+	it('adds bytes elements to a set, the empty one included', async () => {
+		// Given a row with no hashes
+		// When the client patches hashes to two elements, one of them empty
+		const { writer, server } = await editAndRead({}, async (c) => {
+			await c.mutate.patch(Reading, 'r1', {
+				hashes: [ new Uint8Array([ 1, 2 ]), new Uint8Array() ],
+			});
+		});
+
+		// Then the server stores both elements
+		const sorted = (r: Reading) => r.hashes.map((h) => [ ...h ]).sort((x, y) => x.length - y.length);
+		expect(sorted(server)).toEqual([ [], [ 1, 2 ] ]);
+		// And neither element may be dropped from the writer when the write is acked
+		expect(sorted(writer)).toEqual([ [], [ 1, 2 ] ]);
+	});
+
+	it('control: adds a small integral double to a set', async () => {
+		// Given a row whose values hold [1.5]
+		// When the client adds 3
+		const { server } = await editAndRead({ values: [ 1.5 ] }, async (c) => {
+			await c.mutate.update(Reading, 'r1', (r) => {
+				asReading(r).values.push(3);
+			});
+		});
+
+		// Then the server stores both values
+		expect([ ...server.values ].sort((x, y) => x - y)).toEqual([ 1.5, 3 ]);
 	});
 });
 

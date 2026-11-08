@@ -1201,6 +1201,8 @@ A key of an integral map is a decimal number inside the range of the key type. A
 
 In a field mask, the empty key is the empty segment. `custom.` names the entry with the empty key, and `custom` names the whole map. The same rule applies to a keyed-list element and to a scalar-set element whose key is the empty string, so a client that edits only that item leaves the other items to concurrent writers. `custom..text` descends into the entry with the empty key.
 
+A scalar-set element is named by its value: an integer in decimal, a `bool` as `true` or `false`, a `float` or `double` as JavaScript `String()` writes the value as a double (`1000000`, `1e-7`, `1e+21`, `0.10000000149011612` for the `float` 0.1), and `bytes` as lowercase hex. A dot in the value is escaped like a dot in a map key (`values.1\.5`).
+
 Queries reference the specific oneof variant intended. If an entry holds a different variant, the condition evaluates to false and sort clauses rank the entry last.
 
 Sorting across different variants of a custom field is not supported (`order by custom.priority.number` is valid; `order by custom.priority` is not).

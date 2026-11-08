@@ -22,7 +22,9 @@
 package naming
 
 import (
+	"encoding/hex"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -245,16 +247,12 @@ func CutWorkspacePrefix(id, prefix string) (string, bool) {
 }
 
 // ValidateKeyFieldKind checks that a field may form (part of) a row key. Key
-// fields must be singular strings, integers, booleans or enums — the kinds
-// whose values ScalarKeyString renders identically in Go and JS.
+// fields must be singular strings, integers, booleans or enums.
 //
-// Everything else is refused rather than rendered on a best effort. A message,
-// list or map has no canonical text form at all. Bytes and floats have one per
-// language: protoreflect stringifies bytes as their raw octets while the client
-// has a Uint8Array, and Go's %v and JS's String() disagree on float exponents
-// (1e7 renders "1e+07" against "10000000"). A key that means one row on the
-// server and another on the client is worse than a schema that will not
-// register.
+// Everything else is refused. A message, list or map has no canonical text
+// form at all. Bytes and floats have one (see ScalarKeyString), but it does not
+// make a usable key: a float key names a different row after any rounding of
+// the value, and a bytes key reads as hex rather than as the id the app wrote.
 func ValidateKeyFieldKind(fd protoreflect.FieldDescriptor) error {
 	if fd.IsMap() {
 		return fmt.Errorf("key field %q must be singular, is a map", fd.Name())
@@ -386,13 +384,17 @@ func validatePrintableField(what, s string, maxBytes int) error {
 	return nil
 }
 
-// ScalarKeyString canonicalizes one key-field value as text: strings verbatim,
-// integers base-10, bools "true"/"false", enums by number. It is the exact
-// rendering the client performs, and the reason ValidateKeyFieldKind admits
-// only these kinds.
+// ScalarKeyString canonicalizes one scalar value as text: strings verbatim,
+// integers base-10, bools "true"/"false", enums by number. The client renders
+// every value to the same text, which makes the result usable as an identity on
+// both sides: of a row (a key field), of a keyed list's element, and of a
+// scalar set element in a mask path (see engine/internal/lww).
 //
-// It also renders the identity of a keyed list's element (see
-// engine/internal/lww), which is the same question asked of a nested field.
+// Set elements also reach the kinds a key field may not have. A float or
+// double renders as JavaScript's Number.prototype.toString renders the value
+// widened to float64 ("1000000", "1e-7", "1e+21", "Infinity", "NaN"; -0 as
+// "0"), and bytes as lowercase hex, the empty value as "". The shared vectors
+// in testdata/setelem pin these renderings.
 func ScalarKeyString(fd protoreflect.FieldDescriptor, v protoreflect.Value) string {
 	switch fd.Kind() {
 	case protoreflect.StringKind:
@@ -411,12 +413,70 @@ func ScalarKeyString(fd protoreflect.FieldDescriptor, v protoreflect.Value) stri
 		return strconv.FormatUint(v.Uint(), 10)
 	case protoreflect.EnumKind:
 		return strconv.FormatInt(int64(v.Enum()), 10)
+	case protoreflect.FloatKind, protoreflect.DoubleKind:
+		// A float32 value renders widened, not as its own shortest form: the
+		// client holds a decoded float32 as the widened double and has no
+		// float32 formatter.
+		return jsNumberString(v.Float())
+	case protoreflect.BytesKind:
+		return hex.EncodeToString(v.Bytes())
 	default:
-		// Unreachable for a registered key field (ValidateKeyFieldKind refuses
-		// the remaining kinds); kept total for mask segments, which reach here
-		// for any scalar element type.
 		return v.String()
 	}
+}
+
+// jsNumberString renders f as ECMAScript's Number::toString(f) with radix 10.
+// Both take the shortest digit string that reads back as f; only the layout
+// differs from strconv, so this places the digits by the ECMAScript rules.
+func jsNumberString(f float64) string {
+	switch {
+	case math.IsNaN(f):
+		return "NaN"
+	case math.IsInf(f, 1):
+		return "Infinity"
+	case math.IsInf(f, -1):
+		return "-Infinity"
+	case f == 0:
+		return "0" // -0 too
+	}
+	sign := ""
+	if f < 0 {
+		sign = "-"
+		f = -f
+	}
+	// "d.ddde±x": the digits and the exponent of the leading one.
+	sci := strconv.FormatFloat(f, 'e', -1, 64)
+	mant, exp, _ := strings.Cut(sci, "e")
+	digits := strings.Replace(mant, ".", "", 1)
+	e, _ := strconv.Atoi(exp)
+	k, n := len(digits), e+1 // f = 0.digits * 10^n
+	var out string
+	switch {
+	case k <= n && n <= 21:
+		out = digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		out = digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		out = "0." + strings.Repeat("0", -n) + digits
+	default:
+		expSign := "+"
+		if n-1 < 0 {
+			expSign = "-"
+		}
+		lead := digits[:1]
+		if k > 1 {
+			lead += "." + digits[1:]
+		}
+		out = lead + "e" + expSign + strconv.Itoa(abs(n-1))
+	}
+	return sign + out
+}
+
+func abs(n int) int {
+	if n < 0 {
+		return -n
+	}
+	return n
 }
 
 // RowKey joins the rendered key-field values of one row into its storage key. A

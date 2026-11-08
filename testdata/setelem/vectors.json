@@ -1,0 +1,179 @@
+{
+	"comment": "Shared conformance vectors for the text form of a scalar set element, the segment a PATCH mask path names one element of a repeated scalar field by: engine/internal/naming.ScalarKeyString (Go) and client/src/naming.ts scalarKeyString (TypeScript) must render the same value to the same text, or the server matches no element and drops the edit. `bits` is the IEEE 754 value as big-endian hex (16 digits for a double, 8 for a float); `hex` is the bytes value. A float renders as the double it widens to; floats and doubles render as JavaScript String(value) does.",
+	"cases": [
+		{
+			"name": "integral",
+			"kind": "double",
+			"bits": "4008000000000000",
+			"want": "3"
+		},
+		{
+			"name": "fraction",
+			"kind": "double",
+			"bits": "3ff8000000000000",
+			"want": "1.5"
+		},
+		{
+			"name": "negative fraction",
+			"kind": "double",
+			"bits": "bff8000000000000",
+			"want": "-1.5"
+		},
+		{
+			"name": "a million takes no exponent",
+			"kind": "double",
+			"bits": "412e848000000000",
+			"want": "1000000"
+		},
+		{
+			"name": "epoch milliseconds",
+			"kind": "double",
+			"bits": "4278bcfe56800000",
+			"want": "1700000000000"
+		},
+		{
+			"name": "largest power of ten below 1e21 takes no exponent",
+			"kind": "double",
+			"bits": "4415af1d78b58c40",
+			"want": "100000000000000000000"
+		},
+		{
+			"name": "just below 1e21 takes no exponent",
+			"kind": "double",
+			"bits": "444b1ae4d6e2ef4f",
+			"want": "999999999999999900000"
+		},
+		{
+			"name": "1e21 takes an exponent",
+			"kind": "double",
+			"bits": "444b1ae4d6e2ef50",
+			"want": "1e+21"
+		},
+		{
+			"name": "1e-6 takes no exponent",
+			"kind": "double",
+			"bits": "3eb0c6f7a0b5ed8d",
+			"want": "0.000001"
+		},
+		{
+			"name": "1e-7 takes an exponent",
+			"kind": "double",
+			"bits": "3e7ad7f29abcaf48",
+			"want": "1e-7"
+		},
+		{
+			"name": "small with several digits",
+			"kind": "double",
+			"bits": "3e808ffde1023e12",
+			"want": "1.234e-7"
+		},
+		{
+			"name": "sum that does not round",
+			"kind": "double",
+			"bits": "3fd3333333333334",
+			"want": "0.30000000000000004"
+		},
+		{
+			"name": "largest double",
+			"kind": "double",
+			"bits": "7fefffffffffffff",
+			"want": "1.7976931348623157e+308"
+		},
+		{
+			"name": "smallest subnormal",
+			"kind": "double",
+			"bits": "0000000000000001",
+			"want": "5e-324"
+		},
+		{
+			"name": "large with several digits",
+			"kind": "double",
+			"bits": "441ac53a7e04bcda",
+			"want": "123456789012345680000"
+		},
+		{
+			"name": "negative large",
+			"kind": "double",
+			"bits": "c534adf4b7320335",
+			"want": "-2.5e+25"
+		},
+		{
+			"name": "negative zero renders as zero",
+			"kind": "double",
+			"bits": "8000000000000000",
+			"want": "0"
+		},
+		{
+			"name": "positive infinity",
+			"kind": "double",
+			"bits": "7ff0000000000000",
+			"want": "Infinity"
+		},
+		{
+			"name": "negative infinity",
+			"kind": "double",
+			"bits": "fff0000000000000",
+			"want": "-Infinity"
+		},
+		{
+			"name": "NaN",
+			"kind": "double",
+			"bits": "7ff8000000000000",
+			"want": "NaN"
+		},
+		{
+			"name": "0.1 renders widened to a double",
+			"kind": "float",
+			"bits": "3dcccccd",
+			"want": "0.10000000149011612"
+		},
+		{
+			"name": "exact half",
+			"kind": "float",
+			"bits": "3f000000",
+			"want": "0.5"
+		},
+		{
+			"name": "1e10 renders widened",
+			"kind": "float",
+			"bits": "501502f9",
+			"want": "10000000000"
+		},
+		{
+			"name": "1e-7 renders widened",
+			"kind": "float",
+			"bits": "33d6bf95",
+			"want": "1.0000000116860974e-7"
+		},
+		{
+			"name": "negative third",
+			"kind": "float",
+			"bits": "beaaaaab",
+			"want": "-0.3333333432674408"
+		},
+		{
+			"name": "float infinity",
+			"kind": "float",
+			"bits": "7f800000",
+			"want": "Infinity"
+		},
+		{
+			"name": "empty bytes render as the empty string",
+			"kind": "bytes",
+			"hex": "",
+			"want": ""
+		},
+		{
+			"name": "two bytes",
+			"kind": "bytes",
+			"hex": "0102",
+			"want": "0102"
+		},
+		{
+			"name": "high and zero bytes",
+			"kind": "bytes",
+			"hex": "ff00ab",
+			"want": "ff00ab"
+		}
+	]
+}
