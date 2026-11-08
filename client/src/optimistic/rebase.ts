@@ -1172,6 +1172,36 @@ export async function finalizeRebase(
 		touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 	}
 
+	// The server can only have acked ids this store minted, so a watermark above
+	// the counter means the store lost writes it once held: a restored backup,
+	// a commit the browser dropped. The queued ids at or below the watermark
+	// then name writes the server never saw — it took other writes under them —
+	// and retiring them as acked would lose them without a word. They move to
+	// the ids the server expects next, and the counter with them.
+	const counter = BigInt(
+		((await tx.get(metaLastMutationId(workspaceId))) as string | undefined) ?? '0',
+	);
+	const queued = counter < input.lastAckedMutationId ? await readPending(tx, workspaceId) : [];
+	const tail = queued[queued.length - 1]?.mutationId ?? 0n;
+	const minted = tail > counter ? tail : counter;
+	if (input.lastAckedMutationId > minted) {
+		const lost = queued;
+		reportError(
+			`workspace ${workspaceId}: the server has acked mutation ${input.lastAckedMutationId} of this client, `
+				+ `above the ${minted} this store minted; moving ${lost.length} queued mutations above it`,
+			new Error('local store is older than the server watermark'),
+		);
+		const { renumbered } = await renumberPending(
+			tx,
+			registry,
+			workspaceId,
+			lost,
+			input.lastAckedMutationId + 1n,
+		);
+		await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, renumbered, touched);
+		return renumbered.length;
+	}
+
 	// Read in this transaction, not passed in by the caller: the push that went
 	// unanswered may be another tab's, and the watermark of this page covers
 	// mutations whose verdicts only that re-push can collect. Dropping a
@@ -1590,6 +1620,46 @@ export async function dropAndResequencePending(
 	return runResequence(kv, registry, mirrors, workspaceId, drop, drop.mutationId);
 }
 
+/**
+ * Moves `pending`, the whole queue of a workspace, onto ids from `firstId` on
+ * inside `tx`, with the undo tokens they carry. Sets the counter to the last
+ * new id (`firstId - 1` for an empty queue) and the pushed-through watermark to
+ * `firstId - 1`, and drops the unanswered-push mark. Leaves the overlay to the
+ * caller.
+ */
+async function renumberPending(
+	tx: KVWrite,
+	registry: EntityRegistry,
+	workspaceId: string,
+	pending: readonly Mutation[],
+	firstId: bigint,
+): Promise<{ renumbered: Mutation[]; remap: Map<bigint, bigint> }> {
+	// Every old key goes before any new one is written: the ranges overlap
+	// whenever the moves are shorter than the queue, and a write-then-delete
+	// order would drop the entry it had just moved.
+	const remap = new Map<bigint, bigint>();
+	const renumbered: Mutation[] = [];
+	let nextId = firstId;
+	for (const m of pending) {
+		await tx.del(pendingKey(workspaceId, m.mutationId));
+		const moved = clone(MutationSchema, m);
+		moved.mutationId = nextId;
+		remap.set(m.mutationId, nextId);
+		renumbered.push(moved);
+		nextId += 1n;
+	}
+	for (const m of renumbered) await enqueuePending(tx, workspaceId, m);
+	await moveUndoTokens(tx, workspaceId, await readUndoTokens(tx, workspaceId), remap);
+	await tx.put(metaLastMutationId(workspaceId), (nextId - 1n).toString());
+	await recountPendingAccess(tx, registry, workspaceId, renumbered, nextId - 1n);
+	await writePushedThrough(tx, workspaceId, firstId - 1n);
+	// Every renumbered id is above the watermark, so the server applied none
+	// of them, and an unanswered-push mark would hold acked mutations for a
+	// push that can tell nothing about these ids.
+	await tx.del(metaUnresolvedPush(workspaceId));
+	return { renumbered, remap };
+}
+
 async function runResequence(
 	kv: KVStore,
 	registry: EntityRegistry,
@@ -1654,32 +1724,16 @@ async function runResequence(
 				undoTokens,
 			};
 		}
-		// Every old key goes before any new one is written: the ranges overlap
-		// whenever the queue is longer than the hole, and a write-then-delete
-		// order would drop the entry it had just moved.
-		const remap = new Map<bigint, bigint>();
-		const renumbered: Mutation[] = [];
-		let nextId = firstId;
-		for (const m of survivors) {
-			await tx.del(pendingKey(workspaceId, m.mutationId));
-			const moved = clone(MutationSchema, m);
-			moved.mutationId = nextId;
-			remap.set(m.mutationId, nextId);
-			renumbered.push(moved);
-			nextId += 1n;
-		}
-		for (const m of renumbered) await enqueuePending(tx, workspaceId, m);
-		await moveUndoTokens(tx, workspaceId, await readUndoTokens(tx, workspaceId), remap);
 		// The counter follows the queue down even when the queue is empty: it is
 		// what the next local write mints from, and an id above the watermark gaps
 		// the workspace again on the very next edit.
-		await tx.put(metaLastMutationId(workspaceId), (nextId - 1n).toString());
-		await recountPendingAccess(tx, registry, workspaceId, renumbered, nextId - 1n);
-		await writePushedThrough(tx, workspaceId, firstId - 1n);
-		// Every renumbered id is above the watermark, so the server applied none
-		// of them, and an unanswered-push mark would hold acked mutations for a
-		// push that can tell nothing about these ids.
-		await tx.del(metaUnresolvedPush(workspaceId));
+		const { renumbered, remap } = await renumberPending(
+			tx,
+			registry,
+			workspaceId,
+			survivors,
+			firstId,
+		);
 		if (dropped || renumbered.length > 0) {
 			await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, renumbered, touched);
 		}

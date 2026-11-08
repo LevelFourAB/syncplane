@@ -223,6 +223,15 @@ watermark names the caller for this reason: a principal that pushes under
 another principal's `client_id` moves only its own watermark, so it cannot
 consume or skip IDs sent by the other principal.
 
+The server can only acknowledge IDs that a client minted. The TypeScript client
+uses this to detect a local store that went back in time, for example a
+restored device backup or a commit that the browser lost. When a pull or a
+bootstrap reports a watermark above the last ID the store minted, the client
+moves its queued mutations to the IDs after the watermark, and mints new IDs
+from there. The check cannot see a rollback when the store minted IDs up to
+the watermark again before its first pull. The server already holds those IDs,
+so the mutations queued under them are lost.
+
 ## Deletes and the horizon
 
 Deleting a row creates a **tombstone** so that offline clients receive the
