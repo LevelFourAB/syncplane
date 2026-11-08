@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
@@ -20,6 +22,8 @@ import (
 
 	"github.com/levelfourab/syncplane/engine/client"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
+	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/text"
 	"github.com/levelfourab/syncplane/engine/upstream"
@@ -230,6 +234,47 @@ var _ = Describe("Origin answers", Label("convergence"), func() {
 		mu.Lock()
 		defer mu.Unlock()
 		Expect(asked).To(Equal([]string{convWS + " " + local + " " + origin}))
+	})
+
+	It("keeps holding local writes while an origin that leaves the revision off stream pages streams them", func() {
+		sk := newSkew()
+		o := newCOrigin()
+		_, err := o.srv.RegisterDescriptorSet(dynamicSet(sk.ents[0]))
+		Expect(err).NotTo(HaveOccurred())
+		// An origin from before stream pages carried the schema revision: it
+		// sets the revision on each Subscribe frame, not on the page inside.
+		syncPath, syncHandler := syncplanev1connect.NewSyncServiceHandler(o.srv, connect.WithInterceptors(stripPageRevision{}))
+		mux := http.NewServeMux()
+		for path, h := range o.srv.Handlers() {
+			if path == syncPath {
+				h = syncHandler
+			}
+			mux.Handle(path, h)
+		}
+		o.front.set(mux)
+
+		n := newCNodeWith(o, "n0", func(c *upstream.Config) {
+			c.Bindings = append(c.Bindings, upstream.Binding{Entity: "gadget"})
+			c.OnSchemaSkew = func(string, string, string) upstream.SkewAction { return upstream.SkewBlock }
+		}, func(srv *server.Server) {
+			_, err := srv.RegisterDescriptorSet(dynamicSet(sk.ents[1]))
+			Expect(err).NotTo(HaveOccurred())
+		})
+		addConv(n)
+		Expect(n.status().SchemaSkew).NotTo(BeNil())
+
+		_, err = n.ws().Put(ctx, sk.older("g2", "held"))
+		Expect(err).NotTo(HaveOccurred())
+		origin := o.client("other")
+		for i := range 5 {
+			_, err := origin.Put(ctx, &testdatav1.Widget{Id: fmt.Sprintf("w%d", i), Label: "from the origin"})
+			Expect(err).NotTo(HaveOccurred())
+		}
+		Eventually(func() proto.Message { return dumpRows(n.srv, convWS)["widget"]["w4"] }).
+			WithTimeout(10*time.Second).ShouldNot(BeNil(), "the stream delivers the origin's writes")
+		Consistently(func() proto.Message { return sk.readKey(o.ts.URL, "g2") }).
+			WithTimeout(500*time.Millisecond).Should(BeNil(), "a page without a revision does not lift the block")
+		Expect(n.status().SchemaSkew).NotTo(BeNil())
 	})
 
 	It("follows origin edits of a text field only the origin's newer schema knows without bootstrapping again", func() {
@@ -541,4 +586,29 @@ func gadget(mt protoreflect.MessageType, id, name string, extra int64) proto.Mes
 		m.Set(fs.ByName("extra"), protoreflect.ValueOfInt64(extra))
 	}
 	return m
+}
+
+// stripPageRevision clears the schema revision of every page a Subscribe
+// stream sends, as an origin from before pages carried it did.
+type stripPageRevision struct{}
+
+func (stripPageRevision) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc { return next }
+
+func (stripPageRevision) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return next
+}
+
+func (stripPageRevision) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
+		return next(ctx, pageRevisionStripper{conn})
+	}
+}
+
+type pageRevisionStripper struct{ connect.StreamingHandlerConn }
+
+func (c pageRevisionStripper) Send(msg any) error {
+	if r, ok := msg.(*syncplanev1.SubscribeResponse); ok && r.GetPage() != nil {
+		r.GetPage().SchemaRevision = ""
+	}
+	return c.StreamingHandlerConn.Send(msg)
 }

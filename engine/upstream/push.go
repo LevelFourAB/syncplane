@@ -458,10 +458,14 @@ func (l *Link) readWatermark(ctx context.Context, ws, clientID string, cursor []
 }
 
 // observeRevision records the origin's schema revision, and wakes the worker
-// to decide on a skew when it changed. It reports no status change itself: it
+// to decide on a skew when it changed. An empty revision changes nothing. It reports no status change itself: it
 // runs inside a write-through capture, where a status callback must not run.
 // The next status change carries it.
 func (w *workspace) observeRevision(rev string) {
+	if rev == "" {
+		// The answer did not say. See applyPage.
+		return
+	}
 	w.vmu.Lock()
 	changed := w.st.revision != rev
 	w.st.revision = rev

@@ -120,7 +120,12 @@ func (w *workspace) applyPage(ctx context.Context, page *syncplanev1.PullRespons
 		if s := page.GetSeq(); s > 0 {
 			t.meta.originSeq = s
 		}
-		t.meta.schemaRevision = page.GetSchemaRevision()
+		// An origin from before stream pages carried the revision sends pages
+		// without one. An empty revision there means "not said", and storing
+		// it would lift a SkewBlock decision on every page.
+		if rev := page.GetSchemaRevision(); rev != "" {
+			t.meta.schemaRevision = rev
+		}
 		// An entry the origin applied is dropped on the last page of a
 		// drain only: its row may sit on a later page, and dropping it
 		// earlier would revert the row in between.
