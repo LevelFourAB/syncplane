@@ -3261,8 +3261,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			this.hubInstance = hub;
 			// A commit in another tab updates the shared store but only that tab's
 			// hub; mirror its touched set into ours so our watchers stay fresh.
-			this.changeShare = startChangeShare(this.storageNames.changeChannel, (tokens) => {
-				const touched = TouchSet.fromTokens(tokens);
+			const remoteChange = (touched: TouchSet) => {
 				void hub.notify(touched);
 				this.fireAccessChange(touched);
 				// A peer's rollback or custom mutation broadcasts its rows; it may
@@ -3270,7 +3269,24 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				this.scheduleUndoReconcile();
 				// A peer tab's pull may have brought the row whose blob completed.
 				this.blobMgr?.noteSync();
-			});
+			};
+			this.changeShare = startChangeShare(
+				this.storageNames.changeChannel,
+				(tokens) => remoteChange(TouchSet.fromTokens(tokens)),
+				() => {
+					// The broadcasts of the commits other tabs made meanwhile are lost,
+					// and this tab's next pull starts from the cursor they moved, so
+					// it brings none of those rows either. Every watcher re-reads.
+					const touched = new TouchSet();
+					for (const workspaceId of this.scopes.keys()) {
+						for (const entity of this.entityRegistry.syncableNames()) {
+							touched.entity(workspaceId, entity);
+						}
+						touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
+					}
+					remoteChange(touched);
+				},
+			);
 			return hub;
 		})();
 		return this.hubPromise;

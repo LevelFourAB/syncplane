@@ -18,6 +18,8 @@ One visible tab holds the live `Subscribe` stream, elected through a second Web 
 
 The leader tab writes received rows into the shared IndexedDB store. Follower tabs do not run data streams of their own. Instead, they observe writes through the shared store and receive notifications over a `BroadcastChannel` that carries the touched `(workspace, entity)` set.
 
+A page in the back/forward cache receives no `BroadcastChannel` message. Its next pull also starts from the shared cursor that the other tabs moved, so the pull does not bring the rows those tabs wrote. When such a page comes back (`pageshow` with `persisted`), every live query of the tab reads the store again.
+
 The leader tab releases the lock on `visibilitychange` to hidden after a short grace period, on `pagehide`, and on `freeze`. Tabs recontend for leadership on `visible` and `resume` events. As a result, the lock is held by a visible tab or by no tab at all. When all tabs are hidden, tabs fall back to the per-tab polling floor. This behavior ensures that a suspended background tab never strands the lock.
 
 If the lock request fails because Web Locks is unusable, such as in sandboxed or storage-partitioned embedded environments, the tab stops contending, logs the error, and runs its own stream for the session. An extra connection avoids missing live updates.

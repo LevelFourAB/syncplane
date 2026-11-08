@@ -1,9 +1,13 @@
+import { create, toBinary } from '@bufbuild/protobuf';
+import { createRouterTransport } from '@connectrpc/connect';
 import { act, render, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode, StrictMode, Suspense } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { SyncClient, type SyncClientOptions } from '../../src/client.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
+import { BootstrapResponseSchema, SyncService } from '../../src/gen/syncplane/v1/service_pb.js';
+import { confirmedKey } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { createReactSync, useSyncClient } from '../../src/react/index.js';
 
@@ -266,6 +270,68 @@ describe('createReactSync hooks', () => {
 		unmount();
 		await flush();
 		expect(hubOf(client)?.watchers.size).toBe(0);
+		await client.close();
+	});
+
+	// A page in the back/forward cache gets no BroadcastChannel message, so the
+	// commits other tabs make meanwhile never reach its watchers. The store is
+	// shared and current; its own next pull starts from the cursor those tabs
+	// already moved, so it brings nothing either.
+	it('useQuery shows what the store holds after the page is restored from the back/forward cache', async () => {
+		// Given a page showing t1 as 'old'
+		const kv = new MemoryKVStore();
+		const todo = (title: string) => toBinary(TodoSchema, create(TodoSchema, { id: 't1', title }));
+		const transport = createRouterTransport(({ service }) => {
+			service(SyncService, {
+				push: () => ({ results: [] }),
+				pull: (req) => ({
+					patch: { changes: [], dropEntities: [] },
+					nextCursor: req.cursor,
+					lastAckedMutationId: 0n,
+					reset: false,
+					hasMore: false,
+					seq: 0n,
+				}),
+				async *bootstrap() {
+					yield create(BootstrapResponseSchema, {
+						body: { case: 'begin', value: { cursor: new Uint8Array([ 1 ]), seq: 1n } },
+					});
+					yield create(BootstrapResponseSchema, {
+						body: {
+							case: 'chunk',
+							value: {
+								rows: [ {
+									entity: 'todo',
+									key: 't1',
+									version: 1n,
+									body: { case: 'value', value: todo('old') },
+								} ],
+							},
+						},
+					});
+					yield create(BootstrapResponseSchema, { body: { case: 'end', value: {} } });
+				},
+				query: () => ({ rows: [] }),
+			});
+		});
+		const client = newClient({ kvStore: kv, transport });
+		await client.start();
+		await client.syncNow();
+		const { result } = renderHook(() => db.todo.useQuery({}), { wrapper: providerWrapper(client) });
+		await flush();
+		expect(result.current.map((r) => r.value.title)).toEqual([ 'old' ]);
+
+		// When another tab commits t1 = 'new' while the page is in the cache, and
+		// the page is then restored
+		window.dispatchEvent(new PageTransitionEvent('pagehide', { persisted: true }));
+		const tx = await kv.write();
+		await tx.put(confirmedKey('todo', 'ws1', 't1'), { v: todo('new'), ver: '2' });
+		await tx.commit();
+		window.dispatchEvent(new PageTransitionEvent('pageshow', { persisted: true }));
+
+		// Then the query shows the stored value, which a fresh read already sees
+		expect((await client.scan(TodoSchema)).map((r) => r.value.title)).toEqual([ 'new' ]);
+		await waitFor(() => expect(result.current.map((r) => r.value.title)).toEqual([ 'new' ]));
 		await client.close();
 	});
 

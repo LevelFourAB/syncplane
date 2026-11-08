@@ -32,15 +32,24 @@ export interface ChangeShare {
  * exactly the tabs sharing a store share the channel. `onRemoteChange` fires
  * with the raw tokens (see keys.touchKey / keys.rowTouchKey) each time another
  * tab broadcasts a commit; TouchSet.fromTokens turns them back into a touch set.
+ * `onMissedChanges` fires when the page comes back from the back/forward
+ * cache, where no message reaches it: any commit of another tab may then be
+ * unannounced.
  */
 export function startChangeShare(
 	channelName: string,
 	onRemoteChange: (tokens: Set<string>) => void,
+	onMissedChanges?: () => void,
 ): ChangeShare {
 	if (isServerRuntime() || typeof BroadcastChannel === 'undefined') {
 		return { broadcast: () => {}, stop: () => {} };
 	}
 	const channel = new BroadcastChannel(channelName);
+	const onPageShow = (ev: PageTransitionEvent) => {
+		if (ev.persisted) onMissedChanges?.();
+	};
+	const pageEvents = onMissedChanges !== undefined && typeof window !== 'undefined';
+	if (pageEvents) window.addEventListener('pageshow', onPageShow);
 	channel.onmessage = (ev) => {
 		const tokens = ev.data as unknown;
 		if (Array.isArray(tokens) && tokens.length > 0) {
@@ -56,6 +65,9 @@ export function startChangeShare(
 				// closed channel — racing stop(); local watchers already fired
 			}
 		},
-		stop: () => channel.close(),
+		stop: () => {
+			if (pageEvents) window.removeEventListener('pageshow', onPageShow);
+			channel.close();
+		},
 	};
 }
