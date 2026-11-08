@@ -86,6 +86,20 @@ describe('IntentRegistry', () => {
 		expect(rec.updatedAt).toBe(seededAt + 1234);
 	});
 
+	it('writeRefs in a released transaction leaves the stored record unchanged', async () => {
+		const h = harness();
+		const reg = h.registry();
+		await reg.seed(scope([]), refsOf(new Set([ 1n ])));
+
+		// The enqueue that wrote the refs fails, so its transaction rolls back.
+		const tx = await h.kv.write();
+		await reg.writeRefs(tx, WS, new Set([ 1n, 99n ]));
+		tx.release();
+
+		const rec = (await h.readRecord(reg.tabId))!;
+		expect(rec.undoRefTokens).toEqual({ [WS]: [ '1' ] });
+	});
+
 	it('writeRefs before seed() is a no-op', async () => {
 		const h = harness();
 		const reg = h.registry();

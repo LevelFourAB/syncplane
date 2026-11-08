@@ -355,9 +355,11 @@ export class IntentRegistry {
 	}
 
 	private async putRecord(tx: KVWrite): Promise<void> {
+		// Copies, so that a later change to the own scope (setRefs, a re-seed)
+		// does not reach a record this transaction has put but not committed.
 		const record: IntentRecord = {
-			subs: this.ownSubs,
-			undoRefTokens: this.ownRefs,
+			subs: { ...this.ownSubs },
+			undoRefTokens: { ...this.ownRefs },
 			undoRefIds: {},
 			updatedAt: this.now(),
 		};

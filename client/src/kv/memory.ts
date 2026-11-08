@@ -16,6 +16,13 @@ import {
  * Reads see a copy-on-write snapshot taken when the transaction opens.
  * Writes buffer locally and apply atomically on commit. Single-writer:
  * concurrent write() calls queue.
+ *
+ * Values are copied the way IndexedDB copies them: commit stores a copy of
+ * each value put, and a read returns a fresh copy of the committed value, so a
+ * caller that changes an object it put or read does not change the store. A
+ * write transaction's reads of its own puts return the object it put. As in
+ * IndexedDB, a copy of a class instance is a plain object; a value
+ * structuredClone cannot copy (a function) makes commit throw DataCloneError.
  */
 export class MemoryKVStore implements KVStore, GenerationTracking {
 	private map = new Map<string, unknown>();
@@ -61,11 +68,11 @@ class MemoryRead implements KVRead {
 	constructor(protected snapshot: Map<string, unknown>) {}
 
 	async get(key: string): Promise<unknown | undefined> {
-		return this.snapshot.get(key);
+		return this.value(key, this.snapshot.get(key));
 	}
 
 	async getMany(keys: readonly string[]): Promise<(unknown | undefined)[]> {
-		return keys.map((k) => this.snapshot.get(k));
+		return keys.map((k) => this.value(k, this.snapshot.get(k)));
 	}
 
 	async has(key: string): Promise<boolean> {
@@ -75,7 +82,7 @@ class MemoryRead implements KVRead {
 	async *scan(prefix: string): AsyncIterable<[string, unknown]> {
 		const keys = [ ...this.snapshot.keys() ].filter((k) => k.startsWith(prefix)).sort();
 		for (const k of keys) {
-			yield [ k, this.snapshot.get(k) ];
+			yield [ k, this.value(k, this.snapshot.get(k)) ];
 		}
 	}
 
@@ -84,7 +91,7 @@ class MemoryRead implements KVRead {
 			.filter((k) => (lo === undefined || k >= lo) && (hi === undefined || k < hi))
 			.sort();
 		for (const k of keys) {
-			yield [ k, this.snapshot.get(k) ];
+			yield [ k, this.value(k, this.snapshot.get(k)) ];
 		}
 	}
 
@@ -139,7 +146,7 @@ class MemoryRead implements KVRead {
 		for (const [ k, v ] of this.snapshot) {
 			for (const position of positionsOf(v)) {
 				if ((lo === undefined || position >= lo) && (hi === undefined || position < hi)) {
-					entries.push({ position, key: k, value: v });
+					entries.push({ position, key: k, value: this.value(k, v) });
 				}
 			}
 		}
@@ -178,6 +185,20 @@ class MemoryRead implements KVRead {
 	release(): void {
 		// snapshot is garbage-collected
 	}
+
+	/**
+	 * The value a read of `key` returns for `stored`. A committed value is
+	 * cloned so that a caller who changes it does not change the store, which
+	 * IndexedDB also guarantees.
+	 */
+	protected value(key: string, stored: unknown): unknown {
+		return this.isOwnPut(key) ? stored : copyValue(stored);
+	}
+
+	/** Whether `key` holds a value this transaction put and has not committed. */
+	protected isOwnPut(_key: string): boolean {
+		return false;
+	}
 }
 
 class MemoryWrite extends MemoryRead implements KVWrite {
@@ -189,6 +210,8 @@ class MemoryWrite extends MemoryRead implements KVWrite {
 	private dropped: Set<string> | undefined;
 	/** The values commit requires; see KVWrite.guard. */
 	private guards: Map<string, unknown> | undefined;
+	/** Keys this transaction put; commit clones their values. */
+	private puts = new Set<string>();
 
 	constructor(
 		private store: MemoryKVStore,
@@ -201,18 +224,24 @@ class MemoryWrite extends MemoryRead implements KVWrite {
 
 	async put(key: string, value: unknown): Promise<void> {
 		this.snapshot.set(key, value);
+		this.puts.add(key);
 		this.dropped?.delete(key);
 		this.note(key);
 	}
 
 	async del(key: string): Promise<void> {
 		this.snapshot.delete(key);
+		this.puts.delete(key);
 		if (this.generationOf !== undefined) (this.dropped ??= new Set()).add(key);
 		this.note(key);
 	}
 
 	guard(key: string, value: unknown): void {
 		(this.guards ??= new Map()).set(key, value);
+	}
+
+	protected override isOwnPut(key: string): boolean {
+		return this.puts.has(key);
 	}
 
 	/** Records the generations `key` belongs to, if any. */
@@ -227,6 +256,15 @@ class MemoryWrite extends MemoryRead implements KVWrite {
 	async commit(): Promise<void> {
 		if (this.done) throw new Error('transaction already finished');
 		this.done = true;
+		// IndexedDB copies a value when the put request runs, which for a
+		// buffered write is at commit, so a change the caller makes after put
+		// but before commit is stored too.
+		try {
+			for (const key of this.puts) this.snapshot.set(key, copyValue(this.snapshot.get(key)));
+		} catch (err) {
+			this.unlock();
+			throw err;
+		}
 		// The write lock is held from write() to here, so the committed map is
 		// the one this transaction opened on; checked anyway, so the guard does
 		// not depend on that.
@@ -255,4 +293,33 @@ class MemoryWrite extends MemoryRead implements KVWrite {
 		this.done = true;
 		this.unlock();
 	}
+}
+
+/**
+ * A deep copy of `value` with the types IndexedDB stores. It is not
+ * structuredClone, because under jsdom that makes typed arrays of another
+ * realm, which then fail `instanceof Uint8Array`.
+ */
+function copyValue(value: unknown): unknown {
+	if (value === null || typeof value !== 'object') {
+		// A function or a symbol cannot be stored; structuredClone throws the
+		// DataCloneError IndexedDB would.
+		return typeof value === 'function' || typeof value === 'symbol' ? structuredClone(value) : value;
+	}
+	if (ArrayBuffer.isView(value)) {
+		if (value instanceof DataView) {
+			return new DataView(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength));
+		}
+		return (value as Uint8Array).slice();
+	}
+	if (value instanceof ArrayBuffer) return value.slice(0);
+	if (Array.isArray(value)) return value.map(copyValue);
+	if (value instanceof Map) {
+		return new Map([ ...value ].map(([ k, v ]) => [ copyValue(k), copyValue(v) ]));
+	}
+	if (value instanceof Set) return new Set([ ...value ].map(copyValue));
+	if (value instanceof Date) return new Date(value.getTime());
+	const out: Record<string, unknown> = {};
+	for (const [ k, v ] of Object.entries(value)) out[k] = copyValue(v);
+	return out;
 }

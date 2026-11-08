@@ -1723,7 +1723,7 @@ import {
 Built-in storage backends:
 
 - `IDBKVStore`: IndexedDB implementation for browser environments. Uses Web Locks for cross-tab synchronization.
-- `MemoryKVStore`: In-memory implementation for Node.js and testing environments.
+- `MemoryKVStore`: In-memory implementation for Node.js and testing environments. It copies values as IndexedDB does: a change to an object after `put()`, or to a value a read returned, does not change the stored value.
 
 `KVWrite.guard(key, value)` makes a commit conditional: `commit()` writes nothing and rejects with `KVGuardError` unless `key` holds `value` (compared with `===`) when the writes apply. Both built-in stores implement it. The method is optional on a custom store; without it, the client cannot keep a bootstrap of one tab from writing over another tab's bootstrap, unless the store lets only one write transaction be open at a time.
 

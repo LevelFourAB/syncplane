@@ -42,6 +42,39 @@ describe.each(implementations)('KVStore: %s', (_name, open) => {
 		r.release();
 	});
 
+	// IndexedDB stores a structured clone, so an object a caller still holds
+	// is not the committed value. Code tested on one backend must behave the
+	// same on the other.
+	it('keeps the committed value when the writer mutates the object it put', async () => {
+		store = await open();
+		const value = { n: 1 };
+		const w = await store.write();
+		await w.put('k', value);
+		await w.commit();
+
+		value.n = 2;
+
+		const r = await store.read();
+		expect(await r.get('k')).toEqual({ n: 1 });
+		r.release();
+	});
+
+	it('keeps the committed value when a reader mutates the value it got', async () => {
+		store = await open();
+		const w = await store.write();
+		await w.put('k', { n: 1 });
+		await w.commit();
+
+		const r1 = await store.read();
+		const got = (await r1.get('k')) as { n: number };
+		r1.release();
+		got.n = 3;
+
+		const r2 = await store.read();
+		expect(await r2.get('k')).toEqual({ n: 1 });
+		r2.release();
+	});
+
 	it('reads a batch of keys, parallel to the request', async () => {
 		store = await open();
 		const w = await store.write();
