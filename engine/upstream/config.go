@@ -9,6 +9,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/levelfourab/syncplane/engine/server"
 )
 
 // Config configures a Link.
@@ -106,6 +108,14 @@ type Config struct {
 	// MaxPushBytes is the encoded size a push stops adding mutations at. A
 	// single larger mutation is pushed alone. 0 means 4 MiB.
 	MaxPushBytes int
+	// OriginLimits are the limits the origin enforces (its server.Limits). The
+	// link reads MaxValueBytes and MaxFieldMaskPaths, and a field at zero or
+	// below means the server's default. A local write whose forwarded form
+	// is over one of them is refused before it commits, with a server
+	// Rejection of code invalid_argument: an Apply returns it, and a
+	// downstream client's mutation is rejected with it. A collaborative-text
+	// field is measured as the full document the link forwards.
+	OriginLimits server.Limits
 	// WriteThroughTimeout bounds the call a write-through write makes to the
 	// origin. 0 means 10s.
 	WriteThroughTimeout time.Duration

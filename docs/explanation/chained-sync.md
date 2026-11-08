@@ -62,6 +62,8 @@ Delivery of `OnRejected` is at least once. The link removes a rejection from its
 
 A write that the origin keeps failing in the same way (`mutation_failed`, `invalid_argument`, or an unknown code) would block every write behind it. After `Config.PoisonThreshold` failures in a row, the link drops it and reports it as rejected with that code.
 
+The origin checks the size of each write it receives against its own limits. A write can fit the local engine's limits and not the origin's: an `Apply` has no per-value limit, and the link forwards a collaborative-text edit as the full document. So the link checks the forwarded form of each local write against `Config.OriginLimits` before the write commits, and refuses a write that is too large with `invalid_argument`. Nothing commits locally, so no reader sees the write and then sees it reverted. Set `OriginLimits` to the limits the origin uses.
+
 ## Write-through trades availability for a final answer
 
 In **write-through** mode, a local write goes to the origin before it commits locally. The local write fails with the origin's rejection, or with an error that wraps `upstream.ErrOriginUnavailable` when the origin does not answer. Nothing commits locally in either case. A downstream client that pushed the write gets `REJECTED` with the origin's code, as if it had pushed to the origin. A Go caller gets the error from the write call.

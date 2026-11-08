@@ -89,18 +89,7 @@ func mutationOf(b *bound, st stateTx, e *entry, inBatch map[uint64]bool) (_ *syn
 	for _, op := range e.ops {
 		crud := &syncplanev1.CrudMutation{Entity: op.entity, Key: op.key, Op: op.kind}
 		if op.kind != syncplanev1.CrudOp_CRUD_OP_DELETE {
-			value := op.value
-			if model := b.models[op.entity]; model != nil {
-				// A value that cannot be completed goes as captured; the
-				// origin's verdict on it is reported like any other.
-				if v, err := model.UpstreamValue(op.rebaseOp()); err == nil {
-					value = v
-				}
-			}
-			if value == nil {
-				value = []byte{}
-			}
-			crud.Value = value
+			crud.Value = forwardedValue(b, op)
 		}
 		if op.kind == syncplanev1.CrudOp_CRUD_OP_PATCH {
 			crud.FieldMask = &fieldmaskpb.FieldMask{Paths: op.mask}
@@ -127,6 +116,22 @@ func mutationOf(b *bound, st stateTx, e *entry, inBatch map[uint64]bool) (_ *syn
 		m.Payload = &syncplanev1.Mutation_Batch{Batch: &syncplanev1.BatchMutation{Mutations: cruds}}
 	}
 	return m, wait, nil
+}
+
+// forwardedValue is the value the origin receives for a PUT or PATCH op.
+func forwardedValue(b *bound, op entryOp) []byte {
+	value := op.value
+	if model := b.models[op.entity]; model != nil {
+		// A value that cannot be completed goes as captured; the origin's
+		// verdict on it is reported like any other.
+		if v, err := model.UpstreamValue(op.rebaseOp()); err == nil {
+			value = v
+		}
+	}
+	if value == nil {
+		value = []byte{}
+	}
+	return value
 }
 
 // baseVersion resolves a compare-and-swap whose base is another entry: the

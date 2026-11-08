@@ -168,6 +168,7 @@ func New(cfg Config) (*Link, error) {
 	if cfg.MaxPushBytes <= 0 {
 		cfg.MaxPushBytes = 4 << 20
 	}
+	cfg.OriginLimits = originLimits(cfg.OriginLimits)
 	if cfg.WriteThroughTimeout <= 0 {
 		cfg.WriteThroughTimeout = 10 * time.Second
 	}

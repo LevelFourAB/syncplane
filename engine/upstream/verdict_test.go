@@ -3,6 +3,7 @@ package upstream_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
@@ -162,6 +163,24 @@ var _ = Describe("Verdicts", func() {
 			Expect(n.todo("t2")).To(BeNil())
 		})
 	})
+
+	DescribeTable("a local write of a value near the origin's MaxValueBytes is refused before it commits, or reaches the origin",
+		func(size int) {
+			_, err := n.ws().Apply(ctx, func(tx *server.ApplyTx) error {
+				return tx.Put(&todov1.Todo{Id: "big", Title: strings.Repeat("x", size)})
+			})
+			if err != nil {
+				Expect(n.todo("big")).To(BeNil(), "a refused write commits nothing")
+				return
+			}
+			n.flush()
+			Expect(n.rejected()).To(BeEmpty())
+			Expect(o.todo("big").GetTitle()).To(HaveLen(size))
+			Expect(n.todo("big").GetTitle()).To(HaveLen(size))
+		},
+		Entry("under the limit", 1_000_000),
+		Entry("over the limit", 2_000_000),
+	)
 
 	Describe("a compare-and-swap", func() {
 		version := func(key string) uint64 {

@@ -117,6 +117,9 @@ func (l *Link) capture(ctx context.Context, cw *server.CapturedWrite) error {
 		}
 		e.ops = append(e.ops, eop)
 	}
+	if err := l.checkOriginLimits(b, e); err != nil {
+		return err
+	}
 
 	w := l.workspace(cw.Workspace)
 	through := l.cfg.WriteMode == ModeWriteThrough
