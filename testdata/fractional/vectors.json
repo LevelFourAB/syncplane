@@ -203,6 +203,27 @@
 			"want": []
 		},
 		{
+			"name": "negative count between bounds",
+			"a": "a0",
+			"b": "a1",
+			"n": -1,
+			"want": []
+		},
+		{
+			"name": "negative count after a bound",
+			"a": "a0",
+			"b": null,
+			"n": -1,
+			"want": []
+		},
+		{
+			"name": "negative count before a bound",
+			"a": null,
+			"b": "a0",
+			"n": -1,
+			"want": []
+		},
+		{
 			"name": "one key",
 			"a": "a0",
 			"b": "a1",

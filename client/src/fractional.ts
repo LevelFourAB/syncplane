@@ -223,6 +223,9 @@ export function generateKeyBetween(
 /**
  * Returns n keys strictly between a and b, evenly spread (recursively
  * bisecting so neighbors keep room for future inserts).
+ *
+ * A zero or negative n returns an empty array. Throws when n is not an
+ * integer, and for the bounds {@link generateKeyBetween} refuses.
  */
 export function generateNKeysBetween(
 	a: string | null,
@@ -230,7 +233,10 @@ export function generateNKeysBetween(
 	n: number,
 	digits: string = BASE_62_DIGITS,
 ): string[] {
-	if (n === 0) {
+	if (!Number.isInteger(n)) {
+		throw new Error(`key count is not an integer: ${n}`);
+	}
+	if (n <= 0) {
 		return [];
 	}
 	if (n === 1) {

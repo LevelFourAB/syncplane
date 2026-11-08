@@ -90,4 +90,10 @@ describe('generateNKeysBetween', () => {
 	it('returns an empty array for n = 0', () => {
 		expect(generateNKeysBetween(null, null, 0)).toEqual([]);
 	});
+
+	it('rejects a count that is not an integer', () => {
+		expect(() => generateNKeysBetween('a0', 'a1', 2.5)).toThrow(/not an integer/);
+		expect(() => generateNKeysBetween('a0', null, 2.5)).toThrow(/not an integer/);
+		expect(() => generateNKeysBetween('a0', null, Number.NaN)).toThrow(/not an integer/);
+	});
 });
