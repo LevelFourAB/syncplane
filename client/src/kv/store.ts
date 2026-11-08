@@ -242,8 +242,40 @@ export interface KVRead {
 export interface KVWrite extends KVRead {
 	put(key: string, value: unknown): Promise<void>;
 	del(key: string): Promise<void>;
+	/**
+	 * Makes commit() conditional on `key` holding `value` in the committed store
+	 * at the moment the writes apply, compared with `===`: an absent key holds
+	 * `undefined`, and an object never matches. When the condition fails,
+	 * commit() writes nothing and rejects with KVGuardError. Every guard of a
+	 * transaction has to hold. This transaction's own writes to `key` do not
+	 * count.
+	 *
+	 * Optional. A store without it gives a write transaction no protection
+	 * against a commit of another connection between its reads and its commit.
+	 * IDBKVStore and MemoryKVStore implement it.
+	 *
+	 * @example
+	 * ```ts
+	 * const tx = await kv.write();
+	 * tx.guard?.('meta/owner', 'tab-1');
+	 * await tx.put('rows/a', row);
+	 * await tx.commit(); // rejects with KVGuardError once another tab owns it
+	 * ```
+	 */
+	guard?(key: string, value: unknown): void;
 	/** Atomically persist all writes. Implies release. */
 	commit(): Promise<void>;
+}
+
+/**
+ * The rejection of KVWrite.commit when a guard (see KVWrite.guard) did not
+ * hold. The transaction wrote nothing and is finished.
+ */
+export class KVGuardError extends Error {
+	constructor(readonly key: string) {
+		super(`kv: commit refused, ${key} no longer holds the guarded value`);
+		this.name = 'KVGuardError';
+	}
 }
 
 /**

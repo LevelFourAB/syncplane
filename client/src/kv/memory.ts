@@ -2,6 +2,7 @@ import {
 	type GenerationOf,
 	type GenerationTracking,
 	type IndexEntry,
+	KVGuardError,
 	type KVRead,
 	type KVStore,
 	type KVWrite,
@@ -48,6 +49,11 @@ export class MemoryKVStore implements KVStore, GenerationTracking {
 	/** @internal */
 	applyCommit(next: Map<string, unknown>): void {
 		this.map = next;
+	}
+
+	/** @internal The committed value of `key`, for a guard. */
+	committed(key: string): unknown {
+		return this.map.get(key);
 	}
 }
 
@@ -181,6 +187,8 @@ class MemoryWrite extends MemoryRead implements KVWrite {
 	/** Keys this transaction deleted, tracked only while generations are, since
 	 * a deleted generation key must stay deleted (see commit). */
 	private dropped: Set<string> | undefined;
+	/** The values commit requires; see KVWrite.guard. */
+	private guards: Map<string, unknown> | undefined;
 
 	constructor(
 		private store: MemoryKVStore,
@@ -203,6 +211,10 @@ class MemoryWrite extends MemoryRead implements KVWrite {
 		this.note(key);
 	}
 
+	guard(key: string, value: unknown): void {
+		(this.guards ??= new Map()).set(key, value);
+	}
+
 	/** Records the generations `key` belongs to, if any. */
 	private note(key: string): void {
 		const at = this.generationOf?.(key);
@@ -215,6 +227,15 @@ class MemoryWrite extends MemoryRead implements KVWrite {
 	async commit(): Promise<void> {
 		if (this.done) throw new Error('transaction already finished');
 		this.done = true;
+		// The write lock is held from write() to here, so the committed map is
+		// the one this transaction opened on; checked anyway, so the guard does
+		// not depend on that.
+		for (const [ key, value ] of this.guards ?? []) {
+			if (this.store.committed(key) !== value) {
+				this.unlock();
+				throw new KVGuardError(key);
+			}
+		}
 		if (this.stampAt !== undefined) {
 			const token = nextGenerationToken();
 			// A transaction that deleted the generation key keeps it deleted — a

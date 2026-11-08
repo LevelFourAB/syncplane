@@ -6,6 +6,7 @@ import { MemoryKVStore } from '../../src/kv/memory.js';
 import {
 	type GenerationTracking,
 	type IndexEntry,
+	KVGuardError,
 	type KVStore,
 	tracksGenerations,
 } from '../../src/kv/store.js';
@@ -533,6 +534,56 @@ describe.each(implementations)('KVStore: %s', (_name, open) => {
 		expect(await r.get('a')).toBe(1);
 		expect(await r.get('b')).toBe(2);
 		r.release();
+	});
+
+	describe('commit guards', () => {
+		it('commits when every guarded key holds its value', async () => {
+			store = await open();
+			const seed = await store.write();
+			await seed.put('owner', 1);
+			await seed.commit();
+
+			const w = await store.write();
+			w.guard!('owner', 1);
+			w.guard!('missing', undefined);
+			await w.put('row', 'a');
+			await w.put('owner', 2);
+			await w.commit();
+
+			const r = await store.read();
+			expect(await r.get('row')).toBe('a');
+			expect(await r.get('owner')).toBe(2);
+			r.release();
+		});
+
+		it('writes nothing when a guarded key holds another value', async () => {
+			store = await open();
+			const seed = await store.write();
+			await seed.put('owner', 1);
+			await seed.commit();
+
+			const w = await store.write();
+			w.guard!('owner', 2);
+			await w.put('row', 'a');
+			await w.del('owner');
+			await expect(w.commit()).rejects.toBeInstanceOf(KVGuardError);
+
+			const r = await store.read();
+			expect(await r.get('row')).toBeUndefined();
+			expect(await r.get('owner')).toBe(1);
+			r.release();
+			// The refused transaction is finished, and the store takes the next one.
+			const next = await store.write();
+			await next.put('row', 'b');
+			await next.commit();
+		});
+
+		it('refuses a guard on a key that is absent', async () => {
+			store = await open();
+			const w = await store.write();
+			w.guard!('owner', 1);
+			await expect(w.commit()).rejects.toBeInstanceOf(KVGuardError);
+		});
 	});
 
 	describe('generation tracking', () => {

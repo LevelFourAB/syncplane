@@ -47,7 +47,13 @@ import {
 	stagingPrefix,
 	stagingWsRoot,
 } from '../keys.js';
-import { CountingWrite, type KVRead, type KVStore, type KVWrite } from '../kv/store.js';
+import {
+	CountingWrite,
+	KVGuardError,
+	type KVRead,
+	type KVStore,
+	type KVWrite,
+} from '../kv/store.js';
 import { type EntityRegistry, setTextFieldBytes, textFieldBytes } from '../mutations.js';
 import type { Mutex } from '../mutex.js';
 import { compactPending } from '../optimistic/compact.js';
@@ -103,7 +109,12 @@ import {
 } from './leadership.js';
 import { BootstrapProgressTracker, type StoredProgress } from './progress.js';
 import type { SchemaSkewAction, StatusTracker, SyncErrorInfo } from './status.js';
-import { fullStateKey, TextDeltaUnusableError, toWireMutations } from './textdelta.js';
+import {
+	fullStateKey,
+	TextDeltaUnusableError,
+	TextFieldUndeclaredError,
+	toWireMutations,
+} from './textdelta.js';
 
 /** One row's text documents, captured for a full-state re-send. */
 interface TextResendRow {
@@ -491,11 +502,12 @@ interface BootstrapResumeRecord {
  */
 interface BootstrapChunkCommit {
 	/**
-	 * Settles with the transaction's failure, or undefined once it committed.
-	 * Never rejects: it is awaited some way behind the loop that made it, and a
-	 * bare rejection would be an unhandled one until then.
+	 * Settles with the transaction's failure, 'superseded' when its guard on the
+	 * bootstrap generation refused it, or undefined once it committed. Never
+	 * rejects: it is awaited some way behind the loop that made it, and a bare
+	 * rejection would be an unhandled one until then.
 	 */
-	settled: Promise<{ err: unknown } | undefined>;
+	settled: Promise<{ err: unknown } | 'superseded' | undefined>;
 	/** Rows the chunk wrote. */
 	rows: number;
 	/** Entities the chunk carried rows for, for the hydration coverage. */
@@ -636,6 +648,12 @@ export class Coordinator {
 	 * restores a closed tab left behind; see loadTextRestores.
 	 */
 	private restoresUnchecked = new Set<string>();
+	/**
+	 * Entities whose delta state named a text field this build does not
+	 * declare. Sent in no_delta_entities with the opaque ones, so a field that a
+	 * later build added costs one re-bootstrap per coordinator, not one per edit.
+	 */
+	private undeclaredTextEntities = new Set<string>();
 	/**
 	 * Writer identities for the restore path, created on first use. Slots are
 	 * held for the length of one restore batch and coordinate with the client's
@@ -1253,7 +1271,10 @@ export class Coordinator {
 		return this.opts.kvMutex.runShared(async () => {
 			const tx = await this.opts.kv.read();
 			try {
-				return await opaqueEntities(tx, this.opts.registry);
+				const names = await opaqueEntities(tx, this.opts.registry);
+				return this.undeclaredTextEntities.size === 0
+					? names
+					: [ ...new Set([ ...names, ...this.undeclaredTextEntities ]) ];
 			} finally {
 				tx.release();
 			}
@@ -2647,6 +2668,7 @@ export class Coordinator {
 			applied = await this.rebasePage(workspaceId, page);
 		} catch (err) {
 			if (!(err instanceof TextDeltaUnusableError)) throw err;
+			if (err instanceof TextFieldUndeclaredError) this.undeclaredTextEntities.add(err.entity);
 			// The page's text delta state does not fit this client's confirmed
 			// rows, so the page cannot be trusted at all — and neither can the
 			// cursor it would have advanced. Nothing was written (the rebase
@@ -2871,9 +2893,12 @@ export class Coordinator {
 	 * transaction and stops writing the moment it is superseded: a cold
 	 * bootstrap cannot discard rows it has already written into c/, and a staged
 	 * one may have been adopted by the claim that superseded it, which owns its
-	 * staging prefix and resume record from then on. The two transactions
-	 * serialize, so each chunk either lands before the winner's claim — which
-	 * wipes or adopts it — or sees the bumped generation and never lands at all.
+	 * staging prefix and resume record from then on. The chunk also guards its
+	 * commit on the generation (KVWrite.guard), which a store without a write
+	 * lock (IndexedDB) needs: there the check and the commit are separate
+	 * transactions. The claim commits the bumped generation before it reads
+	 * what it wipes, so each chunk either lands before those reads — and is
+	 * wiped or adopted — or is refused and never lands at all.
 	 *
 	 * A failed attempt is not thrown away. What it staged stays where it is, and
 	 * the resume record it left (metaBootstrapResume) lets the next attempt ask
@@ -2930,6 +2955,14 @@ export class Coordinator {
 		//    inside this transaction, and every install is gated on it.
 		const claim = await this.opts.kvMutex.run(
 			async () => {
+				let claimed: {
+					gen: number;
+					snapshotGen: number;
+					direct: boolean;
+					syncable: ReadonlySet<string>;
+					resume: { cursor: Uint8Array; token: Uint8Array } | undefined;
+					progress: StoredProgress | undefined;
+				};
 				const tx = await this.opts.kv.write();
 				try {
 					const current = ((await tx.get(metaBootstrapGen(workspaceId))) as number | undefined) ?? 0;
@@ -2961,20 +2994,10 @@ export class Coordinator {
 					if (adopt) {
 						await tx.put(metaBootstrapResume(workspaceId), { ...record, gen: next });
 					} else {
-						// The wipe a bootstrap would otherwise do at the end, done before
-						// this one writes anything instead. It clears the rows, index
-						// entries and built markers of an interrupted earlier attempt —
-						// all of which describe a snapshot that was never installed — so
-						// what streams in now cannot inherit a row the server has since
-						// deleted, and no marker outlives the rows it described. It is
-						// also what leaves every c/ row of this workspace one this
-						// attempt wrote, which the marker claim at the install rests on.
-						if (direct) await wipeConfirmedState(tx, this.opts.registry, workspaceId, touched);
-						await clearStaging(tx, stagingWsRoot(workspaceId));
 						await tx.del(metaBootstrapResume(workspaceId));
 					}
 					await tx.commit();
-					return {
+					claimed = {
 						gen: next,
 						snapshotGen: adopt ? record.snapshotGen : next,
 						direct,
@@ -2986,6 +3009,33 @@ export class Coordinator {
 					tx.release();
 					throw err;
 				}
+				if (claimed.resume !== undefined) return claimed;
+				// The wipe a bootstrap would otherwise do at the end, done before this
+				// one writes anything instead. It clears the rows, index entries and
+				// built markers of an interrupted earlier attempt — all of which
+				// describe a snapshot that was never installed — so what streams in
+				// now cannot inherit a row the server has since deleted, and no
+				// marker outlives the rows it described. It is also what leaves every
+				// c/ row of this workspace one this attempt wrote, which the marker
+				// claim at the install rests on.
+				//
+				// A transaction of its own, after the claim committed: a chunk of an
+				// earlier generation commits outside the mutex, and on a store
+				// without a write lock (IndexedDB) it can land between the reads of
+				// a wipe and its commit. Its guard refuses it once the claim is
+				// committed, so every chunk either lands before the reads below or
+				// not at all. Interrupted between the two, the workspace keeps no
+				// resume record, and the next claim wipes.
+				const sweep = await this.opts.kv.write();
+				try {
+					if (claimed.direct) await wipeConfirmedState(sweep, this.opts.registry, workspaceId, touched);
+					await clearStaging(sweep, stagingWsRoot(workspaceId));
+					await sweep.commit();
+				} catch (err) {
+					sweep.release();
+					throw err;
+				}
+				return claimed;
 			},
 		);
 		const { gen, snapshotGen: claimedSnapshotGen, direct, resume, syncable } = claim;
@@ -3047,11 +3097,17 @@ export class Coordinator {
 			while (inflight.length > keep) {
 				const chunk = inflight.shift()!;
 				const failed = await chunk.settled;
+				if (failed === 'superseded') {
+					// The chunks after it carry the same guard, so none of them
+					// committed either.
+					superseded = true;
+					continue;
+				}
 				if (failed !== undefined) {
 					failure ??= failed;
 					continue;
 				}
-				if (failure !== undefined) continue;
+				if (failure !== undefined || superseded) continue;
 				rows += chunk.rows;
 				this.progress.committed(workspaceId, chunk.entities);
 				// Committed, so whatever this chunk finished is now readable.
@@ -3070,8 +3126,10 @@ export class Coordinator {
 		// has claimed the workspace meanwhile and owns its rows.
 		const flushPostings = async (): Promise<boolean> => {
 			await settleChunks(0);
+			if (superseded) return false;
 			const tx = await this.opts.kv.write();
 			try {
+				tx.guard?.(metaBootstrapGen(workspaceId), gen);
 				if (!(await this.stillCurrent(tx, workspaceId, gen))) {
 					tx.release();
 					return false;
@@ -3081,6 +3139,7 @@ export class Coordinator {
 				return true;
 			} catch (err) {
 				tx.release();
+				if (err instanceof KVGuardError) return false;
 				throw err;
 			}
 		};
@@ -3139,6 +3198,11 @@ export class Coordinator {
 						if (cursor === undefined) throw new Error('bootstrap chunk before Begin');
 						const entities = msg.body.value.rows.map((r) => r.entity);
 						const tx = await this.opts.kv.write();
+						// The check below reads the generation before the commit,
+						// and a store without a write lock (IndexedDB) lets another
+						// tab's claim commit in between. The guard re-checks it in
+						// the commit itself.
+						tx.guard?.(metaBootstrapGen(workspaceId), gen);
 						try {
 							// A superseded bootstrap stops writing. Cold rows are visible
 							// the moment they commit, so they cannot be discarded
@@ -3203,16 +3267,17 @@ export class Coordinator {
 								);
 							}
 							superseded = !(await current);
+							// Room for this one first: the queue is what bounds how far
+							// ahead of the store the loop may run. A refused chunk in it
+							// also says this attempt is superseded.
+							if (!superseded) await settleChunks(MAX_INFLIGHT_BOOTSTRAP_COMMITS - 1);
 							if (superseded) {
 								tx.release();
 							} else {
-								// Room for this one first: the queue is what bounds how far
-								// ahead of the store the loop may run.
-								await settleChunks(MAX_INFLIGHT_BOOTSTRAP_COMMITS - 1);
 								inflight.push({
 									settled: tx.commit().then(
 										() => undefined,
-										(err: unknown) => ({ err }),
+										(err: unknown) => err instanceof KVGuardError ? 'superseded' : { err },
 									),
 									rows: msg.body.value.rows.length,
 									entities,

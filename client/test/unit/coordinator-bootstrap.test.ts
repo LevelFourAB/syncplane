@@ -1,4 +1,5 @@
-import { create, toBinary } from '@bufbuild/protobuf';
+import 'fake-indexeddb/auto';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { createRouterTransport, type Transport } from '@connectrpc/connect';
 import { describe, expect, it } from 'vitest';
 
@@ -18,10 +19,11 @@ import {
 	metaSnapshotGen,
 	stagingWsRoot,
 } from '../../src/keys.js';
+import { IDBKVStore } from '../../src/kv/idb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { KVRead, KVStore, KVWrite } from '../../src/kv/store.js';
 import { buildPut, EntityRegistry } from '../../src/mutations.js';
-import { createKvMutex, type Mutex } from '../../src/mutex.js';
+import { ChainMutex, createKvMutex, type Mutex } from '../../src/mutex.js';
 import { buildIndexes } from '../../src/optimistic/index-build.js';
 import { IndexCache } from '../../src/optimistic/index-maintain.js';
 import { enqueuePending } from '../../src/optimistic/queue.js';
@@ -966,6 +968,184 @@ describe('cold bootstrap', () => {
 	});
 });
 
+// IndexedDB has no write lock: a write transaction's reads and its commit are
+// separate IDB transactions, so another tab's claim can land between a cold
+// chunk's generation check and its commit.
+describe('cold bootstrap on IndexedDB', () => {
+	/**
+	 * Holds the first commit that writes a confirmed row until `release`, after
+	 * the transaction has read everything it reads. Stands in for the time a
+	 * chunk spends decoding and indexing its rows.
+	 */
+	function holdFirstRowCommit(inner: KVStore) {
+		return holdFirstCommitOf(inner, (key) => key.startsWith(confirmedWsPrefix('todo', WS)));
+	}
+
+	/** Holds the first commit that writes a key `holds` selects, as holdFirstRowCommit does. */
+	function holdFirstCommitOf(inner: KVStore, holds: (key: string) => boolean) {
+		let reached!: () => void;
+		const isHeld = new Promise<void>((r) => (reached = r));
+		let release!: () => void;
+		const gate = new Promise<void>((r) => (release = r));
+		let armed = true;
+		const kv: KVStore = {
+			read: () => inner.read(),
+			close: () => inner.close(),
+			async write(): Promise<KVWrite> {
+				const tx = await inner.write();
+				let writesRows = false;
+				return new Proxy(tx, {
+					get(target, prop) {
+						if (prop === 'put') {
+							return (key: string, value: unknown) => {
+								if (holds(key)) writesRows = true;
+								return target.put(key, value);
+							};
+						}
+						if (prop === 'commit') {
+							return async () => {
+								if (writesRows && armed) {
+									armed = false;
+									reached();
+									await gate;
+								}
+								await target.commit();
+							};
+						}
+						const value = Reflect.get(target, prop) as unknown;
+						return typeof value === 'function' ? (value as () => unknown).bind(target) : value;
+					},
+				});
+			},
+		} as KVStore;
+		return { kv, isHeld, release };
+	}
+
+	/** A server answering every bootstrap with one snapshot, and nothing after it. */
+	function snapshotTransport(seq: number, rows: ReturnType<typeof serverRowBody>[]): Transport {
+		return createRouterTransport(({ service }) => {
+			service(SyncService, {
+				async *bootstrap() {
+					yield create(BootstrapResponseSchema, {
+						body: { case: 'begin', value: { cursor: new Uint8Array([ seq ]), seq: BigInt(seq) } },
+					});
+					yield create(BootstrapResponseSchema, { body: { case: 'chunk', value: { rows } } });
+					yield create(BootstrapResponseSchema, { body: { case: 'end', value: {} } });
+				},
+				push(req) {
+					return pushResults(req, []);
+				},
+				pull() {
+					return {
+						patch: { changes: [], dropEntities: [] },
+						nextCursor: new Uint8Array([ 9 ]),
+						lastAckedMutationId: 0n,
+						reset: false,
+						hasMore: false,
+						seq: 9n,
+					};
+				},
+				query() {
+					return { rows: [] };
+				},
+			});
+		});
+	}
+
+	it("writes no row of the losing tab's chunk after the winner installed", async () => {
+		// Given two tabs on one IndexedDB store and no cursor for the workspace
+		const idb = await IDBKVStore.open(`cold-bootstrap-race-${crypto.randomUUID()}`);
+		const kvMutex = new ChainMutex();
+		const heldA = holdFirstRowCommit(idb);
+		// Tab A's snapshot is at seq 5; by seq 9, x is deleted and y is retitled.
+		const a = newCoordinator(
+			heldA.kv,
+			kvMutex,
+			snapshotTransport(5, [ serverRowBody('x', 'x', 1n), serverRowBody('y', 'old', 2n) ]),
+		);
+		const b = newCoordinator(idb, kvMutex, snapshotTransport(9, [ serverRowBody('y', 'new', 8n) ]));
+
+		// When A's chunk has checked its generation, B claims and installs, and
+		// then A's chunk commits
+		const syncA = a.syncNow().catch(() => {});
+		await heldA.isHeld;
+		await b.syncNow();
+		heldA.release();
+		await syncA;
+
+		// Then the store holds B's snapshot only
+		const tx = await idb.read();
+		try {
+			const titles: Record<string, string> = {};
+			for (const r of await scanMergedRows(tx, registry, 'todo', WS)) {
+				titles[r.key] = fromBinary(TodoSchema, r.v).title;
+			}
+			expect(titles).toEqual({ y: 'new' });
+			expect(await tx.get(metaCursor(WS))).toEqual(new Uint8Array([ 9 ]));
+		} finally {
+			tx.release();
+		}
+
+		await a.stop();
+		await b.stop();
+		await idb.close();
+	});
+
+	it("writes no row of the losing tab's chunk that lands while the winner claims", async () => {
+		// Given two tabs on one IndexedDB store and no cursor for the workspace
+		const idb = await IDBKVStore.open(`cold-bootstrap-claim-race-${crypto.randomUUID()}`);
+		const kvMutex = new ChainMutex();
+		const heldA = holdFirstRowCommit(idb);
+		const heldB = holdFirstCommitOf(idb, (key) => key === metaBootstrapGen(WS));
+		const a = newCoordinator(
+			heldA.kv,
+			kvMutex,
+			snapshotTransport(5, [ serverRowBody('x', 'x', 1n), serverRowBody('y', 'old', 2n) ]),
+		);
+		const b = newCoordinator(
+			heldB.kv,
+			kvMutex,
+			snapshotTransport(9, [ serverRowBody('y', 'new', 8n) ]),
+		);
+
+		// When B's claim has read the store, A's chunk commits, and then B's
+		// claim commits
+		const syncA = a.syncNow().catch(() => {});
+		await heldA.isHeld;
+		const syncB = b.syncNow();
+		await heldB.isHeld;
+		heldA.release();
+		await expect.poll(async () => {
+			const tx = await idb.read();
+			try {
+				return await tx.has(confirmedKey('todo', WS, 'x'));
+			} finally {
+				tx.release();
+			}
+		}).toBe(true);
+		heldB.release();
+		await syncB;
+		await syncA;
+
+		// Then the store holds B's snapshot only
+		const tx = await idb.read();
+		try {
+			const titles: Record<string, string> = {};
+			for (const r of await scanMergedRows(tx, registry, 'todo', WS)) {
+				titles[r.key] = fromBinary(TodoSchema, r.v).title;
+			}
+			expect(titles).toEqual({ y: 'new' });
+			expect(await tx.get(metaCursor(WS))).toEqual(new Uint8Array([ 9 ]));
+		} finally {
+			tx.release();
+		}
+
+		await a.stop();
+		await b.stop();
+		await idb.close();
+	});
+});
+
 // Chunks are written while the ones before them are still committing: the loop
 // hands a transaction to the store and decodes the next chunk instead of
 // waiting, which is what keeps a large snapshot from spending most of its time
@@ -990,9 +1170,10 @@ describe('pipelined bootstrap chunks', () => {
 			(event) => void events.push(event),
 		);
 
-		// Everything the bootstrap commits after claiming its generation waits for
+		// Everything the bootstrap commits after claiming its generation (one
+		// commit) and sweeping what an earlier attempt left (another) waits for
 		// the test.
-		kv.holdFrom = 2;
+		kv.holdFrom = 3;
 		const syncP = coord.syncNow();
 
 		// Two chunk transactions with the store and neither reported back: the
@@ -1057,9 +1238,9 @@ describe('pipelined bootstrap chunks', () => {
 		const onUnhandled = (err: unknown): void => void unhandled.push(err);
 		process.on('unhandledRejection', onUnhandled);
 		try {
-			// The first chunk's transaction, the generation claim being the first
-			// commit of the bootstrap.
-			kv.failAt = 2;
+			// The first chunk's transaction, the generation claim and the sweep
+			// being the first two commits of the bootstrap.
+			kv.failAt = 3;
 			await expect(coord.syncNow()).rejects.toThrow('commit failed');
 			// Long enough for a rejection nobody handled to be reported.
 			await new Promise((r) => setTimeout(r, 20));

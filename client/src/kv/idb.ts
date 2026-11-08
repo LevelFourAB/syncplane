@@ -4,6 +4,7 @@ import {
 	type GenerationTracking,
 	INDEX_FIELD,
 	type IndexEntry,
+	KVGuardError,
 	type KVRead,
 	type KVStore,
 	type KVWrite,
@@ -674,6 +675,8 @@ class IDBWrite extends IDBRead implements KVWrite {
 	private done = false;
 	/** Generation keys the buffered writes fall under; stamped on commit. */
 	private stampAt: Set<string> | undefined;
+	/** The values commit requires; see KVWrite.guard. */
+	private guards: Map<string, unknown> | undefined;
 
 	constructor(db: IDBDatabase, storeName: string, private generationOf?: GenerationOf) {
 		super(db, storeName);
@@ -879,6 +882,10 @@ class IDBWrite extends IDBRead implements KVWrite {
 		this.note(key);
 	}
 
+	guard(key: string, value: unknown): void {
+		(this.guards ??= new Map()).set(key, value);
+	}
+
 	async del(key: string): Promise<void> {
 		this.pending.delete(key);
 		this.deleted.add(key);
@@ -899,25 +906,56 @@ class IDBWrite extends IDBRead implements KVWrite {
 	async commit(): Promise<void> {
 		if (this.done) throw new Error('transaction already finished');
 		this.done = true;
-		if (this.pending.size === 0 && this.deleted.size === 0) return;
+		const guards = this.guards;
+		if (this.pending.size === 0 && this.deleted.size === 0 && guards === undefined) return;
 		const tx = this.db.transaction(this.storeName, 'readwrite');
 		const store = tx.objectStore(this.storeName);
-		for (const [ k, v ] of this.pending) store.put(v, k);
-		for (const k of this.deleted) store.delete(k);
-		if (this.stampAt !== undefined) {
-			const token = nextGenerationToken();
-			// A transaction that deleted the generation key keeps it deleted — a
-			// workspace purge takes the rows and their generation together, and an
-			// absent token already means "unknown" to every reader.
-			for (const at of this.stampAt) {
-				if (!this.deleted.has(at)) store.put(token, at);
+		const apply = () => {
+			for (const [ k, v ] of this.pending) store.put(v, k);
+			for (const k of this.deleted) store.delete(k);
+			if (this.stampAt !== undefined) {
+				const token = nextGenerationToken();
+				// A transaction that deleted the generation key keeps it deleted — a
+				// workspace purge takes the rows and their generation together, and
+				// an absent token already means "unknown" to every reader.
+				for (const at of this.stampAt) {
+					if (!this.deleted.has(at)) store.put(token, at);
+				}
 			}
-		}
-		await new Promise<void>((resolve, reject) => {
+		};
+		let refused: string | undefined;
+		const done = new Promise<void>((resolve, reject) => {
 			tx.oncomplete = () => resolve();
 			tx.onerror = () => reject(tx.error);
-			tx.onabort = () => reject(tx.error ?? new Error('transaction aborted'));
+			tx.onabort = () =>
+				reject(
+					refused !== undefined
+						? new KVGuardError(refused)
+						: tx.error ?? new Error('transaction aborted'),
+				);
 		});
+		if (guards === undefined) {
+			apply();
+		} else {
+			// The reads that check the guards and the writes share this one IDB
+			// transaction, which no other connection's commit can interleave
+			// with. The writes are issued from the last read's callback, while
+			// the transaction is still active.
+			let left = guards.size;
+			for (const [ key, value ] of guards) {
+				const req = store.get(key);
+				req.onsuccess = () => {
+					if (refused !== undefined) return;
+					if (req.result !== value) {
+						refused = key;
+						tx.abort();
+						return;
+					}
+					if (--left === 0) apply();
+				};
+			}
+		}
+		await done;
 	}
 
 	override release(): void {
@@ -925,5 +963,6 @@ class IDBWrite extends IDBRead implements KVWrite {
 		this.pending.clear();
 		this.deleted.clear();
 		this.stampAt = undefined;
+		this.guards = undefined;
 	}
 }
