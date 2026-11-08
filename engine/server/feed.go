@@ -87,6 +87,20 @@ type Change struct {
 // cursor Changes returned alongside this error.
 var ErrCursorTooOld = errors.New("server: feed cursor cannot be resumed against this store")
 
+// ErrCursorForeign is the ErrCursorTooOld that Changes returns when the cursor
+// names a history this store does not hold: another store lineage (see
+// Cursor.Epoch), a sequence above the current one, or a write the store does
+// not hold (see Cursor.Lineage). That is the case after a swap of the store, a
+// restore from backup, or a DeleteWorkspace and RestoreWorkspace. It wraps
+// ErrCursorTooOld, so errors.Is matches both.
+//
+// The two call for different recoveries. Below the horizon, the history the
+// consumer read is still this store's history, and state the consumer derived
+// from it stays a valid base for the resync. After ErrCursorForeign, that
+// state describes a history the store does not hold: discard it, and resync
+// as on a first run.
+var ErrCursorForeign = fmt.Errorf("%w: the cursor names a history this store does not hold", ErrCursorTooOld)
+
 // Changes drains committed row changes after the cursor, in (seq, entity,
 // key) order, invoking fn for at most limit rows (limit <= 0 uses the
 // MaxPullChanges limit). It returns the advanced cursor and whether more
@@ -107,7 +121,8 @@ var ErrCursorTooOld = errors.New("server: feed cursor cannot be resumed against 
 // current sequence, from another store lineage, or from a history a restore
 // from backup discarded — Changes returns ErrCursorTooOld along with a cursor
 // at the workspace's current sequence: resync against current state first,
-// then resume from that cursor.
+// then resume from that cursor. In every case but the horizon the error is
+// ErrCursorForeign.
 func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, limit int, fn func(Change) error) (next Cursor, more bool, err error) {
 	if workspaceID == "" {
 		return Cursor{}, false, fmt.Errorf("server: workspace id is required")
@@ -153,7 +168,7 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 		// and head would only pick an arbitrary one of the two errors.
 		if after.Epoch != 0 && after.Epoch != epoch {
 			next = Cursor{Seq: current, Epoch: epoch}
-			return ErrCursorTooOld
+			return ErrCursorForeign
 		}
 		// A cursor older than the tombstone horizon may have missed
 		// garbage-collected deletions; only a full resync recovers those.
@@ -172,7 +187,7 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 		// epoch because nothing was ever written to it.
 		if after.Seq > current {
 			next = Cursor{Seq: current, Epoch: epoch}
-			return ErrCursorTooOld
+			return ErrCursorForeign
 		}
 		// The same store restored from a backup taken before after.Seq and
 		// written past it: epoch and seq both pass, but the write at
@@ -181,7 +196,7 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 			return err
 		} else if foreign {
 			next = Cursor{Seq: current, Epoch: epoch}
-			return ErrCursorTooOld
+			return ErrCursorForeign
 		}
 		// Scan one row past the limit: seeing it proves truncation without
 		// emitting it. Hidden rows count toward the limit and move the resume
@@ -225,6 +240,9 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, ErrCursorForeign) {
+			return next, false, ErrCursorForeign
+		}
 		if errors.Is(err, ErrCursorTooOld) {
 			return next, false, ErrCursorTooOld
 		}

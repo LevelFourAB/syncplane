@@ -33,6 +33,8 @@ Connector operations use an at-least-once model with idempotent repair. A failur
 
 When any of these failures occur, a reconcile pass restores convergence between the source and the workspace.
 
+When the engine store is swapped or restored from a backup, or the workspace is deleted and restored, the egress cursor names a history that the engine does not hold. The connector then deletes every shadow of the workspace and heals as an initial import: source rows come into the workspace, and workspace rows go out to the source. The shadows of the old history do not decide anything, so a source row that the engine does not hold is imported and not deleted at the source.
+
 ## Collaborative text handling
 
 Connectors exchange text content as plain strings using `Item.TextFields`.

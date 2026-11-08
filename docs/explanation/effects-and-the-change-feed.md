@@ -47,6 +47,8 @@ When a consumer falls behind past the horizon or presents an invalid cursor, `Ch
 
 Persisting cursors with their `Epoch` and `Lineage` fields allows these checks. `Epoch` names the store; `Lineage` names the write at the cursor sequence. A value of `0` in either field means unknown and bypasses that check. Garbage collection removes lineage marks on the tombstone retention, so a cursor older than the retention passes the `Lineage` check. The mark of the current sequence stays, so a consumer at the head of an idle workspace keeps the check. Consumer positions in the effects runtime reside inside the workspace store, so they transfer automatically during a swap or restore.
 
+Only the first condition leaves the history that the consumer read in the store. For the other conditions, `Changes` returns `ErrCursorForeign`, which wraps `ErrCursorTooOld`. State that a consumer derived from the old history, such as shadows of rows, is then no base for a comparison with the current state.
+
 A consumer that falls behind past the horizon logs a warning, drops its shadow rows, and resumes at the current sequence number. Unread intermediate changes are permanently lost.
 
 ## Guarantees provided to handlers

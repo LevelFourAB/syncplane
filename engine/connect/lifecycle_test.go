@@ -254,6 +254,76 @@ var _ = Describe("Cursor-too-old recovery", func() {
 		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
 		Expect(f.src.writeCount()).To(Equal(writes))
 	})
+	Describe("after a workspace delete and restore", func() {
+		const ws = "ws-restored"
+
+		// reseeded leaves the connector healed onto a restored workspace whose
+		// t1 holds the same content as the deleted one's, where t1 was the
+		// deleted workspace's write at seq 10.
+		reseeded := func() *fixture {
+			GinkgoHelper()
+			f := newFixture()
+			for i := 1; i <= 9; i++ {
+				id := fmt.Sprintf("f%d", i)
+				f.push(ctx, ws, putMutation("c1", uint64(i), "todo", id, &todov1.Todo{Id: id}))
+			}
+			f.push(ctx, ws, putMutation("c1", 10, "todo", "t1", &todov1.Todo{Id: "t1", Title: "seed"}))
+			Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+
+			Expect(f.srv.DeleteWorkspace(ctx, ws)).To(Succeed())
+			Expect(f.srv.RestoreWorkspace(ctx, ws)).To(Succeed())
+			f.push(ctx, ws, putMutation("c2", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "seed"}))
+			Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+			return f
+		}
+
+		It("egresses an edit the restored workspace makes below the deleted one's sequence", func() {
+			// Given a healed connector over the re-seeded t1
+			f := reseeded()
+
+			// When a client edits t1 at seq 2
+			f.push(ctx, ws, putMutation("c2", 2, "todo", "t1", &todov1.Todo{Id: "t1", Title: "edited"}))
+			Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+
+			// Then the edit reaches the source
+			Expect(f.src.get(ws, "t1").GetTitle()).To(Equal("edited"),
+				"a shadow from the deleted workspace took the edit for the connector's own write")
+		})
+
+		It("egresses an edit the restored workspace makes above the deleted one's sequence", func() {
+			f := reseeded()
+			for i := 2; i <= 10; i++ {
+				f.push(ctx, ws, putMutation("c2", uint64(i), "todo", "w", &todov1.Todo{Id: "w", Title: fmt.Sprint(i)}))
+			}
+			Expect(f.currentSeq(ctx, ws)).To(BeNumerically(">=", 10))
+
+			f.push(ctx, ws, putMutation("c2", 11, "todo", "t1", &todov1.Todo{Id: "t1", Title: "edited"}))
+			Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+
+			Expect(f.src.get(ws, "t1").GetTitle()).To(Equal("edited"))
+		})
+	})
+
+	It("keeps the shadows of unchanged rows across a heal from the tombstone horizon", func() {
+		const ws = "ws-horizon"
+		f := newFixtureFull([]server.Option{server.WithGC(-time.Second, 0)})
+		f.push(ctx, ws, putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+		before, err := f.st.Shadow(ctx, ws, "todo", "t1")
+		Expect(err).NotTo(HaveOccurred())
+
+		f.push(ctx, ws, putMutation("c1", 2, "todo", "gone", &todov1.Todo{Id: "gone"}))
+		f.push(ctx, ws, deleteMutation("c1", 3, "todo", "gone"))
+		Expect(f.srv.CollectGarbage(ctx, ws)).To(Succeed())
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+		writes := f.src.writeCount()
+
+		after, err := f.st.Shadow(ctx, ws, "todo", "t1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(after.EngineVersion).To(Equal(before.EngineVersion))
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+		Expect(f.src.writeCount()).To(Equal(writes))
+	})
 })
 
 var _ = Describe("Multiple workspaces", func() {

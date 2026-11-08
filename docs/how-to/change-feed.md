@@ -88,7 +88,11 @@ Always persist the cursor whole, including the `Epoch` and `Lineage` fields.
 If `srv.Changes` returns `ErrCursorTooOld`, you cannot resume the cursor.
 When this occurs, do the steps:
 
-1. Resynchronize your local state against the current workspace state.
+1. Resynchronize your local state against the current workspace state. If
+   `errors.Is(err, server.ErrCursorForeign)`, the store does not hold the
+   history your local state came from. Discard the state that you derived from
+   that history, such as per-row snapshots, and resynchronize as on a first
+   run.
 2. Resume reading changes using the new cursor returned by `srv.Changes`.
 
 ## Verifying change processing

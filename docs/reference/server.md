@@ -499,7 +499,7 @@ func (s *Server) CurrentSeq(ctx, workspaceID string) (uint64, error)
 
 The feed outputs all workspace changes, including `syncplane_field_history` records. Effects and handlers dispatching by prototype ignore unhandled entity types; consumers processing all changes directly can filter `syncplane_field_history`. See [effects](../how-to/react-to-changes.md).
 
-`Changes` returns `ErrCursorTooOld` if the cursor is below the tombstone horizon, ahead of the current sequence, contains a mismatched store epoch (`Cursor.Epoch`), or names a write the store does not hold (`Cursor.Lineage`), which is the case after a restore from backup. See [Follow committed changes](../how-to/change-feed.md).
+`Changes` returns `ErrCursorTooOld` if the cursor is below the tombstone horizon, ahead of the current sequence, contains a mismatched store epoch (`Cursor.Epoch`), or names a write the store does not hold (`Cursor.Lineage`), which is the case after a restore from backup. In every case except the horizon, the error is `ErrCursorForeign`, which wraps `ErrCursorTooOld`: the cursor names a history that the store does not hold, for example after a store swap, a restore from backup, or `DeleteWorkspace` and `RestoreWorkspace`. See [Follow committed changes](../how-to/change-feed.md).
 
 `CurrentSeq` returns the current head sequence of the workspace feed.
 

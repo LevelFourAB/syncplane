@@ -48,8 +48,21 @@ func (c *Connector) drain(ctx context.Context, workspaceID string, p *pass) erro
 			// heal both directions outside it — source→engine via reconcile,
 			// engine→source via the shadow/state sweep — then resume from the
 			// position the feed handed back.
+			foreign := errors.Is(err, server.ErrCursorForeign)
 			logger.LogAttrs(ctx, slog.LevelWarn, "feed cursor cannot be resumed; healing via full reconcile + resync",
-				slog.Uint64("resume_seq", next.Seq))
+				slog.Uint64("resume_seq", next.Seq), slog.Bool("foreign_history", foreign))
+			// After a store swap, a restore or a workspace delete and restore,
+			// the shadows describe rows of a history the engine no longer
+			// holds. Kept, they would delete source rows the engine lacks as
+			// lost deletes, and suppress new changes at or below their old
+			// sequences as the connector's own writes. Without them the heal
+			// is the initial import. Below the horizon the history is still
+			// the engine's, and the shadows are what finds the lost deletes.
+			if foreign {
+				if err := c.forgetShadows(ctx, workspaceID); err != nil {
+					return err
+				}
+			}
 			if err := c.reconcile(ctx, workspaceID, p); err != nil {
 				return err
 			}
@@ -79,6 +92,26 @@ func (c *Connector) drain(ctx context.Context, workspaceID string, p *pass) erro
 			return nil
 		}
 	}
+}
+
+// forgetShadows deletes every shadow of the workspace.
+func (c *Connector) forgetShadows(ctx context.Context, workspaceID string) error {
+	// Collect first: State implementations need not support reentrant calls
+	// under an open scan.
+	type rowID struct{ entity, key string }
+	var ids []rowID
+	if err := c.state.ScanShadows(ctx, workspaceID, func(entity, key string, _ Shadow) error {
+		ids = append(ids, rowID{entity, key})
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := c.state.DeleteShadow(ctx, workspaceID, id.entity, id.key); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // egress projects one engine change onto the source, consulting the shadow
