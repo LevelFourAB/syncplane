@@ -135,7 +135,8 @@ export const metaPushedThrough = (workspaceId: string): string =>
  * (decimal string): the response was lost, so the batch may have committed
  * and its verdicts are known only to the server. While the queue still holds
  * an id at or below it, every tab's rebase keeps acked mutations queued, so
- * a rejection among them stays for the re-push to collect. Written when the
+ * a rejection among them stays for the re-push to collect, but does not replay
+ * them over the confirmed rows that already hold their outcome. Written when the
  * push fails, deleted by an answered push that reaches it, and deleted by a
  * rebase or a renumber that leaves no queued id at or below it. See
  * finalizeRebase.

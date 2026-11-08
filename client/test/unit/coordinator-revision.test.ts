@@ -1,4 +1,4 @@
-import { create } from '@bufbuild/protobuf';
+import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { createRouterTransport, type Transport } from '@connectrpc/connect';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -11,12 +11,13 @@ import {
 	SubscribeResponseSchema,
 	SyncService,
 } from '../../src/gen/syncplane/v1/service_pb.js';
-import { metaCursor, metaLastMutationId } from '../../src/keys.js';
+import { confirmedKey, metaCursor, metaLastMutationId } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
-import { buildPut, EntityRegistry } from '../../src/mutations.js';
+import { buildPatch, buildPut, EntityRegistry } from '../../src/mutations.js';
 import { createKvMutex } from '../../src/mutex.js';
 import { enqueuePending } from '../../src/optimistic/queue.js';
 import { applyMutationLocally } from '../../src/optimistic/rebase.js';
+import { readMergedRow } from '../../src/read.js';
 import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator } from '../../src/sync/coordinator.js';
 import { type SchemaSkewAction, StatusTracker } from '../../src/sync/status.js';
@@ -552,5 +553,107 @@ describe('queryServer schema-revision handshake', () => {
 		expect(client.status().schemaSkew).toBeUndefined();
 
 		await client.close();
+	});
+});
+
+// A push whose response was lost leaves a mark that holds its mutations queued
+// until a later push answers for them. A block stops every push, so the mark
+// stands for as long as the block does.
+describe('schema-skew block after an unanswered push', () => {
+	it("shows another user's newer value of a field this client wrote", async () => {
+		const kv = new MemoryKVStore();
+		const registry = new EntityRegistry([ TodoSchema ]);
+		const todo = (title: string) => toBinary(TodoSchema, create(TodoSchema, { id: 'r', title }));
+
+		// Given row r, and mutation 1 setting its title to 'mine'
+		const edit = create(MutationSchema, {
+			clientId: 'c1',
+			mutationId: 1n,
+			payload: {
+				case: 'crud',
+				value: buildPatch(registry.bySchema(TodoSchema), TodoSchema, 'r', { title: 'mine' }),
+			},
+		});
+		const seed = await kv.write();
+		await seed.put(metaCursor(WS), new Uint8Array([ 1 ]));
+		await seed.put(confirmedKey('todo', WS, 'r'), { v: todo('base'), ver: '1' });
+		await enqueuePending(seed, WS, edit);
+		await applyMutationLocally(seed, registry, {}, WS, edit, new TouchSet());
+		await seed.put(metaLastMutationId(WS), '1');
+		await seed.commit();
+
+		// The server applies mutation 1 at seq 11 but its response is lost, and
+		// another user then sets the title to 'theirs' at seq 20. Every pull
+		// reports revision B and a watermark that covers mutation 1.
+		let pushes = 0;
+		const transport = createRouterTransport(({ service }) => {
+			service(SyncService, {
+				push() {
+					pushes++;
+					throw new Error('push response lost');
+				},
+				pull() {
+					return {
+						patch: {
+							changes: [ {
+								entity: 'todo',
+								key: 'r',
+								version: 20n,
+								body: { case: 'value', value: todo('theirs') },
+							} ],
+							dropEntities: [],
+						},
+						nextCursor: new Uint8Array([ 20 ]),
+						lastAckedMutationId: 1n,
+						reset: false,
+						hasMore: false,
+						seq: 20n,
+						schemaRevision: 'B',
+					};
+				},
+				// eslint-disable-next-line require-yield
+				async *bootstrap() {
+					throw new Error('bootstrap should not run with a seeded cursor');
+				},
+				query() {
+					return { rows: [] };
+				},
+			});
+		});
+		const kvMutex = createKvMutex('test');
+		const status = new StatusTracker();
+		const coord = new Coordinator({
+			transport,
+			kv,
+			kvMutex,
+			storageNames: storageNames(DEFAULT_STORAGE_PREFIX, 'acct'),
+			scopes: new Map([ [ WS, [] ] ]),
+			clientId: 'c1',
+			registry,
+			mirrors: {},
+			notify: async () => {},
+			status,
+			streamEnabled: false,
+			pollIntervalMs: 0,
+			clientRevision: 'A',
+			onSchemaSkew: () => 'block',
+		});
+
+		// When the lost push is followed by pulls while the block holds
+		await expect(coord.syncNow()).rejects.toThrow();
+		await coord.syncNow();
+		expect(status.current().schemaSkew?.action).toBe('block');
+		expect(pushes).toBe(1);
+
+		// Then the row shows the newer value, not mutation 1 replayed over it
+		const tx = await kv.read();
+		try {
+			const bytes = await readMergedRow(tx, registry, 'todo', WS, 'r');
+			expect(fromBinary(TodoSchema, bytes!).title).toBe('theirs');
+		} finally {
+			tx.release();
+		}
+
+		await coord.stop();
 	});
 });

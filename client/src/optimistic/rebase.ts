@@ -1027,7 +1027,8 @@ export interface FinalizeInput {
 	 * confirmed writes is idempotent, so holding them a few pages longer is safe.
 	 *
 	 * The rebase also keeps them, whatever this says, while the queue holds an
-	 * id of an unanswered push (metaUnresolvedPush).
+	 * id of an unanswered push (metaUnresolvedPush). Without this flag it then
+	 * does not replay them: the page already shows what the server made of them.
 	 */
 	deferAcked?: boolean;
 	/**
@@ -1201,7 +1202,8 @@ interface ClearedRow {
  *  2. drop pending mutations the server has acked (unless deferAcked, or an
  *     unanswered push still has ids queued)
  *  3. clear the optimistic overlay
- *  4. replay surviving pending mutations on the new base
+ *  4. replay surviving pending mutations on the new base; an acked mutation
+ *     that an unanswered push keeps queued is not replayed, unless deferAcked
  *
  * Returns the number of pending mutations that survived.
  */
@@ -1309,9 +1311,18 @@ export async function finalizeRebase(
 		else await tx.del(metaUnresolvedPush(workspaceId));
 	}
 	let remaining: Mutation[];
+	let replay: Mutation[];
 	let dropped: Mutation[] = [];
 	if (defer) {
 		remaining = pending ?? await readPending(tx, workspaceId);
+		// The mark keeps acked mutations queued only for their verdicts. This page
+		// already holds what the server made of them, and replaying them would put
+		// this client's old values back over newer writes for as long as no push
+		// answers (a schema-skew block stops every push). A non-final page does not
+		// hold all of it yet, so there they still replay.
+		replay = input.deferAcked === true
+			? remaining
+			: remaining.filter((m) => m.mutationId > input.lastAckedMutationId);
 	} else {
 		const acked = await dropAcked(tx, workspaceId, input.lastAckedMutationId);
 		touchPendingAccess(touched, registry, workspaceId, acked.dropped);
@@ -1319,9 +1330,10 @@ export async function finalizeRebase(
 			await recountPendingAccess(tx, registry, workspaceId, acked.remaining);
 		}
 		remaining = acked.remaining;
+		replay = remaining;
 		dropped = acked.dropped;
 	}
-	await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched, dropped);
+	await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, replay, touched, dropped);
 	return remaining.length;
 }
 
