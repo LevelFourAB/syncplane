@@ -215,6 +215,24 @@ var _ = Describe("Fields a newer schema wrote, through an older server", func() 
 		Expect(unknownCount(got.ProtoReflect(), 900)).To(Equal(1))
 	})
 
+	// When a newer client PATCHes with a mask that names the field, Then the
+	// server refuses the write and the stored value stays. Must NOT: apply
+	// the PATCH without the field, or report it applied. The server cannot
+	// resolve a mask path its schema does not declare, so a newer writer can
+	// change the field only through a server whose schema declares it.
+	It("refuses a PATCH that names a top-level unknown field", func() {
+		seed()
+		resp, err := client.Push(ctx, connect.NewRequest(pushOf(wsID, []*syncplanev1.Mutation{
+			patchMutation("newer", 2, "widget", "w1", &testdatav1.Widget{}, "new_field"),
+		})))
+		Expect(err).NotTo(HaveOccurred())
+		results := pushResults(resp.Msg)
+		Expect(results).To(HaveLen(1))
+		Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+		Expect(results[0].GetErrorCode()).To(Equal(server.CodeInvalidArgument))
+		Expect(futureOf(stored("w1").ProtoReflect(), 900)).To(Equal("top"))
+	})
+
 	// When a trusted write PUTs the row through Apply, Then the same rule
 	// holds as for a client PUT.
 	It("keeps stored top-level unknown fields through an Apply PUT", func() {
