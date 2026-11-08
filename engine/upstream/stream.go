@@ -151,9 +151,11 @@ func isTransient(err error) bool {
 }
 
 // stream runs one Subscribe stream over wss. It returns nil when every
-// workspace left the stream, and the stream's error otherwise.
+// workspace left the stream or the stream must reopen with other
+// no_delta_entities, and the stream's error otherwise.
 func (l *Link) stream(ctx context.Context, clientID string, wss []*workspace) error {
-	req := &syncplanev1.SubscribeRequest{ClientId: clientID, Limit: l.cfg.PageLimit}
+	noDelta := l.noDeltaEntities()
+	req := &syncplanev1.SubscribeRequest{ClientId: clientID, Limit: l.cfg.PageLimit, NoDeltaEntities: noDelta}
 	byID := map[string]*workspace{}
 	gens := map[string]uint64{}
 	for _, w := range wss {
@@ -225,11 +227,15 @@ func (l *Link) stream(ctx context.Context, clientID string, wss []*workspace) er
 			// left the stream must not land on top of what the worker pulls.
 			var err error
 			if w.isReady() && !w.behind(msg.GetPage()) {
-				err = w.applyPage(ctx, msg.GetPage())
+				err = w.applyPage(ctx, msg.GetPage(), noDelta)
 			}
 			w.pullMu.Unlock()
 			switch {
 			case err == nil, errors.Is(err, errReset), errors.Is(err, ErrNotLinked):
+			case errors.Is(err, errFullState):
+				// Reopened at once with the entity in no_delta_entities, from
+				// the cursors the page did not advance.
+				return nil
 			case ctx.Err() != nil:
 				return ctx.Err()
 			default:

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 
 	"connectrpc.com/connect"
 	"go.opentelemetry.io/otel/trace"
@@ -33,13 +34,15 @@ func (w *workspace) pullDrainLocked(ctx context.Context) error {
 		w.mu.Lock()
 		meta := w.meta
 		w.mu.Unlock()
+		noDelta := w.l.noDeltaEntities()
 		resp, err := w.l.rpc.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
-			WorkspaceId:   w.id,
-			ClientId:      w.clientID,
-			Cursor:        meta.cursor,
-			Subscriptions: w.l.effectiveSubs(meta.subs),
-			Limit:         w.l.cfg.PageLimit,
-			MinSeq:        meta.ackedSeq,
+			WorkspaceId:     w.id,
+			ClientId:        w.clientID,
+			Cursor:          meta.cursor,
+			Subscriptions:   w.l.effectiveSubs(meta.subs),
+			Limit:           w.l.cfg.PageLimit,
+			MinSeq:          meta.ackedSeq,
+			NoDeltaEntities: noDelta,
 		}))
 		if err != nil {
 			return classify(err)
@@ -50,7 +53,10 @@ func (w *workspace) pullDrainLocked(ctx context.Context) error {
 			w.unready(true, true)
 			return errReset
 		}
-		if err := w.applyPage(ctx, page); err != nil {
+		if err := w.applyPage(ctx, page, noDelta); err != nil {
+			if errors.Is(err, errFullState) {
+				continue
+			}
 			return err
 		}
 		if !page.GetHasMore() {
@@ -62,9 +68,13 @@ func (w *workspace) pullDrainLocked(ctx context.Context) error {
 
 // applyPage applies one page of origin changes in one local transaction:
 // confirmed rows, the entries the page confirms, the local rows they affect,
-// and the cursor. A page carrying text delta state the confirmed rows cannot
-// take asks for a fresh snapshot and returns errReset.
-func (w *workspace) applyPage(ctx context.Context, page *syncplanev1.PullResponse) (err error) {
+// and the cursor. noDelta is the no_delta_entities of the request the page
+// answers. A page carrying text delta state for a field the local schema does
+// not declare, of an entity not in noDelta, adds the entity to the link's
+// noDeltaEntities and returns errFullState. Any other page carrying text delta
+// state the confirmed rows cannot take asks for a fresh snapshot and returns
+// errReset.
+func (w *workspace) applyPage(ctx context.Context, page *syncplanev1.PullResponse, noDelta []string) (err error) {
 	ctx, span := w.l.mx.span(ctx, "syncplane.upstream.apply_page", w.id)
 	defer func() {
 		w.l.mx.count(ctx, w.l.mx.pages, err)
@@ -120,6 +130,18 @@ func (w *workspace) applyPage(ctx context.Context, page *syncplanev1.PullRespons
 		t.metaDirty = true
 		return t.settle()
 	})
+	var undeclared *rebase.UndeclaredTextError
+	if errors.As(err, &undeclared) && !slices.Contains(noDelta, undeclared.Entity) {
+		// The same span fetched again with the entity named in
+		// no_delta_entities carries the documents whole, as unknown fields the
+		// confirmed row keeps. An origin that still sends delta state for an
+		// entity the request named falls through to a fresh snapshot, so a
+		// page is fetched again at most once per entity.
+		w.logger().LogAttrs(ctx, slog.LevelWarn, "origin sends text the local schema does not declare; asking for full rows",
+			slog.String("entity", undeclared.Entity), slog.String("field", undeclared.Field))
+		w.l.askFullState(undeclared.Entity)
+		return errFullState
+	}
 	if errors.Is(err, rebase.ErrTextDeltaUnusable) {
 		w.logger().LogAttrs(ctx, slog.LevelWarn, "page carries text the link cannot rebuild; bootstrapping again",
 			slog.Any("error", err))

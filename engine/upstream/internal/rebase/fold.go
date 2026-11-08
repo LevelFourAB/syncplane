@@ -15,6 +15,24 @@ import (
 // carried it can be trusted; the recovery is a fresh bootstrap.
 var ErrTextDeltaUnusable = errors.New("rebase: text delta state does not apply to the confirmed row")
 
+// UndeclaredTextError reports a RowChange whose text delta state names a
+// field the Model's message does not declare as collaborative text, such as a
+// field a newer schema of the entity added. No confirmed row can rebuild that
+// field from a fragment; the recovery is to ask for the entity's rows as full
+// state. It matches ErrTextDeltaUnusable under errors.Is.
+type UndeclaredTextError struct {
+	// Entity is the RowChange's entity, Key its row key and Field the
+	// instance path the delta names.
+	Entity, Key, Field string
+}
+
+func (e *UndeclaredTextError) Error() string {
+	return fmt.Sprintf("%v: %s %q field %q: the schema declares no such text field",
+		ErrTextDeltaUnusable, e.Entity, e.Key, e.Field)
+}
+
+func (e *UndeclaredTextError) Unwrap() error { return ErrTextDeltaUnusable }
+
 // FoldTextDeltas returns the full row a RowChange stands for, given the row
 // confirmed before it.
 //
@@ -28,8 +46,9 @@ var ErrTextDeltaUnusable = errors.New("rebase: text delta state does not apply t
 // FoldTextDeltas returns an error wrapping ErrTextDeltaUnusable when the value
 // or confirmed does not decode, when a delta names a position the value does
 // not hold, when an empty fragment names a document confirmed does not hold,
-// or when a fragment does not apply. Fields the change lists as hidden stay
-// as the change has them: cleared.
+// or when a fragment does not apply. The error is an *UndeclaredTextError when
+// a delta names a field the Model does not declare as text. Fields the change
+// lists as hidden stay as the change has them: cleared.
 func (m *Model) FoldTextDeltas(confirmed Row, change *syncplanev1.RowChange) (Row, error) {
 	if change.GetTombstone() {
 		return Row{}, nil
@@ -65,6 +84,9 @@ func (m *Model) FoldTextDeltas(confirmed Row, change *syncplanev1.RowChange) (Ro
 	for _, d := range change.GetTextDeltas() {
 		ti, ok := positions[d.GetField()]
 		if !ok {
+			if _, err := textpath.ParseRef(m.desc, d.GetField()); err != nil {
+				return Row{}, &UndeclaredTextError{Entity: change.GetEntity(), Key: change.GetKey(), Field: d.GetField()}
+			}
 			return Row{}, unusable(d.GetField(), errors.New("the row value holds no such position"))
 		}
 		base := have[d.GetField()]

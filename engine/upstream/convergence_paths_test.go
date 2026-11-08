@@ -2,6 +2,7 @@ package upstream_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/client"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/text"
 	"github.com/levelfourab/syncplane/engine/upstream"
 )
 
@@ -228,6 +230,71 @@ var _ = Describe("Origin answers", Label("convergence"), func() {
 		mu.Lock()
 		defer mu.Unlock()
 		Expect(asked).To(Equal([]string{convWS + " " + local + " " + origin}))
+	})
+
+	It("follows origin edits of a text field only the origin's newer schema knows without bootstrapping again", func() {
+		newer := server.DynamicEntity{
+			Name: "gadget", Package: "conv.skewtext", KeyFields: []string{"id"},
+			Fields: []server.DynamicField{
+				{Name: "id", Number: 1, Kind: protoreflect.StringKind},
+				{Name: "name", Number: 2, Kind: protoreflect.StringKind},
+				{Name: "notes", Number: 3, Kind: protoreflect.BytesKind, Text: true},
+			},
+		}
+		older := newer
+		older.Fields = newer.Fields[:2]
+		newerType, err := server.BuildDynamicMessageType(newer)
+		Expect(err).NotTo(HaveOccurred())
+		olderType, err := server.BuildDynamicMessageType(older)
+		Expect(err).NotTo(HaveOccurred())
+		row := func(name string, notes []byte) proto.Message {
+			m := dynamicpb.NewMessage(newerType.Descriptor())
+			fs := newerType.Descriptor().Fields()
+			m.Set(fs.ByName("id"), protoreflect.ValueOfString("g1"))
+			if name != "" {
+				m.Set(fs.ByName("name"), protoreflect.ValueOfString(name))
+			}
+			if notes != nil {
+				m.Set(fs.ByName("notes"), protoreflect.ValueOfBytes(notes))
+			}
+			return m
+		}
+		localName := func(n *cnode) string {
+			GinkgoHelper()
+			m := dynamicpb.NewMessage(olderType.Descriptor())
+			Expect(n.srv.View(server.Trusted(ctx), convWS, func(tx *server.ViewTx) error {
+				_, _, err := tx.Get(m, "g1")
+				return err
+			})).To(Succeed())
+			return m.Get(olderType.Descriptor().Fields().ByName("name")).String()
+		}
+
+		o := newCOrigin(server.WithSchemaRevision("r2"))
+		Expect(o.srv.RegisterDynamicEntity(newer)).To(Succeed())
+		doc := text.New("origin")
+		Expect(doc.Insert(0, "notes")).To(Succeed())
+		Expect(o.srv.Apply(ctx, convWS, func(tx *server.ApplyTx) error { return tx.Put(row("a", doc.Encode())) })).To(Succeed())
+		n := newCNodeWith(o, "n0", func(c *upstream.Config) {
+			c.Bindings = append(c.Bindings, upstream.Binding{Entity: "gadget"})
+		}, func(srv *server.Server) {
+			Expect(srv.RegisterDynamicEntity(older)).To(Succeed())
+		}, server.WithSchemaRevision("r1"))
+		addConv(n)
+		Expect(localName(n)).To(Equal("a"))
+		before := n.part.bootstraps.Load()
+
+		for i := range 5 {
+			Expect(doc.Insert(0, fmt.Sprintf("edit%d ", i))).To(Succeed())
+			Expect(o.srv.Apply(ctx, convWS, func(tx *server.ApplyTx) error {
+				return tx.Patch(row("", doc.Encode()), []string{"notes"}, nil)
+			})).To(Succeed())
+			Eventually(func() uint64 { return n.status().OriginSeq }).Should(Equal(o.head()))
+		}
+		Expect(o.srv.Apply(ctx, convWS, func(tx *server.ApplyTx) error {
+			return tx.Patch(row("b", nil), []string{"name"}, nil)
+		})).To(Succeed())
+		Eventually(func() string { return localName(n) }).Should(Equal("b"))
+		Expect(n.part.bootstraps.Load()-before).To(BeZero(), "bootstraps after the link was caught up")
 	})
 
 	It("lets OnSchemaSkew ignore a skew", func() {

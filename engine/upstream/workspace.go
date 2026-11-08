@@ -19,6 +19,10 @@ var (
 	errReset     = errors.New("upstream: origin asked for a fresh snapshot")
 	errNoAccess  = errors.New("upstream: origin grants no access to the workspace yet")
 	errRevokedWS = errors.New("upstream: origin revoked the workspace")
+	// errFullState asks to fetch the page again with the link's current
+	// noDeltaEntities: the page carried text delta state the local schema
+	// cannot fold, and nothing of it was applied.
+	errFullState = errors.New("upstream: page needs full row state")
 )
 
 // workspace is the runtime of one linked workspace: a worker goroutine that

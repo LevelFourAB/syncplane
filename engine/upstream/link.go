@@ -92,6 +92,12 @@ type Link struct {
 	// may wait for that lock.
 	wtMu sync.Mutex
 	wt   map[string]*wtState
+
+	// noDeltaMu guards noDelta, the entities the link asks the origin to send
+	// as full rows (see noDeltaEntities). The slice only grows by copy, so a
+	// slice once read is never changed.
+	noDeltaMu sync.Mutex
+	noDelta   []string
 }
 
 // bound is what Start learns from the local server.
@@ -768,6 +774,24 @@ func (l *Link) checkSubs(subs []*syncplanev1.Subscription) error {
 		}
 	}
 	return nil
+}
+
+// noDeltaEntities returns the entities to name as no_delta_entities: those the
+// origin sent text delta state for on a field the local schema does not
+// declare as text. The caller must not change the slice.
+func (l *Link) noDeltaEntities() []string {
+	l.noDeltaMu.Lock()
+	defer l.noDeltaMu.Unlock()
+	return l.noDelta
+}
+
+// askFullState adds entity to noDeltaEntities.
+func (l *Link) askFullState(entity string) {
+	l.noDeltaMu.Lock()
+	defer l.noDeltaMu.Unlock()
+	if !slices.Contains(l.noDelta, entity) {
+		l.noDelta = append(slices.Clip(l.noDelta), entity)
+	}
 }
 
 // effectiveSubs is what the link asks the origin for: the given

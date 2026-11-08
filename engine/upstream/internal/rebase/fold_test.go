@@ -1,6 +1,7 @@
 package rebase_test
 
 import (
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"slices"
@@ -79,6 +80,19 @@ var _ = Describe("FoldTextDeltas", func() {
 			&syncplanev1.RowChange{Body: &syncplanev1.RowChange_Tombstone{Tombstone: true}})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(got.Present).To(BeFalse())
+	})
+
+	It("reports a delta on a field the schema does not declare as text as an UndeclaredTextError", func() {
+		_, err := model.FoldTextDeltas(rebase.Row{}, change(&testdatav1.KeyedTextEntity{Id: "k1"},
+			&syncplanev1.FieldDelta{Field: "summary", Fragment: asFragment(doc("a", "x"), nil)}))
+		var undeclared *rebase.UndeclaredTextError
+		Expect(errors.As(err, &undeclared)).To(BeTrue())
+		Expect(*undeclared).To(Equal(rebase.UndeclaredTextError{Entity: "keyed_text", Key: "k1", Field: "summary"}))
+		Expect(err).To(MatchError(rebase.ErrTextDeltaUnusable))
+
+		_, err = model.FoldTextDeltas(rebase.Row{}, change(&testdatav1.KeyedTextEntity{Id: "k1"},
+			&syncplanev1.FieldDelta{Field: "notes.n9.body", Fragment: asFragment(doc("a", "x"), nil)}))
+		Expect(errors.As(err, &undeclared)).To(BeFalse(), "a declared field at a position the value lacks")
 	})
 
 	DescribeTable("reports delta state it cannot fold",
