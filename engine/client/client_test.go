@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,6 +24,8 @@ import (
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
+	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 	"github.com/levelfourab/syncplane/engine/text"
 )
 
@@ -324,6 +327,59 @@ var _ = Describe("Client", func() {
 				_, ok := getTodo("t3")
 				Expect(ok).To(BeTrue())
 			})
+
+			DescribeTable("continues after the watermark an earlier Client left while the read replica lags",
+				func(lastRejected bool) {
+					open := func(name string) storage.Adapter {
+						st, err := sqlitestore.Open(filepath.Join(GinkgoT().TempDir(), name))
+						Expect(err).NotTo(HaveOccurred())
+						DeferCleanup(st.Close)
+						return st
+					}
+					primary, replica := open("primary.db"), open("replica.db")
+					psrv, purl := serve(withReplica{Adapter: primary, replica: replica})
+					_, rurl := serve(replica)
+					first, err := client.New(purl, client.WithClientID("worker"))
+					Expect(err).NotTo(HaveOccurred())
+					copier, err := client.New(rurl, client.WithClientID("worker"))
+					Expect(err).NotTo(HaveOccurred())
+
+					// Ids 1 to 7 reach the replica as well; 8 to 10 only the
+					// primary.
+					for i := 1; i <= 7; i++ {
+						todo := &todov1.Todo{Id: "t" + strconv.Itoa(i)}
+						_, err = first.Workspace("acme").Put(ctx, todo)
+						Expect(err).NotTo(HaveOccurred())
+						_, err = copier.Workspace("acme").Put(ctx, todo)
+						Expect(err).NotTo(HaveOccurred())
+					}
+					if lastRejected {
+						_, err = first.Workspace("acme").Patch(ctx, &todov1.Todo{Id: "missing", Title: "x"}, []string{"title"})
+						var rej *client.RejectedError
+						Expect(errors.As(err, &rej)).To(BeTrue(), "%v", err)
+					} else {
+						_, err = first.Workspace("acme").Put(ctx, &todov1.Todo{Id: "t8"})
+						Expect(err).NotTo(HaveOccurred())
+					}
+					for i := 9; i <= 10; i++ {
+						_, err = first.Workspace("acme").Put(ctx, &todov1.Todo{Id: "t" + strconv.Itoa(i)})
+						Expect(err).NotTo(HaveOccurred())
+					}
+
+					second, err := client.New(purl, client.WithClientID("worker"))
+					Expect(err).NotTo(HaveOccurred())
+					res, err := second.Workspace("acme").Put(ctx, &todov1.Todo{Id: "fresh"})
+					Expect(err).NotTo(HaveOccurred())
+					Expect(res.MutationID).To(Equal(uint64(11)))
+					Expect(psrv.View(server.Trusted(ctx), "acme", func(tx *server.ViewTx) error {
+						found, _, err := tx.Get(&todov1.Todo{}, "fresh")
+						Expect(found).To(BeTrue())
+						return err
+					})).To(Succeed())
+				},
+				Entry("after an applied write", false),
+				Entry("after a rejected write", true),
+			)
 
 			It("reports ErrClientIDInUse when another live Client shares the id", func() {
 				a, err := client.New(url, client.WithClientID("job-2"))

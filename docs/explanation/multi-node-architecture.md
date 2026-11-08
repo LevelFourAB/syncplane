@@ -45,6 +45,8 @@ Running PgBouncer or similar connection poolers in `transaction` mode breaks thr
 
 Replica reads provide consistent snapshots bounded by workspace sequence floors (`last_seq` cursor position, client `min_seq`, or primary sequence). If a read replica lags behind the requested sequence floor, `pgstore` falls back to the primary database.
 
+A pull with no cursor always reads on the primary. A client with no state uses it to learn its mutation watermark before it numbers its next write. No sequence floor makes a replica watermark current, because a rejected mutation moves the watermark and consumes no sequence. A stale watermark makes the next write reuse an id that the server already holds, and the server then answers with the outcome of the older mutation.
+
 ## Table layout and partitioning
 
 Partitioning five tables (`rows`, `field_deltas`, `idempotency`, `index_entries`, and `consumer_shadows`) improves autovacuum maintenance by isolating dead tuples into smaller concurrent tasks.

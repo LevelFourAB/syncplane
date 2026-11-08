@@ -356,7 +356,9 @@ func (w *Workspace) syncCounter(ctx context.Context) error {
 	return nil
 }
 
-// watermark reads the server's last acked mutation id for this client.
+// watermark reads the server's last acked mutation id for this client. The
+// pull carries no cursor, which the server reads on its primary store, so a
+// read replica that lags cannot give a watermark below the ids already used.
 func (w *Workspace) watermark(ctx context.Context) (uint64, error) {
 	resp, err := w.c.sync.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
 		WorkspaceId: w.id,

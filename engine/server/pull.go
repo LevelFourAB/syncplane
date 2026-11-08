@@ -575,7 +575,22 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	// and the client would drop its optimism for a mutation the page lacks.
 	// min_seq is untrusted wire input whose worst effect is forcing the read
 	// onto the primary — the behavior every pull had before replicas.
-	err = s.readTx(ctx, msg.GetWorkspaceId(), cur.readFloor(msg.GetMinSeq()), func(tx storage.ReadTx) error {
+	//
+	// A pull with no cursor reads on the primary. It is how a caller with no
+	// state learns its mutation watermark and numbers its next write from it,
+	// and no sequence floor makes a replica's watermark current: a rejection
+	// moves the watermark and consumes no sequence. A watermark below the
+	// primary's makes the next write reuse an id, which the server answers
+	// with an older mutation's outcome.
+	read := func(fn func(storage.ReadTx) error) error {
+		return s.readTx(ctx, msg.GetWorkspaceId(), cur.readFloor(msg.GetMinSeq()), fn)
+	}
+	if len(msg.GetCursor()) == 0 {
+		read = func(fn func(storage.ReadTx) error) error {
+			return s.store.WithReadTx(ctx, msg.GetWorkspaceId(), fn)
+		}
+	}
+	err = read(func(tx storage.ReadTx) error {
 		ackKey := watermarkKey(principal, msg.GetClientId())
 		var (
 			next cursorState

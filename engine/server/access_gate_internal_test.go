@@ -193,6 +193,22 @@ var _ = Describe("The grant check of the workspace gate", func() {
 			}
 		})
 
+		It("reads the grants from the primary before a resumed pull that the replica can serve", func() {
+			f := newGateFixture(true)
+			req := connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: ws, ClientId: "c-me"})
+			req.Header().Set(resolveOnceUser, "me")
+			resp, err := f.sync.Pull(f.ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			f.rec.take()
+
+			Expect(f.pull("me", ws, resp.Msg.GetNextCursor())).To(Equal("ok"))
+			txs := f.rec.take()
+			Expect(len(txs)).To(BeNumerically(">=", 2))
+			Expect(txs[0].kind).To(Equal("read"))
+			Expect(txs[0].calls).To(ContainElement(grantProbe))
+			Expect(txs[1].kind).To(Equal("replica"))
+		})
+
 		It("checks the grants inside a transaction on the primary", func() {
 			f := newGateFixture(true)
 			for _, op := range ops {
@@ -232,7 +248,9 @@ type gateOp struct {
 
 func gateOps() []gateOp {
 	return []gateOp{
-		{name: "Pull", firstTx: "read", routed: true, run: func(f *gateFixture, user, ws string) string {
+		// A pull with no cursor reads on the primary; "reads the grants from
+		// the primary before a resumed pull" covers a routed one.
+		{name: "Pull", firstTx: "read", run: func(f *gateFixture, user, ws string) string {
 			return f.pull(user, ws, nil)
 		}},
 		{name: "Query", firstTx: "read", routed: true, run: func(f *gateFixture, user, ws string) string {

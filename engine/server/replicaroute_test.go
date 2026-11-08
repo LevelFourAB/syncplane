@@ -136,8 +136,8 @@ var _ = Describe("Replica read routing", func() {
 	It("floors a pull at its cursor's sequence", func() {
 		push(1, 2)
 		first := pull(nil)
-		Expect(fake.recorded()).To(ContainElement(replicaCall{ws: ws, minSeq: 0}),
-			"an empty cursor carries no floor")
+		Expect(fake.recorded()).To(BeEmpty(),
+			"an empty cursor reads on the primary, so its watermark is current")
 		Expect(first.GetReset_()).To(BeFalse())
 
 		fake.reset()
@@ -148,8 +148,10 @@ var _ = Describe("Replica read routing", func() {
 
 	It("keeps serving correct pages when the adapter reports a fallback, and counts it", func() {
 		push(1, 2)
+		cursor := pull(nil).GetNextCursor()
+		push(3, 2)
 		fake.setStale(true)
-		resp := pull(nil)
+		resp := pull(cursor)
 		Expect(resp.GetReset_()).To(BeFalse())
 		Expect(resp.GetPatch().GetChanges()).To(HaveLen(1),
 			"a fallback read serves the primary's rows, coalesced by row")
