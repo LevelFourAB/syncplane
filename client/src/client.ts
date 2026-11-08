@@ -5168,9 +5168,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * committed, leaving the client open but no longer syncing — call again to
 	 * retry the deletion, or `close()`.
 	 *
-	 * The store's IndexedDB database is left in place, empty. Other tabs sharing
-	 * the store see the rows disappear; one whose credential still works reads
-	 * the empty store as a fresh install and bootstraps the data back.
+	 * The store's IndexedDB database is left in place, empty. Other clients
+	 * sharing the store see the rows disappear; one whose credential still works
+	 * bootstraps the data back. Such a client closes at its next write, and that
+	 * write rejects before it is queued: the wipe deleted the clientId it writes
+	 * under.
 	 */
 	async purgeLocalData(): Promise<DiscardedMutation[]> {
 		if (this.closed) return [];
@@ -5299,14 +5301,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * device handle — and why it is NOT a text writer identity on its own. Text
 	 * peers are leased from it per document instance (see text/peer.ts).
 	 *
-	 * Memoized by PROMISE: the stored id never changes under a running client,
-	 * and every mutation needs it — reading it back per enqueue would put a
-	 * second cross-tab lock acquisition and an extra KV write transaction on the
-	 * write path, for a value that cannot have moved under a running client. A
-	 * failed mint is not cached (minting touches the store and can fail
-	 * transiently). The value CAN change across start(), which re-reads it
-	 * whenever a local format upgrade — this client's or another tab's — could
-	 * have discarded the stored identity.
+	 * Memoized by PROMISE: minting it needs a cross-tab lock and a KV write
+	 * transaction, which the write path must not pay per mutation. Each enqueue
+	 * instead compares the memo with the stored id in its own transaction, and
+	 * a client whose stored id another tab's purgeLocalData() deleted closes
+	 * there rather than write under it. A failed mint is not cached (minting
+	 * touches the store and can fail transiently). The value CAN change across
+	 * start(), which re-reads it whenever a local format upgrade — this
+	 * client's or another tab's — could have discarded the stored identity.
 	 */
 	clientId(): Promise<string> {
 		if (!this.clientIdPromise) {
@@ -6625,6 +6627,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		/** Set when the hub took the commit's rows; delivers its callbacks. */
 		let deliver: (() => Promise<void>) | undefined;
 		let capturedToken: bigint | undefined;
+		/** Set when the store no longer holds this client's identity. */
+		let identityLost = false;
 		const capturedInverses: (Inverse | undefined)[] = [];
 		const payloadCruds = payload.case === 'crud'
 			? [ payload.value ]
@@ -6679,7 +6683,19 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						metaPendingAccess(workspaceId),
 						...(mintsToken ? [ metaUndoTokenCounter(workspaceId) ] : []),
 						...(guard ? undoJournalKeys(workspaceId) : []),
+						META_CLIENT_ID,
 					]);
+					// The memo of the identity is only good while the store still
+					// holds it. Another tab's purgeLocalData() deletes the identity
+					// together with the counters; a write minted here would then
+					// restart at id 1 under the old identity, below the server's
+					// watermark for it, and be acked as already applied without ever
+					// being stored.
+					if (pre[pre.length - 1] !== clientId) {
+						tx.release();
+						identityLost = true;
+						return;
+					}
 					const counterRaw = mintsToken ? pre[pendingAccessAt + 1] : undefined;
 					if (guard) {
 						// Checked here, in the replay's own transaction under the kv
@@ -6921,6 +6937,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			});
 		} finally {
 			peerLease?.release();
+		}
+		if (identityLost) {
+			await this.close();
+			throw new Error('SyncClient is closed: the local data was purged');
 		}
 		if (undoBarrier) {
 			// Workspace-wide: a custom mutation is opaque and may have touched

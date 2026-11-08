@@ -13,7 +13,7 @@ Before wiping local data, ensure that you have:
 
 1. Notify other open tabs:
 
-   If your application runs across multiple tabs, notify other tabs to close their clients before wiping the store. Tabs share one store. If another tab with a valid credential detects an empty store, it treats the store as a fresh install and bootstraps the data again.
+   If your application runs across multiple tabs, notify other tabs to close their clients before wiping the store. Tabs share one store. A tab that stays open with a valid credential bootstraps the data again into the empty store. At its next write, that tab finds that its `clientId` is gone: the write rejects and the client closes.
 
    ```ts
    const auth = new BroadcastChannel('app:auth');
