@@ -348,16 +348,19 @@ describe('compaction stores what the separate writes store', () => {
 		// When the client syncs
 		for (let i = 0; i < 3; i++) await a.syncNow().catch(() => undefined);
 
-		// Then the server holds at least the first two edits
-		// And must not lose them with an edit that does not fit
+		// Then the server holds all three edits: each one fits the value limit
+		// alone, though all three together do not
+		// And must not lose the first two with an edit that does not fit
 		const b = newClient(ws);
 		await b.start();
 		await b.syncNow();
 		const stored = plainTextOf((await b.get(WidgetSchema, 'w1'))?.body);
-		expect({ keepsFirstTwo: stored.startsWith(afterTwo), pending: await a.pendingCount() }).toEqual({
-			keepsFirstTwo: true,
-			pending: 0,
-		});
+		expect({
+			keepsFirstTwo: stored.startsWith(afterTwo),
+			keepsAll: stored === text,
+			rejections: rejections.map((r) => r.errorCode),
+			pending: await a.pendingCount(),
+		}).toEqual({ keepsFirstTwo: true, keepsAll: true, rejections: [], pending: 0 });
 
 		await a.close();
 		await b.close();

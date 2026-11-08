@@ -1643,7 +1643,14 @@ export class Coordinator {
 					for (const [ ws, pending ] of queues) {
 						out.set(
 							ws,
-							await toWireMutations(tx, this.opts.registry, ws, pending, this.textFullState),
+							await toWireMutations(
+								tx,
+								this.opts.registry,
+								ws,
+								pending,
+								this.textFullState,
+								this.maxValueBytes,
+							),
 						);
 					}
 					return out;

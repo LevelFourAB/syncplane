@@ -56,6 +56,13 @@ import { textResidency } from '../text/residency.js';
  * ships each of its prefixes — is what queue compaction removes by folding the
  * burst into one mutation before it is ever pushed (optimistic/compact.ts).
  *
+ * The exception is a cumulative fragment past the server's value limit, which
+ * the server would refuse. Such an edit ships only what it adds to the edit
+ * queued before it, when that fits: it then applies once the earlier edit has,
+ * and a rejection of the earlier edit leaves it to fail as
+ * `text_full_state_required`, as the cumulative one would have failed for its
+ * size.
+ *
  * The substitution happens at push time, on a copy: every path that READS a row
  * — stored rows, rebase replay, the merged view — sees a whole document, so
  * nothing downstream has to understand fragments. (Optimistic text edits are
@@ -97,6 +104,13 @@ export function fullStateKey(workspaceId: string, entity: string, key: string): 
  */
 type Accumulated = Map<string, Uint8Array | null>;
 
+/**
+ * The whole document the last queued full-state write of a text field held,
+ * by accKey, while no fragment was queued for the field after it: the base an
+ * edit past the value limit ships its own increment against.
+ */
+type LastDocs = Map<string, Uint8Array>;
+
 const accKey = (entity: string, key: string, path: string): string =>
 	`${entity}\u0000${key}\u0000${path}`;
 
@@ -112,7 +126,9 @@ const accKey = (entity: string, key: string, path: string): string =>
  * push.
  *
  * `pinned` names rows (fullStateKey) that must keep shipping full documents
- * because the server already refused a fragment for them.
+ * because the server already refused a fragment for them. `maxValueBytes` is
+ * the server's value limit, past which a field ships only its own increment
+ * (see the module comment).
  */
 export async function toWireMutations(
 	tx: KVRead,
@@ -120,9 +136,11 @@ export async function toWireMutations(
 	workspaceId: string,
 	pending: readonly Mutation[],
 	pinned: ReadonlySet<string>,
+	maxValueBytes = Number.POSITIVE_INFINITY,
 ): Promise<Mutation[]> {
 	const out: Mutation[] = [];
 	const acc: Accumulated = new Map();
+	const lastDocs: LastDocs = new Map();
 	for (const m of pending) {
 		const cruds = crudsOf(m);
 		if (!cruds?.some((c) => textPathsIn(registry, c).length > 0)) {
@@ -135,7 +153,16 @@ export async function toWireMutations(
 		let index = -1;
 		for (const crud of cruds) {
 			index++;
-			const value = await planCrud(tx, registry, workspaceId, crud, acc, pinned);
+			const value = await planCrud(
+				tx,
+				registry,
+				workspaceId,
+				crud,
+				acc,
+				lastDocs,
+				pinned,
+				maxValueBytes,
+			);
 			if (value !== undefined) planned.set(index, value);
 		}
 		if (planned.size === 0) {
@@ -206,7 +233,9 @@ async function planCrud(
 	workspaceId: string,
 	crud: CrudMutation,
 	acc: Accumulated,
+	lastDocs: LastDocs,
 	pinned: ReadonlySet<string>,
+	maxValueBytes: number,
 ): Promise<Uint8Array | undefined> {
 	const schemaOrMaskPaths = textPathsIn(registry, crud);
 	const def = registry.get(crud.entity);
@@ -219,6 +248,9 @@ async function planCrud(
 			const rowPrefix = `${crud.entity}\u0000${crud.key}\u0000`;
 			for (const k of [ ...acc.keys() ]) {
 				if (k.startsWith(rowPrefix)) acc.delete(k);
+			}
+			for (const k of [ ...lastDocs.keys() ]) {
+				if (k.startsWith(rowPrefix)) lastDocs.delete(k);
 			}
 		}
 		return undefined;
@@ -246,6 +278,9 @@ async function planCrud(
 		const queued = textFieldBytes(def.schema, path, local);
 		if (queued === undefined) continue;
 		const confirmedBytes = confirmed && textFieldBytes(def.schema, path, confirmed);
+		const prevDoc = lastDocs.get(key);
+		if (isFragment(queued)) lastDocs.delete(key);
+		else lastDocs.set(key, queued);
 		const total = isFragment(queued)
 			? foldFragment(acc, key, queued)
 			: diffFullState(acc, key, queued, confirmedBytes);
@@ -260,6 +295,14 @@ async function planCrud(
 			setTextFieldBytes(def.schema, path, local, full);
 			changed = true;
 			continue;
+		}
+		if (asFragment && total.length > maxValueBytes) {
+			const own = isFragment(queued) ? queued : increment(queued, prevDoc);
+			if (own !== undefined && own.length <= maxValueBytes) {
+				setTextFieldBytes(def.schema, path, local, own);
+				changed = true;
+				continue;
+			}
 		}
 		if (asFragment) {
 			// Worth it only when the delta is meaningfully smaller than the document
@@ -279,6 +322,19 @@ async function planCrud(
 		changed = true;
 	}
 	return changed ? toBinary(def.schema, local) : undefined;
+}
+
+/**
+ * The fragment a queued whole document adds to `prev`, the field's document
+ * queued before it, or undefined when there is none or it is not an ancestor.
+ */
+function increment(queued: Uint8Array, prev: Uint8Array | undefined): Uint8Array | undefined {
+	if (prev === undefined) return undefined;
+	try {
+		return encodeFragment(decodeTextDoc(queued, ''), decodeTextDoc(prev, ''));
+	} catch {
+		return undefined;
+	}
 }
 
 /** Unions a queued fragment onto the field's accumulation. */
