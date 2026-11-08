@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -228,39 +227,17 @@ func stampCreatorFields(info *entityInfo, msg proto.Message, subject string) {
 	}
 }
 
-// carryUnknownFields adds to msg each top-level field of base that the schema
-// does not declare and msg does not carry. Such a field was written by a newer
-// schema, and a writer on this one could not have meant to clear what it could
-// not see. A field msg carries as unknown, sent by a writer on a newer schema,
-// wins over the stored one. Fields inside nested messages are not carried. A nil
-// base carries nothing.
+// carryUnknownFields replaces the top-level fields of msg that the schema
+// does not declare with those of base, the stored row. A nil base leaves msg
+// none. Such a field was written by a newer schema. A writer on this one could
+// not have meant to clear what it could not see, and a writer on a newer one
+// could set a field whose guard, creator mark or text union this schema does
+// not know. Fields inside nested messages are not changed.
 func carryUnknownFields(base, msg proto.Message) {
-	if base == nil {
-		return
-	}
-	stored := base.ProtoReflect().GetUnknown()
-	if len(stored) == 0 {
-		return
-	}
 	dst := msg.ProtoReflect()
-	sent := make(map[protowire.Number]bool)
-	for _, n := range unknownNumbers(dst.GetUnknown()) {
-		sent[n] = true
+	if base == nil {
+		dst.SetUnknown(nil)
+		return
 	}
-	out := append(protoreflect.RawFields(nil), dst.GetUnknown()...)
-	for raw := stored; len(raw) > 0; {
-		n, typ, tagLen := protowire.ConsumeTag(raw)
-		if tagLen < 0 {
-			break
-		}
-		valLen := protowire.ConsumeFieldValue(n, typ, raw[tagLen:])
-		if valLen < 0 {
-			break
-		}
-		if !sent[n] {
-			out = append(out, raw[:tagLen+valLen]...)
-		}
-		raw = raw[tagLen+valLen:]
-	}
-	dst.SetUnknown(out)
+	dst.SetUnknown(append(protoreflect.RawFields(nil), base.ProtoReflect().GetUnknown()...))
 }

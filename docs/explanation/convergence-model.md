@@ -335,12 +335,15 @@ access.
 ## Schema evolution is additive
 
 `PUT` operations replace entire rows. A server keeps one class of field across
-a `PUT`: a top-level field that the stored row holds and that the server's
-schema does not declare. A newer schema wrote that field, and a writer on the
-server's schema could not see it, so the server does not take its absence as a
-clear. This protects a node that runs an older build during a rolling deploy,
-and a [linked local engine](chained-sync.md) with an older schema than its
-origin.
+a `PUT`: a top-level field that the server's schema does not declare. The
+stored row keeps its value for such a field, and the value the `PUT` carries
+for it is dropped; a `PUT` that creates a row stores none. A newer schema wrote
+that field, and a writer on the server's schema could not see it, so the server
+does not take its absence as a clear. The server also cannot tell whether the
+newer schema guards the field, stamps it with the creator, or unions it as
+collaborative text, so it does not take a value from the writer either. This
+protects a node that runs an older build during a rolling deploy, and a
+[linked local engine](chained-sync.md) with an older schema than its origin.
 
 The rule has limits:
 
@@ -350,9 +353,10 @@ The rule has limits:
 - The server can only keep fields it does not know. An older client that writes
   to a newer server sends a row without the newer field, and the server cannot
   tell that absence from a clear. The `PUT` clears the field.
-- A writer on a newer schema than the server's cannot clear such a field with a
-  `PUT`. It sends no bytes for a cleared field, and the server keeps the stored
-  value. A `PATCH` that names the field clears it.
+- A writer on a newer schema than the server's cannot set or clear such a
+  field through that server. A `PUT` keeps the stored value, and the server
+  refuses a `PATCH` that names the field. Send the write to a server whose
+  schema declares the field.
 
 To prevent data loss, use `PATCH` with field masks for partial updates, and
 design entity schema changes to be additive.

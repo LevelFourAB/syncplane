@@ -19,11 +19,11 @@ import (
 )
 
 // Schema evolution is additive, and PATCH is what keeps a field this server's
-// schema does not know yet: a newer writer's field travels as unknown bytes,
+// schema does not know yet: a newer node's field is stored as unknown bytes,
 // and a masked merge must carry them along wherever they sit — top level, in a
-// nested message, or in a keyed-list element. A PUT that carries them keeps
-// them too, and a PUT that does not carry them keeps the stored ones at the top
-// level. Field numbers 900+ stand in for fields a newer schema added.
+// nested message, or in a keyed-list element. A PUT keeps the stored ones at
+// the top level, whatever it carries there, and keeps the ones it carries in
+// nested messages. Field numbers 900+ stand in for fields a newer schema added.
 var _ = Describe("Fields a newer schema wrote, through an older server", func() {
 	const wsID = "ws-unknown"
 
@@ -93,8 +93,10 @@ var _ = Describe("Fields a newer schema wrote, through an older server", func() 
 		return nil
 	}
 
-	seed := func() {
-		GinkgoHelper()
+	// futureWidget is w1 as a newer schema writes it, with fields this
+	// server does not know at the top level, in a nested message and in a
+	// keyed-list element.
+	futureWidget := func() *testdatav1.Widget {
 		w := &testdatav1.Widget{
 			Id:       "w1",
 			Label:    "base",
@@ -104,15 +106,37 @@ var _ = Describe("Fields a newer schema wrote, through an older server", func() 
 		future(w.ProtoReflect(), 900, "top")
 		future(w.GetSettings().ProtoReflect(), 901, "nested")
 		future(w.GetMembers()[0].ProtoReflect(), 902, "element")
-		push(putMutation("newer", 1, "widget", "w1", w))
+		return w
 	}
 
-	// Given a newer writer PUTs a row with fields this server does not
+	// seed stores futureWidget as a node on the newer schema stores it.
+	seed := func() {
+		GinkgoHelper()
+		raw, err := proto.Marshal(futureWidget())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(srv.Replicate(ctx, wsID, func(tx *server.ReplicaTx) error {
+			return tx.Put("widget", "w1", raw)
+		})).To(Succeed())
+	}
+
+	// Given a newer node stored a row with fields this server does not
 	// know, When the row is pulled, Then those fields come back untouched.
-	It("keeps unknown fields a PUT carried", func() {
+	It("sends back the unknown fields a newer node stored", func() {
 		seed()
 		w := stored("w1")
 		Expect(futureOf(w.ProtoReflect(), 900)).To(Equal("top"))
+		Expect(futureOf(w.GetSettings().ProtoReflect(), 901)).To(Equal("nested"))
+		Expect(futureOf(w.GetMembers()[0].ProtoReflect(), 902)).To(Equal("element"))
+	})
+
+	// When a newer client creates the row through this server, Then the
+	// unknown fields inside the messages it writes are stored, and the
+	// top-level ones are not. Must NOT: store a top-level field whose guard,
+	// creator mark or text union this server does not know.
+	It("stores the nested unknown fields a create carries, and drops the top-level ones", func() {
+		push(putMutation("newer", 1, "widget", "w1", futureWidget()))
+		w := stored("w1")
+		Expect(futureOf(w.ProtoReflect(), 900)).To(BeEmpty())
 		Expect(futureOf(w.GetSettings().ProtoReflect(), 901)).To(Equal("nested"))
 		Expect(futureOf(w.GetMembers()[0].ProtoReflect(), 902)).To(Equal("element"))
 	})
@@ -178,14 +202,16 @@ var _ = Describe("Fields a newer schema wrote, through an older server", func() 
 	})
 
 	// When a newer client PUTs the row with its own value for the field,
-	// Then its value replaces the stored one, once.
-	It("lets a PUT that carries an unknown field replace the stored one", func() {
+	// Then the stored value stays, once. Must NOT: store a value whose guard,
+	// creator mark or text union this server does not know.
+	It("keeps the stored value of an unknown field a PUT carries", func() {
 		seed()
 		w := &testdatav1.Widget{Id: "w1", Label: "replaced"}
 		future(w.ProtoReflect(), 900, "newer")
 		push(putMutation("newer", 2, "widget", "w1", w))
 		got := stored("w1")
-		Expect(futureOf(got.ProtoReflect(), 900)).To(Equal("newer"))
+		Expect(got.GetLabel()).To(Equal("replaced"))
+		Expect(futureOf(got.ProtoReflect(), 900)).To(Equal("top"))
 		Expect(unknownCount(got.ProtoReflect(), 900)).To(Equal(1))
 	})
 

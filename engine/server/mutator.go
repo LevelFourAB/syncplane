@@ -568,10 +568,10 @@ func (e *EntityTx) GetMeta(dst proto.Message, key string) (found bool, meta RowM
 // the live row and unions each text field (when both sides carry one) before
 // writing.
 //
-// A top-level field the stored row holds and the schema does not declare keeps
-// its stored value unless msg carries that field number itself: a newer schema
-// wrote it, and msg could not express a clear of it. Fields inside nested
-// messages are replaced. Every other field keeps replace semantics.
+// A top-level field the schema does not declare keeps its stored value, and
+// one msg carries is dropped; a Put that creates the row stores none. Fields
+// inside nested messages are replaced. Every other field keeps replace
+// semantics.
 //
 // Text fields can also be written from plain strings — WithTextString plus
 // WithTextPeer — which diffs the string against the stored document under the

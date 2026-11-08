@@ -11,6 +11,9 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
@@ -21,6 +24,49 @@ import (
 	"github.com/levelfourab/syncplane/engine/storage/pgstore"
 	"github.com/levelfourab/syncplane/engine/text"
 )
+
+// onlyEntityWithout returns a self-contained descriptor set of the testdata
+// file that registers only entity message, with field removed from it: the
+// schema of a node one release before field was added.
+func onlyEntityWithout(message, field string) []byte {
+	GinkgoHelper()
+	fd := testdatav1.File_syncplane_testdata_v1_testdata_proto
+	var files []*descriptorpb.FileDescriptorProto
+	seen := map[string]bool{}
+	var walk func(f protoreflect.FileDescriptor)
+	walk = func(f protoreflect.FileDescriptor) {
+		if seen[f.Path()] {
+			return
+		}
+		seen[f.Path()] = true
+		for i := range f.Imports().Len() {
+			walk(f.Imports().Get(i).FileDescriptor)
+		}
+		files = append(files, protodesc.ToFileDescriptorProto(f))
+	}
+	walk(fd)
+	for _, f := range files {
+		if f.GetName() != fd.Path() {
+			continue
+		}
+		for _, m := range f.MessageType {
+			if m.GetName() != message {
+				m.Options = nil
+				continue
+			}
+			kept := m.Field[:0]
+			for _, fl := range m.Field {
+				if fl.GetName() != field {
+					kept = append(kept, fl)
+				}
+			}
+			m.Field = kept
+		}
+	}
+	raw, err := proto.Marshal(&descriptorpb.FileDescriptorSet{File: files})
+	Expect(err).NotTo(HaveOccurred())
+	return raw
+}
 
 // bodyDoc builds an encoded text document owned by peer with the given text.
 func bodyDoc(peer, s string) []byte {
@@ -175,6 +221,39 @@ var _ = Describe("Text fields", func() {
 			w := getWidget("w1")
 			Expect(w.GetLabel()).To(Equal("v2"))
 			Expect(plainBody(w.GetBody())).To(Equal("carol's notes"))
+		})
+
+		It("PUT through a node whose schema lacks the field unions it with the stored document", func() {
+			// In a rolling deploy a node one release older holds body as
+			// unknown bytes. A newer client's PUT through it must not replace
+			// the document its peers built.
+			newer, store := newTestServerStore()
+			older := mustNewServer(store)
+			DeferCleanup(older.Close)
+			_, err := older.RegisterDescriptorSet(onlyEntityWithout("Widget", "body"))
+			Expect(err).NotTo(HaveOccurred())
+			pushTo := func(s *server.Server, m *syncplanev1.Mutation) {
+				GinkgoHelper()
+				resp, err := s.Push(ctx, connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{m})))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(pushResults(resp.Msg)[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+			}
+
+			// Given a document two peers wrote through the newer node
+			pushTo(newer, putMutation("ca", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Label: "x", Body: bodyDoc("alice", "alpha ")}))
+			pushTo(newer, putMutation("cb", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Label: "x", Body: bodyDoc("bob", "beta ")}))
+
+			// When a third peer PUTs its own document through the older node
+			pushTo(older, putMutation("cc", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Label: "y", Body: bodyDoc("carol", "gamma ")}))
+
+			// Then the stored document still holds the first two peers' text
+			var w testdatav1.Widget
+			Expect(newer.View(server.Trusted(ctx), ws, func(tx *server.ViewTx) error {
+				_, _, err := tx.Get(&w, "w1")
+				return err
+			})).To(Succeed())
+			Expect(w.GetLabel()).To(Equal("y"))
+			Expect(plainBody(w.GetBody())).To(And(ContainSubstring("alpha"), ContainSubstring("beta")))
 		})
 
 		It("rejects junk text bytes on PUT with invalid_argument", func() {

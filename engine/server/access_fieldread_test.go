@@ -676,6 +676,31 @@ var _ = Describe("Access model field read rules", func() {
 			Expect(got.GetName()).To(Equal("ann"))
 			Expect(got.GetBonus()).To(BeZero(), "the schema lets no client read bonus")
 		})
+
+		pushOlder := func(user string, m *syncplanev1.Mutation) {
+			GinkgoHelper()
+			req := connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{m}))
+			as(user, req.Header())
+			resp, err := older.Push(f.ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			applied(pushResults(resp.Msg)[0])
+		}
+
+		It("keeps on a PUT the stored value of a guarded field the node does not declare", func() {
+			// A client on the newer schema sends the row it read, with bonus set.
+			row := decoded(pulled("writer")["s2"])
+			row.Bonus = 999
+			pushOlder("writer", putMutation("c-old", 1, "staff", "s2", row))
+
+			Expect(stored("s2").GetBonus()).To(Equal(int64(9)), "no client may write bonus")
+		})
+
+		It("stores no value a create sets in a guarded field the node does not declare", func() {
+			pushOlder("writer", putMutation("c-old", 1, "staff", "s4",
+				&accessv1.Staff{Id: "s4", Project: project("p2"), Name: "di", Bonus: 555}))
+
+			Expect(stored("s4").GetBonus()).To(BeZero(), "no client may write bonus")
+		})
 	})
 
 	Describe("the in-process API", func() {

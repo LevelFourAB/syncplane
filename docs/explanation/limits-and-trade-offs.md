@@ -158,7 +158,7 @@ Because query ordering must produce consistent results across scans and indexes,
 
 `PUT` requests and `EntityTx.Put` replace the entire row. Collaborative-text fields are the exception: they merge with the stored document on every `PUT` path.
 
-A server keeps the stored top-level fields that its schema does not declare, so a `PUT` through an older server does not clear them. An older client that writes to a newer server still clears the fields it does not know, and a field that a newer schema added inside a nested message is lost on every `PUT` that replaces that message (see [Schema evolution is additive](convergence-model.md#schema-evolution-is-additive)). Use `PATCH` with a field mask for partial updates, and treat schema evolution as additive.
+A server keeps the stored top-level fields that its schema does not declare, so a `PUT` through an older server does not clear them, and it does not change them either: a newer client cannot set such a field through an older server. An older client that writes to a newer server still clears the fields it does not know, and a field that a newer schema added inside a nested message is lost on every `PUT` that replaces that message (see [Schema evolution is additive](convergence-model.md#schema-evolution-is-additive)). Use `PATCH` with a field mask for partial updates, and treat schema evolution as additive.
 
 The [schema-revision handshake](../how-to/handle-failures.md#steps) detects version skew during rolling deployments, but does not replace the need for additive schema changes.
 
