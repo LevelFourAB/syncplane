@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -1178,6 +1179,22 @@ func (t *pgTx) IndexState(entity, index string) (string, bool, error) {
 	// normal state right after registration — not an error.
 	st := t.indexStates[indexKey{entity, index}]
 	return st.specHash, st.ready, nil
+}
+
+// IndexStates answers from the memo IndexState reads, so it costs no round
+// trip in a transaction that has read the workspace.
+func (t *pgTx) IndexStates(entity string) ([]storage.IndexStatus, error) {
+	if err := t.loadIndexStates(); err != nil {
+		return nil, err
+	}
+	out := []storage.IndexStatus{}
+	for k, st := range t.indexStates {
+		if k.entity == entity {
+			out = append(out, storage.IndexStatus{Index: k.index, SpecHash: st.specHash, Ready: st.ready})
+		}
+	}
+	slices.SortFunc(out, func(a, b storage.IndexStatus) int { return strings.Compare(a.Index, b.Index) })
+	return out, nil
 }
 
 // SetIndexBuildMark updates the workspace row and never calls register: the

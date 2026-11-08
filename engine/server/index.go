@@ -224,6 +224,9 @@ func (info *entityInfo) indexByName(name string) *compiledIndex {
 // by the data, which is what makes the per-row limit below load-bearing rather
 // than a formality.
 func (info *entityInfo) updateRowIndexes(tx storage.WriteTx, limits Limits, key string, msg proto.Message) error {
+	if err := info.dropForeignIndexes(tx); err != nil {
+		return err
+	}
 	if len(info.indexes) == 0 && info.search == nil {
 		return nil
 	}
@@ -318,11 +321,62 @@ func (info *entityInfo) maskTouchesIndexes(paths []string) bool {
 // neither the push DELETE nor EntityTx.Delete has a decoded message, and
 // reading one to compute which entries to remove would put a read on the
 // delete path.
+//
+// A schema that declares no index of the entity still drops the entries when
+// another schema, which shares the store, declares one: those entries would
+// name a row that is gone.
 func (info *entityInfo) clearRowIndexes(tx storage.WriteTx, key string) error {
 	if len(info.indexes) == 0 && info.search == nil {
-		return nil
+		states, err := tx.IndexStates(info.name)
+		if err != nil || len(states) == 0 {
+			return err
+		}
 	}
 	return tx.DeleteIndexEntries(info.name, key)
+}
+
+// dropForeignIndexes marks unready each index of the entity whose entries
+// this schema does not maintain, and clears the workspace's build mark when
+// it marks one. Every write of a row runs it.
+//
+// Another schema can share the store: a node one release older or newer in
+// a rolling deploy, or this node before a rollback. Its indexes have no
+// entries from a write under this schema (PutIndexEntries replaces the row's
+// whole set, and a write that skips updateRowIndexes changes the row under
+// its old entries), so they must not answer a query until a node that
+// declares them builds them again. The state takes an empty fingerprint, not
+// only ready=false: a build that is in progress then fails its final check
+// and does not claim the rows this write changed after the build passed
+// them. The cleared mark makes the background pass of that node select the
+// workspace.
+func (info *entityInfo) dropForeignIndexes(tx storage.WriteTx) error {
+	states, err := tx.IndexStates(info.name)
+	if err != nil {
+		return err
+	}
+	dropped := false
+	for _, st := range states {
+		if st.SpecHash == "" || info.maintains(st.Index, st.SpecHash) {
+			continue
+		}
+		if err := tx.SetIndexState(info.name, st.Index, "", false); err != nil {
+			return err
+		}
+		dropped = true
+	}
+	if !dropped {
+		return nil
+	}
+	return tx.SetIndexBuildMark("")
+}
+
+// maintains reports whether a write under this schema keeps the entries of
+// the entity's index name as built under specHash.
+func (info *entityInfo) maintains(name, specHash string) bool {
+	if ci := info.indexByName(name); ci != nil {
+		return ci.specHash == specHash
+	}
+	return info.search != nil && info.search.name == name && info.search.specHash == specHash
 }
 
 // indexReady reports whether an index's stored entries cover the whole entity

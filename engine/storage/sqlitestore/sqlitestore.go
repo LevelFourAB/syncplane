@@ -2183,6 +2183,32 @@ func (t *sqliteTx) IndexState(entity, index string) (string, bool, error) {
 	return specHash, ready != 0, err
 }
 
+func (t *sqliteTx) IndexStates(entity string) ([]storage.IndexStatus, error) {
+	rows, err := t.query(
+		`SELECT idx, spec_hash, ready FROM index_state
+		 WHERE workspace_id = ? AND entity = ?
+		 ORDER BY idx`,
+		t.ws, entity,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []storage.IndexStatus{}
+	for rows.Next() {
+		var (
+			st    storage.IndexStatus
+			ready int
+		)
+		if err := rows.Scan(&st.Index, &st.SpecHash, &ready); err != nil {
+			return nil, err
+		}
+		st.Ready = ready != 0
+		out = append(out, st)
+	}
+	return out, rows.Err()
+}
+
 func (t *sqliteTx) SetIndexState(entity, index, specHash string, ready bool) error {
 	if err := t.register(); err != nil {
 		return err

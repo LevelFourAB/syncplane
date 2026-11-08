@@ -1411,6 +1411,8 @@ func (s *Server) applyCrud(
 			if err := info.updateRowIndexes(tx, s.limits, crud.GetKey(), base); err != nil {
 				return err
 			}
+		} else if err := info.dropForeignIndexes(tx); err != nil {
+			return err
 		}
 		// `row` is the memo the merge base came from, still holding the encoded
 		// before-state: the merge above rewrote `base` in place, so the bytes

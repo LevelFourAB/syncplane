@@ -93,6 +93,8 @@ The following server-side traversal paths do not use query planning:
 
 These paths fall back to a scan when an index is not yet built. A new or modified index remains unusable until a background pass completes the entity walk. This fallback is intentional: index use is strictly an optimization, and indexed and scanning paths produce identical results. `Limits.DisableIndexes` forces this fallback during testing.
 
+Two schemas can write to one store: the old and the new release during a rolling deploy, or one node before and after a rollback. A write under one schema does not maintain an index that only the other schema declares. Such a write therefore marks that index as not built, and the node that declares the index builds it again on its next pass. While both releases write to an entity whose indexes differ between them, each release rebuilds its indexes of that entity on every pass, and queries on those indexes scan in between.
+
 These costs represent resolving a window or closure from scratch, which occurs only when a pull cannot maintain existing cursor state; see [Partial sync and coverage](partial-sync-and-coverage.md#what-a-bounded-membership-costs-the-server). Index maintenance is tested similarly: `Limits.DisableMembershipMaintenance` forces a full rebuild, and both paths must produce identical pages.
 
 Index maintenance costs apply to writes on both the client and the server. A write re-encodes and stores the row's complete entry set instead of computing a diff. Neither side keeps the previous row value in memory during a `PATCH` or `DELETE`, so computing a diff would add a read and decode operation to every write.

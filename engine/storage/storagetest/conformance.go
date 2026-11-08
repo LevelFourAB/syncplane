@@ -4014,6 +4014,36 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 			})
 
+			It("lists the index states of one entity", func() {
+				read("ws1", func(tx storage.ReadTx) {
+					states, err := tx.IndexStates("widget")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(states).To(BeEmpty(), "an entity with no state")
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetIndexState("widget", "by_label", "hash1", true)).To(Succeed())
+					Expect(tx.SetIndexState("widget", "by_count", "hash2", false)).To(Succeed())
+					Expect(tx.SetIndexState("gadget", "by_label", "hash3", true)).To(Succeed())
+					states, err := tx.IndexStates("widget")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(states).To(Equal([]storage.IndexStatus{
+						{Index: "by_count", SpecHash: "hash2", Ready: false},
+						{Index: "by_label", SpecHash: "hash1", Ready: true},
+					}), "a write transaction reads its own states")
+				})
+				write("ws2", func(tx storage.WriteTx) {
+					Expect(tx.SetIndexState("widget", "by_other", "hash4", true)).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					states, err := tx.IndexStates("widget")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(states).To(Equal([]storage.IndexStatus{
+						{Index: "by_count", SpecHash: "hash2", Ready: false},
+						{Index: "by_label", SpecHash: "hash1", Ready: true},
+					}), "states are per entity and per workspace, ordered by name")
+				})
+			})
+
 			It("stops a scan when fn returns an error, propagating it", func() {
 				write("ws1", func(tx storage.WriteTx) {
 					for i, k := range []string{"k1", "k2", "k3"} {

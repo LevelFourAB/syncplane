@@ -1035,6 +1035,8 @@ func (e *EntityTx) patch(msg proto.Message, mask []string, expected *uint64, opt
 		if err := info.updateRowIndexes(e.tx, e.srv.limits, key, base); err != nil {
 			return err
 		}
+	} else if err := info.dropForeignIndexes(e.tx); err != nil {
+		return err
 	}
 	// The EFFECTIVE mask, which is the one this write merged: a text write
 	// option added its paths to `mask` above, before the authorization that

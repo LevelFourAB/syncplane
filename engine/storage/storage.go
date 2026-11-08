@@ -873,6 +873,24 @@ type ReadTx interface {
 	// sharing a name have separate entries, built separately, and a single
 	// shared flag would let either claim coverage of the other.
 	IndexState(entity, index string) (specHash string, ready bool, err error)
+	// IndexStates returns the state of every index of entity that has a state,
+	// as IndexState reports each, ordered by index name. An entity with none
+	// reads as an empty slice, not an error.
+	//
+	// A writer uses it to find the indexes that another schema declares over
+	// the rows it writes, whose names its own schema does not hold.
+	IndexStates(entity string) ([]IndexStatus, error)
+}
+
+// IndexStatus is the state of one index of one entity (see
+// ReadTx.IndexState).
+type IndexStatus struct {
+	// Index is the index's name.
+	Index string
+	// SpecHash is the spec fingerprint the stored entries were built under.
+	SpecHash string
+	// Ready reports whether the build under SpecHash finished.
+	Ready bool
 }
 
 // RowCounter is the optional capability of a ReadTx that can count the live

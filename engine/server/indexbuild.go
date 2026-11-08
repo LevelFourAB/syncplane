@@ -263,7 +263,10 @@ type buildTarget struct {
 //   - Maintenance is already live. Any row written while the build runs gets
 //     its entries from the write path, so the build never has to catch up to
 //     a moving target; it only has to visit rows that existed before it
-//     started, and revisiting one is harmless.
+//     started, and revisiting one is harmless. A write under a schema that
+//     does not declare an index clears its fingerprint (see
+//     entityInfo.dropForeignIndexes), and the final check below then leaves
+//     it unready.
 //   - Readiness is claimed last, in its own transaction per index. A crash
 //     mid-build leaves entries in place and the indexes unready, so reads keep
 //     scanning and the next pass redoes the walk over rows that mostly already

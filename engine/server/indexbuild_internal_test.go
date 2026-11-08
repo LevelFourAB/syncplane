@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/dynamicpb"
 
+	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
@@ -335,5 +338,144 @@ func TestIndexBuildMarkTracksDeclarations(t *testing.T) {
 	}
 	if mark(a, b) != mark(b, a) {
 		t.Fatal("the mark must not depend on declaration order within a catalog")
+	}
+}
+
+// Two schema revisions of one entity can write to one store at once (a
+// rolling deploy that adds an index) or one after the other (a rollback and
+// a roll forward). The revision that declares the index must not answer from
+// entries the other revision's writes left stale or never wrote.
+
+// noteWithStateIndex and noteWithoutIndex are the two revisions of note.
+var (
+	noteWithStateIndex = DynamicEntity{
+		Name: "note", KeyFields: []string{"id"},
+		Fields: []DynamicField{
+			{Name: "id", Number: 1, Kind: protoreflect.StringKind},
+			{Name: "state", Number: 2, Kind: protoreflect.StringKind, Indexed: true},
+		},
+	}
+	noteWithoutIndex = DynamicEntity{
+		Name: "note", KeyFields: []string{"id"},
+		Fields: []DynamicField{
+			{Name: "id", Number: 1, Kind: protoreflect.StringKind},
+			{Name: "state", Number: 2, Kind: protoreflect.StringKind},
+		},
+	}
+)
+
+// noteRevision is one server running one revision of note over store.
+type noteRevision struct {
+	t   *testing.T
+	srv *Server
+	mt  protoreflect.MessageType
+}
+
+func newNoteRevision(t *testing.T, store storage.Adapter, spec DynamicEntity) *noteRevision {
+	t.Helper()
+	srv, err := New(store, WithIndexBuild(0, 0))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	if err := srv.RegisterDynamicEntity(spec); err != nil {
+		t.Fatalf("registering note: %v", err)
+	}
+	mt, err := BuildDynamicMessageType(spec)
+	if err != nil {
+		t.Fatalf("building note type: %v", err)
+	}
+	return &noteRevision{t: t, srv: srv, mt: mt}
+}
+
+func (r *noteRevision) put(id, state string) {
+	r.t.Helper()
+	m := r.mt.New()
+	fds := r.mt.Descriptor().Fields()
+	m.Set(fds.ByName("id"), protoreflect.ValueOfString(id))
+	m.Set(fds.ByName("state"), protoreflect.ValueOfString(state))
+	if err := r.srv.Mutate(Trusted(context.Background()), "ws1", func(tx *EntityTx) error {
+		return tx.Put(m.Interface())
+	}); err != nil {
+		r.t.Fatalf("put %s: %v", id, err)
+	}
+}
+
+func (r *noteRevision) build() {
+	r.t.Helper()
+	if err := r.srv.BuildIndexes(context.Background(), "ws1"); err != nil {
+		r.t.Fatalf("build: %v", err)
+	}
+}
+
+// keysIn returns the sorted keys of the notes whose state is state.
+func (r *noteRevision) keysIn(state string) []string {
+	r.t.Helper()
+	var out []string
+	if err := r.srv.View(Trusted(context.Background()), "ws1", func(tx *ViewTx) error {
+		return tx.Query(dynamicpb.NewMessage(r.mt.Descriptor()), query.Spec{Where: query.Eq("state", state)},
+			func(msg proto.Message, _ uint64) error {
+				m := msg.ProtoReflect()
+				out = append(out, m.Get(m.Descriptor().Fields().ByName("id")).String())
+				return nil
+			})
+	}); err != nil {
+		r.t.Fatalf("query: %v", err)
+	}
+	slices.Sort(out)
+	return out
+}
+
+func TestIndexedQueryMatchesRowsANodeWithoutTheIndexWrote(t *testing.T) {
+	store := newIndexBuildStore(t)
+	indexed := newNoteRevision(t, store, noteWithStateIndex)
+	plain := newNoteRevision(t, store, noteWithoutIndex)
+
+	// Given n1 open, written and indexed by the revision with the index
+	indexed.put("n1", "open")
+	indexed.build()
+	if !readyState(t, store, "__field_state") {
+		t.Fatal("the index must be ready before the other revision writes")
+	}
+
+	// When the revision without it creates n2 and closes n1, and both run a
+	// build pass
+	plain.put("n2", "open")
+	plain.put("n1", "closed")
+	plain.build()
+	indexed.build()
+
+	// Then the indexed query answers as a scan does
+	if got, want := indexed.keysIn("open"), []string{"n2"}; !equal(got, want) {
+		t.Fatalf(`state == "open" returns %v, want %v`, got, want)
+	}
+	if got, want := indexed.keysIn("closed"), []string{"n1"}; !equal(got, want) {
+		t.Fatalf(`state == "closed" returns %v, want %v`, got, want)
+	}
+}
+
+func TestIndexedQueryMatchesRowsWrittenWhileTheIndexWasRolledBack(t *testing.T) {
+	store := newIndexBuildStore(t)
+
+	// Given a node that built the index, then ran a revision without it and
+	// wrote, then came back with the index
+	before := newNoteRevision(t, store, noteWithStateIndex)
+	before.put("n1", "open")
+	before.build()
+	_ = before.srv.Close()
+
+	rolledBack := newNoteRevision(t, store, noteWithoutIndex)
+	rolledBack.put("n1", "closed")
+	rolledBack.put("n2", "open")
+	_ = rolledBack.srv.Close()
+
+	after := newNoteRevision(t, store, noteWithStateIndex)
+	after.build()
+
+	// Then the indexed query answers as a scan does
+	if got, want := after.keysIn("open"), []string{"n2"}; !equal(got, want) {
+		t.Fatalf(`state == "open" returns %v, want %v`, got, want)
+	}
+	if got, want := after.keysIn("closed"), []string{"n1"}; !equal(got, want) {
+		t.Fatalf(`state == "closed" returns %v, want %v`, got, want)
 	}
 }
