@@ -3,6 +3,7 @@ package upstream_test
 import (
 	"context"
 	"errors"
+	"time"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -340,6 +341,26 @@ var _ = Describe("Custom mutations", func() {
 		Expect(resp.Msg.GetResults()[0].GetResults()[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
 		Eventually(func() bool { return o.todo("t1").GetCompleted() }).Should(BeTrue())
 		Eventually(func() bool { return n.todo("t1").GetCompleted() }).Should(BeTrue())
+	})
+
+	It("replaces the prediction of a mutation the origin applies without writing a row", func() {
+		// The origin finds nothing to do; the local prediction completes t1.
+		o := newOrigin(server.WithMutator("claim", &todov1.CompleteAllArgs{}, func(context.Context, *server.EntityTx, proto.Message) error {
+			return nil
+		}))
+		o.put(&todov1.Todo{Id: "t1", Title: "one"})
+		n := newLocal(o, nil, server.WithMutator("claim", &todov1.CompleteAllArgs{}, completeAll))
+		n.add()
+		n.flush()
+
+		rc, err := n.ws().Invoke(ctx, "claim", &todov1.CompleteAllArgs{})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(rc.Wait(ctx)).To(Succeed())
+		fctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		Expect(n.link.Flush(fctx, ws)).To(Succeed(), "status %+v", n.status())
+		Expect(n.todo("t1").GetCompleted()).To(BeFalse())
+		Expect(o.todo("t1").GetCompleted()).To(BeFalse())
 	})
 
 	It("drops a mutation the origin keeps failing, and pushes the writes after it", func() {

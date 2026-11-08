@@ -59,7 +59,12 @@ type subScope struct {
 	cursorSent   bool
 	owedBytes    int
 	sent         cursorState
-	logger       *slog.Logger
+	// ackSent is the last_acked_mutation_id of the last page sent that ended
+	// a drain. A page that ends a drain goes out when the watermark moved past
+	// it, rows or not: a client confirms its acked writes from such a page,
+	// and a write that changed no row the scope shows sends no other.
+	ackSent uint64
+	logger  *slog.Logger
 	// live is false once the scope has been dropped (reset, revoked, failed).
 	// A dropped scope is silently skipped by the tail loop; the client has
 	// already been told and will reopen when it is ready.
@@ -468,8 +473,9 @@ func (sc *subScope) checkpointDue(next cursorState, pageBytes, cursorBytes int) 
 
 // drainScope pages one scope forward until its backlog (or burst) is
 // exhausted, sending each page as it is produced. A page carrying rows is
-// always sent; an empty page is sent only when keepalive is set, which is how
-// catch-up reports last_acked and the cursor position on a quiet workspace.
+// always sent; an empty page is sent when keepalive is set, which is how
+// catch-up reports last_acked and the cursor position on a quiet workspace,
+// and when it ends the drain with a last_acked above the one sent last.
 //
 // Each page is routed as a Pull page is (routePull): a forward page, a delta
 // resync step when the epoch or the subscription set no longer matches the
@@ -525,7 +531,11 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		// has moved past it, so its frame always goes out and always carries
 		// the cursor: a stream resumed from an older one would fire it twice.
 		hasLate := len(page.GetLateRejections()) > 0
-		if hasRows || hasAccess || hasLate || (keepalive && last) {
+		ackMoved := last && page.GetLastAckedMutationId() > sc.ackSent
+		if hasRows || hasAccess || hasLate || ackMoved || (keepalive && last) {
+			if last {
+				sc.ackSent = page.GetLastAckedMutationId()
+			}
 			// The scope carries its own position, so the cursor on the frame is
 			// the client's resume point and nothing else — it can be left off
 			// when it would cost more than the re-delivery it saves. A frame

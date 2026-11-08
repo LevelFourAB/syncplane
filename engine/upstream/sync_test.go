@@ -3,6 +3,7 @@ package upstream_test
 import (
 	"context"
 	"sync/atomic"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -192,6 +193,21 @@ var _ = Describe("Sync", func() {
 		}()
 		Eventually(done).Should(Receive(Succeed()))
 		Eventually(reentered).Should(Receive(Succeed()))
+	})
+
+	It("removes a row the origin confirmed outside the subscribed scope while the workspace is quiet", func() {
+		Expect(n.link.SetSubscriptions(ctx, ws, &syncplanev1.Subscription{
+			Entity: "todo", Predicate: query.Eq("completed", true),
+		})).To(Succeed())
+		n.flush()
+
+		n.put(&todov1.Todo{Id: "t1", Title: "open"})
+		Eventually(func() string { return title(o.todo("t1")) }).Should(Equal("open"))
+		fctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		Expect(n.link.Flush(fctx, ws)).To(Succeed(), "status %+v", n.status())
+		Expect(n.status().Pending).To(BeZero())
+		Expect(n.todo("t1")).To(BeNil())
 	})
 
 	It("refuses a subscription to an entity that is not bound", func() {
