@@ -619,8 +619,9 @@ func (s *Server) collectAllGarbage(ctx context.Context) (err error) {
 	return errors.Join(errs...)
 }
 
-// Close stops background work: the GC goroutine, the index backfill, the room
-// registry's announce sweep, and the notify-coalescing timers. It is idempotent
+// Close stops background work: the GC goroutine, the text compaction loop, the
+// index backfill, the room registry's announce sweep, and the notify-coalescing
+// timers. It waits for a running GC or compaction pass to end. It is idempotent
 // and does NOT close what the caller owns — not the storage adapter, not a
 // notifier installed with WithNotifier, not a bus installed with
 // WithPresenceBus. Stopping the coalescing timers is what keeps a shared
@@ -630,6 +631,9 @@ func (s *Server) collectAllGarbage(ctx context.Context) (err error) {
 func (s *Server) Close() error {
 	if s.gc != nil {
 		s.gc.close()
+	}
+	if s.compact != nil {
+		s.compact.close()
 	}
 	if s.indexBuild != nil {
 		s.indexBuild.close()

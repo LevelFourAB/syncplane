@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -254,5 +255,121 @@ func TestCompactTextResumesInsideAVersionGroupLargerThanTheBatch(t *testing.T) {
 	}
 	if len(ids) != 0 {
 		t.Fatalf("workspaces still due = %v, want none", ids)
+	}
+}
+
+// compactProbeStore counts the compaction loop's work queries and the write
+// transactions that reach the store once watching is set, and can hold a
+// work query until release is closed. The loop runs on its own goroutine, so
+// every field is safe to touch from both sides.
+type compactProbeStore struct {
+	storage.Adapter
+	watching atomic.Bool
+	lists    atomic.Int64
+	writes   atomic.Int64
+	// entered, when set, receives once per work query, which then waits for
+	// release.
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (c *compactProbeStore) WithWriteTx(ctx context.Context, ws string, fn func(storage.WriteTx) error) error {
+	if c.watching.Load() {
+		c.writes.Add(1)
+	}
+	return c.Adapter.WithWriteTx(ctx, ws, fn)
+}
+
+func (c *compactProbeStore) ListCompactableWorkspaceIDs(ctx context.Context, minPurged int, r storage.Range, limit int) ([]string, error) {
+	if c.watching.Load() {
+		c.lists.Add(1)
+	}
+	if c.entered != nil {
+		c.entered <- struct{}{}
+		<-c.release
+	}
+	return c.Adapter.ListCompactableWorkspaceIDs(ctx, minPurged, r, limit)
+}
+
+// A closed server must leave the store alone: the caller may keep using it, or
+// build another server over it with compaction configured differently.
+func TestCloseStopsTheTextCompactionLoop(t *testing.T) {
+	ctx := context.Background()
+	base, err := sqlitestore.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("opening store: %v", err)
+	}
+	defer func() { _ = base.Close() }()
+	store := &compactProbeStore{Adapter: base}
+	// A background GC pass is what starts the compaction loop.
+	s, err := New(store, WithGC(time.Hour, time.Hour), WithTextCompaction(1),
+		WithTextCompactionPacing(10*time.Millisecond, 10))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	if err := store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+		return tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})
+	}); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	store.watching.Store(true)
+	// The workspace becomes due after Close, so a loop still running would
+	// rewrite it.
+	quieten(t, base, "ws1", 1)
+	time.Sleep(200 * time.Millisecond)
+
+	if lists, writes := store.lists.Load(), store.writes.Load(); lists != 0 || writes != 0 {
+		t.Fatalf("after Close the compaction loop made %d work queries and %d write transactions, want none",
+			lists, writes)
+	}
+}
+
+// Close returns only once a running pass has ended, so a caller that closes
+// the store next does not pull it from under the pass.
+func TestCloseWaitsForARunningTextCompactionPass(t *testing.T) {
+	base, err := sqlitestore.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("opening store: %v", err)
+	}
+	defer func() { _ = base.Close() }()
+	store := &compactProbeStore{Adapter: base, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	s, err := New(store, WithGC(time.Hour, time.Hour), WithTextCompaction(1),
+		WithTextCompactionPacing(10*time.Millisecond, 10))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(store.release)
+		}
+	}()
+	select {
+	case <-store.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the compaction loop never started a pass")
+	}
+
+	closed := make(chan error, 1)
+	go func() { closed <- s.Close() }()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while a compaction pass was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(store.release)
+	released = true
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("close: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return after the pass ended")
 	}
 }
