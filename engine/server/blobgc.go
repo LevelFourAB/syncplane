@@ -70,7 +70,6 @@ func (s *Server) collectAllBlobs(ctx context.Context) error {
 // and marks, unmarks and deletes committed blobs as the file comment
 // describes.
 func (s *Server) collectBlobs(ctx context.Context, workspaceID string) error {
-	key := s.blobKey(workspaceID)
 	deleted, err := s.store.WorkspaceDeleted(ctx, workspaceID)
 	if err != nil {
 		return err
@@ -78,8 +77,9 @@ func (s *Server) collectBlobs(ctx context.Context, workspaceID string) error {
 	if deleted {
 		// DeleteWorkspace removes them itself; this catches what it could not,
 		// and what an upload admitted before the deletion committed after it.
-		return s.blobs.DeleteWorkspace(ctx, key)
+		return s.deleteWorkspaceBlobs(ctx, workspaceID)
 	}
+	key := s.blobKey(workspaceID)
 	now := time.Now()
 	cutoff := now.Add(-s.blobRetentionOrDefault())
 

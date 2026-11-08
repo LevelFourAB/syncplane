@@ -414,7 +414,8 @@ type Adapter interface {
 	// RestoreWorkspace removes the mark DeleteWorkspace left, so that the next
 	// write registers the workspace again as a new one, with sequence 0 and a
 	// new store epoch. It restores no data. Restoring a workspace that is not
-	// marked is not an error.
+	// marked is not an error. It holds the workspace's write exclusion, as
+	// DeleteWorkspace does.
 	RestoreWorkspace(ctx context.Context, workspaceID string) error
 	// WorkspaceDeleted reports whether DeleteWorkspace marked the workspace
 	// and RestoreWorkspace has not removed the mark since.
@@ -422,7 +423,9 @@ type Adapter interface {
 	// The engine calls it once per request it admits to a workspace, so an
 	// adapter must answer it with one indexed lookup. It must read the primary,
 	// never a bounded-staleness view: a stale answer admits a client to a
-	// workspace that is gone.
+	// workspace that is gone. The engine also calls it from inside a write
+	// transaction of the same workspace, so it must answer from committed
+	// state without waiting for that transaction.
 	WorkspaceDeleted(ctx context.Context, workspaceID string) (bool, error)
 	// ListWorkspaceIDs returns the ids of the workspaces in rng that hold
 	// persisted state, i.e. those some write transaction has actually written

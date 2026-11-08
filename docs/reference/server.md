@@ -217,7 +217,7 @@ Neither call runs a permission hook. Expose them only to callers your applicatio
 
 Each admitted request reads the deletion mark: one indexed lookup. On `pgstore` this is one extra round trip per request.
 
-With `WithBlobStore`, the call then deletes the workspace's blobs and staged uploads. When that fails, the call returns an error, and the next blob GC pass deletes them. `RestoreWorkspace` does not bring them back.
+With `WithBlobStore`, the call then deletes the workspace's blobs and staged uploads. When that fails, the call returns an error, and the next blob GC pass deletes them. `RestoreWorkspace` does not bring them back. A `RestoreWorkspace` that lands before the blobs are gone stops the deletion: the blobs the restored workspace uploads stay, and blob GC treats the blobs left from before as unreferenced.
 
 State outside the storage adapter remains: a custom `WithCursorStateStore` keeps its entries until it evicts them, and presence rooms keep sessions until they end.
 

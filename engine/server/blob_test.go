@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -123,6 +124,23 @@ type failingBlobStore struct{ *memstore.Store }
 
 func (failingBlobStore) Stat(context.Context, string, blob.Digest) (blob.Info, error) {
 	return blob.Info{}, errors.New("open /srv/private/blobs/ws/ab/cd: input/output error")
+}
+
+// heldListStore holds List until release is closed, as a store that walks
+// many blobs does, and signals entered when one starts.
+type heldListStore struct {
+	*memstore.Store
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *heldListStore) List(ctx context.Context, ws string) iter.Seq2[blob.Digest, error] {
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	<-s.release
+	return s.Store.List(ctx, ws)
 }
 
 // uploadPolicy refuses uploads of more than 50 bytes by "bob", and fails to
@@ -791,6 +809,74 @@ var _ = Describe("Blobs", func() {
 				_, err := store.Stat(ctx, ws, m.Digest)
 				return err
 			}, "2s").Should(MatchError(blob.ErrNotFound))
+		})
+
+		// The blob step of a deletion runs after the rows are gone, and a
+		// RestoreWorkspace can land while it walks. Blobs the restored
+		// workspace uploads and references are not the deleted workspace's.
+		Describe("while the workspace is restored", func() {
+			var held *heldListStore
+
+			BeforeEach(func() {
+				held = &heldListStore{Store: store, entered: make(chan struct{}, 1), release: make(chan struct{})}
+			})
+
+			// restoreAndReference restores ws, then uploads a blob and puts a
+			// row that names it.
+			restoreAndReference := func(srv *server.Server, seed byte) blob.Manifest {
+				GinkgoHelper()
+				Expect(srv.RestoreWorkspace(ctx, ws)).To(Succeed())
+				data, m := blobOf(seed, 10)
+				uploadBlob(alice, srv, ws, data, m)
+				putRows(ctx, srv, ws, &testdatav1.BlobHolder{Id: "new", Photo: refTo(m)})
+				return m
+			}
+
+			It("keeps a blob the restored workspace references when DeleteWorkspace's blob step ends", func() {
+				srv := mustNewServer(newTestStore(), blobEntities(), server.WithBlobStore(held))
+				DeferCleanup(srv.Close)
+				putRows(ctx, srv, ws, &testdatav1.BlobHolder{Id: "old"})
+
+				// Given DeleteWorkspace is in its blob step
+				done := make(chan error, 1)
+				go func() { done <- srv.DeleteWorkspace(ctx, ws) }()
+				Eventually(held.entered, "2s").Should(Receive())
+
+				// When the workspace is restored and references a new blob
+				m := restoreAndReference(srv, 52)
+				close(held.release)
+				Expect(<-done).To(Succeed())
+
+				// Then the blob is still there
+				_, err := held.Stat(ctx, ws, m.Digest)
+				Expect(err).NotTo(HaveOccurred(), "a live row of the restored workspace names it")
+			})
+
+			It("keeps a blob the restored workspace references when a pass that saw the deletion ends", func() {
+				srv := mustNewServer(newTestStore(), blobEntities(), server.WithBlobStore(held),
+					server.WithGC(time.Hour, 0), server.WithBlobRetention(time.Hour))
+				DeferCleanup(srv.Close)
+				putRows(ctx, srv, ws, &testdatav1.BlobHolder{Id: "old"})
+				// The deletion's own blob step goes through at once.
+				close(held.release)
+				Expect(srv.DeleteWorkspace(ctx, ws)).To(Succeed())
+				held.release = make(chan struct{})
+				Eventually(held.entered).Should(Receive())
+
+				// Given a GC pass is deleting the deleted workspace's blobs
+				done := make(chan error, 1)
+				go func() { done <- srv.CollectGarbage(ctx, ws) }()
+				Eventually(held.entered, "2s").Should(Receive())
+
+				// When the workspace is restored and references a new blob
+				m := restoreAndReference(srv, 53)
+				close(held.release)
+				Expect(<-done).To(Succeed())
+
+				// Then the blob is still there
+				_, err := held.Stat(ctx, ws, m.Digest)
+				Expect(err).NotTo(HaveOccurred(), "a live row of the restored workspace names it")
+			})
 		})
 
 		It("marks blobs in a background pass of a workspace with no rows", func() {

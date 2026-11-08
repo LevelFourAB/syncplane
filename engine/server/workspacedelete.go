@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/levelfourab/syncplane/engine/blob"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
@@ -31,7 +32,9 @@ var errWorkspaceDeletedDenial error = &WorkspaceDenial{
 // It does this in one storage transaction, after any write in flight commits.
 // With WithBlobStore it then deletes the workspace's blobs and staged
 // uploads. When that fails, it returns an error and the next blob GC pass of
-// WithGC deletes them.
+// WithGC deletes them. A RestoreWorkspace that lands before the blobs are gone
+// stops the deletion: the blobs the restored workspace uploads stay, and blob
+// GC treats the blobs left from before as unreferenced.
 //
 // The id then stays refused until RestoreWorkspace:
 //
@@ -71,11 +74,92 @@ func (s *Server) DeleteWorkspace(ctx context.Context, workspaceID string) error 
 	// when this fails, and an upload admitted before the mark can still commit
 	// a blob after this call.
 	if s.blobs != nil {
-		if err := s.blobs.DeleteWorkspace(ctx, s.blobKey(workspaceID)); err != nil {
+		if err := s.deleteWorkspaceBlobs(ctx, workspaceID); err != nil {
 			return fmt.Errorf("server: delete blobs of workspace %q: %w", workspaceID, err)
 		}
 	}
 	return nil
+}
+
+// deleteWorkspaceBlobs removes every committed blob and staged upload of a
+// workspace that DeleteWorkspace marked. It stops, without an error, when the
+// workspace is no longer marked.
+//
+// RestoreWorkspace can land while the walk runs, and the blobs uploaded after
+// it belong to the restored workspace. So each step deletes inside the
+// workspace's write exclusion, which RestoreWorkspace also takes, and reads the
+// mark there first. A step holds the exclusion for one batch, not for the whole
+// walk: on an adapter with one writer for all workspaces, a long walk would
+// stop every write for its duration.
+func (s *Server) deleteWorkspaceBlobs(ctx context.Context, workspaceID string) error {
+	key := s.blobKey(workspaceID)
+	var digests []blob.Digest
+	for d, err := range s.blobs.List(ctx, key) {
+		if err != nil {
+			return err
+		}
+		digests = append(digests, d)
+	}
+	var staged []blob.Digest
+	for up, err := range s.blobs.ListStaged(ctx, key) {
+		if err != nil {
+			return err
+		}
+		staged = append(staged, up.Manifest.Digest)
+	}
+	steps := []struct {
+		digests []blob.Digest
+		remove  func(context.Context, string, blob.Digest) error
+	}{
+		{digests, s.blobs.Delete},
+		{staged, s.blobs.Abort},
+	}
+	for _, step := range steps {
+		for start := 0; start < len(step.digests); start += blobGCBatch {
+			batch := step.digests[start:min(start+blobGCBatch, len(step.digests))]
+			deleted, err := s.whileDeleted(ctx, workspaceID, func() error {
+				for _, d := range batch {
+					if err := step.remove(ctx, key, d); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			if err != nil || !deleted {
+				return err
+			}
+		}
+	}
+	// The walk left little or nothing: an upload admitted before the mark can
+	// have committed since the listing. This also removes what the blob store
+	// keeps for the workspace itself.
+	_, err := s.whileDeleted(ctx, workspaceID, func() error {
+		return s.blobs.DeleteWorkspace(ctx, key)
+	})
+	return err
+}
+
+// whileDeleted runs fn inside the workspace's write exclusion when the
+// workspace is still marked deleted there, and reports whether it ran fn.
+func (s *Server) whileDeleted(ctx context.Context, workspaceID string, fn func() error) (bool, error) {
+	ran := false
+	err := s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+		ran = false
+		// A statement of the transaction comes first: an adapter can take the
+		// exclusion with it (pgstore does), and the mark must be read after.
+		if _, err := tx.CurrentSeq(); err != nil {
+			return err
+		}
+		// The mark is read outside the transaction, from the committed state,
+		// which RestoreWorkspace cannot change while the exclusion is held.
+		deleted, err := s.store.WorkspaceDeleted(ctx, workspaceID)
+		if err != nil || !deleted {
+			return err
+		}
+		ran = true
+		return fn()
+	})
+	return ran, err
 }
 
 // RestoreWorkspace lifts the refusal DeleteWorkspace put on the id. It
