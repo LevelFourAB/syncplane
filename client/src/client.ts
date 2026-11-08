@@ -518,8 +518,9 @@ export interface SubscriptionSpec<D extends DescMessage = DescMessage> {
 	 * and walks references from the named rows. An empty array names no rows,
 	 * which is different from omitting it (the whole entity). Changing the set
 	 * delta-resyncs the difference: rows entering it arrive, rows leaving it
-	 * drop. Capped by the server's MaxSubscriptionKeys (default 1000). Local
-	 * reads of the entity report the `predicate` coverage bound.
+	 * drop. Capped by the server's MaxSubscriptionKeys (see
+	 * SyncClientOptions.maxSubscriptionKeys). Local reads of the entity report
+	 * the `predicate` coverage bound.
 	 */
 	keys?: readonly string[];
 }
@@ -586,7 +587,11 @@ export function subscription<D extends DescMessage>(
  * intersected with them: which of the two rules the rows would follow is not
  * something a reader of the spec should have to know.
  */
-function compileKeySet(spec: SubscriptionSpec, entity: string): KeySet | undefined {
+function compileKeySet(
+	spec: SubscriptionSpec,
+	entity: string,
+	maxKeys: number,
+): KeySet | undefined {
 	if (spec.keys === undefined) return undefined;
 	if (spec.where || spec.limit !== undefined || spec.orderBy || spec.byRecency) {
 		throw new Error(
@@ -594,8 +599,18 @@ function compileKeySet(spec: SubscriptionSpec, entity: string): KeySet | undefin
 		);
 	}
 	for (const key of spec.keys) validateRowKey(entity, key);
-	return create(KeySetSchema, { keys: [ ...new Set(spec.keys) ].sort() });
+	const keys = [ ...new Set(spec.keys) ].sort();
+	if (keys.length > maxKeys) {
+		throw new Error(
+			`subscription for "${entity}" names ${keys.length} keys, over the limit of ${maxKeys} (maxSubscriptionKeys); `
+				+ 'the server would refuse every pull of the scope',
+		);
+	}
+	return create(KeySetSchema, { keys });
 }
+
+/** The engine's default Limits.MaxSubscriptionKeys. */
+const DEFAULT_MAX_SUBSCRIPTION_KEYS = 1000;
 
 /** Flattens an include tree into root-to-leaf relation chains (RefPath segments). */
 function includeToPaths(spec: IncludeSpec): string[][] {
@@ -904,6 +919,17 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 * than the stream.
 	 */
 	maxWorkspacesPerRequest?: number;
+	/**
+	 * Largest number of keys one key-set subscription may name: the server's
+	 * Limits.MaxSubscriptionKeys. The server refuses every pull of a scope past
+	 * it, so `setSubscriptions()` and the constructor throw for a `keys` list
+	 * with more distinct keys, and `hold()` throws for a row that would take
+	 * the held rows of one entity past it. Set this to match a server
+	 * configured with another MaxSubscriptionKeys.
+	 *
+	 * @defaultValue 1000
+	 */
+	maxSubscriptionKeys?: number;
 	/**
 	 * Largest encoded entity value the server accepts in one write: its
 	 * Limits.MaxValueBytes. A collaborative-text edit the server can take only
@@ -3747,6 +3773,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		let rows = byEntity.get(def.name);
 		if (rows === undefined) byEntity.set(def.name, rows = new Map());
 		let row = rows.get(key);
+		if (row === undefined && rows.size >= this.maxSubscriptionKeys()) {
+			throw new Error(
+				`holding row "${key}" of "${def.name}" would take its held rows over the limit of `
+					+ `${this.maxSubscriptionKeys()} (maxSubscriptionKeys); release a hold first`,
+			);
+		}
 		if (row === undefined) {
 			rows.set(key, row = { count: 0 });
 			this.scheduleHoldPublish(workspaceId);
@@ -3917,6 +3949,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		return this.publishScope(workspaceId);
 	}
 
+	private maxSubscriptionKeys(): number {
+		return Math.max(1, this.opts.maxSubscriptionKeys ?? DEFAULT_MAX_SUBSCRIPTION_KEYS);
+	}
+
 	private compileSubscriptions(specs: SubscriptionSpec[]): Subscription[] {
 		return specs.map((spec) => {
 			const def = this.entityRegistry.bySchema(spec.schema);
@@ -3955,7 +3991,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				predicate: wire.where ? condToProto(wire.where) : undefined,
 				follow: spec.follow ? compileFollow(spec.follow, spec.followDepth) : undefined,
 				window: compileWindow(spec, wire.orderBy),
-				keySet: compileKeySet(spec, def.name),
+				keySet: compileKeySet(spec, def.name, this.maxSubscriptionKeys()),
 			});
 		});
 	}

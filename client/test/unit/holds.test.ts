@@ -63,6 +63,22 @@ describe('holds', () => {
 		await client.close();
 	});
 
+	it("refuses a hold past the server's key cap, which the server would refuse on every pull", () => {
+		const client = newClient({ maxSubscriptionKeys: 2 });
+		client.hold(WidgetSchema, 'a');
+		client.hold(WidgetSchema, 'b');
+		expect(() => client.hold(WidgetSchema, 'c')).toThrow(/maxSubscriptionKeys/);
+		client.hold(WidgetSchema, 'a');
+		expect(effectiveScopes(client).get('ws1')![1]!.keySet?.keys).toEqual([ 'a', 'b' ]);
+	});
+
+	it("refuses a declared key set past the server's key cap", () => {
+		const client = newClient({ maxSubscriptionKeys: 2 });
+		expect(() => client.setSubscriptions([ subscription(WidgetSchema, { keys: [ 'a', 'b', 'c' ] }) ]))
+			.toThrow(/maxSubscriptionKeys/);
+		client.setSubscriptions([ subscription(WidgetSchema, { keys: [ 'a', 'b', 'a' ] }) ]);
+	});
+
 	it('keeps a row until every hold on it is released', async () => {
 		const client = newClient();
 		const first = client.db.widget.hold('a');
