@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -16,6 +19,8 @@ import (
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
+	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 	"github.com/levelfourab/syncplane/engine/text"
 	"github.com/levelfourab/syncplane/engine/upstream"
 )
@@ -141,6 +146,47 @@ var _ = Describe("Recovery", func() {
 		Expect(n.status().Pending).To(BeZero())
 		Expect(n.todo("t1")).To(BeNil())
 		Expect(n.todo("t7")).To(Equal(o.todo("t7")), "the local engine holds what the origin holds")
+	})
+
+	It("asks for no freshness above the restored origin workspace's head after bootstrapping it", func() {
+		store, err := sqlitestore.Open(filepath.Join(GinkgoT().TempDir(), "origin.db"))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(store.Close)
+		floors := &floorRecorder{Adapter: store}
+		srv, err := server.New(floors, server.WithEntities(&todov1.Todo{}, &todov1.Note{}, &todov1.Annotation{}))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(srv.Close)
+		ts := httptest.NewServer(srv.HTTPHandler())
+		DeferCleanup(ts.Close)
+		o := &origin{srv: srv, ts: ts, store: store}
+		n := newLocal(o, nil)
+		n.add()
+		for i := range 5 {
+			n.put(&todov1.Todo{Id: fmt.Sprintf("t%d", i), Title: "old"})
+		}
+		n.flush()
+
+		n.part.Cut()
+		Expect(o.srv.DeleteWorkspace(ctx, ws)).To(Succeed())
+		Expect(o.srv.RestoreWorkspace(ctx, ws)).To(Succeed())
+		o.put(&todov1.Todo{Id: "r1", Title: "restored"})
+		n.part.Heal()
+		Eventually(func() string { return title(n.todo("r1")) }).Should(Equal("restored"))
+		n.mu.Lock()
+		Expect(n.resets).To(Equal([]string{ws}))
+		n.mu.Unlock()
+		n.flush()
+
+		// The reads of the next start come from the restored workspace's
+		// lineage only.
+		mark := floors.count()
+		n.restart()
+		n.flush()
+		head, err := o.srv.CurrentSeq(ctx, ws)
+		Expect(err).NotTo(HaveOccurred())
+		after := floors.since(mark)
+		Expect(after).NotTo(BeEmpty())
+		Expect(slices.Max(after)).To(BeNumerically("<=", head), "floors %v over head %d", after, head)
 	})
 
 	It("converges concurrent edits of a collaborative text field", func() {
@@ -277,4 +323,37 @@ func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	req.Header.Set("x-user", t.user)
 	return t.base.RoundTrip(req)
+}
+
+// floorRecorder serves every read from the store itself and records the
+// freshness floor each read through its ReplicaReader asked for.
+type floorRecorder struct {
+	storage.Adapter
+	mu     sync.Mutex
+	floors []uint64
+}
+
+func (r *floorRecorder) ReplicaReader() storage.ReplicaReader { return r }
+
+func (r *floorRecorder) WithReadTxMinSeq(ctx context.Context, ws string, minSeq uint64, fn func(storage.ReadTx) error) (storage.ReadRoute, error) {
+	r.mu.Lock()
+	r.floors = append(r.floors, minSeq)
+	r.mu.Unlock()
+	return storage.ReadRouteReplica, r.Adapter.WithReadTx(ctx, ws, fn)
+}
+
+func (r *floorRecorder) WithReadTxAnchored(ctx context.Context, ws string, fn func(storage.ReadTx) error) (storage.ReadRoute, error) {
+	return storage.ReadRouteReplica, r.Adapter.WithReadTx(ctx, ws, fn)
+}
+
+func (r *floorRecorder) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.floors)
+}
+
+func (r *floorRecorder) since(mark int) []uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.floors[mark:])
 }

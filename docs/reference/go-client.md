@@ -85,7 +85,7 @@ Build ops for `Apply` with these functions. Errors in an op are reported by `App
 
 `T` is a pointer to a generated message type. Build `spec.Where` and `spec.OrderBy` with the `engine/query` constructors.
 
-`Pull` and `Subscribe` send the highest sequence the client's writes were applied at, so a server that reads from a replica never answers with state older than them.
+`Pull` and `Subscribe` send the highest sequence the client's writes were applied at, so a server that reads from a replica never answers with state older than them. When the server answers with a head below that sequence, the workspace's history no longer holds it (the workspace was deleted and restored, or restored from a backup), and later reads send that head instead.
 
 #### `Row[T]` and `Page[T]`
 

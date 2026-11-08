@@ -83,7 +83,8 @@ type syncMeta struct {
 	// lastAcked is the origin's mutation watermark, as of cursor.
 	lastAcked uint64
 	// ackedSeq is the highest origin sequence a push of this link was
-	// applied at, sent as min_seq.
+	// applied at, sent as min_seq. A bootstrap lowers it to the snapshot's
+	// sequence.
 	ackedSeq       uint64
 	schemaRevision string
 	// gen is the generation of the latest bootstrap; confirmed rows a

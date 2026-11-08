@@ -327,11 +327,14 @@ func (s *Snapshot) Close() error {
 // When the cursor cannot continue, Pull yields ErrReset; bootstrap again.
 // Iteration stops after the first error. Each request carries the highest
 // sequence this Client's writes were applied at, so a server reading from a
-// replica never answers with state older than them.
+// replica never answers with state older than them. A response whose head is
+// below that sequence tells that the workspace's history no longer holds it,
+// and later requests carry that head instead.
 func (w *Workspace) Pull(ctx context.Context, cursor []byte, opts ...ReadOption) iter.Seq2[*syncplanev1.PullResponse, error] {
 	o := readOptions(opts)
 	return func(yield func(*syncplanev1.PullResponse, error) bool) {
 		for {
+			floor := w.st.maxSeq.Load()
 			resp, err := w.c.sync.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
 				WorkspaceId:     w.id,
 				ClientId:        w.c.clientID,
@@ -339,12 +342,13 @@ func (w *Workspace) Pull(ctx context.Context, cursor []byte, opts ...ReadOption)
 				Subscriptions:   o.subs,
 				Limit:           o.limit,
 				NoDeltaEntities: o.noDelta,
-				MinSeq:          w.st.maxSeq.Load(),
+				MinSeq:          floor,
 			}))
 			if err != nil {
 				yield(nil, err)
 				return
 			}
+			w.st.lowerFloor(floor, resp.Msg.GetHeadSeq())
 			if resp.Msg.GetReset_() {
 				yield(nil, fmt.Errorf("client: pull %q: %w", w.id, ErrReset))
 				return
@@ -405,12 +409,14 @@ func (c *Client) Subscribe(ctx context.Context, scopes []Scope, opts ...ReadOpti
 			NoDeltaEntities: o.noDelta,
 		}
 		live := make(map[string]bool, len(scopes))
+		floors := make(map[string]uint64, len(scopes))
 		for _, s := range scopes {
+			floors[s.Workspace] = c.state(s.Workspace).maxSeq.Load()
 			req.Scopes = append(req.Scopes, &syncplanev1.WorkspaceScope{
 				WorkspaceId:   s.Workspace,
 				Cursor:        s.Cursor,
 				Subscriptions: s.Subscriptions,
-				MinSeq:        c.state(s.Workspace).maxSeq.Load(),
+				MinSeq:        floors[s.Workspace],
 			})
 			live[s.Workspace] = true
 		}
@@ -430,6 +436,9 @@ func (c *Client) Subscribe(ctx context.Context, scopes []Scope, opts ...ReadOpti
 				continue
 			case msg.GetPage() != nil:
 				ev.Page = msg.GetPage()
+				if f, ok := floors[ev.Workspace]; ok {
+					c.state(ev.Workspace).lowerFloor(f, ev.Page.GetHeadSeq())
+				}
 			case msg.GetCaughtUp():
 				ev.CaughtUp = true
 			case msg.GetDropped() != nil:

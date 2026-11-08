@@ -410,6 +410,11 @@ func (t *txn) finishStep() (bool, error) {
 	t.meta.cursor = boot.cursor
 	t.meta.originSeq = boot.seq
 	t.meta.lastAcked = boot.acked
+	// The cursor already reads at boot.seq or later, so a lower floor adds
+	// nothing. A higher one can come from the history before a reset (a
+	// deleted and restored workspace, a restore below it) and would send
+	// every read to the primary until the new history passed it.
+	t.meta.ackedSeq = min(t.meta.ackedSeq, boot.seq)
 	t.meta.schemaRevision = boot.revision
 	t.meta.boot = nil
 	t.meta.adopt = false

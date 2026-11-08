@@ -38,6 +38,18 @@ type wsState struct {
 	maxSeq atomic.Uint64
 }
 
+// lowerFloor takes back the freshness floor sent when the server answered a
+// read from it with a head below it. A read meets its floor unless the
+// workspace's history no longer holds that sequence (a deleted and restored
+// workspace, a restore below it), and such a floor sends every read to the
+// primary until the new history passes it. A push applied since the read
+// changed the floor, and then it stays.
+func (st *wsState) lowerFloor(sent, head uint64) {
+	if head != 0 && head < sent {
+		st.maxSeq.CompareAndSwap(sent, head)
+	}
+}
+
 // Result is the outcome of a write the server accepted.
 type Result struct {
 	// MutationID is the id the write was pushed under.
