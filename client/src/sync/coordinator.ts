@@ -4,6 +4,7 @@ import { type Client, Code, ConnectError, createClient, type Transport } from '@
 import { type DecodedAccess, encodeAccess, touchPendingAccess } from '../access.js';
 import { sameBytes } from '../blob/digest.js';
 import {
+	CodeConflict,
 	CodeInternal,
 	CodeMutationIdGap,
 	CodePoisonDropped,
@@ -252,6 +253,9 @@ const PUSH_FRAMING_BYTES = 16;
  */
 export const DEFAULT_MAX_WORKSPACES_PER_REQUEST = 64;
 
+/** Default largest entity value a write may carry; the engine's Limits.MaxValueBytes default. */
+export const DEFAULT_MAX_VALUE_BYTES = 1 << 20;
+
 /**
  * How long the leader waits before re-checking for work when it holds no
  * syncable workspace at all (every one removed or revoked). Interrupted the
@@ -429,6 +433,13 @@ export interface CoordinatorOptions {
 	 * scopes). Default 64 (the engine's default limit).
 	 */
 	maxWorkspacesPerRequest?: number;
+	/**
+	 * Largest encoded entity value the server accepts in one write. A text edit
+	 * the server can only take as a whole document is reported as a conflict,
+	 * not re-sent, when that document is over it. Default 1 MiB (the engine's
+	 * default limit).
+	 */
+	maxValueBytes?: number;
 	/**
 	 * This client build's schema revision. When set, the coordinator compares it
 	 * against the revision the server advertises (on every stream frame, pull, and
@@ -679,6 +690,7 @@ export class Coordinator {
 	private readonly poisonThreshold: number;
 	private readonly maxMutationsPerPush: number;
 	private readonly maxWorkspacesPerRequest: number;
+	private readonly maxValueBytes: number;
 	/** Per-call deadline in ms; 0 for none. See CoordinatorOptions.requestTimeoutMs. */
 	private readonly requestTimeoutMs: number;
 	/** See CoordinatorOptions.streamIdleTimeoutMs; 0 for no check. */
@@ -781,6 +793,7 @@ export class Coordinator {
 			1,
 			opts.maxWorkspacesPerRequest ?? DEFAULT_MAX_WORKSPACES_PER_REQUEST,
 		);
+		this.maxValueBytes = Math.max(1, opts.maxValueBytes ?? DEFAULT_MAX_VALUE_BYTES);
 		this.requestTimeoutMs = Math.max(0, opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
 		this.streamIdleTimeoutMs = Math.max(
 			0,
@@ -1900,7 +1913,11 @@ export class Coordinator {
 				// be re-sent as a full document. Recovered rejections are handled here
 				// and never reach the app.
 				const recovered = await this.captureTextFullState(rejections, queues)
-					.catch(() => ({ rows: new Map<string, TextResendRow[]>(), handled: new Set<string>() }));
+					.catch(() => ({
+						rows: new Map<string, TextResendRow[]>(),
+						handled: new Set<string>(),
+						oversize: new Map<string, string>(),
+					}));
 				// Text refused for predating a compaction cannot be re-sent as-is; its
 				// visible text is captured here and re-applied once the workspace has
 				// re-bootstrapped onto the state the server actually holds.
@@ -1934,9 +1951,13 @@ export class Coordinator {
 					}
 				}
 				for (const info of rejections) {
-					if (recovered.handled.has(`${info.workspaceId} ${info.mutationId}`)) continue;
+					const key = `${info.workspaceId} ${info.mutationId}`;
+					if (recovered.handled.has(key)) continue;
+					const oversize = recovered.oversize.get(key);
 					this.opts.onMutationRejected?.(
-						info,
+						oversize === undefined
+							? info
+							: { ...info, errorCode: CodeConflict, errorMessage: oversize },
 						undoTokens.get(info.workspaceId)?.get(info.mutationId) ?? [],
 					);
 				}
@@ -2189,15 +2210,25 @@ export class Coordinator {
 	 * whose second does not (the entity is gone, the row was deleted meanwhile)
 	 * would otherwise look recovered while half its edits were silently dropped —
 	 * better a visible rejection than a silent loss.
+	 *
+	 * A rejection whose whole documents would make a value over maxValueBytes is
+	 * not re-sent, since the server would refuse it for its size: it is returned
+	 * in `oversize`, with the message to report it as a conflict under, and its
+	 * rows are not pinned.
 	 */
 	private async captureTextFullState(
 		rejections: readonly RejectionInfo[],
 		queues: Map<string, Mutation[]>,
-	): Promise<{ rows: Map<string, TextResendRow[]>; handled: Set<string> }> {
+	): Promise<{
+		rows: Map<string, TextResendRow[]>;
+		handled: Set<string>;
+		oversize: Map<string, string>;
+	}> {
 		const rows = new Map<string, TextResendRow[]>();
 		const handled = new Set<string>();
+		const oversize = new Map<string, string>();
 		const targets = rejections.filter((r) => r.errorCode === CodeTextFullStateRequired);
-		if (targets.length === 0) return { rows, handled };
+		if (targets.length === 0) return { rows, handled, oversize };
 		for (const r of targets) {
 			const m = queues.get(r.workspaceId)?.find((q) => q.mutationId === r.mutationId);
 			const cruds = m?.payload.case === 'crud'
@@ -2228,12 +2259,41 @@ export class Coordinator {
 				staged.push({ entity: crud.entity, key: crud.key, fields: captured });
 			}
 			if (!complete || staged.length === 0) continue;
+			const over = staged
+				.map((row) => ({ row, bytes: this.resendValue(row)?.byteLength ?? 0 }))
+				.find(({ bytes }) => bytes > this.maxValueBytes);
+			if (over !== undefined) {
+				// The fragment named text the server's row does not hold (another
+				// client deleted and re-created it, say), and the whole document
+				// cannot travel either. The edit conflicts with that change. A pin
+				// would only make the next edit of the row fail the same way.
+				for (const row of staged) {
+					this.textFullState.delete(fullStateKey(r.workspaceId, row.entity, row.key));
+				}
+				oversize.set(
+					`${r.workspaceId} ${r.mutationId}`,
+					`the text of ${over.row.entity} ${over.row.key} changed on the server in a way this edit cannot apply to, `
+						+ `and the whole document (${over.bytes} bytes) is over the value limit of ${this.maxValueBytes} bytes`,
+				);
+				continue;
+			}
 			const list = rows.get(r.workspaceId) ?? [];
 			list.push(...staged);
 			rows.set(r.workspaceId, list);
 			handled.add(`${r.workspaceId} ${r.mutationId}`);
 		}
-		return { rows, handled };
+		return { rows, handled, oversize };
+	}
+
+	/** The PATCH value that re-sends one captured row's documents whole. */
+	private resendValue(row: TextResendRow): Uint8Array | undefined {
+		const def = this.opts.registry.get(row.entity);
+		if (!def) return undefined;
+		const value = create(def.schema);
+		for (const field of row.fields) {
+			setTextFieldBytes(def.schema, field.path, value, field.value);
+		}
+		return toBinary(def.schema, value);
 	}
 
 	/**
@@ -2481,17 +2541,13 @@ export class Coordinator {
 				let mutationId = lastRaw ? BigInt(lastRaw) : 0n;
 				const appended: Mutation[] = [];
 				for (const row of rows) {
-					const def = this.opts.registry.get(row.entity);
-					if (!def) continue;
-					const value = create(def.schema);
-					for (const field of row.fields) {
-						setTextFieldBytes(def.schema, field.path, value, field.value);
-					}
+					const value = this.resendValue(row);
+					if (value === undefined) continue;
 					const crud = create(CrudMutationSchema, {
 						entity: row.entity,
 						key: row.key,
 						op: CrudOp.PATCH,
-						value: toBinary(def.schema, value),
+						value,
 						fieldMask: { paths: row.fields.map((f) => f.path) },
 					});
 					mutationId += 1n;

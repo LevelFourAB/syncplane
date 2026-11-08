@@ -24,7 +24,7 @@ Applying a fragment uses the same pure union and produces byte-identical results
 
 A pushed text PATCH whose mask names the field carries the fragment between the row that the client last confirmed from the server and the value being written. The server state always covers that confirmed row. Typing into a large document costs a payload proportional to the edit rather than to the full document.
 
-If the server cannot apply a fragment, it rejects the edit with `text_full_state_required`. This acknowledgment consumes no sequence number and leaves the row untouched. The client re-sends the same edit as a whole document and stops using deltas for that row. Applications never observe the rejection. Nothing negotiates, and a client that never sends fragments works against the same server.
+If the server cannot apply a fragment, it rejects the edit with `text_full_state_required`. This acknowledgment consumes no sequence number and leaves the row untouched. The client re-sends the same edit as a whole document and stops using deltas for that row. Applications never observe the rejection, except when the whole document is larger than the server's `MaxValueBytes` (the client's `maxValueBytes` option). The client cannot send that document, so it reports the edit as `conflict` and keeps using deltas for the row. Nothing negotiates, and a client that never sends fragments works against the same server.
 
 ### Downstream: pulls ship deltas
 

@@ -900,6 +900,16 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 */
 	maxWorkspacesPerRequest?: number;
 	/**
+	 * Largest encoded entity value the server accepts in one write: its
+	 * Limits.MaxValueBytes. A collaborative-text edit the server can take only
+	 * as a whole document is re-sent whole when the document fits, and reported
+	 * through onMutationRejected with code "conflict" when it does not. Set this
+	 * to match a server with another MaxValueBytes.
+	 *
+	 * @defaultValue 1048576 (1 MiB)
+	 */
+	maxValueBytes?: number;
+	/**
 	 * Partial sync: only the listed entities (narrowed by their predicates)
 	 * sync to this client. Empty/absent = full sync. The set applies to EVERY
 	 * workspace the client holds; narrow one of them with
@@ -3454,6 +3464,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			poisonThreshold: this.opts.poisonThreshold,
 			maxMutationsPerPush: this.opts.maxMutationsPerPush,
 			maxWorkspacesPerRequest: this.opts.maxWorkspacesPerRequest,
+			maxValueBytes: this.opts.maxValueBytes,
 			// Undo references forward mutations by undo token; let compaction keep
 			// the ones whose inverse is a snapshot of one specific mutation from
 			// folding. Tokens move with renumbered mutations, so squashing a queue

@@ -10,6 +10,8 @@
 import { inject } from 'vitest';
 import { describe, expect, it } from 'vitest';
 
+import type { RejectionInfo } from '../../src/client.js';
+import { CodeConflict } from '../../src/codes.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import {
 	decodeTextDoc,
@@ -146,6 +148,78 @@ describe('upstream text delta state', () => {
 
 		await b.close();
 		await a.close();
+	});
+
+	// A fragment cut against a row that another client deleted and created
+	// again cannot apply, and the server asks for the full document. The full
+	// document can be over the value limit (1 MiB) although each edit that
+	// grew it fit; the edit must still land or be reported as a conflict.
+	async function editAfterRecreate(grow: (a: ReturnType<typeof newClient>) => Promise<string>) {
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const hold = { pushDebounceMs: 60_000, pushMaxDelayMs: 60_000 };
+		const a = newClient(ws, hold);
+		const b = newClient(ws, { ...hold, onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await b.start();
+		const text = await grow(a);
+		await b.syncNow();
+
+		// A third client deletes the row and creates it again with a small
+		// document. A client other than a, so the new document shares no text
+		// item ids with the old one.
+		const c = newClient(ws);
+		await c.start();
+		await c.syncNow();
+		await c.mutate.del(WidgetSchema, 'w1');
+		await c.syncNow();
+		await c.mutate.put(WidgetSchema, { id: 'w1', label: 'recreated', body: 'fresh' });
+		await c.syncNow();
+		await c.close();
+
+		// b, still on the old document, appends to it and syncs
+		await b.mutate.patch(WidgetSchema, 'w1', { body: text + ' B edit' });
+		for (let i = 0; i < 4; i++) await b.syncNow().catch(() => undefined);
+
+		const landed = plainTextOf((await b.get(WidgetSchema, 'w1'))?.body).includes(' B edit');
+		await a.close();
+		await b.close();
+		return { landed, rejections };
+	}
+
+	it('lands or reports a refused fragment on a document larger than the value limit', async () => {
+		// Given a body grown past the value limit through four accepted 300 KiB edits
+		const { landed, rejections } = await editAfterRecreate(async (a) => {
+			await a.mutate.put(WidgetSchema, { id: 'w1', label: 'x' });
+			await a.syncNow();
+			let text = '';
+			for (let i = 0; i < 4; i++) {
+				text += String.fromCharCode(97 + i).repeat(300 * 1024);
+				await a.mutate.patch(WidgetSchema, 'w1', { body: text });
+				await a.syncNow();
+			}
+			return text;
+		});
+
+		// Then the edit lands, or is reported as a conflict with the re-creation
+		// And it must not be refused for a value size the client never chose
+		const codes = rejections.map((r) => r.errorCode);
+		expect({
+			landedOrConflict: landed || codes.includes(CodeConflict),
+			refusedOtherwise: codes.filter((c) => c !== CodeConflict),
+		}).toEqual({ landedOrConflict: true, refusedOtherwise: [] });
+	}, 120_000);
+
+	it('control: lands a refused fragment on a small document', async () => {
+		// Given a small body
+		const { landed, rejections } = await editAfterRecreate(async (a) => {
+			await a.mutate.put(WidgetSchema, { id: 'w1', label: 'x', body: 'small text' });
+			await a.syncNow();
+			return 'small text';
+		});
+
+		// Then the edit lands without a rejection
+		expect({ landed, rejections }).toEqual({ landed: true, rejections: [] });
 	});
 
 	it('converges with a trusted server-side string write', async () => {
