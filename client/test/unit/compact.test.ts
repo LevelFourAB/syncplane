@@ -34,6 +34,8 @@ import { TouchSet } from '../../src/touch.js';
 
 const registry = new EntityRegistry([ TodoSchema ]);
 const NO_PROTECTED: ReadonlySet<bigint> = new Set();
+/** The confirmed store holds every row. */
+const STORED = (): boolean => true;
 
 function mutation(id: bigint, crud: CrudMutation): Mutation {
 	return create(MutationSchema, {
@@ -205,7 +207,7 @@ describe('planCompaction', () => {
 
 	it('folds repeated unguarded PUTs, and repeated DELETEs, of one row', async () => {
 		const puts = [ put(1n, { id: 't1', title: 'a' }), put(2n, { id: 't1', title: 'b' }) ];
-		const plan = planCompaction(registry, puts, 0n, NO_PROTECTED);
+		const plan = planCompaction(registry, puts, 0n, NO_PROTECTED, STORED);
 		expect(plan.mutations).toHaveLength(1);
 		const crud = plan.mutations[0]!.payload.value as CrudMutation;
 		expect(fromBinary(TodoSchema, crud.value).title).toBe('b');
@@ -213,6 +215,57 @@ describe('planCompaction', () => {
 
 		const dels = [ del(1n, 't1'), del(2n, 't1') ];
 		expect(planCompaction(registry, dels, 0n, NO_PROTECTED).mutations).toHaveLength(1);
+	});
+
+	// A refusal of the later PUT would take the row with it, where alone it
+	// leaves the row the earlier PUT created.
+	describe('a PUT that may create the row', () => {
+		it('keeps a later unguarded PUT apart, and folds the PUTs after that', async () => {
+			const puts = [
+				put(1n, { id: 't1', title: 'a' }),
+				put(2n, { id: 't1', title: 'b' }),
+				put(3n, { id: 't1', title: 'c' }),
+			];
+			const plan = planCompaction(registry, puts, 0n, NO_PROTECTED, (_, key) => key !== 't1');
+			expect(ids(plan.mutations)).toEqual([ 1n, 2n ]);
+			expect(plan.remap.get(3n)).toBe(2n);
+			await expectSameOverlay(registry, puts, plan.mutations);
+		});
+
+		it('is a PUT after a DELETE of a stored row', () => {
+			const original = [
+				del(1n, 't1'),
+				put(2n, { id: 't1', title: 'a' }),
+				put(3n, { id: 't1', title: 'b' }),
+			];
+			const plan = planCompaction(registry, original, 0n, NO_PROTECTED, STORED);
+			expect(plan.changed).toBe(false);
+		});
+
+		it('is a PUT after a custom mutation', () => {
+			const original = [
+				custom(1n),
+				put(2n, { id: 't1', title: 'a' }),
+				put(3n, { id: 't1', title: 'b' }),
+			];
+			const plan = planCompaction(registry, original, 0n, NO_PROTECTED, STORED);
+			expect(plan.changed).toBe(false);
+		});
+
+		it('is not a PUT after a pushed PUT of the row', () => {
+			const original = [
+				put(1n, { id: 't1', title: 'a' }),
+				put(2n, { id: 't1', title: 'b' }),
+				put(3n, { id: 't1', title: 'c' }),
+			];
+			const plan = planCompaction(registry, original, 1n, NO_PROTECTED, () => false);
+			expect(ids(plan.mutations)).toEqual([ 1n, 2n ]);
+		});
+
+		it('still folds a later PUT under the same guard', () => {
+			const puts = [ put(1n, { id: 't1', title: 'a' }, 0n), put(2n, { id: 't1', title: 'b' }, 0n) ];
+			expect(planCompaction(registry, puts, 0n, NO_PROTECTED).mutations).toHaveLength(1);
+		});
 	});
 
 	it('collapses a guarded PUT and the PATCHes after it into one PUT', async () => {
@@ -404,7 +457,7 @@ describe('planCompaction', () => {
 			put(2n, { id: 't2', title: 'y' }), // merges with id 1 → one PUT
 			patch(3n, 't1', { title: 'c' }, [ 'title' ]), // protected, survives, renumbered
 		];
-		const plan2 = planCompaction(registry, withDrop, 0n, new Set([ 3n ]));
+		const plan2 = planCompaction(registry, withDrop, 0n, new Set([ 3n ]), STORED);
 		expect(plan2.mutations).toHaveLength(2);
 		expect(ids(plan2.mutations)).toEqual([ 1n, 2n ]);
 		expect(plan2.remap.get(3n)).toBe(2n);
@@ -434,7 +487,7 @@ describe('planCompaction', () => {
 			put(2n, { id: 't1', title: 'b' }),
 			custom(3n),
 		];
-		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
+		const plan = planCompaction(registry, original, 0n, NO_PROTECTED, STORED);
 
 		expect(plan.changed).toBe(true);
 		expect(ids(plan.mutations)).toEqual([ 1n, 2n ]);
@@ -542,11 +595,7 @@ describe('compactPending', () => {
 	});
 
 	it('deletes the old key of a barrier the renumbering moved', async () => {
-		const kv = await seedQueue([
-			put(1n, { id: 't1', title: 'a' }),
-			put(2n, { id: 't1', title: 'b' }),
-			custom(3n),
-		]);
+		const kv = await seedQueue([ del(1n, 't1'), del(2n, 't1'), custom(3n) ]);
 		const result = await compactPending(kv, registry, {}, WS, () => NO_PROTECTED);
 		expect(result.changed).toBe(true);
 		expect(result.pendingCount).toBe(2);
@@ -561,6 +610,28 @@ describe('compactPending', () => {
 		} finally {
 			tx.release();
 		}
+	});
+
+	it('folds PUTs of a row only when the confirmed store holds it', async () => {
+		const queue = [ put(1n, { id: 't1', title: 'a' }), put(2n, { id: 't1', title: 'b' }) ];
+		const created = await compactPending(
+			await seedQueue(queue),
+			registry,
+			{},
+			WS,
+			() => NO_PROTECTED,
+		);
+		expect(created.changed).toBe(false);
+
+		const kv = await seedQueue(queue);
+		const tx = await kv.write();
+		await tx.put(confirmedKey('todo', WS, 't1'), {
+			v: toBinary(TodoSchema, create(TodoSchema, { id: 't1', title: 'old' })),
+			ver: '1',
+		});
+		await tx.commit();
+		const stored = await compactPending(kv, registry, {}, WS, () => NO_PROTECTED);
+		expect(stored.pendingCount).toBe(1);
 	});
 
 	it('is a no-op (no write) when nothing compacts', async () => {
@@ -769,7 +840,7 @@ describe('text field compaction', () => {
 				widgetPut(1n, { label: 'a', body: typedBody }),
 				widgetPut(2n, { label: 'b' }),
 			];
-			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED);
+			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED, STORED);
 			expect(plan.mutations).toHaveLength(2);
 			expect(await overlayBody(original)).toBe('base typed offline');
 			await expectSameOverlay(widgetRegistry, original, plan.mutations, confirmed);
@@ -781,7 +852,7 @@ describe('text field compaction', () => {
 				widgetPut(1n, { label: 'a', body: typedBody }),
 				widgetPut(2n, { label: 'b', body: baseBody }),
 			];
-			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED);
+			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED, STORED);
 			expect(plan.mutations).toHaveLength(2);
 			expect(await overlayBody(original)).toBe('base typed offline');
 			await expectSameOverlay(widgetRegistry, original, plan.mutations, confirmed);
@@ -793,7 +864,7 @@ describe('text field compaction', () => {
 				widgetPut(1n, { label: 'a', body: typedBody }),
 				widgetPut(2n, { label: 'b', body: typedBody }),
 			];
-			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED);
+			const plan = planCompaction(widgetRegistry, original, 0n, NO_PROTECTED, STORED);
 			expect(plan.mutations).toHaveLength(1);
 			expect(await overlayBody(plan.mutations)).toBe('base typed offline');
 			await expectSameOverlay(widgetRegistry, original, plan.mutations, confirmed);

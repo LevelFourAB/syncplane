@@ -209,7 +209,9 @@ describe('overlay cache across clients sharing a store', () => {
 	it('sees the overlay a compaction rewrote', async () => {
 		const { kv, a, b } = await twoClients();
 		try {
+			// The first PUT creates the row, so only the two after it fold.
 			await b.mutate.put(NoteSchema, nine as never);
+			await b.mutate.put(NoteSchema, { ...nine, rank: 1 } as never);
 			await b.mutate.put(NoteSchema, { ...nine, rank: 0 } as never);
 			expect(await open(a)).toEqual([ 'n9', 'n1', 'n2' ]);
 

@@ -85,6 +85,34 @@ describe('compaction stores what the separate writes store', () => {
 		await b.close();
 	});
 
+	it('a refused PUT does not cancel an earlier PUT that created the row', async () => {
+		// Given a client that creates a new todo row while offline
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { ...HOLD, onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(TodoSchema, { id: 't3', title: 'draft' });
+		// And then writes the row again with a title that the server policy refuses
+		await a.mutate.put(TodoSchema, { id: 't3', title: 'forbidden plan' });
+
+		// When the client pushes the two writes
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then only the second write is refused
+		expect(rejections).toHaveLength(1);
+		// And the row that the first PUT created exists on the server with its title
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		// And must not be missing on the server or on the writer
+		expect((await b.get(TodoSchema, 't3'))?.title).toBe('draft');
+		expect((await a.get(TodoSchema, 't3'))?.title).toBe('draft');
+
+		await a.close();
+		await b.close();
+	});
+
 	it('a PATCH of a field only the server protects does not take an allowed PATCH with it', async () => {
 		// Given a guarded row, and a client authenticated as "viewer" (the server
 		// policy protects `label` for this subject only, so the client cannot know)
@@ -406,6 +434,48 @@ describe('compaction stores what the separate writes store', () => {
 
 		// Then the row keeps the typed text
 		expect(plainTextOf((await a.get(WidgetSchema, 'w1'))?.body)).toBe('base typed offline');
+		await a.close();
+	});
+
+	it('control: two accepted PUTs of a new row store the later one', async () => {
+		// Given a client that creates a new todo row while offline
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { ...HOLD, onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(TodoSchema, { id: 't3', title: 'draft' });
+		// And then writes the row again with a title that the server accepts
+		await a.mutate.put(TodoSchema, { id: 't3', title: 'final' });
+
+		// When the client pushes the two writes
+		await a.syncNow();
+		await a.syncNow();
+
+		// Then the server stores the later title
+		expect(rejections).toHaveLength(0);
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		expect((await b.get(TodoSchema, 't3'))?.title).toBe('final');
+
+		await a.close();
+		await b.close();
+	});
+
+	it('control: a refused PUT pushed after the PUT that created the row leaves the row', async () => {
+		// Given a client that creates a new todo row and pushes it
+		const ws = freshWorkspace();
+		const a = newClient(ws, HOLD);
+		await a.start();
+		await a.mutate.put(TodoSchema, { id: 't3', title: 'draft' });
+		await a.syncNow();
+
+		// When a write that the server policy refuses goes in a separate push
+		await a.mutate.put(TodoSchema, { id: 't3', title: 'forbidden plan' });
+		await a.syncNow();
+
+		// Then the row keeps its first title
+		expect((await a.get(TodoSchema, 't3'))?.title).toBe('draft');
 		await a.close();
 	});
 

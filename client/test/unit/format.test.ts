@@ -284,8 +284,8 @@ describe('format version upgrade', () => {
 		// initPushedThrough to re-seed from the (now empty) queue reads as 0, which
 		// puts that slot back at id 1 — already applied, and silently dropped along
 		// with every id up to the watermark that followed it.
-		await client.mutate.put(TodoSchema, { id: 't3', title: 'first' });
-		await client.mutate.put(TodoSchema, { id: 't3', title: 'second' });
+		await client.mutate.del(TodoSchema, 't3');
+		await client.mutate.del(TodoSchema, 't3');
 		await client.syncNow();
 
 		expect(pushedBatches.at(-1)?.map((m) => m.mutationId)).toEqual([ 3n ]);

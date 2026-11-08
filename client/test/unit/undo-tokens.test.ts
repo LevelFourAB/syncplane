@@ -58,8 +58,8 @@ async function tabs() {
  * from id 3 to id 2, and the counter drops to 2.
  */
 async function renumberUnderB(a: SyncClient, b: SyncClient): Promise<void> {
-	await a.mutate.put(TodoSchema, { id: 't9', title: 'first' });
-	await a.mutate.put(TodoSchema, { id: 't9', title: 'second' });
+	await a.mutate.del(TodoSchema, 't9');
+	await a.mutate.del(TodoSchema, 't9');
 	await b.mutate.put(TodoSchema, { id: 't1', title: 'from b' });
 	expect(b.canUndo()).toBe(true);
 

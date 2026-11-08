@@ -15,7 +15,7 @@ import {
 	type Mutation,
 	MutationSchema,
 } from '../gen/syncplane/v1/mutation_pb.js';
-import { metaLastMutationId, pendingKey } from '../keys.js';
+import { confirmedKey, metaLastMutationId, pendingKey } from '../keys.js';
 import type { KVRead, KVStore } from '../kv/store.js';
 import {
 	type EntityDef,
@@ -87,6 +87,9 @@ import { clearOverlayAndReplay, type MirrorMap } from './rebase.js';
  *    field, which is the one the user last asked for. Text has no "later
  *    value": a PUT unions its documents with the stored ones, so a PUT folds
  *    onto an earlier PUT only when it already carries all of that PUT's text.
+ *  - An unguarded PUT never folds onto a PUT that may create the row (no
+ *    confirmed row, or a DELETE before it). A refusal of the later value
+ *    would otherwise take the row itself with it, not only an earlier value.
  */
 export interface CompactionPlan {
 	/** New queue in id order: the untouched pushed prefix + renumbered tail. */
@@ -106,14 +109,23 @@ interface Slot {
 	clientId: string;
 	/** Old ids folded into this slot (all remap to the slot's new id). */
 	sources: bigint[];
+	/** The slot opened with a PUT on a row that may not exist before it. */
+	creates?: boolean;
 }
 
-/** Plans a compaction of the pending queue. Pure; does no I/O. */
+/**
+ * Plans a compaction of the pending queue. Pure; does no I/O.
+ *
+ * `stored` tells whether the confirmed store holds the row of an entity and
+ * key. When it is omitted, no row counts as held, which costs at most one
+ * unfolded slot per row.
+ */
 export function planCompaction(
 	registry: EntityRegistry,
 	pending: Mutation[],
 	pushedThrough: bigint,
 	protectedIds: ReadonlySet<bigint>,
+	stored: (entity: string, key: string) => boolean = () => false,
 ): CompactionPlan {
 	const head: Mutation[] = [];
 	const tail: Mutation[] = [];
@@ -122,12 +134,38 @@ export function planCompaction(
 		else tail.push(m);
 	}
 
+	// Whether each row is live after the queue so far, where an op on it says.
+	// A custom or batch mutation can create or delete any row, so after one
+	// every row the queue has not written since may be absent.
+	const live = new Map<string, boolean>();
+	let unknown = false;
+	const mayBeAbsent = (entity: string, key: string): boolean => {
+		const known = live.get(`${entity}\u0000${key}`);
+		if (known !== undefined) return !known;
+		return unknown || !stored(entity, key);
+	};
+	const track = (m: Mutation): void => {
+		if (m.payload.case !== 'crud') {
+			live.clear();
+			unknown = true;
+			return;
+		}
+		const crud = m.payload.value;
+		const keyStr = `${crud.entity}\u0000${crud.key}`;
+		if (crud.op === CrudOp.PUT) live.set(keyStr, true);
+		else if (crud.op === CrudOp.DELETE) live.set(keyStr, false);
+	};
+	for (const m of head) track(m);
+
 	const slots: Slot[] = [];
 	// The mergeable slot currently open for each (entity, key). A barrier closes
 	// the relevant slots so later ops cannot merge across it.
 	const openByKey = new Map<string, Slot>();
 
 	for (const m of tail) {
+		const createsRow = m.payload.case === 'crud' && m.payload.value.op === CrudOp.PUT
+			&& mayBeAbsent(m.payload.value.entity, m.payload.value.key);
+		track(m);
 		if (m.payload.case !== 'crud') {
 			// custom/batch: a hard barrier across every key (a custom mutator may
 			// touch any row; a batch spans many).
@@ -152,7 +190,8 @@ export function planCompaction(
 		// incoming op opens a fresh slot that later ops can still extend.
 		const foldable = open?.crud !== undefined
 			&& open.crud.expectedVersion === crud.expectedVersion
-			&& (crud.expectedVersion !== undefined || sameWrite(open.crud, crud));
+			&& (crud.expectedVersion !== undefined
+				|| (sameWrite(open.crud, crud) && !(open.creates && crud.op === CrudOp.PUT)));
 		const folded = foldable ? foldCrud(registry, def, open!.crud!, crud) : undefined;
 		if (open?.crud && folded && folded !== 'barrier') {
 			open.crud = folded;
@@ -165,6 +204,7 @@ export function planCompaction(
 			crud: clone(CrudMutationSchema, crud),
 			clientId: m.clientId,
 			sources: [ m.mutationId ],
+			creates: createsRow,
 		};
 		slots.push(slot);
 		openByKey.set(keyStr, slot);
@@ -559,7 +599,21 @@ export async function compactPending(
 				if (list.some((t) => protectedTokens.has(t))) protectedIds.add(id);
 			}
 		}
-		const plan = planCompaction(registry, pending, pushedThrough, protectedIds);
+		// Only a PUT asks whether its row is stored (see planCompaction).
+		const stored = new Set<string>();
+		for (const m of pending) {
+			if (m.mutationId <= pushedThrough || m.payload.case !== 'crud') continue;
+			const { entity, key, op } = m.payload.value;
+			if (op !== CrudOp.PUT) continue;
+			if (await tx.has(confirmedKey(entity, workspaceId, key))) stored.add(`${entity}\u0000${key}`);
+		}
+		const plan = planCompaction(
+			registry,
+			pending,
+			pushedThrough,
+			protectedIds,
+			(entity, key) => stored.has(`${entity}\u0000${key}`),
+		);
 		if (!plan.changed) {
 			tx.release();
 			return { remap: new Map(), pendingCount: pending.length, changed: false };

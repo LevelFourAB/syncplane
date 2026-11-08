@@ -462,8 +462,8 @@ describe('a saved scope and the server', () => {
 		const db = newDb();
 		const client = await queueWriter(db, server.transport());
 		const page = await client.restoreUndoScope('page:1');
-		await page.mutate.put(TodoSchema, { id: 't1', title: 'one' });
-		await page.mutate.put(TodoSchema, { id: 't1', title: 'two' });
+		await page.mutate.del(TodoSchema, 't1');
+		await page.mutate.del(TodoSchema, 't1');
 		await page.discard();
 		await shut(client);
 
