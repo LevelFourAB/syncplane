@@ -1567,8 +1567,9 @@ func (s *Server) applyCustom(
 	if err := s.checkInvocation(ctx, ws, tx, g.accessOf(), mi, args); err != nil {
 		return err
 	}
+	ftx := &failureTx{WriteTx: tx}
 	etx := &EntityTx{
-		srv: s, ctx: ctx, ws: ws, tx: tx, seq: seq, actor: actor, access: g.accessOf(), caller: g,
+		srv: s, ctx: ctx, ws: ws, tx: ftx, seq: seq, actor: actor, access: g.accessOf(), caller: g,
 		guarded: guarded, log: log,
 	}
 	err := mi.fn(markWriteTx(ctx), etx, args)
@@ -1579,6 +1580,16 @@ func (s *Server) applyCustom(
 		return errNeedsSavepoints
 	}
 	if _, isRejection := AsRejection(err); err == nil || isRejection {
+		return err
+	}
+	if ftx.failed != nil {
+		// The store failed under the body, so the body's error is most likely
+		// that failure, handed back as is or reworded. Joining the cause keeps
+		// it visible to the adapter's retry check and the workspace gate when
+		// the body did not wrap it.
+		if !errors.Is(err, ftx.failed) {
+			err = errors.Join(err, ftx.failed)
+		}
 		return err
 	}
 	return &mutatorError{name: mi.name, mutationID: mutationID, err: err}

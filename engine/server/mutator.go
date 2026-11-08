@@ -25,7 +25,10 @@ import (
 // client a retry loop that ends in the mutation being dropped to its
 // dead-letter surface, so it reaches the app as a lost write rather than as
 // the "no" it was. A cancelled push context fails the batch as CodeInternal
-// instead.
+// instead, and so does any error after a storage call of the body failed:
+// that error is taken to be the store's failure, which the client retries
+// without a limit. An answer is not a failure here: a missing row, or an
+// error the body's own Scan or Query callback returned.
 //
 // args follows the registration, not the caller: a mutator registered with a
 // prototype always receives a non-nil message of that type — zeroed when the

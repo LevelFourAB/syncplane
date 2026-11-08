@@ -539,6 +539,19 @@ var _ = Describe("Push batches", func() {
 			Expect(todoAt("t1")).To(BeNil())
 		})
 
+		It("reports an error a mutator's scan callback returns as mutation_failed", func() {
+			start(newTestServer(server.WithMutator("scanfail", nil,
+				func(_ context.Context, tx *server.EntityTx, _ proto.Message) error {
+					return tx.Scan(&todov1.Todo{}, func(proto.Message) error {
+						return errors.New("ledger row missing")
+					})
+				})))
+
+			pushBatch(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+			batch := pushBatch(customMutation("c1", 2, "scanfail", &testdatav1.Widget{}))
+			Expect(batch.GetErrorCode()).To(Equal(server.CodeMutationFailed), batch.GetErrorMessage())
+		})
+
 		It("keeps a mutator's Reject a rejection", func() {
 			start(newTestServer(server.WithMutator("refuse", nil,
 				func(context.Context, *server.EntityTx, proto.Message) error {
@@ -561,8 +574,52 @@ var _ = Describe("Push batches", func() {
 				Expect(batch.GetErrorMessage()).NotTo(ContainSubstring("disk on fire"))
 			}
 		})
+
+		It("reports a storage failure a mutator returns as internal", func() {
+			// The read fails inside the transaction, and the mutator hands the
+			// error back as most do. It is still the store's failure, which
+			// the client retries without a limit, and not the mutator's.
+			store := &failingReadInWriteAdapter{Adapter: newTestStore(), entity: "todo", err: errors.New("connection reset by peer")}
+			start(mustNewServer(store, testEntities(), server.WithMutator("bump", nil,
+				func(_ context.Context, tx *server.EntityTx, _ proto.Message) error {
+					var t todov1.Todo
+					_, err := tx.Get(&t, "t1")
+					return err
+				})))
+
+			for range 3 {
+				batch := pushBatch(customMutation("c1", 1, "bump", &testdatav1.Widget{}))
+				Expect(batch.GetErrorCode()).To(Equal(server.CodeInternal), batch.GetErrorMessage())
+			}
+		})
 	})
 })
+
+// failingReadInWriteAdapter fails every row read of one entity inside a write
+// transaction, as a connection that drops mid-transaction does.
+type failingReadInWriteAdapter struct {
+	storage.Adapter
+	entity string
+	err    error
+}
+
+func (a *failingReadInWriteAdapter) WithWriteTx(ctx context.Context, ws string, fn func(storage.WriteTx) error) error {
+	return a.Adapter.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
+		return fn(&failingReadInWriteTx{WriteTx: tx, owner: a})
+	})
+}
+
+type failingReadInWriteTx struct {
+	storage.WriteTx
+	owner *failingReadInWriteAdapter
+}
+
+func (t *failingReadInWriteTx) GetRow(entity, key string) (storage.Row, error) {
+	if entity == t.owner.entity {
+		return storage.Row{}, t.owner.err
+	}
+	return t.WriteTx.GetRow(entity, key)
+}
 
 // failingWriteAdapter fails every write transaction before its closure runs,
 // as a store that is down does.

@@ -115,14 +115,14 @@ func (a *txAccess) settle(ctx context.Context, err error) error {
 
 // get returns what the caller holds as of tx.
 func (a *txAccess) get(tx storage.ReadTx) (*accessSet, error) {
-	if a.set != nil && a.tx == tx {
+	if a.set != nil && a.tx == baseTx(tx) {
 		return a.set, nil
 	}
 	set, err := resolveAccess(tx, a.caller, a.limits)
 	if err != nil {
 		return nil, err
 	}
-	a.tx, a.set = tx, set
+	a.tx, a.set = baseTx(tx), set
 	return set, nil
 }
 
