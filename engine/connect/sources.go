@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+
+	"github.com/levelfourab/syncplane/engine/server"
 )
 
 // pass is the scope of one convergence run: the source handle it borrowed
@@ -25,6 +27,12 @@ type pass struct {
 
 	// wrote counts engine writes for IngestChunk pacing.
 	wrote int
+
+	// egressed is the egress position mirrored in the engine (see
+	// Connector.egressMirror), read once per pass; egressedRead says whether
+	// it was read.
+	egressed     *server.Cursor
+	egressedRead bool
 }
 
 // writer returns the source's Writer half. Egress paths are gated on

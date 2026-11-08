@@ -133,6 +133,69 @@ var _ = Describe("Connector.Drain", func() {
 		Expect(f.src.writeCount()).To(Equal(2))
 	})
 
+	It("keeps a client edit that was not egressed when the State is lost", func() {
+		// Given a connector with a stable writer id, a row reconciled from the
+		// source, and a client edit the connector has not drained yet
+		f := newFixture(func(c *engineconnect.Config) { c.WriterID = "w1" })
+		f.src.set(ws, &todov1.Todo{Id: "t1", Title: "source v1"})
+		Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+		f.push(ctx, ws, putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "client edit"}))
+
+		// When the State loses the shadow and the egress cursor
+		Expect(f.st.DeleteShadow(ctx, ws, "todo", "t1")).To(Succeed())
+		Expect(f.st.SetCursor(ctx, ws, server.Cursor{})).To(Succeed())
+		Expect(f.conn.Ingress(ctx, ws)).To(Succeed())
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+
+		// Then the edit survives in the engine and reaches the source
+		Expect(f.engineTodo(ctx, ws, "t1").GetTitle()).To(Equal("client edit"),
+			"a lost State costs a reconcile, never a committed edit")
+		Expect(f.src.get(ws, "t1").GetTitle()).To(Equal("client edit"))
+	})
+
+	It("takes a source edit made after the last egress when the State is lost", func() {
+		// Given a connector with a stable writer id, and a client edit it
+		// drained to the source
+		f := newFixture(func(c *engineconnect.Config) { c.WriterID = "w1" })
+		f.src.set(ws, &todov1.Todo{Id: "t1", Title: "source v1"})
+		Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+		f.push(ctx, ws, putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "client edit"}))
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+		Expect(f.src.get(ws, "t1").GetTitle()).To(Equal("client edit"))
+
+		// When the source changes the row, and the State is lost
+		f.src.set(ws, &todov1.Todo{Id: "t1", Title: "source v2"})
+		Expect(f.st.DeleteShadow(ctx, ws, "todo", "t1")).To(Succeed())
+		Expect(f.st.SetCursor(ctx, ws, server.Cursor{})).To(Succeed())
+		Expect(f.conn.Ingress(ctx, ws)).To(Succeed())
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+
+		// Then the source's newer value wins on both sides
+		Expect(f.engineTodo(ctx, ws, "t1").GetTitle()).To(Equal("source v2"))
+		Expect(f.src.get(ws, "t1").GetTitle()).To(Equal("source v2"))
+	})
+
+	It("rewrites nothing when the State is lost with both sides in step", func() {
+		// Given a row identical on both sides and no pending client edit
+		f := newFixture()
+		f.src.set(ws, &todov1.Todo{Id: "t1", Title: "same"})
+		Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+		seq, writes := f.currentSeq(ctx, ws), f.src.writeCount()
+
+		// When the State loses the shadow and the egress cursor
+		Expect(f.st.DeleteShadow(ctx, ws, "todo", "t1")).To(Succeed())
+		Expect(f.st.SetCursor(ctx, ws, server.Cursor{})).To(Succeed())
+		Expect(f.conn.Ingress(ctx, ws)).To(Succeed())
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+
+		// Then neither side is written
+		Expect(f.currentSeq(ctx, ws)).To(Equal(seq), "no engine write")
+		Expect(f.src.writeCount()).To(Equal(writes), "no source write")
+		Expect(f.engineTodo(ctx, ws, "t1").GetTitle()).To(Equal("same"))
+	})
+
 	It("egresses deletes and clears the shadow", func() {
 		f := newFixture()
 		f.push(ctx, ws, putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "hello"}))

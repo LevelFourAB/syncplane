@@ -32,6 +32,15 @@ func (c *Connector) drain(ctx context.Context, workspaceID string, p *pass) erro
 		if err != nil {
 			return err
 		}
+		if cur.Seq == 0 {
+			// A State that lost its cursor resumes from the copy in the
+			// engine: the changes below it reached the source already.
+			if mirrored, ok, err := c.egressMirror(ctx, workspaceID, p); err != nil {
+				return err
+			} else if ok {
+				cur = mirrored
+			}
+		}
 		// Collect the page inside the read snapshot, act on it outside: the
 		// source's I/O must never run inside (and pin) an engine read tx.
 		var page []server.Change
@@ -69,7 +78,7 @@ func (c *Connector) drain(ctx context.Context, workspaceID string, p *pass) erro
 			if err := c.resyncSource(ctx, workspaceID, p, next.Seq); err != nil {
 				return err
 			}
-			if err := c.state.SetCursor(ctx, workspaceID, next); err != nil {
+			if err := c.setCursor(ctx, workspaceID, p, next); err != nil {
 				return err
 			}
 			continue
@@ -85,13 +94,61 @@ func (c *Connector) drain(ctx context.Context, workspaceID string, p *pass) erro
 		if len(page) > 0 {
 			logger.LogAttrs(ctx, slog.LevelDebug, "drain page egressed", slog.Int("rows", len(page)))
 		}
-		if err := c.state.SetCursor(ctx, workspaceID, next); err != nil {
+		if err := c.setCursor(ctx, workspaceID, p, next); err != nil {
 			return err
 		}
 		if !more {
 			return nil
 		}
 	}
+}
+
+// setCursor records the egress position in the State, and its copy in the
+// engine (see egressMirror).
+func (c *Connector) setCursor(ctx context.Context, workspaceID string, p *pass, next server.Cursor) error {
+	if err := c.state.SetCursor(ctx, workspaceID, next); err != nil {
+		return err
+	}
+	if c.consumer == "" {
+		return nil
+	}
+	err := c.srv.AdvanceConsumer(ctx, workspaceID, c.consumer, server.ConsumerUpdate{Cursor: next})
+	if errors.Is(err, server.ErrCursorForeign) {
+		// The workspace's history changed since Changes returned next, and the
+		// next pass meets the foreign cursor and heals from there.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	p.egressed, p.egressedRead = &server.Cursor{Seq: next.Seq, Entity: next.Entity, Key: next.Key}, true
+	return nil
+}
+
+// egressMirror returns the egress position the connector copied into the
+// engine's store, as the consumer position of its label, and whether there is
+// one. The copy lives with the rows, so it survives a lost State: the changes
+// at or below it reached the source, and a row the engine changed after it
+// holds an edit the source has not received. There is none without
+// Config.WriterID, whose label is the only name stable across restarts.
+func (c *Connector) egressMirror(ctx context.Context, workspaceID string, p *pass) (server.Cursor, bool, error) {
+	if c.consumer == "" {
+		return server.Cursor{}, false, nil
+	}
+	if !p.egressedRead {
+		cur, ok, err := c.srv.ConsumerPosition(ctx, workspaceID, c.consumer)
+		if err != nil {
+			return server.Cursor{}, false, err
+		}
+		p.egressedRead = true
+		if ok {
+			p.egressed = &cur
+		}
+	}
+	if p.egressed == nil {
+		return server.Cursor{}, false, nil
+	}
+	return *p.egressed, true, nil
 }
 
 // forgetShadows deletes every shadow of the workspace.

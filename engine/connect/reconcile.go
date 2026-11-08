@@ -142,18 +142,37 @@ func (c *Connector) ingest(ctx context.Context, workspaceID string, p *pass, b b
 		// No ancestor: everything the source reports is new to us.
 		changedTexts = item.TextFields
 	}
+	// Without a shadow nothing tells which side changed a row both hold, except
+	// the egress position the engine keeps: a row written after it holds an
+	// edit the source has not received.
+	var egressed *server.Cursor
+	if sh == nil && b.direction == Bidirectional {
+		if cur, ok, err := c.egressMirror(ctx, workspaceID, p); err != nil {
+			return err
+		} else if ok {
+			egressed = &cur
+		}
+	}
 
 	var (
 		seq    uint64
 		merged proto.Message
+		unsent bool
 	)
 	if err := c.srv.Mutate(server.TrustedAs(ctx, c.label), workspaceID, func(tx *server.EntityTx) error {
 		// Reset on entry: the storage adapter may retry this closure.
-		seq, merged = 0, nil
+		seq, merged, unsent = 0, nil, false
 		cur := b.prototype.ProtoReflect().New().Interface()
-		found, err := tx.Get(cur, key)
+		found, meta, err := tx.GetMeta(cur, key)
 		if err != nil {
 			return err
+		}
+		if found && egressed != nil && meta.Version > egressed.Seq {
+			// Taking the source's value would overwrite the edit, and the
+			// shadow written after it would keep the drain from sending it.
+			// The drain sends it, and records the shadow.
+			unsent = true
+			return nil
 		}
 		if !found || baseMsg == nil {
 			merged = proto.Clone(item.Msg)
@@ -180,6 +199,9 @@ func (c *Connector) ingest(ctx context.Context, workspaceID string, p *pass, b b
 		return nil
 	}); err != nil {
 		return err
+	}
+	if unsent {
+		return nil
 	}
 	if seq != 0 {
 		if err := c.pace(ctx, p); err != nil {

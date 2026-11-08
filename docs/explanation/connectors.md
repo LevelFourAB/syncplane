@@ -33,6 +33,8 @@ Connector operations use an at-least-once model with idempotent repair. A failur
 
 When any of these failures occur, a reconcile pass restores convergence between the source and the workspace.
 
+Losing the state database also loses the shadows, so for a row that both sides hold nothing records which side changed it. A connector with a fixed `WriterID` keeps a copy of its egress position in the engine's store, as the consumer position `connect:<WriterID>`. That copy is stored with the rows, so it survives the loss. A row that the workspace changed after the copied position holds a client edit that the source has not received: the connector sends it to the source and does not take the source's value. Every other row takes the source's value. A row that both sides changed after the last egress keeps the client edit, and the source's edit to that row is lost. A connector without a `WriterID` has no name that stays the same across restarts, so it keeps no copy: after a lost state database every row takes the source's value, and client edits that the connector had not sent yet are lost.
+
 When the engine store is swapped or restored from a backup, or the workspace is deleted and restored, the egress cursor names a history that the engine does not hold. The connector then deletes every shadow of the workspace and heals as an initial import: source rows come into the workspace, and workspace rows go out to the source. The shadows of the old history do not decide anything, so a source row that the engine does not hold is imported and not deleted at the source.
 
 ## Collaborative text handling

@@ -110,6 +110,13 @@ type Config struct {
 	// "connect:<WriterID>" — the name an effect or another connector suppresses
 	// its own echo by. Empty labels them "connect", which is enough to tell a
 	// connector's write from a GC pass but not one connector from another.
+	//
+	// With a WriterID, the connector also records how far it has egressed in
+	// the engine's store, as the consumer position of "connect:<WriterID>".
+	// That copy outlives a lost State: a row the engine changed after it is a
+	// client edit the source has not received, and the next pass sends it to
+	// the source instead of taking the source's older value. Without a
+	// WriterID, a lost State loses such edits (see State).
 	WriterID string
 	// Logger is the structured logger the background loops write to. Loop
 	// failures are logged (never returned — convergence work must not take the
@@ -174,6 +181,9 @@ type Connector struct {
 	// derived from Config.WriterID rather than from the minted peer: a label
 	// that changes per run tells a consumer nothing.
 	label string
+	// consumer is the engine consumer name the egress position is mirrored
+	// under, "" without Config.WriterID. See egressMirror.
+	consumer string
 
 	mu      sync.Mutex
 	ready   *sync.Cond
@@ -276,6 +286,9 @@ func New(cfg Config) (*Connector, error) {
 		health:       make(map[string]Health),
 		peer:         "connector:" + writerID,
 		label:        label,
+	}
+	if cfg.WriterID != "" {
+		c.consumer = label
 	}
 	c.ready = sync.NewCond(&c.mu)
 	bind := func(prototype proto.Message, dir Direction) error {

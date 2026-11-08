@@ -50,9 +50,13 @@ type SourceSync struct {
 }
 
 // State is the connector's durable bookkeeping: shadows, the egress cursor
-// into the change feed, and the source's ingress position. It is a cache, not
-// a ledger — losing it costs a full reconcile (content comparison, idempotent
-// writes), never data.
+// into the change feed, and the source's ingress position. Losing it costs a
+// full reconcile (content comparison, idempotent writes). Without the shadows,
+// nothing records which side changed a row that both sides hold. With
+// Config.WriterID set, the connector keeps a copy of its egress position in
+// the engine, and a row the engine changed after it keeps the client's edit
+// and goes to the source. Without one, every such row takes the source's
+// value, and a client edit the connector had not sent yet is lost.
 //
 // Implementations need no cross-row transactionality; the connector orders
 // its writes so that any crash between two State calls is healed by
