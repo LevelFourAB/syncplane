@@ -5,7 +5,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SyncClient } from '../../src/client.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
-import { BootstrapResponseSchema, SyncService } from '../../src/gen/syncplane/v1/service_pb.js';
+import {
+	BootstrapResponseSchema,
+	type SubscribeResponse,
+	SubscribeResponseSchema,
+	SyncService,
+} from '../../src/gen/syncplane/v1/service_pb.js';
 import { metaCursor, metaLastMutationId } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { buildPut, EntityRegistry } from '../../src/mutations.js';
@@ -36,9 +41,16 @@ interface FakeServer {
 	failBootstraps: number;
 }
 
-function fakeTransport(srv: FakeServer): Transport {
+function fakeTransport(
+	srv: FakeServer,
+	subscribe?: (signal: AbortSignal) => AsyncIterable<SubscribeResponse>,
+): Transport {
 	return createRouterTransport(({ service }) => {
 		service(SyncService, {
+			async *subscribe(_req, ctx) {
+				if (subscribe !== undefined) yield* subscribe(ctx.signal);
+				await waitAbort(ctx.signal);
+			},
 			push(req) {
 				srv.pushes++;
 				// Push advertises the revision too, so a client learns of skew on
@@ -88,6 +100,39 @@ function fakeTransport(srv: FakeServer): Transport {
 	});
 }
 
+function waitAbort(signal: AbortSignal): Promise<void> {
+	return new Promise((resolve) => {
+		if (signal.aborted) resolve();
+		else signal.addEventListener('abort', () => resolve());
+	});
+}
+
+// The server advertises its revision on the outer Subscribe frame only; the
+// page inside it is a PullResponse that carries none.
+function streamPage(revision: string, cursor: number): SubscribeResponse {
+	return create(SubscribeResponseSchema, {
+		workspaceId: WS,
+		schemaRevision: revision,
+		body: {
+			case: 'page',
+			value: {
+				patch: { changes: [], dropEntities: [] },
+				nextCursor: new Uint8Array([ cursor ]),
+				hasMore: false,
+				seq: 0n,
+				schemaRevision: '',
+			},
+		},
+	});
+}
+
+function streamHeartbeat(revision: string): SubscribeResponse {
+	return create(SubscribeResponseSchema, {
+		schemaRevision: revision,
+		body: { case: 'heartbeat', value: true },
+	});
+}
+
 describe('coordinator schema-revision handshake', () => {
 	let kv: MemoryKVStore;
 	let registry: EntityRegistry;
@@ -118,6 +163,7 @@ describe('coordinator schema-revision handshake', () => {
 		status: StatusTracker,
 		clientRevision: string | undefined,
 		onSchemaSkew?: (info: { client: string; server: string }) => SchemaSkewAction,
+		streamEnabled = false,
 	): Coordinator {
 		const kvMutex = createKvMutex('test');
 		const hub = new WatcherHub(kv, registry, kvMutex);
@@ -132,7 +178,7 @@ describe('coordinator schema-revision handshake', () => {
 			mirrors: {},
 			notify: (touched) => hub.notify(touched),
 			status,
-			streamEnabled: false,
+			streamEnabled,
 			pollIntervalMs: 0,
 			clientRevision,
 			onSchemaSkew,
@@ -322,6 +368,136 @@ describe('coordinator schema-revision handshake', () => {
 		} finally {
 			errSpy.mockRestore();
 		}
+	});
+
+	describe('over the subscribe stream', () => {
+		/**
+		 * Scripted stream frames, held back until `release` so the first sync
+		 * cycle observes the skew before any frame arrives. `done` resolves once
+		 * the stream has handed out its last frame.
+		 */
+		function scriptedStream(frames: SubscribeResponse[]) {
+			let release!: () => void;
+			const released = new Promise<void>((r) => (release = r));
+			let done!: () => void;
+			const finished = new Promise<void>((r) => (done = r));
+			let opened = 0;
+			async function* subscribe(): AsyncIterable<SubscribeResponse> {
+				// A re-opened stream (after a bootstrap) has nothing new to say.
+				if (opened++ > 0) return;
+				await released;
+				yield* frames;
+				done();
+			}
+			return { subscribe, release, finished };
+		}
+
+		async function readCursor(): Promise<unknown> {
+			const tx = await kv.read();
+			try {
+				return await tx.get(metaCursor(WS));
+			} finally {
+				tx.release();
+			}
+		}
+
+		it('keeps a block engaged across a page whose frame carries the revision', async () => {
+			const srv: FakeServer = {
+				revision: 'B',
+				pushes: 0,
+				bootstraps: 0,
+				queries: 0,
+				failBootstraps: 0,
+			};
+			const stream = scriptedStream([ streamHeartbeat('B'), streamPage('B', 2) ]);
+			const status = new StatusTracker();
+			const seen: string[] = [];
+			const coord = newCoordinator(fakeTransport(srv, stream.subscribe), status, 'A', (info) => {
+				seen.push(info.server);
+				return 'block';
+			}, true);
+
+			// Given a client blocked on server revision B
+			await coord.start();
+			await coord.syncNow();
+			expect(status.current().schemaSkew).toEqual({ client: 'A', server: 'B', action: 'block' });
+			const pushes = srv.pushes;
+
+			// When the stream delivers a page from the same server
+			stream.release();
+			await stream.finished;
+			await vi.waitFor(async () => expect(await readCursor()).toEqual(new Uint8Array([ 2 ])));
+
+			// Then the block stays, the policy is not asked again, and no push leaves
+			expect(status.current().schemaSkew).toEqual({ client: 'A', server: 'B', action: 'block' });
+			expect(seen).toEqual([ 'B' ]);
+			await coord.syncNow();
+			expect(srv.pushes).toBe(pushes);
+			await coord.stop();
+		});
+
+		it('re-bootstraps once on a resync decision while pages stream', async () => {
+			const srv: FakeServer = {
+				revision: 'B',
+				pushes: 0,
+				bootstraps: 0,
+				queries: 0,
+				failBootstraps: 0,
+			};
+			const frames: SubscribeResponse[] = [];
+			for (let i = 0; i < 10; i++) frames.push(streamPage('B', i + 2), streamHeartbeat('B'));
+			const stream = scriptedStream(frames);
+			const status = new StatusTracker();
+			const seen: string[] = [];
+			const coord = newCoordinator(fakeTransport(srv, stream.subscribe), status, 'A', (info) => {
+				seen.push(info.server);
+				return 'resync';
+			}, true);
+
+			// Given a client that already ran the resync for server revision B
+			await coord.start();
+			await coord.syncNow();
+			await coord.syncNow();
+			expect(srv.bootstraps).toBe(1);
+
+			// When the stream delivers 10 pages, each followed by a heartbeat
+			stream.release();
+			await stream.finished;
+			await new Promise((r) => setTimeout(r, 30));
+			await coord.syncNow();
+
+			// Then no further re-bootstrap runs
+			expect(srv.bootstraps).toBe(1);
+			expect(seen).toEqual([ 'B' ]);
+			await coord.stop();
+		});
+
+		it('reports no skew when neither frames nor pages carry a revision', async () => {
+			const srv: FakeServer = {
+				revision: '',
+				pushes: 0,
+				bootstraps: 0,
+				queries: 0,
+				failBootstraps: 0,
+			};
+			const stream = scriptedStream([ streamHeartbeat(''), streamPage('', 2), streamHeartbeat('') ]);
+			const status = new StatusTracker();
+			const seen: string[] = [];
+			const coord = newCoordinator(fakeTransport(srv, stream.subscribe), status, 'A', (info) => {
+				seen.push(info.server);
+				return 'block';
+			}, true);
+
+			await coord.start();
+			await coord.syncNow();
+			stream.release();
+			await stream.finished;
+			await vi.waitFor(async () => expect(await readCursor()).toEqual(new Uint8Array([ 2 ])));
+
+			expect(status.current().schemaSkew).toBeUndefined();
+			expect(seen).toEqual([]);
+			await coord.stop();
+		});
 	});
 });
 

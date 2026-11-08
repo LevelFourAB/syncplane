@@ -2548,6 +2548,7 @@ export class Coordinator {
 			}
 			lastAcked = resp.lastAckedMutationId;
 			const responded = performance.now();
+			this.observeServerRevision(resp.schemaRevision);
 			const { reset, accessStale, skipped, behind } = await this.applyServerPage(
 				workspaceId,
 				resp,
@@ -2596,11 +2597,12 @@ export class Coordinator {
 
 	/**
 	 * Applies one forward page of a workspace (from a Pull response or a Subscribe
-	 * stream — the shapes are identical) onto the local store: observe the schema
-	 * revision, re-bootstrap on reset, otherwise rebase under the stored-seq guard
-	 * and notify watchers. Returns `reset` (the caller must stop / reopen) and, on
-	 * a reset, whether the re-bootstrap actually `committed` — a superseded
-	 * bootstrap left the cursor untouched, so a stream reopening on it would just
+	 * stream — the shapes are identical) onto the local store: re-bootstrap on
+	 * reset, otherwise rebase under the stored-seq guard and notify watchers.
+	 * The caller observes the schema revision: a stream page from an older server
+	 * carries none of its own, and only its frame says which revision sent it.
+	 * Returns `reset` (the caller must stop / reopen) and, on a reset, whether
+	 * the re-bootstrap actually `committed` — a superseded bootstrap left the cursor untouched, so a stream reopening on it would just
 	 * reset again. `accessStale` is RebaseResult.accessStale: the caller pulls
 	 * again. `skipped` and `behind` are RebaseResult's. Shared so the stream
 	 * applies pages through exactly the path Pull does.
@@ -2616,7 +2618,6 @@ export class Coordinator {
 	): Promise<
 		{ reset: boolean; committed: boolean; accessStale: boolean; skipped: boolean; behind: boolean }
 	> {
-		this.observeServerRevision(page.schemaRevision);
 		if (page.reset) {
 			const committed = await this.doBootstrap(workspaceId, subs);
 			return { reset: true, committed, accessStale: false, skipped: false, behind: false };

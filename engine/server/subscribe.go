@@ -495,9 +495,14 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 				sc.owedBytes += pageBytes
 				page.NextCursor = nil
 			}
+			rev := s.catalogPtr().schemaRev
+			// The page is a PullResponse, so it carries the revision too: a
+			// consumer that applies pages the same way it applies Pull responses
+			// must not read an empty revision as "the server has none".
+			page.SchemaRevision = rev
 			if err := stream.Send(&syncplanev1.SubscribeResponse{
 				WorkspaceId:    sc.ws,
-				SchemaRevision: s.catalogPtr().schemaRev,
+				SchemaRevision: rev,
 				Body:           &syncplanev1.SubscribeResponse_Page{Page: page},
 			}); err != nil {
 				return err
