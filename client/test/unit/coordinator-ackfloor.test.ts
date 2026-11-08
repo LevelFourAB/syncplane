@@ -105,6 +105,7 @@ describe('coordinator acked-seq floor', () => {
 	function ackingTransport(
 		pulledMinSeqs: bigint[],
 		seqOf: (id: bigint) => bigint,
+		status: MutationStatus = MutationStatus.APPLIED,
 	): Transport {
 		return createRouterTransport(({ service }) => {
 			service(SyncService, {
@@ -113,7 +114,7 @@ describe('coordinator acked-seq floor', () => {
 						req,
 						pushedMutations(req).map((m) => ({
 							mutationId: m.mutationId,
-							status: MutationStatus.APPLIED,
+							status,
 							seq: seqOf(m.mutationId),
 						})),
 					),
@@ -147,6 +148,29 @@ describe('coordinator acked-seq floor', () => {
 		expect(await meta(metaAckedSeq(WS))).toBe('42');
 		// The same cycle's pull already carries the floor the push just earned.
 		expect(minSeqs).toContain(42n);
+	});
+
+	// A resend of a push whose response was lost is answered ALREADY_APPLIED,
+	// with the seq the first attempt committed at.
+	it('persists the seq an ALREADY_APPLIED resend reports and sends it as the pull floor', async () => {
+		await seed([ 7n ]);
+		const minSeqs: bigint[] = [];
+		const coord = newCoordinator(ackingTransport(minSeqs, () => 42n, MutationStatus.ALREADY_APPLIED));
+		await coord.syncNow();
+		await coord.stop();
+
+		expect(await meta(metaAckedSeq(WS))).toBe('42');
+		expect(minSeqs).toContain(42n);
+	});
+
+	it('records nothing for an ALREADY_APPLIED result without a seq', async () => {
+		await seed([ 7n ]);
+		const minSeqs: bigint[] = [];
+		const coord = newCoordinator(ackingTransport(minSeqs, () => 0n, MutationStatus.ALREADY_APPLIED));
+		await coord.syncNow();
+		await coord.stop();
+
+		expect(await meta(metaAckedSeq(WS))).toBeUndefined();
 	});
 
 	it('never regresses the floor', async () => {

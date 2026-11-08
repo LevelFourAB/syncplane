@@ -1878,7 +1878,12 @@ export class Coordinator {
 					}
 					let ackedSeq = 0n;
 					for (const result of wsResult.results) {
-						if (result.status === MutationStatus.APPLIED && result.seq > ackedSeq) {
+						// An ALREADY_APPLIED resend of a push whose response was lost
+						// carries the seq the first attempt committed at; older ones carry 0.
+						if (
+							(result.status === MutationStatus.APPLIED || result.status === MutationStatus.ALREADY_APPLIED)
+							&& result.seq > ackedSeq
+						) {
 							ackedSeq = result.seq;
 						}
 						if (result.status === MutationStatus.REJECTED) {
