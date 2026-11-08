@@ -850,9 +850,10 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	/**
 	 * Largest number of mutations a single push RPC carries, counted ACROSS the
 	 * workspaces it batches (the engine's limit is a per-request total). A bigger
-	 * offline burst is split across sequential pushes. Default 256 (the engine's
-	 * default limit). Set this to match a server configured with a lower
-	 * MaxMutationsPerPush.
+	 * offline burst is split across sequential pushes. Also the largest number
+	 * of writes one transact() batch may hold; a larger batch rejects. Default
+	 * 256 (the engine's default limit). Set this to match a server configured
+	 * with another MaxMutationsPerPush.
 	 */
 	maxMutationsPerPush?: number;
 	/**
@@ -6633,6 +6634,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		if (this.scopes.get(workspaceId) !== scope.root) {
 			throw new Error(`workspace "${workspaceId}" is not held by this client`);
 		}
+		// The server refuses a larger batch as a whole, and the push cannot split
+		// it, so it fails here, before anything shows locally.
+		const maxBatch = Math.max(1, this.opts.maxMutationsPerPush ?? DEFAULT_MAX_MUTATIONS_PER_PUSH);
+		if (payload.case === 'batch' && payload.value.mutations.length > maxBatch) {
+			throw new Error(
+				`a batch of ${payload.value.mutations.length} writes is over the limit of ${maxBatch} `
+					+ `(maxMutationsPerPush). Split it into several transact() calls.`,
+			);
+		}
 		const undoMgr = scope.undoMgr;
 		const kv = await this.kv();
 		const clientId = await this.clientId();
@@ -7048,6 +7058,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * apply in order, so a later one observes earlier ones; but the batch is not
 	 * visible to get/scan/watch until fn returns, and if fn throws the whole batch
 	 * is discarded (nothing applies).
+	 *
+	 * A batch holds at most `maxMutationsPerPush` writes (default 256), the
+	 * server's limit for one batch. A larger one rejects after fn returns, and
+	 * nothing of it applies.
 	 *
 	 * Scoping is by handle, not by time: writes issued through the client
 	 * itself (`client.mutate.*`) while fn is suspended on an await are NOT part

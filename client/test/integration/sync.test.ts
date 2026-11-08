@@ -254,6 +254,71 @@ describe('sync (poll-driven)', () => {
 		await a.close();
 	});
 
+	// The server refuses a batch of more than MaxMutationsPerPush (256) writes
+	// as a whole. A transact() that the server cannot take must fail where the
+	// app calls it, or reach the server; its rows must not show and then vanish.
+	it('does not show a transact() batch of 300 writes and then drop it', async () => {
+		// Given a client with the default limits
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+
+		// When one transact() puts 300 todos
+		const failed = await a.transact(async (tx) => {
+			for (let i = 0; i < 300; i++) {
+				await tx.mutate.put(TodoSchema, { id: `t${i}`, title: 'imported' });
+			}
+		}).then(() => undefined, (err: unknown) => err);
+
+		// Then either transact() fails and writes nothing locally
+		if (failed !== undefined) {
+			expect(await a.scan(TodoSchema)).toHaveLength(0);
+			await a.close();
+			return;
+		}
+		// Or all 300 rows reach the server
+		await a.syncNow();
+		await a.syncNow();
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		expect({
+			onServer: (await b.scan(TodoSchema)).length,
+			local: (await a.scan(TodoSchema)).length,
+			rejections: rejections.map((r) => r.errorCode),
+		}).toEqual({ onServer: 300, local: 300, rejections: [] });
+
+		await a.close();
+		await b.close();
+	}, 60_000);
+
+	it('control: converges a transact() batch of 256 writes', async () => {
+		// Given a client with the default limits
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+
+		// When one transact() puts 256 todos and the client syncs
+		await a.transact(async (tx) => {
+			for (let i = 0; i < 256; i++) {
+				await tx.mutate.put(TodoSchema, { id: `t${i}`, title: 'imported' });
+			}
+		});
+		await a.syncNow();
+
+		// Then all 256 rows reach the server
+		expect(rejections).toEqual([]);
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		expect(await b.scan(TodoSchema)).toHaveLength(256);
+
+		await a.close();
+		await b.close();
+	}, 60_000);
+
 	it('dead-letters a mutation whose mutator fails the batch on every attempt', async () => {
 		// fail_internal returns a plain error instead of a Reject, so the server
 		// fails the whole batch as "mutation_failed" — retryable by contract, but

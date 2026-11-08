@@ -437,6 +437,7 @@ Behavior rules:
 - Writes made through `tx` collect into a single `BatchMutation`.
 - Reads on `tx` see pre-batch state. Buffered writes are invisible until the callback resolves.
 - If the callback throws, the client discards the entire batch.
+- A batch holds at most `maxMutationsPerPush` writes (default 256). A larger batch rejects after the callback resolves, and nothing of it applies.
 - Scoping is lexical by handle: the batch does not capture writes issued on `client.mutate.*` during an await.
 - `tx` supports read operations, `tx.mutate` (CRUD operations only), and `tx.db`. Transactions do not support custom mutators.
 
