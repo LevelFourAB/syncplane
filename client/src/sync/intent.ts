@@ -67,6 +67,12 @@ export interface IntentRecord {
 	subs: Record<string, Uint8Array[]>;
 	/** Workspace id → undo tokens the tab's stacks reference, as decimal strings. */
 	undoRefTokens: Record<string, string[]>;
+	/**
+	 * Always empty when this build writes it. Builds before v0.5.0 skip a
+	 * record without this field, and with it their subscriptions; with it
+	 * present they union this record's `subs` like their own.
+	 */
+	undoRefIds?: Record<string, string[]>;
 	/** Heartbeat (epoch ms); drives the TTLs above. */
 	updatedAt: number;
 }
@@ -178,7 +184,9 @@ export class IntentRegistry {
 	 * unioned with every live record's. A workspace present in any live record is
 	 * in the union; within a workspace, its subscription sets are unioned and
 	 * deduplicated by wire encoding, with full sync absorbing (any participant
-	 * asking for everything makes the union everything). Records past GC_TTL_MS
+	 * asking for everything makes the union everything). A live record whose
+	 * subscriptions this build cannot read makes every workspace of the union
+	 * full sync, since the scope that tab pulls with is unknown. Records past GC_TTL_MS
 	 * are deleted via a fire-and-forget write transaction (acquired sequentially
 	 * after the shared scan — the mutex is non-reentrant).
 	 */
@@ -187,12 +195,23 @@ export class IntentRegistry {
 		const ownKey = intentKey(this.tabId);
 		const live: IntentRecord[] = [];
 		const doomed: string[] = [];
+		let unreadable = false;
 		await this.kvMutex.runShared(async () => {
 			const tx = await this.kv.read();
 			try {
 				for await (const [ k, v ] of tx.scan(INTENT_PREFIX)) {
 					const rec = asIntentRecord(v);
-					if (!rec) continue;
+					if (!rec) {
+						// A tab of another build still pulls against the shared cursor
+						// with whatever scope its record names. Narrowing to the scopes
+						// this tab can read would alternate the cursor's scope between
+						// the two tabs; the widest scope covers both.
+						const at = heartbeatOf(v);
+						if (at === undefined || k === ownKey) continue;
+						if (now - at > this.gcTtlMs) doomed.push(k);
+						else if (now - at <= this.subsTtlMs) unreadable = true;
+						continue;
+					}
 					if (now - rec.updatedAt > this.gcTtlMs) {
 						// Own record is never GC'd here: heartbeats keep it fresh, and a
 						// suspended-then-resumed tab must not delete itself mid-cycle.
@@ -242,6 +261,7 @@ export class IntentRegistry {
 		for (const rec of live) {
 			for (const [ ws, subs ] of Object.entries(rec.subs)) add(ws, subs);
 		}
+		if (unreadable) { for (const ws of out.keys()) out.set(ws, []); }
 		return out;
 	}
 
@@ -338,6 +358,7 @@ export class IntentRegistry {
 		const record: IntentRecord = {
 			subs: this.ownSubs,
 			undoRefTokens: this.ownRefs,
+			undoRefIds: {},
 			updatedAt: this.now(),
 		};
 		this.lastWriteAt = record.updatedAt;
@@ -399,6 +420,13 @@ function dedupKey(bytes: Uint8Array): string {
 	let bin = '';
 	for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]!);
 	return btoa(bin);
+}
+
+/** The numeric `updatedAt` of a scanned value; undefined when it has none. */
+function heartbeatOf(v: unknown): number | undefined {
+	if (typeof v !== 'object' || v === null) return undefined;
+	const at = (v as { updatedAt?: unknown }).updatedAt;
+	return typeof at === 'number' ? at : undefined;
 }
 
 /** Validates a scanned value as an IntentRecord; undefined for foreign shapes. */

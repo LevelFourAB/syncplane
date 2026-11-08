@@ -233,6 +233,59 @@ describe('IntentRegistry', () => {
 		await expect(reg.reap('never-existed')).resolves.toBeUndefined();
 	});
 
+	// Tabs of different builds share the store, so a record can carry a shape
+	// this build does not know. A live peer's scope it cannot read is still a
+	// scope the peer pulls with; leaving it out splits the tabs' unions over one
+	// shared cursor.
+	describe('records of other builds', () => {
+		it("counts an earlier build's record, which names its refs undoRefIds", async () => {
+			const h = harness();
+			const a = h.registry();
+			await a.seed(scope([ sub('todo') ]), refsOf(new Set()));
+			const tx = await h.kv.write();
+			await tx.put(intentKey('older-tab'), {
+				subs: { [WS]: [ toBinary(SubscriptionSchema, sub('project')) ] },
+				undoRefIds: { [WS]: [ '1' ] },
+				updatedAt: h.clock.now(),
+			});
+			await tx.commit();
+
+			expect(entities(await a.unionScopes(scope([ sub('todo') ])))).toEqual([ 'project', 'todo' ]);
+		});
+
+		it('writes the field an earlier build requires before it reads a record', async () => {
+			const h = harness();
+			const a = h.registry();
+			await a.seed(scope([ sub('todo') ]), refsOf(new Set()));
+
+			const read = await h.kv.read();
+			try {
+				const rec = (await read.get(intentKey(a.tabId))) as Record<string, unknown>;
+				expect(rec['undoRefIds']).toEqual({});
+			} finally {
+				read.release();
+			}
+		});
+
+		it('widens to full sync for a live record whose scope it cannot read', async () => {
+			// Given a live peer record whose subscriptions are in a later shape
+			const h = harness();
+			const a = h.registry();
+			await a.seed(scope([ sub('todo') ]), refsOf(new Set()));
+			const tx = await h.kv.write();
+			await tx.put(intentKey('newer-tab'), {
+				scopes: { [WS]: { entities: [ 'project' ] } },
+				undoRefTokens: {},
+				updatedAt: h.clock.now(),
+			});
+			await tx.commit();
+
+			// When this tab computes its union, then it falls back to the widest scope
+			const union = await a.unionScopes(scope([ sub('todo') ]));
+			expect(union.get(WS)).toEqual([]);
+		});
+	});
+
 	it('ignores foreign or malformed values under the intent prefix', async () => {
 		const h = harness();
 		const a = h.registry();

@@ -46,6 +46,8 @@ Another Web Lock elects the tab that uploads the account's queued [blobs](blobs.
 
 The coordinator synchronizes the union of subscriptions across all active tabs. As a result, a tab can hold rows in storage that it did not explicitly request.
 
+All tabs share one cursor per workspace, so all tabs must pull with the same scope. If tabs pulled with different scopes, the server would resync the difference on each pull. A tab can find the record of a tab that runs a different client build, and it can be unable to read the subscriptions in that record. While that record is live, the tab synchronizes every workspace of the union in full.
+
 Coverage calculations evaluate against each tab's declared scope rather than the union. When the union is wider than the tab's own scope, own-scope coverage can report less completeness than the union. This design prevents coverage status from changing when peer tabs open or close. `status().scope` reports `own`, `effective`, and a boolean that indicates whether the scope was `widened`.
 
 ## Why this tier has its own tests
