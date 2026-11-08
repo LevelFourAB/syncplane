@@ -2896,7 +2896,15 @@ export class Coordinator {
 		if (unbased) {
 			return { reset: false, committed: false, accessStale: false, skipped, behind: false, unbased };
 		}
-		if (state && page.seq > state.serverSeq) state.serverSeq = page.seq;
+		if (state && page.seq > 0n && !skipped && !behind) {
+			// The page passed the stored-seq gate and wrote its seq, so the store
+			// now stands at it. Set rather than raised: a peer tab that
+			// re-bootstrapped a swapped store moved the stored seq below the one
+			// this tab still holds.
+			state.serverSeq = page.seq;
+		} else if (state && page.seq > state.serverSeq) {
+			state.serverSeq = page.seq;
+		}
 		// A server older than head_seq sends 0, which makes the head unknown
 		// rather than leaving one from the snapshot that this page has passed.
 		if (state) state.headSeq = page.headSeq;
