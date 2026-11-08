@@ -706,3 +706,99 @@ describe('a search over a collaborative-text field', () => {
 		}
 	});
 });
+
+// Tabs of two builds share one store during a rolling upgrade. A build that
+// declares no search on an entity, or another one, still writes its rows, and
+// the postings of the build that searches must keep answering as its scan does.
+describe('mixed builds', () => {
+	const note = { id: text().key(), title: text().searchable(), body: text() };
+	const NoteSchema = defineSchema(entity('note', note)).descMessage('note');
+	// The same entity as a build without search declares it.
+	const UnsearchedNoteSchema = defineSchema(entity('note', { ...note, title: text() })).descMessage(
+		'note',
+	);
+	// The same entity as a build that also searches the body declares it.
+	const WiderNoteSchema = defineSchema(entity('note', { ...note, body: text().searchable() }))
+		.descMessage('note');
+	type Note = { id: string; title: string; body: string };
+
+	function noteChange(
+		schema: typeof NoteSchema,
+		version: bigint,
+		n: Partial<Note> & { id: string },
+	) {
+		return create(RowChangeSchema, {
+			entity: 'note',
+			key: n.id,
+			version,
+			body: { case: 'value', value: toBinary(schema, create(schema, n)) },
+		});
+	}
+
+	/** A store this build seeded with n1 'apple pie' and n2 'apple tart' and indexed, then `schema`'s build applied `changes` to. */
+	async function rewrittenBy(schema: typeof NoteSchema, changes: ReturnType<typeof noteChange>[]) {
+		const kv = new MemoryKVStore();
+		const reg = new EntityRegistry([ NoteSchema ]);
+		const indexes = new IndexCache(reg);
+		const seed = await kv.write();
+		await seed.put(metaCursor(WS), new Uint8Array([ 1 ]));
+		await applyServerChanges(
+			seed,
+			reg,
+			WS,
+			[
+				noteChange(NoteSchema, 1n, { id: 'n1', title: 'apple pie' }),
+				noteChange(NoteSchema, 2n, { id: 'n2', title: 'apple tart' }),
+			],
+			new TouchSet(),
+			indexes,
+		);
+		await seed.commit();
+		const mutex = new ChainMutex();
+		await buildIndexes(kv, (fn) => mutex.run(fn), reg, indexes, WS);
+
+		const writer = new EntityRegistry([ schema ]);
+		const tx = await kv.write();
+		await applyServerChanges(tx, writer, WS, changes, new TouchSet(), new IndexCache(writer));
+		await tx.commit();
+
+		return new SyncClient({
+			workspaceId: WS,
+			kvStore: kv,
+			entities: [ NoteSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		}) as unknown as SyncClient<never>;
+	}
+
+	async function matching(client: SyncClient<never>, term: string): Promise<string[]> {
+		const rows = await client.query(
+			NoteSchema,
+			{ where: (n: { match(t: string): unknown }) => n.match(term) } as never,
+		) as unknown as RowSet<Note>;
+		return rows.map((r) => r.key).sort();
+	}
+
+	it('finds the rows a build without search wrote', async () => {
+		// Given n1 retitled and n3 created by a build that declares no search
+		const client = await rewrittenBy(UnsearchedNoteSchema, [
+			noteChange(UnsearchedNoteSchema, 3n, { id: 'n1', title: 'banana bread' }),
+			noteChange(UnsearchedNoteSchema, 4n, { id: 'n3', title: 'apple crumble' }),
+		]);
+
+		// When this build searches, then the answers are what a scan finds
+		expect.soft(await matching(client, 'apple')).toEqual([ 'n2', 'n3' ]);
+		expect(await matching(client, 'banana')).toEqual([ 'n1' ]);
+		await client.close();
+	});
+
+	it('finds a row a build with another search spec rewrote', async () => {
+		// Given n1's body changed by a build that also searches the body
+		const client = await rewrittenBy(WiderNoteSchema, [
+			noteChange(WiderNoteSchema, 3n, { id: 'n1', title: 'apple pie', body: 'with cream' }),
+		]);
+
+		expect(await matching(client, 'apple')).toEqual([ 'n1', 'n2' ]);
+		await client.close();
+	});
+});
