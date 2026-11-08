@@ -117,7 +117,7 @@ func (l *Link) capture(ctx context.Context, cw *server.CapturedWrite) error {
 		}
 		e.ops = append(e.ops, eop)
 	}
-	if err := l.checkOriginLimits(b, e); err != nil {
+	if err := l.checkOriginLimits(b, cw.Workspace, e); err != nil {
 		return err
 	}
 

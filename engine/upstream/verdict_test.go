@@ -3,6 +3,7 @@ package upstream_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -161,6 +162,43 @@ var _ = Describe("Verdicts", func() {
 			Expect(n.rejected()).To(HaveLen(1))
 			Expect(title(o.todo("t3"))).To(Equal("fine"))
 			Expect(n.todo("t2")).To(BeNil())
+		})
+	})
+
+	Describe("a local transaction over the origin's push limits", func() {
+		putMany := func(count int, titled string) error {
+			_, err := n.ws().Apply(ctx, func(tx *server.ApplyTx) error {
+				for i := range count {
+					if err := tx.Put(&todov1.Todo{Id: fmt.Sprintf("big%03d", i), Title: titled}); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			return err
+		}
+
+		It("is refused before it commits, or reaches the origin whole", func() {
+			if err := putMany(300, "imported"); err != nil {
+				Expect(n.todo("big000")).To(BeNil(), "a refused transaction commits nothing")
+				return
+			}
+			n.flush()
+			Expect(n.rejected()).To(BeEmpty())
+			Expect(title(o.todo("big000"))).To(Equal("imported"))
+			Expect(title(o.todo("big299"))).To(Equal("imported"))
+			Expect(title(n.todo("big299"))).To(Equal("imported"))
+		})
+
+		It("does not hold back the writes queued after it", func() {
+			err := putMany(20, strings.Repeat("x", 900_000))
+			n.put(&todov1.Todo{Id: "later", Title: "small"})
+			Eventually(func() *todov1.Todo { return o.todo("later") }).WithTimeout(5*time.Second).
+				ShouldNot(BeNil(), func() string { return fmt.Sprintf("status %+v", n.status()) })
+			if err == nil {
+				Expect(len(n.rejected()) == 1 || o.todo("big000") != nil).To(BeTrue(),
+					"the large transaction is either reported or forwarded")
+			}
 		})
 	})
 
