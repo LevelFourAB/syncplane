@@ -30,6 +30,11 @@ type wsState struct {
 	// known reports that next is in step with the server's watermark.
 	known bool
 	next  uint64
+	// sent is the highest id this Client put in a push request, or the
+	// watermark it learned. Each push sends it as sent_through, so the server
+	// refuses a batch with CodeClientIDInUse once another writer has used an
+	// id after it, rather than answer this Client with that writer's verdict.
+	sent uint64
 	// pending is a mutation sent without a known outcome. It is sent again,
 	// under its own id, before any newer one.
 	pending *syncplanev1.Mutation
@@ -353,6 +358,9 @@ func (w *Workspace) syncCounter(ctx context.Context) error {
 		return err
 	}
 	st.next, st.known = acked+1, true
+	// The ids up to the watermark count as this Client's own: a pinned id
+	// takes the server's watermark over.
+	st.sent = max(st.sent, acked)
 	return nil
 }
 
@@ -384,8 +392,14 @@ func (w *Workspace) send(ctx context.Context, m *syncplanev1.Mutation, resend bo
 				break
 			}
 		}
+		sentThrough := st.sent
+		st.sent = max(st.sent, m.GetMutationId())
 		resp, err := w.c.sync.Push(ctx, connect.NewRequest(&syncplanev1.PushRequest{
-			Batches: []*syncplanev1.WorkspaceBatch{{WorkspaceId: w.id, Mutations: []*syncplanev1.Mutation{m}}},
+			Batches: []*syncplanev1.WorkspaceBatch{{
+				WorkspaceId: w.id,
+				Mutations:   []*syncplanev1.Mutation{m},
+				SentThrough: &sentThrough,
+			}},
 		}))
 		if err != nil {
 			if ctx.Err() == nil && !ambiguous(err) {
@@ -411,6 +425,20 @@ func (w *Workspace) send(ctx context.Context, m *syncplanev1.Mutation, resend bo
 			// ALREADY_APPLIED answer can be this mutation's own.
 			lastErr, resend = &WorkspaceError{Workspace: w.id, Code: code, Message: wr.GetErrorMessage()}, true
 			continue
+		case CodeClientIDInUse:
+			// Nothing in this batch applied. Another writer used an id after
+			// the ones this Client sent, so a resend of m can never be
+			// answered for m again: an earlier attempt may have applied, or
+			// the other writer took its id. Learn the watermark again before
+			// the next write.
+			w.release(m)
+			st.known = false
+			if resend {
+				return Result{}, fmt.Errorf("client: workspace %q: mutation %d: %w: %w: %s",
+					w.id, m.GetMutationId(), ErrUnconfirmed, ErrClientIDInUse, wr.GetErrorMessage())
+			}
+			return Result{}, fmt.Errorf("client: workspace %q: mutation %d: %w: %s",
+				w.id, m.GetMutationId(), ErrClientIDInUse, wr.GetErrorMessage())
 		case CodeMutationIDGap:
 			// Nothing in the batch applied, so the id is free to move. The
 			// server's watermark is not where the counter thought: another

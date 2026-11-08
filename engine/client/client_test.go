@@ -400,6 +400,28 @@ var _ = Describe("Client", func() {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(res.MutationID).To(Equal(uint64(3)))
 			})
+
+			It("reports ErrClientIDInUse when another live Client's write under the id was rejected", func() {
+				a, err := client.New(url, client.WithClientID("job-3"))
+				Expect(err).NotTo(HaveOccurred())
+				b, err := client.New(url, client.WithClientID("job-3"))
+				Expect(err).NotTo(HaveOccurred())
+				_, err = a.Workspace("acme").Put(ctx, &todov1.Todo{Id: "a1"})
+				Expect(err).NotTo(HaveOccurred())
+				_, err = b.Workspace("acme").Patch(ctx, &todov1.Todo{Id: "missing", Title: "b"}, []string{"title"})
+				var rej *client.RejectedError
+				Expect(errors.As(err, &rej)).To(BeTrue(), "%v", err)
+
+				// a's next id is the one b's rejected write took.
+				_, err = a.Workspace("acme").Put(ctx, &todov1.Todo{Id: "a2"})
+				Expect(err).To(MatchError(client.ErrClientIDInUse))
+				_, ok := getTodo("a2")
+				Expect(ok).To(BeFalse())
+
+				res, err := a.Workspace("acme").Put(ctx, &todov1.Todo{Id: "a2"})
+				Expect(err).NotTo(HaveOccurred())
+				Expect(res.MutationID).To(Equal(uint64(3)))
+			})
 		})
 
 		Describe("retries", func() {

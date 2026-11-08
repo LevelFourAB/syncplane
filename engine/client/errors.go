@@ -20,6 +20,7 @@ const (
 	CodeWorkspaceAccessRevoked = "workspace_access_revoked"
 	CodeWorkspaceNoAccess      = "workspace_no_access"
 	CodeMutationIDGap          = "mutation_id_gap"
+	CodeClientIDInUse          = "client_id_in_use"
 	CodeInternal               = "internal"
 	CodeMutationFailed         = "mutation_failed"
 )
@@ -70,9 +71,12 @@ func (e *WorkspaceError) Error() string {
 // once and reports its outcome.
 var ErrUnconfirmed = errors.New("client: mutation outcome unknown")
 
-// ErrClientIDInUse is returned by a write when the server reports a new
-// mutation as already applied. Another writer advanced the watermark of this
-// client id, so two live Clients share one id. The mutation was not applied.
+// ErrClientIDInUse is returned by a write when another writer advanced the
+// watermark of this client id past the ids this Client sent, so two live
+// Clients share one id. The server applied nothing of the write. When the
+// error also matches ErrUnconfirmed, an earlier attempt of the mutation may
+// have applied, and no later answer can tell. The next write to the
+// workspace learns the watermark again and continues under the same id.
 var ErrClientIDInUse = errors.New("client: client id in use by another writer")
 
 // ErrReset is returned by Pull, and reported by Subscribe, when a cursor can
