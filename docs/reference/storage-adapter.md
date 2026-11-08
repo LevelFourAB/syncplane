@@ -122,7 +122,7 @@ An adapter can implement `storage.ReplicaProvider` to return a `storage.ReplicaR
 The reader serves time-shifted reads as consistent snapshots bounded by a workspace sequence floor:
 
 - `WithReadTxMinSeq`: Runs the closure against a snapshot at or above the specified sequence floor. It uses the replica if up to date. It falls back to the primary if the replica is behind (`fallback_stale`), or if the replica fails before execution (`fallback_error`).
-- `WithReadTxAnchored`: Uses the current sequence on the primary as the floor, providing read-your-writes consistency.
+- `WithReadTxAnchored`: Uses the current sequence on the primary as the floor, providing read-your-writes consistency. The snapshot must also hold the store epoch the primary holds. A replica that has not replayed a `DeleteWorkspace` can hold a higher sequence of the deleted generation, so a different epoch falls back to the primary (`fallback_stale`).
 
 Both methods run the closure at most once. Routing decisions occur before closure execution. Errors during stream execution return directly to the caller.
 

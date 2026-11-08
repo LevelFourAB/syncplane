@@ -112,6 +112,76 @@ var _ = Describe("Postgres read replica", func() {
 		Expect(value).To(Equal("fresh-v"))
 	})
 
+	// snapshot replaces every table behind toDSN with a copy of fromDSN's, so
+	// the copy is what a standby holds when it has replayed exactly up to now:
+	// the same workspace generation, epoch included.
+	snapshot := func(fromDSN, toDSN string) {
+		GinkgoHelper()
+		schemaOf := func(dsn string) string {
+			GinkgoHelper()
+			conn, err := pgx.Connect(ctx, dsn)
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = conn.Close(ctx) }()
+			var schema string
+			Expect(conn.QueryRow(ctx, `SELECT current_schema()`).Scan(&schema)).To(Succeed())
+			return schema
+		}
+		from, to := schemaOf(fromDSN), schemaOf(toDSN)
+
+		conn, err := pgx.Connect(ctx, fromDSN)
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { _ = conn.Close(ctx) }()
+		rows, err := conn.Query(ctx, `
+			SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') AND NOT c.relispartition`, from)
+		Expect(err).NotTo(HaveOccurred())
+		tables, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		Expect(err).NotTo(HaveOccurred())
+		Expect(tables).NotTo(BeEmpty())
+		for _, table := range tables {
+			src := pgx.Identifier{from, table}.Sanitize()
+			dst := pgx.Identifier{to, table}.Sanitize()
+			_, err := conn.Exec(ctx, `TRUNCATE `+dst)
+			Expect(err).NotTo(HaveOccurred())
+			_, err = conn.Exec(ctx, `INSERT INTO `+dst+` SELECT * FROM `+src)
+			Expect(err).NotTo(HaveOccurred(), "copy %s", table)
+		}
+	}
+
+	It("never serves an anchored read from a workspace generation the primary deleted", func() {
+		// Given a replica that holds ws1 as it stood before the primary
+		// deleted it, restored it and wrote it again
+		primaryDSN, replicaDSN := pgtest.DSN(), pgtest.DSN()
+		seed, err := pgstore.Open(ctx, primaryDSN)
+		Expect(err).NotTo(HaveOccurred())
+		for i := 0; i < 3; i++ {
+			put(seed, "ws1", "k1", "deleted-v")
+		}
+		Expect(seed.Close()).To(Succeed())
+		seed, err = pgstore.Open(ctx, replicaDSN)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(seed.Close()).To(Succeed())
+		snapshot(primaryDSN, replicaDSN)
+
+		store, err := pgstore.Open(ctx, primaryDSN, pgstore.WithReadReplica(replicaDSN))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+		Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
+		Expect(store.RestoreWorkspace(ctx, "ws1")).To(Succeed())
+		Expect(put(store, "ws1", "k1", "fresh-v")).To(BeNumerically("<", 3),
+			"the restored workspace restarts its sequence below the replica's")
+
+		// When a caller reads its own write through an anchored read
+		reader := store.ReplicaReader()
+		route, value := readValue(func(fn func(storage.ReadTx) error) (storage.ReadRoute, error) {
+			return reader.WithReadTxAnchored(ctx, "ws1", fn)
+		})
+
+		// Then the read sees the primary's generation, not the deleted one
+		Expect(value).To(Equal("fresh-v"), "the replica served rows of the deleted generation")
+		Expect(route).NotTo(Equal(storage.ReadRouteReplica))
+	})
+
 	It("falls back to the primary when the replica breaks after Open", func() {
 		l := openLagging()
 

@@ -67,6 +67,13 @@ func (s *Store) ReplicaReader() storage.ReplicaReader {
 }
 
 func (r replicaReader) WithReadTxMinSeq(ctx context.Context, workspaceID string, minSeq uint64, fn func(storage.ReadTx) error) (storage.ReadRoute, error) {
+	return r.withFloor(ctx, workspaceID, minSeq, nil, fn)
+}
+
+// withFloor runs fn on the replica when its snapshot of the workspace is at
+// minSeq or past it and, when epoch is not nil, holds the store epoch *epoch,
+// and on the primary otherwise.
+func (r replicaReader) withFloor(ctx context.Context, workspaceID string, minSeq uint64, epoch *uint64, fn func(storage.ReadTx) error) (storage.ReadRoute, error) {
 	s := r.s
 	// The same isolation as WithReadTx: fn's contract is one consistent
 	// snapshot wherever it runs.
@@ -85,7 +92,10 @@ func (r replicaReader) WithReadTxMinSeq(ctx context.Context, workspaceID string,
 		t.end()
 		return storage.ReadRouteFallbackError, s.WithReadTx(ctx, workspaceID, fn)
 	}
-	if t.wsSeq < minSeq {
+	// A sequence compares only within one workspace generation: after a
+	// delete and restore the sequence starts again, so a replica that has
+	// not replayed the delete can hold a higher sequence of the old one.
+	if t.wsSeq < minSeq || epoch != nil && t.wsEpoch != *epoch {
 		t.end()
 		return storage.ReadRouteFallbackStale, s.WithReadTx(ctx, workspaceID, fn)
 	}
@@ -98,15 +108,19 @@ func (r replicaReader) WithReadTxAnchored(ctx context.Context, workspaceID strin
 	// A bare point read, not a transaction: the connection goes back to the
 	// pool before the (possibly long) read runs, so anchoring costs the
 	// primary one statement rather than a held connection.
-	var seq int64
+	// The epoch anchors the generation as the sequence anchors the position.
+	// A missing row anchors epoch 0, which a replica that still holds a
+	// deleted generation does not match.
+	var seq, epoch int64
 	err := s.pool.QueryRow(ctx,
-		`SELECT last_seq FROM workspaces WHERE workspace_id = $1`,
-		workspaceID).Scan(&seq)
+		`SELECT last_seq, store_epoch FROM workspaces WHERE workspace_id = $1`,
+		workspaceID).Scan(&seq, &epoch)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
-		seq = 0
+		seq, epoch = 0, 0
 	case err != nil:
 		return storage.ReadRouteFallbackError, s.WithReadTx(ctx, workspaceID, fn)
 	}
-	return r.WithReadTxMinSeq(ctx, workspaceID, uint64(seq), fn)
+	anchor := uint64(epoch)
+	return r.withFloor(ctx, workspaceID, uint64(seq), &anchor, fn)
 }

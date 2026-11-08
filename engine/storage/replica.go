@@ -40,9 +40,10 @@ type ReplicaReader interface {
 	// non-nil.
 	WithReadTxMinSeq(ctx context.Context, workspaceID string, minSeq uint64, fn func(ReadTx) error) (ReadRoute, error)
 	// WithReadTxAnchored runs fn over a snapshot at least as fresh as the
-	// primary's workspace sequence at the moment of the call — read-your-writes
-	// for a caller holding no sequence of its own. It costs one point read on
-	// the primary before the snapshot opens.
+	// primary's workspace sequence at the moment of the call, and of the same
+	// workspace generation, so never of one a DeleteWorkspace has since
+	// removed — read-your-writes for a caller holding no sequence of its own.
+	// It costs one point read on the primary before the snapshot opens.
 	WithReadTxAnchored(ctx context.Context, workspaceID string, fn func(ReadTx) error) (ReadRoute, error)
 }
 
