@@ -686,6 +686,31 @@ func (t *txn) drop(e *entry, rej *rejection) error {
 	return nil
 }
 
+// voidVerdictsAbove clears the applied verdicts of the entries above the
+// origin's watermark acked, and moves pushFrom back to the first of them, so
+// they are pushed again. A watermark below an applied verdict means the
+// history that applied the entry is gone: the origin's workspace was deleted
+// and restored, or restored from a backup. Without the resend the entry is
+// never pushed and never settled. An entry the origin applied after the
+// snapshot began is resent too, and answered as already applied.
+func (t *txn) voidVerdictsAbove(acked uint64) error {
+	for id := max(t.q.lowID, acked+1); id < t.q.nextID; id++ {
+		r, ok, err := t.st.result(id)
+		if err != nil {
+			return err
+		}
+		// A refusal is reported and dropped whatever the origin holds now.
+		if !ok || r.status == syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED {
+			continue
+		}
+		if err := t.st.del(shadowResult, idKey(id)); err != nil {
+			return err
+		}
+		t.q.pushFrom = min(t.q.pushFrom, id)
+	}
+	return nil
+}
+
 // establishAck brings the queue in line with the origin's watermark the first
 // time this process learns it. An entry this process captured before then
 // may hold an id the origin already used, for a write whose local

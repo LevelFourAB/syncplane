@@ -404,6 +404,9 @@ func (t *txn) finishStep() (bool, error) {
 	if n == scanPage && boot.afterID+1 < t.q.nextID {
 		return false, nil
 	}
+	if err := t.voidVerdictsAbove(boot.acked); err != nil {
+		return false, err
+	}
 	t.meta.cursor = boot.cursor
 	t.meta.originSeq = boot.seq
 	t.meta.lastAcked = boot.acked

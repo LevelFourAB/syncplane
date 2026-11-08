@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -109,6 +110,37 @@ var _ = Describe("Recovery", func() {
 		n.flush()
 		Expect(n.status().Pending).To(BeZero())
 		Expect(title(o.todo("t3"))).To(Equal("three"))
+	})
+
+	It("settles a write the deleted origin workspace applied once it bootstraps the restored one", func() {
+		o := newOrigin()
+		o.put(&todov1.Todo{Id: "t1", Title: "old"})
+		n := newLocal(o, nil)
+		n.add()
+		n.flush()
+
+		// The origin applies t7, and no page confirms it to the link.
+		n.part.blockReads.Store(true)
+		n.put(&todov1.Todo{Id: "t7", Title: "pending"})
+		Eventually(func() string { return title(o.todo("t7")) }).Should(Equal("pending"))
+		Expect(o.srv.DeleteWorkspace(ctx, ws)).To(Succeed())
+		Expect(o.srv.RestoreWorkspace(ctx, ws)).To(Succeed())
+		o.put(&todov1.Todo{Id: "r1", Title: "restored"})
+
+		n.part.blockReads.Store(false)
+		Eventually(func() string { return title(n.todo("r1")) }).Should(Equal("restored"))
+		// OnReset runs after the snapshot's rows commit.
+		Eventually(func() []string {
+			n.mu.Lock()
+			defer n.mu.Unlock()
+			return slices.Clone(n.resets)
+		}).Should(Equal([]string{ws}))
+		fctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+		Expect(n.link.Flush(fctx, ws)).To(Succeed(), "status %+v", n.status())
+		Expect(n.status().Pending).To(BeZero())
+		Expect(n.todo("t1")).To(BeNil())
+		Expect(n.todo("t7")).To(Equal(o.todo("t7")), "the local engine holds what the origin holds")
 	})
 
 	It("converges concurrent edits of a collaborative text field", func() {
