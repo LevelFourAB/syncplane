@@ -155,6 +155,16 @@ export const CodeMutationIdGap = 'mutation_id_gap';
 export const CodeClientIdInUse = 'client_id_in_use';
 
 /**
+ * The write was queued against data the server no longer holds: the server
+ * deleted the workspace and restored it as a new, empty one, or now serves
+ * another store. The server applied none of the queued writes. The client
+ * drops each of them with this code and bootstraps the workspace again.
+ * Writes queued before the client holds the new workspace count as queued
+ * against the old one.
+ */
+export const CodeWorkspaceReplaced = 'workspace_replaced';
+
+/**
  * A failure the caller cannot act on and that may not persist — a storage
  * error, or a permission hook that could not decide. Retry with backoff. It
  * never means "denied": a denial is always typed.
@@ -309,6 +319,7 @@ export type RejectionCode =
 	| typeof CodeConflict
 	| typeof CodePoisonDropped
 	| typeof CodeWorkspacePurged
+	| typeof CodeWorkspaceReplaced
 	| typeof CodeFormatUpgraded;
 
 /**

@@ -14,6 +14,7 @@ import {
 	CodeUnavailable,
 	CodeWorkspaceAccessRevoked,
 	CodeWorkspaceNoAccess,
+	CodeWorkspaceReplaced,
 	ErrorCodeMetadataKey,
 	type RejectionCode,
 	type SyncErrorCode,
@@ -44,6 +45,7 @@ import {
 	metaLastMutationId,
 	metaPendingAccess,
 	metaPushedThrough,
+	metaQueueBasis,
 	metaSnapshotGen,
 	metaTextRestores,
 	metaUnresolvedPush,
@@ -735,6 +737,12 @@ export class Coordinator {
 	 * sent_through.
 	 */
 	private sentThrough = new Map<string, bigint>();
+	/**
+	 * The cursor each workspace's queue was written against, as markPushThrough
+	 * read it: metaQueueBasis, or the stored cursor. Each batch carries it as
+	 * basis.
+	 */
+	private pushBasis = new Map<string, Uint8Array>();
 	/**
 	 * Rows (fullStateKey) whose collaborative-text writes must ship whole
 	 * documents because the server refused a delta-state fragment for them. In
@@ -1686,7 +1694,12 @@ export class Coordinator {
 		let settled = false;
 		try {
 			while (remaining.size > 0) {
-				const batches: { workspaceId: string; mutations: Mutation[]; sentThrough?: bigint }[] = [];
+				const batches: {
+					workspaceId: string;
+					mutations: Mutation[];
+					sentThrough?: bigint;
+					basis?: Uint8Array;
+				}[] = [];
 				const shipped: { workspaceId: string; count: number; atHead: boolean }[] = [];
 				// What was sent this round, so a rejection can name the rows it would
 				// have written; the server answers with ids alone.
@@ -1712,7 +1725,12 @@ export class Coordinator {
 					const slice = entry.pending.slice(0, take);
 					for (const m of slice) inFlight.set(`${ws}\u0000${m.mutationId}`, m);
 					const sentThrough = this.sentThrough.get(ws);
-					batches.push({ workspaceId: ws, mutations: slice, sentThrough });
+					batches.push({
+						workspaceId: ws,
+						mutations: slice,
+						sentThrough,
+						basis: this.pushBasis.get(ws),
+					});
 					const last = slice[slice.length - 1]!.mutationId;
 					if (sentThrough !== undefined && last > sentThrough) this.sentThrough.set(ws, last);
 					shipped.push({ workspaceId: ws, count: take, atHead: entry.atHead });
@@ -1855,6 +1873,24 @@ export class Coordinator {
 							}
 							const sentBefore = batches.find((b) => b.workspaceId === sent.workspaceId)?.sentThrough;
 							if (sentBefore !== undefined) await this.lowerPushedThrough(sent.workspaceId, sentBefore);
+							continue;
+						}
+						if (wsResult.errorCode === CodeWorkspaceReplaced) {
+							// The queue was written against a store history the workspace
+							// no longer has, and no write of it applies there. Each one is
+							// dropped as rejected; the pull then bootstraps the workspace
+							// it has now.
+							if (state) state.poison = undefined;
+							for (const m of queues.get(sent.workspaceId) ?? []) {
+								rejections.push({
+									workspaceId: sent.workspaceId,
+									mutationId: m.mutationId,
+									errorCode: CodeWorkspaceReplaced,
+									errorMessage: wsResult.errorMessage,
+									...describeMutation(m),
+								});
+							}
+							settled = true;
 							continue;
 						}
 						if (wsResult.errorCode === CodeWorkspaceAccessRevoked) {
@@ -2263,6 +2299,11 @@ export class Coordinator {
 					const through = isolating ? head.mutationId : pending[pending.length - 1]!.mutationId;
 					const before = await readPushedThrough(tx, ws);
 					this.sentThrough.set(ws, before);
+					const basis = ((await tx.get(metaQueueBasis(ws))) ?? (await tx.get(metaCursor(ws)))) as
+						| Uint8Array
+						| undefined;
+					if (basis === undefined) this.pushBasis.delete(ws);
+					else this.pushBasis.set(ws, basis);
 					if (through > before) {
 						await writePushedThrough(tx, ws, through);
 						dirty = true;

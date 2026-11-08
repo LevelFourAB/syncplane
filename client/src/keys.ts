@@ -131,6 +131,16 @@ export const metaLastMutationId = (workspaceId: string): string =>
 export const metaPushedThrough = (workspaceId: string): string =>
 	`${metaWsPrefix(workspaceId)}pushedThrough`;
 /**
+ * The cursor this workspace's pending queue was written against, kept while
+ * the queue outlives the cursor: a re-bootstrap that replaces the cursor keeps
+ * the queue, and the old cursor here. Each push sends it, or the current
+ * cursor when it is absent, as WorkspaceBatch.basis, so the server can refuse
+ * a queue written against a workspace it deleted and restored. Deleted once
+ * the queue is empty.
+ */
+export const metaQueueBasis = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}queueBasis`;
+/**
  * Highest mutation id of a push the server never answered for this workspace
  * (decimal string): the response was lost, so the batch may have committed
  * and its verdicts are known only to the server. While the queue still holds

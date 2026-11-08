@@ -41,6 +41,7 @@ import {
 	metaIndexPrefix,
 	metaLastMutationId,
 	metaPushedThrough,
+	metaQueueBasis,
 	metaServerSeq,
 	metaUnresolvedPush,
 	overlayKey,
@@ -51,6 +52,7 @@ import {
 	overlayTextWsPrefix,
 	overlayWsPrefix,
 	pendingKey,
+	pendingPrefix,
 	searchIndexWsPrefix,
 	searchPostingsScope,
 	splitOverlayTextSuffix,
@@ -559,6 +561,7 @@ export async function wipeConfirmedState(
 	workspaceId: string,
 	touched: TouchSet,
 ): Promise<void> {
+	await keepQueueBasis(tx, workspaceId);
 	await tx.del(metaCursor(workspaceId));
 	await tx.del(metaCursorSeq(workspaceId));
 	// The summary is what the cursor's lineage was told; the snapshot that
@@ -584,6 +587,22 @@ export async function wipeConfirmedState(
 			}
 		}
 		touched.entity(workspaceId, entity);
+	}
+}
+
+/**
+ * Keeps the stored cursor as the queue's basis (metaQueueBasis) when a pending
+ * queue outlives it, which a re-bootstrap does: the queue was written against
+ * the old cursor, and the server must judge it by that one. A basis already
+ * kept stays, as it is older still.
+ */
+async function keepQueueBasis(tx: KVWrite, workspaceId: string): Promise<void> {
+	if (await tx.has(metaQueueBasis(workspaceId))) return;
+	const cursor = (await tx.get(metaCursor(workspaceId))) as Uint8Array | undefined;
+	if (cursor === undefined || cursor.length === 0) return;
+	for await (const _ of tx.scan(pendingPrefix(workspaceId))) {
+		await tx.put(metaQueueBasis(workspaceId), cursor);
+		return;
 	}
 }
 
@@ -1224,6 +1243,10 @@ export async function finalizeRebase(
 	// A cursor viewing the whole page it arrived on would keep a 4096-change
 	// page resident until the next one replaced it, hence detached().
 	if (input.nextCursor.length > 0) {
+		// A snapshot swap replaces the cursor lineage. The staged path lands
+		// here with the old cursor still stored, the direct path already kept
+		// it in wipeConfirmedState.
+		if (input.baseline) await keepQueueBasis(tx, workspaceId);
 		await tx.put(metaCursor(workspaceId), detached(input.nextCursor));
 		// The seq goes with the cursor it describes, so a cursorless frame below
 		// leaves both alone. Without a seq the cursor's position is unknown, and
@@ -1305,6 +1328,7 @@ export async function finalizeRebase(
 				input.lastAckedMutationId + 1n,
 			);
 			await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, renumbered, touched, acked);
+			if (renumbered.length === 0) await tx.del(metaQueueBasis(workspaceId));
 			return renumbered.length;
 		}
 	}
@@ -1347,6 +1371,9 @@ export async function finalizeRebase(
 		dropped = acked.dropped;
 	}
 	await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, replay, touched, dropped);
+	// The writes queued from here on are written against the cursor this
+	// rebase stored.
+	if (remaining.length === 0) await tx.del(metaQueueBasis(workspaceId));
 	return remaining.length;
 }
 

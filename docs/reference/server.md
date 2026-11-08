@@ -211,7 +211,7 @@ if err := srv.DeleteWorkspace(ctx, graphID); err != nil {
 - **Enumeration:** `WorkspaceIDs` omits the workspace, and background passes do not visit it.
 - **Repeat calls:** deleting a workspace that holds no state refuses the ID. Deleting a deleted workspace changes nothing.
 
-`RestoreWorkspace` restores no data. The next write starts a new workspace under the ID with a new store epoch, so a client holding a cursor of the deleted workspace re-bootstraps.
+`RestoreWorkspace` restores no data. The next write starts a new workspace under the ID with a new store epoch, so a client holding a cursor of the deleted workspace re-bootstraps. A push that names the cursor its queue was written against (`WorkspaceBatch.basis`) and comes from the deleted workspace fails with `workspace_replaced`, and the client drops that queue. The TypeScript client sends the basis. A push without it, from the Go client or an older client, applies to the new workspace from its first mutation ID, including writes the deleted workspace had already applied.
 
 Neither call runs a permission hook. Expose them only to callers your application authorized. Both return an error when called from inside a mutator or write transaction.
 

@@ -76,6 +76,7 @@ export {
 	CodeWorkspaceAccessRevoked,
 	CodeWorkspaceNoAccess,
 	CodeWorkspacePurged,
+	CodeWorkspaceReplaced,
 	ErrorCodeMetadataKey,
 } from './codes.js';
 export type { RejectionCode, SyncErrorCode } from './codes.js';
