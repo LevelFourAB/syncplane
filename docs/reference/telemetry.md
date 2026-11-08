@@ -98,6 +98,7 @@ of contention.
 | `syncplane.pull.changes`      | histogram       | `{change}` | —              |
 | `syncplane.pull.resets`       | counter         | `{reset}`  | `reset_reason` |
 | `syncplane.subscribe.streams` | up-down counter | `{stream}` | —              |
+| `syncplane.subscribe.dropped` | counter         | `{scope}`  | `drop_reason`  |
 
 `syncplane.pull.resets` indicates that a client discarded its local store and
 re-downloaded the workspace. A reset appears as a successful pull at the RPC
@@ -113,6 +114,12 @@ layer. `reset_reason` has one of the following values:
 
 `syncplane.subscribe.streams` measures the current number of open subscription
 streams.
+
+`syncplane.subscribe.dropped` counts workspace scopes that a subscription stream
+dropped. The stream stays open after a drop, so the drop does not appear in
+RPC-level metrics. `drop_reason` is `reset`, `access_revoked`, `no_access` or
+`error`. The server also logs each `error` drop with its cause, at the level it
+gives the same error on a pull.
 
 ### Rooms
 

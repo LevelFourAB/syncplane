@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"connectrpc.com/connect"
+	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/protobuf/proto"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/internal/naming"
+	"github.com/levelfourab/syncplane/engine/internal/telemetry"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
@@ -141,7 +144,7 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[syncplanev1
 	for _, want := range msg.GetScopes() {
 		sc, reason, err := s.openScope(ctx, want, msg.GetClientId(), noDeltas, msg.GetSparseCursor())
 		if err != nil {
-			if sendErr := s.sendDropped(stream, want.GetWorkspaceId(), reason, err); sendErr != nil {
+			if sendErr := s.sendDropped(ctx, s.reqLog(ctx, "subscribe", want.GetWorkspaceId(), msg.GetClientId()), stream, want.GetWorkspaceId(), reason, err); sendErr != nil {
 				return sendErr
 			}
 			continue
@@ -437,7 +440,7 @@ func (s *Server) regateScope(ctx context.Context, stream *connect.ServerStream[s
 	sc.logger.LogAttrs(ctx, slog.LevelInfo, "subscribe scope dropped by access re-check",
 		slog.String("reason", reason.String()),
 		slog.String("cause", err.Error()))
-	return s.dropScope(stream, sc, reason, err)
+	return s.dropScope(ctx, stream, sc, reason, err)
 }
 
 // checkpointDue reports whether the page being sent must carry next_cursor.
@@ -495,11 +498,11 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 			}
 		}
 		if err := s.refreshEpoch(ctx, sc); err != nil {
-			return s.dropScope(stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)
+			return s.dropScope(ctx, stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)
 		}
 		route, err := s.routePull(ctx, sc.ws, sc.cur, sc.rawCursor, sc.wantHash, sc.epoch, sc.emitter)
 		if err != nil {
-			return s.dropScope(stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)
+			return s.dropScope(ctx, stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)
 		}
 		var page *syncplanev1.PullResponse
 		var next cursorState
@@ -513,11 +516,11 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 			return attachLateRejections(tx, sc.ackKey, sc.cur, next, page)
 		}); err != nil {
 			// A read failure is this workspace's problem, not the stream's.
-			return s.dropScope(stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)
+			return s.dropScope(ctx, stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)
 		}
 		if page.GetReset_() {
 			logReset(ctx, sc.logger, reason)
-			return s.dropScope(stream, sc, syncplanev1.WorkspaceDropped_REASON_RESET, fmt.Errorf("%s", reason))
+			return s.dropScope(ctx, stream, sc, syncplanev1.WorkspaceDropped_REASON_RESET, fmt.Errorf("%s", reason))
 		}
 		sc.cur = next
 		sc.rawCursor = page.GetNextCursor()
@@ -577,14 +580,26 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 
 // dropScope marks a scope dead and tells the client why. It returns an error
 // only if the frame could not be sent (the stream itself is gone).
-func (s *Server) dropScope(stream *connect.ServerStream[syncplanev1.SubscribeResponse], sc *subScope, reason syncplanev1.WorkspaceDropped_Reason, cause error) error {
+func (s *Server) dropScope(ctx context.Context, stream *connect.ServerStream[syncplanev1.SubscribeResponse], sc *subScope, reason syncplanev1.WorkspaceDropped_Reason, cause error) error {
 	sc.live = false
-	return s.sendDropped(stream, sc.ws, reason, cause)
+	return s.sendDropped(ctx, sc.logger, stream, sc.ws, reason, cause)
 }
 
-// sendDropped emits a WorkspaceDropped frame. The message is for logs only —
+// sendDropped emits a WorkspaceDropped frame, counts the drop by reason and
+// logs a REASON_ERROR drop with its cause. The message is for logs only —
 // clients branch on reason — so it carries the cause verbatim.
-func (s *Server) sendDropped(stream *connect.ServerStream[syncplanev1.SubscribeResponse], ws string, reason syncplanev1.WorkspaceDropped_Reason, cause error) error {
+func (s *Server) sendDropped(ctx context.Context, logger *slog.Logger, stream *connect.ServerStream[syncplanev1.SubscribeResponse], ws string, reason syncplanev1.WorkspaceDropped_Reason, cause error) error {
+	s.tel().subscribeDrops.Add(ctx, 1, metric.WithAttributes(
+		telemetry.AttrDropReason.String(dropReasonAttr(reason))))
+	// The stream goes on after a drop, so the RPC interceptor that logs
+	// failed requests never sees this cause. Log it here at the level the
+	// interceptor gives the same error on Pull. The other reasons are logged
+	// where they are decided (logReset, regateScope) or are routine.
+	if reason == syncplanev1.WorkspaceDropped_REASON_ERROR && cause != nil {
+		logger.LogAttrs(ctx, levelForCode(connect.CodeOf(cause)), "subscribe scope dropped",
+			slog.String("reason", reason.String()),
+			slog.String("cause", cause.Error()))
+	}
 	msg := ""
 	if cause != nil {
 		msg = cause.Error()
@@ -597,4 +612,10 @@ func (s *Server) sendDropped(stream *connect.ServerStream[syncplanev1.SubscribeR
 			Message: msg,
 		}},
 	})
+}
+
+// dropReasonAttr is the drop_reason metric value of a WorkspaceDropped
+// reason: the enum name without its prefix, in lower case ("error").
+func dropReasonAttr(reason syncplanev1.WorkspaceDropped_Reason) string {
+	return strings.ToLower(strings.TrimPrefix(reason.String(), "REASON_"))
 }

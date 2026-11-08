@@ -128,6 +128,10 @@ type metrics struct {
 	// streams tracks Subscribe streams currently open. An up-down counter
 	// rather than a counter because what matters is the level, not the rate.
 	streams metric.Int64UpDownCounter
+	// subscribeDrops counts workspace scopes a Subscribe stream dropped, by
+	// reason. The stream stays open, so an error drop never reaches the RPC
+	// error rate; this is the counter that shows it.
+	subscribeDrops metric.Int64Counter
 
 	// notifyRequested counts change notifications the engine raised;
 	// notifyPublished counts the ones that reached the notifier underneath the
@@ -214,6 +218,7 @@ const (
 	metricCursorStateMisses      = "syncplane.cursor_state.misses"
 	metricCursorStatePutFailures = "syncplane.cursor_state.put_failures"
 	metricSubscribeStreams       = "syncplane.subscribe.streams"
+	metricSubscribeDrops         = "syncplane.subscribe.dropped"
 	metricNotifyRequested        = "syncplane.notify.requested"
 	metricNotifyPublished        = "syncplane.notify.published"
 	metricGCDuration             = "syncplane.gc.duration"
@@ -265,6 +270,9 @@ func newMetrics(p telemetry.Providers) (*metrics, error) {
 		streams: b.Int64UpDownCounter(metricSubscribeStreams,
 			metric.WithDescription("Subscribe streams currently open."),
 			metric.WithUnit("{stream}")),
+		subscribeDrops: b.Int64Counter(metricSubscribeDrops,
+			metric.WithDescription("Workspace scopes dropped from a Subscribe stream, by reason."),
+			metric.WithUnit("{scope}")),
 		notifyRequested: b.Int64Counter(metricNotifyRequested,
 			metric.WithDescription("Change notifications raised by the engine, before coalescing."),
 			metric.WithUnit("{notification}")),

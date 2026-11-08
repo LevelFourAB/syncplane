@@ -4,14 +4,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"google.golang.org/protobuf/proto"
 
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
@@ -20,8 +24,23 @@ import (
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/internal/exampleapp"
 )
+
+// readFailingStore fails every read transaction while failing is set, as a
+// store whose connection drops does.
+type readFailingStore struct {
+	storage.Adapter
+	failing atomic.Bool
+}
+
+func (s *readFailingStore) WithReadTx(ctx context.Context, ws string, fn func(storage.ReadTx) error) error {
+	if s.failing.Load() {
+		return errors.New("read tcp 10.0.0.7:5432: i/o timeout")
+	}
+	return s.Adapter.WithReadTx(ctx, ws, fn)
+}
 
 // scopes builds a one-workspace-per-id scope set with no cursor and no
 // subscription filter — full sync from the beginning, the shape most specs
@@ -522,6 +541,64 @@ var _ = Describe("Subscribe", func() {
 					wsB: syncplanev1.WorkspaceDropped_REASON_ACCESS_REVOKED,
 				}))
 			})
+		})
+
+		// The stream itself goes on, so no error reaches the RPC interceptor
+		// that logs failed requests: the drop has to be logged where it
+		// happens, or the operator never hears of it.
+		It("logs a scope it drops for a storage failure", func() {
+			logs := &recordingHandler{}
+			reader := sdkmetric.NewManualReader()
+			store := &readFailingStore{Adapter: newTestStore()}
+			client = start(mustNewServer(store, testEntities(),
+				server.WithLogger(slog.New(logs)), server.WithHeartbeat(time.Hour),
+				server.WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))))
+			stream := subscribe(&syncplanev1.SubscribeRequest{ClientId: "c1", Scopes: scopes(ws)})
+			drainToCaughtUp(stream, ws)
+
+			// When the scope's next read fails
+			store.failing.Store(true)
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+			var dropped *syncplanev1.WorkspaceDropped
+			for dropped == nil {
+				dropped = recv(stream).GetDropped()
+			}
+			Expect(dropped.GetReason()).To(Equal(syncplanev1.WorkspaceDropped_REASON_ERROR))
+
+			// Then the server logged it with the cause. recordingHandler drops
+			// attributes bound with Logger.With, so only the record's own are
+			// checked.
+			logs.mu.Lock()
+			defer logs.mu.Unlock()
+			var found bool
+			for _, r := range logs.records {
+				if r.Level < slog.LevelWarn {
+					continue
+				}
+				r.Attrs(func(a slog.Attr) bool {
+					found = found || strings.Contains(a.Value.String(), "i/o timeout")
+					return true
+				})
+			}
+			Expect(found).To(BeTrue(), "no record at Warn or above carries the cause")
+
+			// And counted it by reason.
+			var rm metricdata.ResourceMetrics
+			Expect(reader.Collect(context.Background(), &rm)).To(Succeed())
+			var drops int64
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					if m.Name != "syncplane.subscribe.dropped" {
+						continue
+					}
+					for _, p := range m.Data.(metricdata.Sum[int64]).DataPoints {
+						if v, ok := p.Attributes.Value("syncplane.drop_reason"); ok && v.AsString() == "error" {
+							drops += p.Value
+						}
+					}
+				}
+			}
+			Expect(drops).To(BeEquivalentTo(1))
 		})
 
 		It("rejects a request with no scopes", func() {
