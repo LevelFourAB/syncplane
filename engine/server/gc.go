@@ -105,6 +105,7 @@ func WithGC(retention, interval time.Duration) Option {
 // WithClientRetention makes each GC pass delete the watermark records of
 // clients that have not pushed for d, bounding the clients table. It only
 // takes effect together with WithGC. Zero, the default, keeps every record.
+// A negative d makes New fail.
 //
 // A deleted watermark forgets which mutation ids the client already had
 // applied. The client re-enters through watermark adoption at whatever id it
@@ -118,6 +119,12 @@ func WithGC(retention, interval time.Duration) Option {
 // docs/explanation/limits-and-trade-offs.md.
 func WithClientRetention(d time.Duration) Option {
 	return func(s *Server) error {
+		// A negative d would put the cutoff in the future and delete every
+		// watermark on each pass. Other retention options read a negative
+		// value as "never" or "default", so refuse it rather than guess.
+		if d < 0 {
+			return fmt.Errorf("server: WithClientRetention(%s): the duration must not be negative", d)
+		}
 		if s.gc == nil {
 			s.gc = &gcLoop{}
 		}

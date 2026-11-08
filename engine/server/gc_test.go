@@ -331,7 +331,7 @@ var _ = Describe("Garbage collection", func() {
 		srv := mustNewServer(store,
 			server.WithEntities(&todov1.Todo{}),
 			server.WithGC(0, time.Millisecond),
-			server.WithClientRetention(-time.Second))
+			server.WithClientRetention(time.Nanosecond))
 		start(srv)
 
 		push(
@@ -422,7 +422,7 @@ var _ = Describe("Garbage collection", func() {
 		})
 
 		It("prunes idle clients and re-admits a returning client at its next mutation id", func() {
-			srv := newTestServer(server.WithGC(-time.Second, 0), server.WithClientRetention(-time.Second))
+			srv := newTestServer(server.WithGC(-time.Second, 0), server.WithClientRetention(time.Nanosecond))
 			DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
 			start(srv)
 
@@ -432,6 +432,9 @@ var _ = Describe("Garbage collection", func() {
 				putMutation("c1", 3, "todo", "t3", &todov1.Todo{Id: "t3", Title: "three"}),
 			)
 			Expect(pull(nil).GetLastAckedMutationId()).To(BeEquivalentTo(3))
+			// The store keeps push times in milliseconds, so the client is
+			// idle for the 1ns retention only after the next millisecond.
+			time.Sleep(2 * time.Millisecond)
 
 			Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
 			Expect(pull(nil).GetLastAckedMutationId()).To(BeZero(), "pruned client reads as unknown")
@@ -473,6 +476,15 @@ var _ = Describe("Garbage collection", func() {
 			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
 			Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
 			Expect(pull(nil).GetLastAckedMutationId()).To(BeEquivalentTo(1), "young client survives")
+		})
+
+		// A negative duration reads as "never" in WithHistoryRetention
+		// (HistoryForever) and as "default" in WithIdempotencyRetention. Here it
+		// would put the cutoff in the future and delete every watermark on
+		// each pass, a moment-old one included, so New refuses it.
+		It("refuses a negative client retention", func() {
+			err := newTestServerErr(server.WithGC(time.Hour, 0), server.WithClientRetention(-time.Hour))
+			Expect(err).To(MatchError(ContainSubstring("WithClientRetention")))
 		})
 
 		It("measures watermark rows against the client retention, not the tombstone retention", func() {
