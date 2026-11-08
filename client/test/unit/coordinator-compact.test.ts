@@ -16,8 +16,14 @@ import {
 	PullResponseSchema,
 	SyncService,
 } from '../../src/gen/syncplane/v1/service_pb.js';
-import { metaCursor, metaLastMutationId, metaUnresolvedPush } from '../../src/keys.js';
+import {
+	metaCursor,
+	metaLastMutationId,
+	metaPushedThrough,
+	metaUnresolvedPush,
+} from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
+import type { KVWrite } from '../../src/kv/store.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { createKvMutex } from '../../src/mutex.js';
 import { enqueuePending, readPending } from '../../src/optimistic/queue.js';
@@ -549,5 +555,89 @@ describe('coordinator push: compaction + chunking', () => {
 		expect(await pendingIds()).toEqual([ 1n ]);
 
 		await coord.stop();
+	});
+
+	// Compaction is an optimization: the queue it would have folded is still a
+	// valid push. A store that cannot take the rewrite (IndexedDB over its quota,
+	// say) must not keep the queue on the device.
+	describe('compaction failure', () => {
+		/**
+		 * A store over its quota for the compaction rewrite: a commit that both
+		 * deletes and writes pending entries fails. `failMark` also fails the
+		 * pushed-through mark the push writes before its RPC.
+		 */
+		class QuotaStore extends MemoryKVStore {
+			failMark = false;
+
+			override async write(): Promise<KVWrite> {
+				const tx = await super.write();
+				const store = this;
+				let deletes = false;
+				let puts = false;
+				let marks = false;
+				return new Proxy(tx, {
+					get(target, prop) {
+						if (prop === 'del') {
+							return (key: string) => {
+								if (key.startsWith('p/')) deletes = true;
+								return target.del(key);
+							};
+						}
+						if (prop === 'put') {
+							return (key: string, value: unknown) => {
+								if (key.startsWith('p/')) puts = true;
+								if (key === metaPushedThrough(WS)) marks = true;
+								return target.put(key, value);
+							};
+						}
+						if (prop === 'commit') {
+							return async () => {
+								if ((deletes && puts) || (store.failMark && marks)) {
+									target.release();
+									throw new DOMException('the quota has been exceeded', 'QuotaExceededError');
+								}
+								await target.commit();
+							};
+						}
+						const value = Reflect.get(target, prop) as unknown;
+						return typeof value === 'function' ? (value as () => unknown).bind(target) : value;
+					},
+				});
+			}
+		}
+
+		let store: QuotaStore;
+
+		beforeEach(async () => {
+			store = new QuotaStore();
+			kv = store;
+			// Two PATCHes of one field, neither pushed yet: compaction folds them.
+			await seed([ patch(1n, 't', [ 'title' ]), patch(2n, 't', [ 'title' ]) ]);
+			const tx = await kv.write();
+			await tx.put(metaPushedThrough(WS), '0');
+			await tx.commit();
+		});
+
+		it('pushes the queue uncompacted when the compaction commit fails', async () => {
+			const coord = newCoordinator(transport());
+
+			await coord.syncNow().catch(() => undefined);
+
+			expect(pushes.map((p) => p.map((m) => m.mutationId))).toEqual([ [ 1n, 2n ] ]);
+
+			await coord.stop();
+		});
+
+		it('pushes nothing when the pushed-through mark cannot be written either', async () => {
+			store.failMark = true;
+			const coord = newCoordinator(transport());
+
+			await expect(coord.syncNow()).rejects.toThrow(/quota/);
+
+			expect(pushes).toEqual([]);
+			expect(await pendingIds()).toEqual([ 1n, 2n ]);
+
+			await coord.stop();
+		});
 	});
 });

@@ -1416,7 +1416,16 @@ export class Coordinator {
 		// rebase the following pull will run. Skipped for a workspace isolating a
 		// poison head — there we are deliberately draining one mutation at a time.
 		for (const ws of workspaceIds) {
-			if (!this.workspaces.get(ws)?.poison) await this.compact(ws);
+			if (this.workspaces.get(ws)?.poison) continue;
+			try {
+				await this.compact(ws);
+			} catch (err) {
+				// The queue as it stands is still a valid push, and compaction only
+				// shortens it. A store that cannot take the rewrite (IndexedDB over
+				// its quota) does not free up while writes keep queueing, so
+				// failing the round here would hold every write on the device.
+				reportError(`compaction of workspace "${ws}" failed; pushing its queue as it is`, err);
+			}
 		}
 
 		// Snapshot the queues AND raise the durable, cross-tab pushed-through
