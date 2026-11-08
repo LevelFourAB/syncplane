@@ -1255,6 +1255,13 @@ export interface RebaseInput {
 	 * rebase(). 0/unset applies ungated (older server).
 	 */
 	serverSeq?: bigint;
+	/**
+	 * Skips the page when the workspace holds no cursor. A pull or stream page
+	 * extends the snapshot that a bootstrap installed; without that snapshot
+	 * (a purge or a wipe committed after the request) the page is skipped
+	 * whole, and the result has `unbased` set.
+	 */
+	requireCursor?: boolean;
 	/** The page's CallerAccess (PullResponse.caller_access); see FinalizeInput. */
 	callerAccess?: DecodedAccess;
 	/**
@@ -1277,10 +1284,17 @@ export interface RebaseResult {
 	/** Pending mutations still queued after dropping acked ones. */
 	pendingCount: number;
 	/**
-	 * True when the monotonic gate dropped the page: nothing was written, so
-	 * `touched` is empty and `pendingCount` is meaningless. See rebase().
+	 * True when the page was dropped, by the monotonic gate or because no
+	 * cursor is stored: nothing was written, so `touched` is empty and
+	 * `pendingCount` is meaningless. See rebase().
 	 */
 	skipped?: boolean;
+	/**
+	 * True when the page was skipped because the workspace holds no cursor
+	 * (see RebaseInput.requireCursor). The workspace needs a bootstrap before
+	 * any pull.
+	 */
+	unbased?: boolean;
 	/**
 	 * True when the page applied below the stored seq: its rows were older
 	 * than some the store held, which it kept. A row a Subscribe frame deleted
@@ -1317,6 +1331,13 @@ export async function rebase(
 	const touched = new TouchSet();
 	const tx = await kv.write();
 	try {
+		// Checked in the transaction that writes the page: a purge that commits
+		// between the request and here deletes the cursor, and this page must
+		// not write rows and a cursor back into the purged workspace.
+		if (input.requireCursor && (await tx.get(metaCursor(workspaceId))) === undefined) {
+			tx.release();
+			return { touched, pendingCount: 0, skipped: true, unbased: true };
+		}
 		// Monotonic cursor gate: with several tabs pulling the shared store
 		// concurrently, responses can commit out of request order. A page whose
 		// seq is strictly below the stored cursor's is from a stale read of the

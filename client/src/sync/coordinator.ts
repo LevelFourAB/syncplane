@@ -2515,6 +2515,9 @@ export class Coordinator {
 		let droppedFrom: Uint8Array | undefined;
 		for (;;) {
 			const { cursor, minSeq, callerAccessVersion } = await this.pullPosition(workspaceId);
+			// A purge (here or in another tab) deleted the base a pull extends;
+			// the next cycle bootstraps the workspace if it is still synced.
+			if (cursor === undefined) return;
 			// Timed from issuing the request to the page being committed locally,
 			// not just the RPC: what a user waits for is the data being readable,
 			// and the rebase is part of that.
@@ -2549,7 +2552,7 @@ export class Coordinator {
 			lastAcked = resp.lastAckedMutationId;
 			const responded = performance.now();
 			this.observeServerRevision(resp.schemaRevision);
-			const { reset, accessStale, skipped, behind } = await this.applyServerPage(
+			const { reset, accessStale, skipped, behind, unbased } = await this.applyServerPage(
 				workspaceId,
 				resp,
 				subs,
@@ -2566,8 +2569,9 @@ export class Coordinator {
 				outcome: 'ok',
 			});
 			// A reset re-bootstrapped instead of paging, and a bootstrap leaves the
-			// queue alone: the next cycle's push re-reports any gap.
-			if (reset) return;
+			// queue alone: the next cycle's push re-reports any gap. An unbased
+			// page found the workspace purged, and there is nothing to page onto.
+			if (reset || unbased) return;
 			if (skipped && resp.hasMore) {
 				const sent = cursor ?? new Uint8Array();
 				dropped = droppedFrom !== undefined && sameBytes(droppedFrom, sent) ? dropped + 1 : 1;
@@ -2602,9 +2606,10 @@ export class Coordinator {
 	 * The caller observes the schema revision: a stream page from an older server
 	 * carries none of its own, and only its frame says which revision sent it.
 	 * Returns `reset` (the caller must stop / reopen) and, on a reset, whether
-	 * the re-bootstrap actually `committed` — a superseded bootstrap left the cursor untouched, so a stream reopening on it would just
-	 * reset again. `accessStale` is RebaseResult.accessStale: the caller pulls
-	 * again. `skipped` and `behind` are RebaseResult's. Shared so the stream
+	 * the re-bootstrap actually `committed` — a superseded bootstrap left the
+	 * cursor untouched, so a stream reopening on it would just reset again.
+	 * `accessStale` is RebaseResult.accessStale: the caller pulls again.
+	 * `skipped`, `behind` and `unbased` are RebaseResult's. Shared so the stream
 	 * applies pages through exactly the path Pull does.
 	 */
 	private async applyServerPage(
@@ -2616,11 +2621,25 @@ export class Coordinator {
 		page: PullResponse,
 		subs: Subscription[],
 	): Promise<
-		{ reset: boolean; committed: boolean; accessStale: boolean; skipped: boolean; behind: boolean }
+		{
+			reset: boolean;
+			committed: boolean;
+			accessStale: boolean;
+			skipped: boolean;
+			behind: boolean;
+			unbased: boolean;
+		}
 	> {
 		if (page.reset) {
 			const committed = await this.doBootstrap(workspaceId, subs);
-			return { reset: true, committed, accessStale: false, skipped: false, behind: false };
+			return {
+				reset: true,
+				committed,
+				accessStale: false,
+				skipped: false,
+				behind: false,
+				unbased: false,
+			};
 		}
 		const state = this.workspaces.get(workspaceId);
 		let applied;
@@ -2635,9 +2654,26 @@ export class Coordinator {
 			// state both sides agree on. Treated exactly like a server-sent
 			// reset, because it is the same verdict reached one layer later.
 			const committed = await this.doBootstrap(workspaceId, subs);
-			return { reset: true, committed, accessStale: false, skipped: false, behind: false };
+			return {
+				reset: true,
+				committed,
+				accessStale: false,
+				skipped: false,
+				behind: false,
+				unbased: false,
+			};
 		}
-		const { touched, pendingCount, skipped = false, behind = false, accessStale = false } = applied;
+		const {
+			touched,
+			pendingCount,
+			skipped = false,
+			behind = false,
+			accessStale = false,
+			unbased = false,
+		} = applied;
+		if (unbased) {
+			return { reset: false, committed: false, accessStale: false, skipped, behind: false, unbased };
+		}
 		if (state && page.seq > state.serverSeq) state.serverSeq = page.seq;
 		// A server older than head_seq sends 0, which makes the head unknown
 		// rather than leaving one from the snapshot that this page has passed.
@@ -2654,7 +2690,7 @@ export class Coordinator {
 			// applied by another tab, which reported its late rejections.
 			this.reportLateRejections(workspaceId, page);
 		}
-		return { reset: false, committed: false, accessStale, skipped, behind };
+		return { reset: false, committed: false, accessStale, skipped, behind, unbased: false };
 	}
 
 	/**
@@ -2723,6 +2759,7 @@ export class Coordinator {
 				// it) is dropped whole — rows AND cursor — instead of regressing
 				// the shared store.
 				serverSeq: page.seq,
+				requireCursor: true,
 				...(access === undefined ? {} : { callerAccess: access }),
 				...(delta === undefined ? {} : { callerAccessDelta: delta }),
 				...(applied === undefined ? {} : { callerAccessApplied: applied }),
@@ -3697,14 +3734,16 @@ export class Coordinator {
 							workspaceId: ws,
 							changes: body.value.patch?.changes.length ?? 0,
 						});
-						const { reset, committed, accessStale } = await this.applyServerPage(
+						const { reset, committed, accessStale, unbased } = await this.applyServerPage(
 							ws,
 							body.value,
 							planned.subs.get(ws) ?? [],
 						);
 						// A pull names the summary this store holds, which the
-						// stream cannot do once it is open.
-						if (accessStale) this.syncSoon();
+						// stream cannot do once it is open. A purge deleted the
+						// base of an unbased page: a cycle bootstraps the
+						// workspace again if it is still synced.
+						if (accessStale || unbased) this.syncSoon();
 						if (reset) {
 							// The stream never sets reset (a reset arrives as a dropped
 							// frame); handled defensively so a server that does send one
