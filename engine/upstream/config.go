@@ -212,7 +212,10 @@ type RowRef struct {
 // CodeClientIDInUse is the Rejection.Code of a write whose mutation id the
 // origin reports as applied before the link ever sent it: another writer, for
 // example a second link started over a copy of this link's store, writes
-// under the same client id. The origin did not apply the write.
+// under the same client id. The origin did not apply the write. Only an origin
+// that does not check WorkspaceBatch.sent_through answers this way. An origin
+// that checks it refuses the push as a whole, and the link moves the writes it
+// did not send past the other writer's mutations and pushes them again.
 const CodeClientIDInUse = "client_id_in_use"
 
 // Rejection is a local write the origin rejected.

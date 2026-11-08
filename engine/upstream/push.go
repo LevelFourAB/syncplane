@@ -195,10 +195,15 @@ func casVersionOf(r resultRecord, cas casRef) uint64 {
 }
 
 // noteSend counts a push of the batch's entries, and forgets the ids below low,
-// the queue's lowest id: no entry holds them.
-func (w *workspace) noteSend(bt batch, low uint64) {
+// the queue's lowest id: no entry holds them. It returns the highest id the
+// link may have pushed before this push, for its sent_through.
+func (w *workspace) noteSend(bt batch, low uint64) uint64 {
 	w.sendMu.Lock()
 	defer w.sendMu.Unlock()
+	sent := w.sent
+	for _, e := range bt.ents {
+		w.sent = max(w.sent, e.id)
+	}
 	if low > 0 {
 		for id := range w.sends {
 			if id < low {
@@ -209,6 +214,16 @@ func (w *workspace) noteSend(bt batch, low uint64) {
 	for _, e := range bt.ents {
 		w.sends[e.id]++
 	}
+	return sent
+}
+
+// adoptSent counts the ids up to the origin's watermark acked as pushed by
+// the link: the link takes the watermark over, and resends an unanswered entry
+// at or below it as its own.
+func (w *workspace) adoptSent(acked uint64) {
+	w.sendMu.Lock()
+	defer w.sendMu.Unlock()
+	w.sent = max(w.sent, acked)
 }
 
 // firstSend reports a mutation id that no push before the one just answered
@@ -296,12 +311,12 @@ func (w *workspace) push(ctx context.Context) error {
 		if len(bt.muts) == 0 {
 			return nil
 		}
-		w.noteSend(bt, low)
-		wr, err := w.send(ctx, bt)
+		sent := w.noteSend(bt, low)
+		wr, err := w.send(ctx, bt, sent)
 		if err != nil {
 			// A failure the link resolved (a realigned queue, a dropped
 			// mutation) leaves the rest of the queue to push.
-			if err := w.pushFailed(ctx, bt, err); err != nil {
+			if err := w.pushFailed(ctx, bt, sent, err); err != nil {
 				return err
 			}
 			continue
@@ -335,14 +350,14 @@ func (w *workspace) push(ctx context.Context) error {
 
 // send pushes one batch and returns its workspace result. A batch the origin
 // refused as a whole returns a *client.WorkspaceError.
-func (w *workspace) send(ctx context.Context, bt batch) (_ *syncplanev1.WorkspaceResults, err error) {
+func (w *workspace) send(ctx context.Context, bt batch, sent uint64) (_ *syncplanev1.WorkspaceResults, err error) {
 	ctx, span := w.l.mx.span(ctx, "syncplane.upstream.push", w.id)
 	defer func() {
 		w.l.mx.count(ctx, w.l.mx.pushes, err)
 		endSpan(span, err)
 	}()
 	resp, err := w.l.rpc.Push(ctx, connect.NewRequest(&syncplanev1.PushRequest{
-		Batches: []*syncplanev1.WorkspaceBatch{{WorkspaceId: w.id, Mutations: bt.muts}},
+		Batches: []*syncplanev1.WorkspaceBatch{{WorkspaceId: w.id, Mutations: bt.muts, SentThrough: &sent}},
 	}))
 	if err != nil {
 		return nil, err
@@ -360,8 +375,9 @@ func (w *workspace) send(ctx context.Context, bt batch) (_ *syncplanev1.Workspac
 	return nil, fmt.Errorf("upstream: push answered no result for workspace %q", w.id)
 }
 
-// pushFailed decides what a failed push means for the queue.
-func (w *workspace) pushFailed(ctx context.Context, bt batch, err error) error {
+// pushFailed decides what a failed push means for the queue. sent is the
+// sent_through the push carried.
+func (w *workspace) pushFailed(ctx context.Context, bt batch, sent uint64, err error) error {
 	var we *client.WorkspaceError
 	isBatch := errors.As(err, &we)
 	code := client.CodeOf(err)
@@ -372,6 +388,8 @@ func (w *workspace) pushFailed(ctx context.Context, bt batch, err error) error {
 		return errors.Join(errNoAccess, err)
 	case isBatch && code == client.CodeMutationIDGap:
 		return w.resolveGap(ctx)
+	case isBatch && code == client.CodeClientIDInUse:
+		return w.resolveInUse(ctx, sent)
 	case isBatch && code == client.CodeInternal:
 		w.poison = poisonCount{}
 		return err
@@ -432,6 +450,35 @@ func (w *workspace) resolveGap(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	w.l.resetFloor(w.id)
+	return nil
+}
+
+// resolveInUse realigns the queue after the origin reported that another
+// writer used ids after sent, the highest id the link pushed. Nothing of the
+// batch applied, and the origin holds the other writer's mutations at the ids
+// above sent, so the entries there move to follow the watermark. An entry at
+// or below sent is resent under its id and answered as already applied: the
+// link cannot tell its own earlier attempt from the other writer's mutation.
+func (w *workspace) resolveInUse(ctx context.Context, sent uint64) error {
+	acked, err := w.watermark(ctx)
+	if err != nil {
+		return err
+	}
+	w.logger().LogAttrs(ctx, slog.LevelWarn, "another writer uses this link's client id; moving unsent writes past its mutations",
+		slog.String("client_id", w.clientID), slog.Uint64("sent_through", sent))
+	if acked > sent {
+		if _, err := w.txn(ctx, func(t *txn) error {
+			mapping, err := compactFrom(t.st, &t.q, sent+1, acked+1)
+			if err != nil || len(mapping) == 0 {
+				return err
+			}
+			return t.reloadView()
+		}); err != nil {
+			return err
+		}
+	}
+	w.adoptSent(acked)
 	w.l.resetFloor(w.id)
 	return nil
 }

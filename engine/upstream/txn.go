@@ -720,6 +720,7 @@ func (t *txn) establishAck(acked uint64) error {
 		return nil
 	}
 	t.res.ackKnown = true
+	t.w.adoptSent(acked)
 	return establishAck(t.st, &t.q, acked, t.w.startNext, t.renumber)
 }
 
@@ -772,10 +773,15 @@ func (t *txn) compactAbove(acked uint64) error {
 // compactAbove is txn.compactAbove on a bare state transaction. It returns
 // the new id of each entry it moved.
 func compactAbove(st stateTx, q *queueMeta, acked uint64) (map[uint64]uint64, error) {
+	return compactFrom(st, q, acked+1, acked+1)
+}
+
+// compactFrom gives the entries at from and above consecutive ids from next,
+// clearing their verdicts. It returns the new id of each entry it moved.
+func compactFrom(st stateTx, q *queueMeta, from, next uint64) (map[uint64]uint64, error) {
 	var move []*entry
 	var ids []uint64
-	next := acked + 1
-	for id := max(q.lowID, acked+1); id < q.nextID; id++ {
+	for id := max(q.lowID, from); id < q.nextID; id++ {
 		e, err := st.entry(id)
 		if err != nil {
 			return nil, err

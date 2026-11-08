@@ -340,6 +340,7 @@ func (l *Link) learnWatermark(ctx context.Context, w *workspace, st stateTx, q *
 	if err != nil {
 		return throughErr(err)
 	}
+	w.adoptSent(acked)
 	if err := establishAck(st, q, acked, w.startNext, func(move []*entry, ids []uint64) error {
 		return renumber(st, q, move, ids)
 	}); err != nil {
@@ -389,8 +390,8 @@ func (l *Link) writeThrough(ctx context.Context, w *workspace, b *bound, st stat
 		}
 		l.noteThrough(w.id, e.id, payload, nil)
 		// The queue's lowest id here is uncommitted, so it forgets no ids.
-		w.noteSend(bt, 0)
-		wr, err := w.send(ctx, bt)
+		sent := w.noteSend(bt, 0)
+		wr, err := w.send(ctx, bt, sent)
 		if err == nil {
 			if _, _, _, err := recordResults(st, q, bt, wr, w.firstSend); err != nil {
 				return err

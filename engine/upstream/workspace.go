@@ -46,8 +46,14 @@ type workspace struct {
 	// read in this process; pushes wait for it.
 	ackKnown atomic.Bool
 
-	// sendMu guards sends.
+	// sendMu guards sends and sent.
 	sendMu sync.Mutex
+	// sent is the highest mutation id the link may have pushed under its
+	// client id, or the watermark it took over at start. Each push sends it
+	// as sent_through, so the origin refuses a batch once another writer used
+	// an id after it, instead of answering that writer's mutations for the
+	// link's.
+	sent uint64
 	// sends counts the pushes of each mutation id this runtime sent, so that
 	// ALREADY_APPLIED for an id sent once tells another writer of the client
 	// id from a resend. Ids below the queue's lowest id are forgotten.
@@ -128,13 +134,15 @@ func (l *Link) newWorkspace(id string, meta syncMeta, q queueMeta) *workspace {
 		wake:        make(chan struct{}, 1),
 		deliverWake: make(chan struct{}, 1),
 		sends:       map[uint64]int{},
-		unreported:  map[uint64]bool{},
-		handed:      map[uint64]bool{},
-		meta:        meta,
-		pend:        map[uint64]uint64{},
-		bySeq:       map[uint64]uint64{},
-		verdicts:    map[uint64]error{},
-		changed:     make(chan struct{}),
+		// An earlier runtime may have pushed every id it took.
+		sent:       q.nextID - min(q.nextID, 1),
+		unreported: map[uint64]bool{},
+		handed:     map[uint64]bool{},
+		meta:       meta,
+		pend:       map[uint64]uint64{},
+		bySeq:      map[uint64]uint64{},
+		verdicts:   map[uint64]error{},
+		changed:    make(chan struct{}),
 	}
 	if w.clientID == "" {
 		w.clientID = l.clientID

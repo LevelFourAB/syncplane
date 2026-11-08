@@ -2,6 +2,7 @@ package upstream_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/levelfourab/syncplane/engine/client"
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	"github.com/levelfourab/syncplane/engine/query"
@@ -251,8 +253,36 @@ var _ = Describe("Recovery", func() {
 		Eventually(func() string { return title(b.todo("t1")) }).Should(Equal("from a"))
 		b.put(&todov1.Todo{Id: "t2", Title: "from b"})
 		b.flush()
-		Expect(title(o.todo("t2")) == "from b" || len(b.rejected()) > 0).To(BeTrue(),
-			"b's write neither reached the origin nor was reported: local row %v", b.todo("t2"))
+		Expect(title(o.todo("t2"))).To(Equal("from b"),
+			"the origin refuses b's push as a whole, and b moves the write past a's mutations")
+		Expect(b.rejected()).To(BeEmpty())
+
+		// a's next write meets b's ids in the same way.
+		a.put(&todov1.Todo{Id: "t3", Title: "from a again"})
+		a.flush()
+		Expect(title(o.todo("t3"))).To(Equal("from a again"))
+		Expect(a.rejected()).To(BeEmpty())
+	})
+
+	It("does not take a verdict the origin gave another writer under its client id for its own write", func() {
+		o := newOrigin()
+		a := newLocal(o, nil)
+		a.add()
+		a.put(&todov1.Todo{Id: "t1", Title: "first"})
+		a.flush()
+
+		// Another writer takes the link's next id with a write the origin
+		// rejects: a PATCH of a row that does not exist.
+		c, err := client.New(o.ts.URL, client.WithClientID(a.link.ClientID()))
+		Expect(err).NotTo(HaveOccurred())
+		_, err = c.Workspace(ws).Patch(ctx, &todov1.Todo{Id: "missing", Title: "x"}, []string{"title"})
+		var rej *client.RejectedError
+		Expect(errors.As(err, &rej)).To(BeTrue(), "the other writer's write is rejected: %v", err)
+
+		a.put(&todov1.Todo{Id: "t2", Title: "second"})
+		a.flush()
+		Expect(title(o.todo("t2"))).To(Equal("second"))
+		Expect(a.rejected()).To(BeEmpty())
 	})
 
 	It("keeps a row it cannot store at its confirmed state until the origin decides the write that blocks it", func() {
