@@ -30,7 +30,7 @@ import {
 	searchSpecTag,
 } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
-import type { KVStore } from '../../src/kv/store.js';
+import type { KVRead, KVStore } from '../../src/kv/store.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { ChainMutex } from '../../src/mutex.js';
 import { buildIndexes, markIndexesBuilt } from '../../src/optimistic/index-build.js';
@@ -46,8 +46,9 @@ import { fingerprint } from '../../src/query/indexkey.js';
 import {
 	POSTINGS_LAST_PAGE,
 	postingsPageKey,
-	readAllKeys,
+	readAllRows,
 	readTerm,
+	rowKeysOf as keysOfRows,
 } from '../../src/query/postings.js';
 import { SEARCH_INDEX_NAME, SEARCH_TERMS_PER_ROW } from '../../src/query/searchindex.js';
 import { defineSchema, entity, type Infer, text } from '../../src/schema/builder.js';
@@ -133,13 +134,20 @@ function baseOf(indexes: IndexCache, entityName = 'article', ws = WS): string {
 	return searchPostingsBase(entityName, ws, searchIndexOf(indexes.for(entityName))!.specHash);
 }
 
+/** The keys of the rows the index under `base` posts under one entry, in key
+ * order. */
+async function termRowKeys(tx: KVRead, base: string, entry: string): Promise<string[]> {
+	const head = await readTerm(tx, base, entry);
+	if (head === undefined) return [];
+	const rows = await readAllRows(tx, base, [ head ]);
+	return [ ...(await keysOfRows(tx, base, rows)).values() ].sort();
+}
+
 /** The rows posted under one entry, in key order. */
 async function posted(kv: KVStore, indexes: IndexCache, entry: string): Promise<string[]> {
-	const base = baseOf(indexes);
 	const tx = await kv.read();
 	try {
-		const head = await readTerm(tx, base, entry);
-		return head === undefined ? [] : await readAllKeys(tx, base, [ head ]);
+		return await termRowKeys(tx, baseOf(indexes), entry);
 	} finally {
 		tx.release();
 	}
@@ -842,8 +850,7 @@ describe('search postings of entities and workspaces whose names share a prefix'
 		const base = baseOf(indexes, e, w);
 		const tx = await kv.read();
 		try {
-			const head = await readTerm(tx, base, entryOf('milk'));
-			return head === undefined ? [] : await readAllKeys(tx, base, [ head ]);
+			return await termRowKeys(tx, base, entryOf('milk'));
 		} finally {
 			tx.release();
 		}

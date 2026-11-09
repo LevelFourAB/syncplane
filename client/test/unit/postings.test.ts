@@ -1,7 +1,8 @@
 // The search postings store (query/postings.ts): the codec, how a term's row
-// keys are split across its head and chunks, and — against a model of what
-// every term should list — that a run of random writes keeps every structure
-// exact, and that queries served from it answer what the scan answers.
+// numbers are split across its head and chunks, the two maps between row keys
+// and row numbers, and — against a model of what every term should list —
+// that a run of random writes keeps every structure exact, and that queries
+// served from it answer what the scan answers.
 
 import 'fake-indexeddb/auto';
 
@@ -25,22 +26,30 @@ import {
 	decodeHead,
 	decodeKeyList,
 	decodePage,
+	decodeRows,
 	encodeHead,
 	encodeKeyList,
 	encodePage,
+	encodeRows,
+	type PostedRow,
+	postedRowCount,
 	POSTINGS_CHUNK_CAP,
 	POSTINGS_INLINE_MAX,
 	POSTINGS_LAST_PAGE,
 	POSTINGS_PAGE_CAP,
-	POSTINGS_POSTED_ENTRY,
 	postingsChunkKey,
 	postingsDirectoryKey,
 	postingsHeadKey,
-	postingsPageKey,
-	readAllKeys,
+	readAllRows,
 	readTerm,
+	ROW_BLOCK,
+	ROW_MAP_CHUNK_CAP,
+	rowKeysOf,
+	scanPostedRows,
 	scanTerms,
 	SearchPostingsWriter,
+	type TermHead,
+	TermMembers,
 } from '../../src/query/postings.js';
 import { SEARCH_TERMS_PER_ROW } from '../../src/query/searchindex.js';
 import { defineSchema, entity, type Infer, text } from '../../src/schema/builder.js';
@@ -93,18 +102,26 @@ describe('the postings codec', () => {
 		expect(s.length).toBeLessThan(keys.join('').length / 2);
 	});
 
+	it('round-trips row numbers, and stores a run of them at one character a row', () => {
+		const cases = [ [], [ 0 ], [ 0, 1, 2 ], [ 5, 127, 128, 16384, 2 ** 40 ] ];
+		for (const rows of cases) expect(decodeRows(encodeRows(rows))).toEqual(rows);
+		const run = Array.from({ length: 300 }, (_, i) => 100_000 + i);
+		expect(encodeRows(run).length).toBeLessThan(run.length + 8);
+		expect(() => decodeRows(encodeRows(run).slice(0, -1))).toThrow();
+	});
+
 	it('round-trips a page, marking large terms', () => {
 		const page = [
-			{ entry: '\u0001a\u0000\u0000', keys: [ 'k1', 'k2' ] },
-			{ entry: '\u0001ab\u0000\u0000', keys: undefined },
-			{ entry: '\u0002', keys: [ 'z' ] },
+			{ entry: '\u0001a\u0000\u0000', rows: [ 1, 2 ] },
+			{ entry: '\u0001ab\u0000\u0000', rows: undefined },
+			{ entry: '\u0002', rows: [ 0 ] },
 		];
 		expect(decodePage(encodePage(page))).toEqual(page);
 		expect(decodePage(encodePage([]))).toEqual([]);
 	});
 
 	it('round-trips a head', () => {
-		const head = { counts: [ 3, 200, 1 ], bounds: [ 'a', 'm', 'qĀ' ], tail: [ 'r', 's' ] };
+		const head = { counts: [ 3, 200, 1 ], bounds: [ 7, 900, 901 ], tail: [ 902, 70000 ] };
 		expect(decodeHead(encodeHead(head))).toEqual(head);
 		const empty = { counts: [], bounds: [], tail: [] };
 		expect(decodeHead(encodeHead(empty))).toEqual(empty);
@@ -116,13 +133,38 @@ describe('the postings codec', () => {
 	});
 });
 
+/** The posted rows of `base` in key order, with the row map's invariants
+ * checked: keys ascend, no chunk is over its cap, and the blocks give every
+ * number its key back and hold no other key. */
+async function checkedRows(tx: KVRead, base: string): Promise<PostedRow[]> {
+	const rows: PostedRow[] = [];
+	for await (const chunk of scanPostedRows(tx, base)) {
+		expect(chunk.length).toBeLessThanOrEqual(ROW_MAP_CHUNK_CAP);
+		rows.push(...chunk);
+	}
+	const keys = rows.map(([ k ]) => k);
+	expect(keys).toEqual(sorted(new Set(keys)));
+	expect(new Set(rows.map(([ , n ]) => n)).size, 'two rows share a number').toBe(rows.length);
+	expect(await postedRowCount(tx, base)).toBe(rows.length);
+	const named = await rowKeysOf(tx, base, rows.map(([ , n ]) => n));
+	for (const [ key, n ] of rows) expect(named.get(n), `row ${n}`).toBe(key);
+	let inBlocks = 0;
+	for await (const [ k, v ] of tx.scan(`${base}n`)) {
+		const live = decodeKeyList(v as string).filter((key) => key !== '');
+		expect(live.length, `an empty block ${k}`).toBeGreaterThan(0);
+		inBlocks += live.length;
+	}
+	expect(inBlocks, 'a block names a row the map lacks').toBe(rows.length);
+	return rows;
+}
+
 /**
- * Every term's row keys under `base`, with every invariant of the layout
- * checked on the way: the directory names exactly the pages there are, pages
- * hold sorted terms inside their bounds and within their cap, a page marks
- * exactly the terms that have a head, a head's chunks are exactly the chunk
- * records of its term, and every row a term names is a posted row. The posted
- * rows themselves are not in the result; see postedOf.
+ * Every term's row keys under `base`, in key order, with every invariant of
+ * the layout checked on the way: the directory names exactly the pages there
+ * are, pages hold sorted terms inside their bounds and within their cap, a
+ * page marks exactly the terms that have a head, a head's chunks are exactly
+ * the chunk records of its term, every row a term names is a posted row, and
+ * the row map is whole (see checkedRows).
  */
 async function checkedBase(tx: KVRead, base: string): Promise<Map<string, string[]>> {
 	const kinds = new Map<string, Map<string, unknown>>();
@@ -132,14 +174,24 @@ async function checkedBase(tx: KVRead, base: string): Promise<Map<string, string
 		if (m === undefined) kinds.set(kind, m = new Map());
 		m.set(k.slice(base.length + 1), v);
 	}
+	const keyOf = new Map((await checkedRows(tx, base)).map(([ key, n ]) => [ n, key ]));
 	const pages = kinds.get('p') ?? new Map<string, unknown>();
 	const heads = kinds.get('h') ?? new Map<string, unknown>();
 	const chunks = kinds.get('c') ?? new Map<string, unknown>();
 	const out = new Map<string, string[]>();
+	const keysOf = (entry: string, rows: number[]): string[] => {
+		expect(rows).toEqual([ ...new Set(rows) ].sort((a, b) => a - b));
+		return sorted(rows.map((n) => {
+			const key = keyOf.get(n);
+			expect(key, `${JSON.stringify(entry)} names row ${n}, which is not posted`).toBeDefined();
+			return key!;
+		}));
+	};
 	const dir = kinds.get('d')?.get('');
 	if (pages.size === 0 && heads.size === 0) {
 		expect(dir, 'a directory outlived its pages').toBeUndefined();
 		expect(chunks.size).toBe(0);
+		expect(keyOf.size, 'a posted row with no term').toBe(0);
 		return out;
 	}
 	const bounds = decodeKeyList(dir as string);
@@ -156,14 +208,12 @@ async function checkedBase(tx: KVRead, base: string): Promise<Map<string, string
 		for (const t of terms) {
 			if (below !== undefined) expect(t.entry > below).toBe(true);
 			expect(t.entry <= bound).toBe(true);
-			if (t.keys === undefined) {
+			if (t.rows === undefined) {
 				flagged.add(t.entry);
 				continue;
 			}
-			expect(t.keys.length).toBeGreaterThan(0);
-			expect(t.keys.length).toBeLessThanOrEqual(POSTINGS_INLINE_MAX);
-			expect(t.keys).toEqual(sorted(new Set(t.keys)));
-			out.set(t.entry, t.keys);
+			expect(t.rows.length).toBeLessThanOrEqual(POSTINGS_INLINE_MAX);
+			out.set(t.entry, keysOf(t.entry, t.rows));
 		}
 		below = bound;
 	}
@@ -172,50 +222,53 @@ async function checkedBase(tx: KVRead, base: string): Promise<Map<string, string
 	for (const [ entry, raw ] of heads) {
 		const head = decodeHead(raw as string);
 		expect(head.tail.length).toBeLessThanOrEqual(CAP);
-		const keys: string[] = [];
-		let low: string | undefined;
+		const rows: number[] = [];
+		let low: number | undefined;
 		for (let i = 0; i < head.bounds.length; i++) {
 			const bound = head.bounds[i]!;
 			if (low !== undefined) expect(bound > low, 'bounds out of order').toBe(true);
-			owned.add(entry + bound);
-			const chunk = decodeKeyList(chunks.get(entry + bound) as string);
+			owned.add(entry + bound.toString(36));
+			const chunk = decodeRows(chunks.get(entry + bound.toString(36)) as string);
 			expect(chunk.length).toBe(head.counts[i]);
 			expect(chunk.length).toBeGreaterThan(0);
 			expect(chunk.length).toBeLessThanOrEqual(CAP);
-			for (const key of chunk) {
-				if (low !== undefined) expect(key > low).toBe(true);
-				expect(key <= bound).toBe(true);
+			for (const n of chunk) {
+				if (low !== undefined) expect(n > low).toBe(true);
+				expect(n <= bound).toBe(true);
 			}
-			keys.push(...chunk);
+			rows.push(...chunk);
 			low = bound;
 		}
-		for (const key of head.tail) if (low !== undefined) expect(key > low).toBe(true);
-		keys.push(...head.tail);
-		expect(keys).toEqual(sorted(new Set(keys)));
+		for (const n of head.tail) if (low !== undefined) expect(n > low).toBe(true);
+		rows.push(...head.tail);
 		// A head that shrank to the demotion point went back into its page.
-		expect(head.bounds.length > 0 || keys.length > POSTINGS_INLINE_MAX / 2).toBe(true);
-		out.set(entry, keys);
+		expect(head.bounds.length > 0 || rows.length > POSTINGS_INLINE_MAX / 2).toBe(true);
+		out.set(entry, keysOf(entry, rows));
 	}
 	expect(sorted(chunks.keys()), 'a chunk no head names').toEqual(sorted(owned));
-	const posted = new Set(out.get(POSTINGS_POSTED_ENTRY) ?? []);
-	out.delete(POSTINGS_POSTED_ENTRY);
-	for (const [ entry, keys ] of out) {
-		for (const key of keys) expect(posted.has(key), `${entry} names an unposted row`).toBe(true);
-	}
+	const termed = new Set([ ...out.values() ].flat());
+	expect(termed.size, 'a posted row with no term').toBe(keyOf.size);
 	return out;
 }
 
-/** The rows the index under `base` lists as posted, in key order. */
+/** The rows the index under `base` posts, in key order. */
 async function postedOf(tx: KVRead, base: string): Promise<string[]> {
-	const read = await readTerm(tx, base, POSTINGS_POSTED_ENTRY);
-	return read === undefined ? [] : await readAllKeys(tx, base, [ read ]);
+	return (await checkedRows(tx, base)).map(([ key ]) => key);
+}
+
+/** The row keys a term read through readTerm names, in key order. */
+async function keysOfTerm(tx: KVRead, base: string, term: TermHead | undefined): Promise<string[]> {
+	if (term === undefined) return [];
+	const rows = await readAllRows(tx, base, [ term ]);
+	const named = await rowKeysOf(tx, base, rows);
+	expect(named.size).toBe(rows.length);
+	return sorted(named.values());
 }
 
 /** One term's row keys, checked through checkedBase and through readTerm. */
 async function checkedTerm(tx: KVRead, base: string, entry: string): Promise<string[]> {
 	const keys = (await checkedBase(tx, base)).get(entry) ?? [];
-	const read = await readTerm(tx, base, entry);
-	expect(read === undefined ? [] : await readAllKeys(tx, base, [ read ])).toEqual(keys);
+	expect(await keysOfTerm(tx, base, await readTerm(tx, base, entry))).toEqual(keys);
 	return keys;
 }
 
@@ -258,41 +311,45 @@ async function headOf(kv: KVStore, entry: string) {
 }
 
 const T = '\u0001t\u0000\u0000';
+const U = '\u0001u\u0000\u0000';
+const range = (from: number, to: number) => Array.from({ length: to - from }, (_, i) => from + i);
 
 describe.each(STORES)('the postings of one term (%s)', (_, open) => {
+	// Rows get their numbers in the order they are first posted, so the i-th
+	// key below is row i.
 	it('stay in the head up to the cap, and move whole chunks out past it', async () => {
 		const kv = await open();
 		const keys = Array.from({ length: 2 * CAP + 1 }, (_, i) => `k${pad(i)}`);
 		await write(kv, keys.slice(0, CAP).map((k) => [ k, [ T ] ]));
-		expect(await headOf(kv, T)).toEqual({ counts: [], bounds: [], tail: keys.slice(0, CAP) });
+		expect(await headOf(kv, T)).toEqual({ counts: [], bounds: [], tail: range(0, CAP) });
 
 		await write(kv, [ [ keys[CAP]!, [ T ] ] ]);
-		expect(await headOf(kv, T)).toEqual({
-			counts: [ CAP ],
-			bounds: [ keys[CAP - 1] ],
-			tail: [ keys[CAP] ],
-		});
+		expect(await headOf(kv, T)).toEqual({ counts: [ CAP ], bounds: [ CAP - 1 ], tail: [ CAP ] });
 
 		await write(kv, keys.slice(CAP + 1).map((k) => [ k, [ T ] ]));
 		const head = (await headOf(kv, T))!;
 		expect(head.counts).toEqual([ CAP, CAP ]);
-		expect(head.tail).toEqual([ keys[2 * CAP] ]);
+		expect(head.tail).toEqual([ 2 * CAP ]);
 		expect(await termKeysOf(kv, T)).toEqual(keys);
 		await kv.close();
 	});
 
 	it('split a full chunk that a row lands inside, keeping its bound on the upper half', async () => {
 		const kv = await open();
-		const keys = Array.from({ length: CAP + 1 }, (_, i) => `k${pad(i * 2)}`);
-		await write(kv, keys.map((k) => [ k, [ T ] ]));
-		const bound = keys[CAP - 1]!;
+		// Every other row holds the term, so a row between two of them can
+		// gain it later, with a number inside the chunk.
+		const keys = Array.from({ length: 2 * CAP + 1 }, (_, i) => `k${pad(i)}`);
+		await write(kv, keys.map((k, i) => [ k, [ i % 2 === 0 ? T : U ] ]));
+		const bound = 2 * (CAP - 1);
 		expect((await headOf(kv, T))!.bounds).toEqual([ bound ]);
 
-		await write(kv, [ [ `k${pad(1)}`, [ T ] ] ]);
+		await write(kv, [ [ keys[1]!, [ U, T ] ] ]);
 		const head = (await headOf(kv, T))!;
 		expect(head.counts).toEqual([ (CAP + 1) / 2 + 0.5, (CAP + 1) / 2 - 0.5 ].map(Math.floor));
 		expect(head.bounds[1]).toBe(bound);
-		expect(await termKeysOf(kv, T)).toEqual(sorted([ ...keys, `k${pad(1)}` ]));
+		expect(await termKeysOf(kv, T)).toEqual(
+			sorted([ ...keys.filter((_, i) => i % 2 === 0), keys[1]! ]),
+		);
 		await kv.close();
 	});
 
@@ -317,7 +374,7 @@ describe.each(STORES)('the postings of one term (%s)', (_, open) => {
 		await kv.close();
 	});
 
-	it('order rows whose keys sort first and last of any key', async () => {
+	it('list rows whose keys sort first and last of any key', async () => {
 		const kv = await open();
 		const middle = Array.from({ length: CAP * 2 }, (_, i) => `m${pad(i)}`);
 		await write(kv, middle.map((k) => [ k, [ T ] ]));
@@ -437,6 +494,130 @@ describe.each(STORES)('the rows a writer is given (%s)', (_, open) => {
 	});
 });
 
+describe.each(STORES)('the row map (%s)', (_, open) => {
+	async function rowsOf(kv: KVStore): Promise<PostedRow[]> {
+		const tx = await kv.read();
+		try {
+			await checkedBase(tx, BASE);
+			return await checkedRows(tx, BASE);
+		} finally {
+			tx.release();
+		}
+	}
+
+	it('numbers rows in the order they are first posted, and keeps a number while its row is posted', async () => {
+		const kv = await open();
+		await write(kv, [ [ 'm', [ T ] ], [ 'a', [ T ] ] ]);
+		await write(kv, [ [ 'z', [ T ] ], [ 'b', [ U ] ] ]);
+		expect(await rowsOf(kv)).toEqual([ [ 'a', 1 ], [ 'b', 3 ], [ 'm', 0 ], [ 'z', 2 ] ]);
+		// Other terms, the same row.
+		await write(kv, [ [ 'm', [ U ] ] ]);
+		expect(await rowsOf(kv)).toEqual([ [ 'a', 1 ], [ 'b', 3 ], [ 'm', 0 ], [ 'z', 2 ] ]);
+		expect(await termKeysOf(kv, U)).toEqual([ 'b', 'm' ]);
+		await kv.close();
+	});
+
+	it('does not give a number out again while a row is posted, and starts again once none is', async () => {
+		const kv = await open();
+		await write(kv, [ [ 'a', [ T ] ], [ 'b', [ T ] ], [ 'c', [ T ] ] ]);
+		await write(kv, [ [ 'b', [] ] ]);
+		// The row comes back as a new row: its old number is not its number.
+		await write(kv, [ [ 'b', [ U ] ], [ 'd', [ T ] ] ]);
+		expect(await rowsOf(kv)).toEqual([ [ 'a', 0 ], [ 'b', 3 ], [ 'c', 2 ], [ 'd', 4 ] ]);
+		expect(await termKeysOf(kv, T)).toEqual([ 'a', 'c', 'd' ]);
+
+		await write(kv, [ 'a', 'b', 'c', 'd' ].map((k) => [ k, [] ]));
+		const tx = await kv.read();
+		const left: string[] = [];
+		for await (const [ k ] of tx.scan(BASE)) left.push(k);
+		tx.release();
+		expect(left).toEqual([]);
+		await write(kv, [ [ 'e', [ T ] ] ]);
+		expect(await rowsOf(kv)).toEqual([ [ 'e', 0 ] ]);
+		await kv.close();
+	});
+
+	it('splits a chunk past its cap and drops one that empties, whatever order the keys arrive in', async () => {
+		const rand = prng(3);
+		const kv = await open();
+		const keys = Array.from({ length: ROW_MAP_CHUNK_CAP * 4 }, (_, i) => `k${pad(i)}`);
+		const shuffled = [ ...keys ].sort(() => rand() - 0.5);
+		for (let at = 0; at < shuffled.length; at += 150) {
+			await write(kv, shuffled.slice(at, at + 150).map((k) => [ k, [ T ] ]));
+		}
+		const rows = await rowsOf(kv);
+		expect(rows.map(([ k ]) => k)).toEqual(keys);
+		expect(rows.map(([ , n ]) => shuffled[n])).toEqual(keys);
+		const chunks = async () => {
+			const tx = await kv.read();
+			let n = 0;
+			for await (const _ of scanPostedRows(tx, BASE)) n++;
+			tx.release();
+			return n;
+		};
+		const before = await chunks();
+		expect(before).toBeGreaterThanOrEqual(4);
+
+		// The lowest keys go: their chunks go with them, and the rest stay.
+		await write(kv, keys.slice(0, ROW_MAP_CHUNK_CAP * 2).map((k) => [ k, [] ]));
+		expect((await rowsOf(kv)).map(([ k ]) => k)).toEqual(keys.slice(ROW_MAP_CHUNK_CAP * 2));
+		expect(await chunks()).toBeLessThan(before);
+		await kv.close();
+	});
+
+	it('keeps a block of row keys while one of its rows is posted', async () => {
+		const kv = await open();
+		const keys = Array.from({ length: ROW_BLOCK * 2 }, (_, i) => `k${pad(i)}`);
+		await write(kv, keys.map((k) => [ k, [ T ] ]));
+		const blocks = async () => {
+			const tx = await kv.read();
+			const out: string[] = [];
+			for await (const [ k ] of tx.scan(`${BASE}n`)) out.push(k);
+			tx.release();
+			return out.length;
+		};
+		expect(await blocks()).toBe(2);
+		await write(kv, keys.slice(1, ROW_BLOCK).map((k) => [ k, [] ]));
+		expect(await blocks()).toBe(2);
+		await write(kv, [ [ keys[0]!, [] ] ]);
+		expect(await blocks()).toBe(1);
+		expect((await rowsOf(kv)).map(([ k ]) => k)).toEqual(keys.slice(ROW_BLOCK));
+		await kv.close();
+	});
+});
+
+describe('the members of a term', () => {
+	it('are answered from the chunks the numbers asked about fall in, and no other', async () => {
+		const kv = new MemoryKVStore();
+		// Every other row holds the term, over three chunks and a tail.
+		const keys = Array.from({ length: CAP * 6 + 10 }, (_, i) => `k${pad(i)}`);
+		await write(kv, keys.map((k, i) => [ k, [ i % 2 === 0 ? T : U ] ]));
+		const tx = await kv.read();
+		const term = (await readTerm(tx, BASE, T))!;
+		expect(term.head.bounds.length).toBe(3);
+		const read: string[] = [];
+		const getMany = tx.getMany.bind(tx);
+		tx.getMany = (ks) => {
+			read.push(...ks);
+			return getMany(ks);
+		};
+		const members = new TermMembers(tx, BASE, term);
+		// The tail is in the head: no read.
+		await members.load([ CAP * 6 + 2, CAP * 6 + 3 ]);
+		expect(read).toEqual([]);
+		expect([ members.has(CAP * 6 + 2), members.has(CAP * 6 + 3) ]).toEqual([ true, false ]);
+
+		await members.load([ 0, 1, 2 ]);
+		expect(read).toEqual([ postingsChunkKey(BASE, T, term.head.bounds[0]!) ]);
+		expect([ members.has(0), members.has(1), members.has(2) ]).toEqual([ true, false, true ]);
+		// A chunk is read once.
+		await members.load([ 4, 5 ]);
+		expect(read.length).toBe(1);
+		tx.release();
+		await kv.close();
+	});
+});
+
 async function baseOf(kv: KVStore): Promise<Map<string, string[]>> {
 	const tx = await kv.read();
 	try {
@@ -477,7 +658,7 @@ describe.each(STORES)('pages of small terms (%s)', (_, open) => {
 		const tx = await kv.read();
 		const read = await readTerm(tx, BASE, bounds[0]!);
 		tx.release();
-		expect(read?.head.tail).toEqual([ 'ka', 'kb', 'kc' ]);
+		expect(read?.head.tail).toEqual([ 0, 1, 2 ]);
 		await kv.close();
 	});
 
@@ -505,14 +686,14 @@ describe.each(STORES)('pages of small terms (%s)', (_, open) => {
 		expect((await baseOf(kv)).get(e)).toEqual(keys.slice(0, POSTINGS_INLINE_MAX));
 
 		await write(kv, [ [ keys[POSTINGS_INLINE_MAX]!, [ e ] ] ]);
-		expect((await headOf(kv, e))?.tail).toEqual(keys);
+		expect((await headOf(kv, e))?.tail).toEqual(range(0, keys.length));
 		expect((await baseOf(kv)).get(e)).toEqual(keys);
 
 		// Shrinking to just above half keeps the head, so a term at the limit
 		// does not move on every write.
 		const half = POSTINGS_INLINE_MAX / 2;
 		await write(kv, keys.slice(half + 1).map((k) => [ k, [] ]));
-		expect((await headOf(kv, e))?.tail).toEqual(keys.slice(0, half + 1));
+		expect((await headOf(kv, e))?.tail).toEqual(range(0, half + 1));
 		await write(kv, [ [ keys[half]!, [] ] ]);
 		expect(await headOf(kv, e)).toBeUndefined();
 		expect((await baseOf(kv)).get(e)).toEqual(keys.slice(0, half));
@@ -536,7 +717,7 @@ describe.each(STORES)('pages of small terms (%s)', (_, open) => {
 			const keys: string[][] = [];
 			for await (const t of scanTerms(tx, BASE, lo, hi)) {
 				got.push(t.entry);
-				keys.push(await readAllKeys(tx, BASE, [ t ]));
+				keys.push(await keysOfTerm(tx, BASE, t));
 			}
 			tx.release();
 			expect(got, prefix).toEqual(want);
@@ -558,9 +739,9 @@ describe.each(STORES)('postings under random writes (%s)', (_, open) => {
 		const rows = new Map<string, string[]>();
 		for (let round = 0; round < 25; round++) {
 			const batch: [string, string[]][] = [];
-			const n = 1 + Math.floor(rand() * 120);
+			const n = 1 + Math.floor(rand() * 400);
 			for (let i = 0; i < n; i++) {
-				const key = `r${pad(Math.floor(rand() * 1500))}`;
+				const key = `r${pad(Math.floor(rand() * 4000))}`;
 				const entries = rand() < 0.15
 					? []
 					: terms.filter((_, t) => rand() < (t < 6 ? 1 / (t + 1) : 0.02));
@@ -584,8 +765,7 @@ describe.each(STORES)('postings under random writes (%s)', (_, open) => {
 				const stored = await checkedBase(tx, BASE);
 				for (const t of terms) expect(stored.get(t) ?? []).toEqual(sorted(model.get(t) ?? []));
 				for (const t of terms.slice(0, 8)) {
-					const read = await readTerm(tx, BASE, t);
-					expect(read === undefined ? [] : await readAllKeys(tx, BASE, [ read ])).toEqual(
+					expect(await keysOfTerm(tx, BASE, await readTerm(tx, BASE, t))).toEqual(
 						sorted(model.get(t) ?? []),
 					);
 				}
@@ -601,7 +781,7 @@ describe.each(STORES)('postings under random writes (%s)', (_, open) => {
 		// the run tested less than it claims.
 		expect((await readTerm(tx, BASE, terms[0]!))!.head.bounds.length).toBeGreaterThan(1);
 		tx.release();
-		expect((await directoryOf(kv)).length).toBeGreaterThan(2);
+		expect((await directoryOf(kv)).length).toBeGreaterThan(1);
 		await kv.close();
 	});
 });
@@ -766,9 +946,9 @@ describe('queries over postings under random writes', () => {
 		const live = new Set<string>();
 		for (let round = 0; round < 6; round++) {
 			const changes = [];
-			const n = round === 0 ? 900 : 150;
+			const n = round === 0 ? 2600 : 300;
 			for (let i = 0; i < n; i++) {
-				const id = `d${pad(Math.floor(rand() * 1200))}`;
+				const id = `d${pad(Math.floor(rand() * 3000))}`;
 				if (live.has(id) && rand() < 0.25) {
 					changes.push(docTombstone(id, version++));
 					live.delete(id);
@@ -785,7 +965,7 @@ describe('queries over postings under random writes', () => {
 		const base = searchPostingsBase('doc', WS, searchIndexOf(indexes.for('doc'))!.specHash);
 		const tx = await kv.read();
 		expect((await readTerm(tx, base, '\u0001alpha\u0000\u0000'))!.head.bounds.length)
-			.toBeGreaterThan(1);
+			.toBeGreaterThan(0);
 		tx.release();
 	});
 

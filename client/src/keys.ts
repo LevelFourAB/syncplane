@@ -39,9 +39,10 @@
  * SEARCH-index postings are not positions. A searchable row holds one posting
  * per distinct term — an order of magnitude more than its value positions —
  * and a store keeps an index row per position, with the record's key beside
- * it, twice on WebKit. They are records under `s/` instead: pages that hold
- * the rare terms of an entry range together, a head and chunks of a few
- * hundred row keys for each common term, and one list of the posted rows (see
+ * it, twice on WebKit. They are records under `s/` instead. The index gives
+ * each row it posts a small number, and a term lists the numbers of its rows:
+ * pages hold the rare terms of an entry range together, each common term has
+ * a head and chunks, and two maps pair the row keys with the numbers (see
  * query/postings.ts). See optimistic/index-maintain.ts for what fills both and
  * what a writer owes.
  *

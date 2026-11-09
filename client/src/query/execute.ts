@@ -73,7 +73,18 @@ import { IndexEncoder, upperBound } from './indexkey.js';
 import type { SearchDecl } from './match.js';
 import type { GroupPlan, IndexRange, QueryPlan } from './plan.js';
 import { planGroup, planGroupRows, planQuery } from './plan.js';
-import { readAllKeys, readTerm, scanTerms, type TermHead, termKeys } from './postings.js';
+import {
+	postedRowCount,
+	readAllRows,
+	readTerm,
+	ROW_BLOCK,
+	ROW_MAP_CHUNK_CAP,
+	rowKeysOf,
+	scanPostedRows,
+	scanTerms,
+	type TermHead,
+	TermMembers,
+} from './postings.js';
 import {
 	projectionFor,
 	projectionForGroup,
@@ -1408,13 +1419,13 @@ async function querySearchIndex<D extends DescMessage>(
 	const scanKeys = async (
 		src: TermPostings,
 		max: number,
-		keep: (key: string) => void,
+		keep: (row: number) => void,
 	): Promise<'ok' | 'wide' | 'budget'> => {
 		const room = indexCandidateBudget - walked;
 		await src.fill(Math.min(max, room));
 		if (src.count <= max && src.count <= room) {
 			walked += src.count;
-			for (const key of await src.keys()) keep(key);
+			for (const row of await src.rows()) keep(row);
 			return 'ok';
 		}
 		// The step at which a one-at-a-time walk would have stopped: the
@@ -1436,7 +1447,7 @@ async function querySearchIndex<D extends DescMessage>(
 	 * per term before it declines, instead of reading every list to the budget
 	 * to discover the same thing.
 	 */
-	const seed = async (): Promise<{ keys: Set<string>; at: number } | undefined> => {
+	const seed = async (): Promise<{ rows: Set<number>; at: number } | undefined> => {
 		// One term is its own most selective: there is nothing to compare it
 		// against, so the rounds would only read the same list twice.
 		// The final round is at the budget — the cap that decides whether the
@@ -1446,10 +1457,10 @@ async function querySearchIndex<D extends DescMessage>(
 			: [ ...SEARCH_SEED_CAPS.filter((c) => c < indexCandidateBudget), indexCandidateBudget ];
 		for (const max of caps) {
 			for (let at = 0; at < matcher.terms.length; at++) {
-				const keys = new Set<string>();
-				const outcome = await scanKeys(sources[at]!, max, (key) => keys.add(key));
+				const rows = new Set<number>();
+				const outcome = await scanKeys(sources[at]!, max, (row) => rows.add(row));
 				if (outcome === 'budget') return undefined;
-				if (outcome === 'ok') return { keys, at };
+				if (outcome === 'ok') return { rows, at };
 			}
 		}
 		return undefined;
@@ -1463,16 +1474,16 @@ async function querySearchIndex<D extends DescMessage>(
 	// postings to find that out is only worth it while the list is small
 	// against the rows it could save re-reading, which is what the cap
 	// expresses. A term that blows it is skipped rather than declined.
-	let all = seeded.keys;
+	let all = seeded.rows;
 	for (let at = 0; at < matcher.terms.length; at++) {
 		if (at === seeded.at || all.size === 0) continue;
-		const next = new Set<string>();
+		const next = new Set<number>();
 		const kept = all;
 		const outcome = await scanKeys(
 			sources[at]!,
 			Math.min(kept.size * SEARCH_NARROW_RATIO, indexCandidateBudget),
-			(key) => {
-				if (kept.has(key)) next.add(key);
+			(row) => {
+				if (kept.has(row)) next.add(row);
 			},
 		);
 		if (outcome === 'budget') return decline(report, 'budget', walked);
@@ -1485,16 +1496,17 @@ async function querySearchIndex<D extends DescMessage>(
 		await scanKeys(
 			new TermPostings(tx, base, undefined),
 			indexCandidateBudget,
-			(key) => all.add(key),
+			(row) => all.add(row),
 		) !== 'ok'
 	) {
 		return decline(report, 'budget', walked);
 	}
 	// Locally text-edited rows join them, for the same reason: their postings
 	// answer for the confirmed document rather than the one this read folds.
-	for (const key of edited) all.add(key);
+	const named = new Set((await rowKeysOf(tx, base, all)).values());
+	for (const key of edited) named.add(key);
 
-	const keys = [ ...all ].filter((k) => !shadowed.has(k)).sort();
+	const keys = [ ...named ].filter((k) => !shadowed.has(k)).sort();
 	// Every candidate is re-read to be re-checked and ranked, and most of them
 	// are rejected or sorted past — so they are decoded as only the predicate's
 	// paths, the ordering's and the declared search fields the match and the
@@ -1662,36 +1674,74 @@ async function querySearchPostings<D extends DescMessage>(
 			return { kind: 'decline', reason: 'budget', walked: indexCandidateBudget + 1 };
 		}
 		walked += overflow.count;
-		for (const key of await readAllKeys(tx, base, [ overflow ])) {
+		const rows = await readAllRows(tx, base, [ overflow ]);
+		for (const key of (await rowKeysOf(tx, base, rows)).values()) {
 			if (!shadowed.has(key)) readWhole.add(key);
 		}
 	}
 	for (const key of edited) if (!shadowed.has(key)) readWhole.add(key);
 
-	// A term's postings come out in row-key order, which with no orderBy is the
-	// result order — so the rows past the budget are provably past the page,
-	// exactly as an ordered value walk settles (see candidateBudget). Overflow
-	// and overlay rows merge in AHEAD of postings rows, never displace them.
+	// With no orderBy the result order is row-key order, and the walk below
+	// meets the term's rows in that order — so the rows past the budget are
+	// provably past the page, exactly as an ordered value walk settles (see
+	// candidateBudget). Overflow and overlay rows merge in AHEAD of postings
+	// rows, never displace them.
 	const budget = candidateBudget(compiled, overlayRows.length, undefined);
 	const pageKeys: string[] = [];
 	// Whether a match exists past the ones taken — what hasMore rides on when
 	// the total is opted out and the walk therefore stops at the page.
 	let more = false;
+	// Takes one of the term's rows, in key order. False once the page is full.
+	const take = (key: string): boolean | 'budget' => {
+		if (++walked > indexCandidateBudget) return 'budget';
+		if (answered.has(key)) return true;
+		if (budget !== undefined && pageKeys.length >= budget) {
+			more = true;
+			return false;
+		}
+		pageKeys.push(key);
+		return true;
+	};
 	if (posted !== undefined) {
-		// The first read takes as many chunks as the page can need: the page,
-		// one more posting for hasMore, and every answered row skipped on the
-		// way.
-		const first = budget === undefined
-			? posted.head.bounds.length
-			: chunksCovering(posted, budget + answered.size + 1);
-		for await (const key of termKeys(tx, base, posted, first)) {
-			if (++walked > indexCandidateBudget) return { kind: 'decline', reason: 'budget', walked };
-			if (answered.has(key)) continue;
-			if (budget !== undefined && pageKeys.length >= budget) {
-				more = true;
-				break;
+		// The term lists row numbers, and the page wants its first rows by key.
+		// Two ways to get them. The keys of ALL the term's rows can be read
+		// from the blocks and sorted, which reads a block of keys for each of
+		// them at worst. Or the row map can be walked in key order, asking the
+		// term about each number, which reads the map as far as the page
+		// reaches: the page, one more posting for hasMore, and every answered
+		// row skipped on the way. The walk reads fewer keys for a term that
+		// many rows hold, and the estimate of how far it goes is also how much
+		// of the map its first request takes.
+		const want = budget === undefined ? undefined : budget + answered.size + 1;
+		const total = want === undefined ? 0 : await postedRowCount(tx, base);
+		const reach = want === undefined ? 0 : (want * total) / posted.count;
+		const walkMap = want !== undefined
+			&& reach < Math.min(posted.count * ROW_BLOCK, total);
+		if (walkMap) {
+			const members = new TermMembers(tx, base, posted);
+			const first = Math.ceil(reach / ROW_MAP_CHUNK_CAP);
+			walk: for await (const chunk of scanPostedRows(tx, base, first)) {
+				await members.load(chunk.map(([ , row ]) => row));
+				for (const [ key, row ] of chunk) {
+					if (!members.has(row)) continue;
+					const took = take(key);
+					if (took === 'budget') return { kind: 'decline', reason: 'budget', walked };
+					if (!took) break walk;
+				}
 			}
-			pageKeys.push(key);
+		} else {
+			// A walk of the postings one at a time stops on the step past the
+			// budget, and with no page to stop at it takes every one of them.
+			if (want === undefined && posted.count > indexCandidateBudget) {
+				return { kind: 'decline', reason: 'budget', walked: indexCandidateBudget + 1 };
+			}
+			const rows = await readAllRows(tx, base, [ posted ]);
+			const keys = [ ...(await rowKeysOf(tx, base, rows)).values() ].sort();
+			for (const key of keys) {
+				const took = take(key);
+				if (took === 'budget') return { kind: 'decline', reason: 'budget', walked };
+				if (!took) break;
+			}
 		}
 	}
 
@@ -1764,18 +1814,6 @@ async function querySearchPostings<D extends DescMessage>(
 	};
 }
 
-/** How many leading chunks of a term hold at least `n` of its postings — all
- * of them when the chunks hold fewer, and at least one. */
-function chunksCovering(term: TermHead, n: number): number {
-	const { counts } = term.head;
-	let sum = 0;
-	for (let i = 0; i < counts.length; i++) {
-		sum += counts[i]!;
-		if (sum >= n) return i + 1;
-	}
-	return Math.max(1, counts.length);
-}
-
 /**
  * The postings one query term selects — the term's own, or every term a
  * prefix term reaches — or the overflow rows', read head by head as the walk
@@ -1817,10 +1855,10 @@ class TermPostings {
 		}
 	}
 
-	/** Every row key of the heads read so far. Only complete once fill has
+	/** Every row number of the heads read so far. Only complete once fill has
 	 * read them all, which it has whenever the count is within its limit. */
-	keys(): Promise<string[]> {
-		return readAllKeys(this.tx, this.base, this.heads);
+	rows(): Promise<number[]> {
+		return readAllRows(this.tx, this.base, this.heads);
 	}
 
 	private add(head: TermHead | undefined): void {

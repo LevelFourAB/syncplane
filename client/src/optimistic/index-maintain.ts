@@ -31,11 +31,12 @@
 //   computed from the row and handed to the put that was happening anyway.
 // - SEARCH postings are records of their own under `s/` (query/postings.ts):
 //   pages that hold the rare terms of an entry range together, a head and
-//   chunks for each common term, and one list of the posted rows. A
-//   searchable row holds one posting per distinct term — an order of
-//   magnitude more than its value positions — and as positions
-//   each of them cost the store an index row carrying the record's key. As
-//   packed lists they cost the bytes of the row key once per term.
+//   chunks for each common term, and two maps that pair each posted row's
+//   key with the small number the postings name it by. A searchable row
+//   holds one posting per distinct term — an order of magnitude more than
+//   its value positions — and as positions each of them cost the store an
+//   index row carrying the record's key. As a number in a packed list a
+//   posting costs one or two bytes.
 //
 // For value positions that collapses most of what maintenance used to be:
 //
@@ -53,7 +54,8 @@
 // reads the confirmed record it is about to replace, and a
 // SearchPostingsWriter compares the entries that record analyzes to with the
 // entries of the new value and changes only the postings that differ. A write
-// that leaves the searchable text alone costs that one read. Every path that
+// that leaves the searchable text alone costs that one read. The row map of
+// the index says whether the earlier value was posted at all. Every path that
 // writes or removes a searchable confirmed row records it with a writer,
 // together with the record the store held, and flushes it in the same
 // transaction. A row removed without one leaves postings that answer for a row

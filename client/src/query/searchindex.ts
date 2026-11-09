@@ -8,7 +8,7 @@
 // 	      |  0x02          the overflow marker, alone
 //
 // An entry names a posting list rather than a row: the client keys a term's
-// postings by its entry and lists the row keys inside them (see
+// postings by its entry and lists the numbers of its rows inside them (see
 // query/postings.ts), so entries sort by term and a prefix term brackets a
 // range of them.
 //
@@ -33,7 +33,7 @@ import type { SearchDecl } from './match.js';
  * moves existing terms — invalidates every stored search index, which then
  * rebuilds.
  */
-const SEARCH_INDEX_ENCODING_VERSION = 4;
+const SEARCH_INDEX_ENCODING_VERSION = 5;
 
 /**
  * Caps the distinct terms one row stores postings for; past it the row stores
