@@ -70,23 +70,21 @@ import type {
 } from './group.js';
 import { GroupBuckets, groupValuesOf } from './group.js';
 import { IndexEncoder, upperBound } from './indexkey.js';
+import type { SearchDecl } from './match.js';
 import type { GroupPlan, IndexRange, QueryPlan } from './plan.js';
 import { planGroup, planGroupRows, planQuery } from './plan.js';
-import {
-	postingsTermsKey,
-	readAllKeys,
-	readTerm,
-	scanTerms,
-	type TermHead,
-	termKeys,
-	termListOf,
-} from './postings.js';
+import { readAllKeys, readTerm, scanTerms, type TermHead, termKeys } from './postings.js';
 import {
 	projectionFor,
 	projectionForGroup,
 	projectionForOverlay,
 } from './projection.js';
-import { requiredMatchCond, SEARCH_OVERFLOW_ENTRY, searchTermRange } from './searchindex.js';
+import {
+	requiredMatchCond,
+	SEARCH_OVERFLOW_ENTRY,
+	searchEntries,
+	searchTermRange,
+} from './searchindex.js';
 import type { FacetTable } from './types.js';
 
 /**
@@ -1373,6 +1371,7 @@ async function querySearchIndex<D extends DescMessage>(
 		registry,
 		def,
 		schema,
+		idx.search!,
 		matcher,
 		compiled,
 		workspaceId,
@@ -1611,6 +1610,7 @@ async function querySearchPostings<D extends DescMessage>(
 	registry: EntityRegistry,
 	def: EntityDef,
 	schema: D,
+	decl: SearchDecl,
 	matcher: Matcher,
 	compiled: CompiledQuery,
 	workspaceId: string,
@@ -1727,13 +1727,18 @@ async function querySearchPostings<D extends DescMessage>(
 		// are the confirmed half of the total without a walk. Rows answered
 		// elsewhere keep their confirmed postings there — the overlay does not
 		// touch them, and a text fragment lives beside the row — so each one
-		// the row's term list places in the range comes back out, and the row
-		// is counted, if it still matches, from the rows read above.
+		// the row's confirmed value places in the range comes back out, and
+		// the row is counted, if it still matches, from the rows read above.
 		let answeredInRange = 0;
 		if (answered.size > 0 && posted !== undefined) {
-			const lists = await tx.getMany([ ...answered ].map((k) => postingsTermsKey(base, k)));
-			for (const list of lists) {
-				for (const e of termListOf(list)) {
+			// The index posts a row under the entries its confirmed value
+			// analyzes to, so that value says which postings the row holds.
+			const held = await tx.getMany(
+				[ ...answered ].map((k) => confirmedKey(def.name, workspaceId, k)),
+			);
+			for (const record of held as (ConfirmedRecord | undefined)[]) {
+				if (record === undefined) continue;
+				for (const e of searchEntries(decl, fromBinary(schema, record.v), schema)) {
 					if (e >= range.lo && (range.hi === undefined || e < range.hi)) answeredInRange++;
 				}
 			}

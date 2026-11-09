@@ -41,7 +41,7 @@
  * and a store keeps an index row per position, with the record's key beside
  * it, twice on WebKit. They are records under `s/` instead: pages that hold
  * the rare terms of an entry range together, a head and chunks of a few
- * hundred row keys for each common term, and one term list per row (see
+ * hundred row keys for each common term, and one list of the posted rows (see
  * query/postings.ts). See optimistic/index-maintain.ts for what fills both and
  * what a writer owes.
  *

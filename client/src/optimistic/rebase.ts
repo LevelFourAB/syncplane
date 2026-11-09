@@ -703,6 +703,10 @@ export async function applyServerChanges(
 	const postings = new SearchPostingsWriter();
 	// Entities whose foreign indexes this transaction has dropped already.
 	const dropped = new Set<string>();
+	// The rows of searchable entities as the store holds them before this
+	// batch: the postings writer removes the terms a row no longer holds, and
+	// the earlier value is where it gets them.
+	const before = await heldSearchRows(tx, workspaceId, changes, syncable, indexes);
 	for (const change of changes) {
 		if (!syncable.has(change.entity)) continue;
 		touched.row(workspaceId, change.entity, change.key);
@@ -710,8 +714,8 @@ export async function applyServerChanges(
 		const idx = indexes?.for(change.entity) ?? [];
 		const search = searchIndexOf(idx);
 		// A value write keeps only the indexes of this build. A tombstone leaves
-		// every index whole: the positions go with the row, and the postings
-		// writer removes the row from every declaration.
+		// every value index whole: the positions go with the row. The postings
+		// writer answers for the search index of another declaration.
 		if (change.body.case === 'value' && !dropped.has(change.entity)) {
 			dropped.add(change.entity);
 			await dropForeignIndexes(tx, idx, workspaceId, change.entity);
@@ -723,7 +727,16 @@ export async function applyServerChanges(
 			// Recorded whether or not this build compiles a search index: another
 			// build's tab may have written postings for it.
 			await tx.del(cKey);
-			recordSearchRow(postings, change.entity, workspaceId, search, change.key, undefined, undefined);
+			recordSearchRow(
+				postings,
+				change.entity,
+				workspaceId,
+				search,
+				change.key,
+				undefined,
+				registry.get(change.entity)?.schema,
+				before.get(cKey),
+			);
 		} else if (change.body.case === 'value') {
 			const value = detached(
 				await applyTextDeltas(tx, registry, workspaceId, change, change.body.value),
@@ -744,9 +757,9 @@ export async function applyServerChanges(
 					decoded,
 					def.schema,
 				);
-				// Most updates leave the searchable text alone, and the writer
-				// compares the new terms with the row's stored term list, so such a
-				// change costs one read and writes nothing.
+				// Most updates leave the searchable text alone, which the recorder
+				// sees from the two values, so such a change costs one read and
+				// writes nothing.
 				if (search !== undefined) {
 					recordSearchRow(
 						postings,
@@ -756,6 +769,7 @@ export async function applyServerChanges(
 						change.key,
 						decoded,
 						def.schema,
+						before.get(cKey),
 					);
 				}
 			}
@@ -763,6 +777,34 @@ export async function applyServerChanges(
 		}
 	}
 	await postings.flush(tx);
+}
+
+/**
+ * The confirmed records the store holds for the rows `changes` names, by
+ * confirmed key, for the entities that declare a search index. One read for
+ * the batch; a row the store does not hold has no entry.
+ */
+async function heldSearchRows(
+	tx: KVWrite,
+	workspaceId: string,
+	changes: RowChange[],
+	syncable: ReadonlySet<string>,
+	indexes: IndexCache | undefined,
+): Promise<Map<string, ConfirmedRecord>> {
+	const keys = new Set<string>();
+	for (const change of changes) {
+		if (!syncable.has(change.entity)) continue;
+		if (searchIndexOf(indexes?.for(change.entity) ?? []) === undefined) continue;
+		keys.add(confirmedKey(change.entity, workspaceId, change.key));
+	}
+	const out = new Map<string, ConfirmedRecord>();
+	if (keys.size === 0) return out;
+	const list = [ ...keys ];
+	const records = await tx.getMany(list);
+	for (let i = 0; i < list.length; i++) {
+		if (records[i] !== undefined) out.set(list[i]!, records[i] as ConfirmedRecord);
+	}
+	return out;
 }
 
 /**
@@ -801,6 +843,12 @@ async function writeSnapshotRows(
 ): Promise<void> {
 	const syncable = entities ?? await syncableEntities(tx, registry);
 	const postings = index === undefined ? undefined : index.postings ?? new SearchPostingsWriter();
+	// A cold bootstrap that resumed an earlier attempt rewrites rows that
+	// attempt already posted, and the row it replaces is what keeps those
+	// postings exact.
+	const before = index === undefined
+		? new Map<string, ConfirmedRecord>()
+		: await heldSearchRows(tx, index.workspaceId, changes, syncable, index.indexes);
 	for (const change of changes) {
 		if (!syncable.has(change.entity)) continue;
 		if (change.textDeltas.length > 0) {
@@ -824,7 +872,8 @@ async function writeSnapshotRows(
 					search,
 					change.key,
 					undefined,
-					undefined,
+					registry.get(change.entity)?.schema,
+					before.get(k),
 				);
 			}
 		} else if (change.body.case === 'value') {
@@ -842,9 +891,6 @@ async function writeSnapshotRows(
 					decoded,
 					def.schema,
 				);
-				// Through the writer rather than written blind: a cold bootstrap
-				// that resumed an earlier attempt rewrites rows that attempt already
-				// posted, and the term lists are what keep those postings exact.
 				// On a workspace the bootstrap is filling for the first time, the
 				// rows arrive in key order, so the postings of each common term
 				// append to its tail and the writer reads no chunk.
@@ -857,6 +903,7 @@ async function writeSnapshotRows(
 						change.key,
 						decoded,
 						def.schema,
+						before.get(k),
 					);
 				}
 			}

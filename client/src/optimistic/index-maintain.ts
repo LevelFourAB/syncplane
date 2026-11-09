@@ -31,8 +31,9 @@
 //   computed from the row and handed to the put that was happening anyway.
 // - SEARCH postings are records of their own under `s/` (query/postings.ts):
 //   pages that hold the rare terms of an entry range together, a head and
-//   chunks for each common term, and a term list per row. A searchable row holds one posting per distinct term —
-//   an order of magnitude more than its value positions — and as positions
+//   chunks for each common term, and one list of the posted rows. A
+//   searchable row holds one posting per distinct term — an order of
+//   magnitude more than its value positions — and as positions
 //   each of them cost the store an index row carrying the record's key. As
 //   packed lists they cost the bytes of the row key once per term.
 //
@@ -47,21 +48,25 @@
 //   them along with every other position; the build pass rewrites every row, so
 //   a spec change reclaims its own keyspace as it rebuilds.
 //
-// Search postings are maintained by DIFF instead. A SearchPostingsWriter reads
-// the row's stored term list, compares it with the entries the new value
-// analyzes to, and changes only the postings that differ — so a write that
-// leaves the searchable text alone costs one read, and every path that writes
-// or removes a searchable confirmed row records it with a writer and flushes
-// it in the same transaction. A row removed without one leaves postings that
-// answer for a row that is gone; a row rewritten without one leaves postings
-// describing its PREVIOUS text. The sweeps of a workspace or an entity delete
-// the whole `s/` scope with the rows instead of visiting them.
+// Search postings are maintained by DIFF instead. The index keeps no list of
+// the terms of a row, so the diff is between two values of the row: a writer
+// reads the confirmed record it is about to replace, and a
+// SearchPostingsWriter compares the entries that record analyzes to with the
+// entries of the new value and changes only the postings that differ. A write
+// that leaves the searchable text alone costs that one read. Every path that
+// writes or removes a searchable confirmed row records it with a writer,
+// together with the record the store held, and flushes it in the same
+// transaction. A row removed without one leaves postings that answer for a row
+// that is gone; a row rewritten without one, or without the record it
+// replaced, leaves postings describing its PREVIOUS text, and no later write
+// removes them. The sweeps of a workspace or an entity delete the whole `s/`
+// scope with the rows instead of visiting them.
 //
 // A superseded search declaration writes under another spec tag, so its
-// postings are unreachable from the current one. A writer removes every row it
-// records from the other tags it finds under the scope, since it cannot
-// analyze a row the way the other declaration does, and the build deletes the
-// rest when it claims its markers (see index-build.ts).
+// postings are unreachable from the current one. A writer cannot analyze a
+// row the way the other declaration does, so it cannot take one row out of
+// those postings: its flush deletes every other tag it finds under the scope,
+// whole, with the built marker of the index they made.
 //
 // It also puts one obligation on every writer, which is the price of the
 // layout: a row's value positions are only as good as the last write of that
@@ -87,7 +92,7 @@
 //   progress (dropForeignIndexes in index-build.ts). The build that declares
 //   the index walks it again on its next pass.
 
-import type { DescMessage } from '@bufbuild/protobuf';
+import { type DescMessage, fromBinary } from '@bufbuild/protobuf';
 
 import { type ConfirmedRecord, indexPositionPrefix } from '../keys.js';
 import type { KVWrite } from '../kv/store.js';
@@ -100,7 +105,12 @@ import {
 } from '../query/indexkey.js';
 import { type SearchDecl, searchDeclOf } from '../query/match.js';
 import type { SearchPostingsWriter } from '../query/postings.js';
-import { SEARCH_INDEX_NAME, searchEntries, searchSpecHash } from '../query/searchindex.js';
+import {
+	sameSearchText,
+	SEARCH_INDEX_NAME,
+	searchEntries,
+	searchSpecHash,
+} from '../query/searchindex.js';
 import { reportError } from '../report.js';
 
 /**
@@ -267,10 +277,15 @@ export function searchIndexOf(indexes: readonly CompiledIndex[]): CompiledIndex 
  * marker alone past the per-row term cap — or none when `value` is undefined,
  * for a row that is gone.
  *
+ * `old` is the record the store held at the row's key before this write, and
+ * undefined when it held none. The writer removes the postings of the terms
+ * that `old` held and `value` does not, so a caller must give it whenever the
+ * store held a row.
+ *
  * `search` is the entity's search index in this build, or undefined when it
- * declares none; the row then leaves the postings of every other declaration
- * and gains none. `schema` decodes `value`, and is only read when both are
- * given. The change is written when the writer flushes.
+ * declares none; the postings of every other declaration are then deleted and
+ * the row gains none. `schema` decodes `value` and `old`. The change is
+ * written when the writer flushes.
  */
 export function recordSearchRow(
 	writer: SearchPostingsWriter,
@@ -280,11 +295,22 @@ export function recordSearchRow(
 	key: string,
 	value: unknown | undefined,
 	schema: DescMessage | undefined,
+	old: ConfirmedRecord | undefined,
 ): void {
-	const entries = search !== undefined && value !== undefined && schema !== undefined
-		? searchEntries(search.search!, value, schema)
-		: [];
-	writer.set(entity, workspaceId, search?.specHash, key, entries);
+	if (search === undefined || schema === undefined) {
+		writer.set(entity, workspaceId, search?.specHash, key, undefined, []);
+		return;
+	}
+	const decl = search.search!;
+	const entries = value === undefined ? [] : searchEntries(decl, value, schema);
+	const before = old === undefined ? undefined : (): readonly string[] => {
+		const held = fromBinary(schema, old.v);
+		// Most writes leave the searchable text alone. The same text analyzes
+		// to the same entries, and the same array tells the writer so.
+		if (value !== undefined && sameSearchText(decl, held, value, schema)) return entries;
+		return searchEntries(decl, held, schema);
+	};
+	writer.set(entity, workspaceId, search.specHash, key, before, entries);
 }
 
 /**

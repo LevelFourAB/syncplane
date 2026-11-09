@@ -1,10 +1,10 @@
 // The search postings (`s/<scope><tag>…`): per-term heads and chunks of row
-// keys, and a term list per row, kept as records of their own so a write that
-// leaves the searchable text alone leaves the postings alone.
+// keys, kept as records of their own so a write that leaves the searchable
+// text alone leaves the postings alone.
 //
 // Two properties are load-bearing and neither is visible in a query result. A
-// rewrite that does not change the terms must not touch any posting — the
-// whole point of the term list — and every path that removes a row must remove
+// rewrite that does not change the terms must not touch any posting, and
+// every path that removes a row must remove
 // its postings, since a posting outliving its row would answer for a row
 // nothing can read. Both are asserted against the keys the store is actually
 // asked to write.
@@ -46,10 +46,8 @@ import { fingerprint } from '../../src/query/indexkey.js';
 import {
 	POSTINGS_LAST_PAGE,
 	postingsPageKey,
-	postingsTermsKey,
 	readAllKeys,
 	readTerm,
-	termListOf,
 } from '../../src/query/postings.js';
 import { SEARCH_INDEX_NAME, SEARCH_TERMS_PER_ROW } from '../../src/query/searchindex.js';
 import { defineSchema, entity, type Infer, text } from '../../src/schema/builder.js';
@@ -147,16 +145,6 @@ async function posted(kv: KVStore, indexes: IndexCache, entry: string): Promise<
 	}
 }
 
-/** The entries one row's term list holds, sorted. */
-async function termsOf(kv: KVStore, indexes: IndexCache, id: string): Promise<string[]> {
-	const tx = await kv.read();
-	try {
-		return termListOf(await tx.get(postingsTermsKey(baseOf(indexes), id)));
-	} finally {
-		tx.release();
-	}
-}
-
 const isPosting = (k: string) => k.startsWith(SEARCH_POSTINGS_ROOT);
 
 describe('the search postings of a row', () => {
@@ -164,7 +152,6 @@ describe('the search postings of a row', () => {
 		const { kv, puts } = recordingWrites(new MemoryKVStore());
 		const indexes = new IndexCache(registry);
 		await apply(kv, indexes, [ change('a1', 'milk cow', 'draft', 1n) ]);
-		expect(puts).toContain(postingsTermsKey(baseOf(indexes), 'a1'));
 		expect(puts).toContain(postingsPageKey(baseOf(indexes), POSTINGS_LAST_PAGE));
 
 		puts.length = 0;
@@ -195,11 +182,8 @@ describe('the search postings of a row', () => {
 		puts.length = 0;
 		await apply(kv, indexes, [ change('a1', 'milk goat', 'draft', 3n) ]);
 		const base = baseOf(indexes);
-		// Three small terms in one page: the page and the row's term list.
-		expect(puts.filter(isPosting).sort()).toEqual(
-			[ postingsPageKey(base, POSTINGS_LAST_PAGE), postingsTermsKey(base, 'a1') ].sort(),
-		);
-		expect(await termsOf(kv, indexes, 'a1')).toEqual([ entryOf('goat'), entryOf('milk') ]);
+		// Three small terms in one page, and nothing else to write.
+		expect(puts.filter(isPosting)).toEqual([ postingsPageKey(base, POSTINGS_LAST_PAGE) ]);
 		expect(await posted(kv, indexes, entryOf('cow'))).toEqual([]);
 		expect(await posted(kv, indexes, entryOf('goat'))).toEqual([ 'a1' ]);
 		expect(await posted(kv, indexes, entryOf('milk'))).toEqual([ 'a1', 'a2' ]);
@@ -214,16 +198,14 @@ describe('the search postings of a row', () => {
 	});
 
 	it('are deleted by a tombstone', async () => {
-		const { kv, dels } = recordingWrites(new MemoryKVStore());
+		const kv = new MemoryKVStore();
 		const indexes = new IndexCache(registry);
 		await apply(kv, indexes, [
 			change('a1', 'milk cow', 'draft', 1n),
 			change('a2', 'milk', 'draft', 2n),
 		]);
 
-		dels.length = 0;
 		await apply(kv, indexes, [ tombstone('a1', 3n) ]);
-		expect(dels).toContain(postingsTermsKey(baseOf(indexes), 'a1'));
 		expect(await posted(kv, indexes, entryOf('milk'))).toEqual([ 'a2' ]);
 		expect(await posted(kv, indexes, entryOf('cow'))).toEqual([]);
 
@@ -416,7 +398,6 @@ describe('search postings', () => {
 		]);
 		expect(await posted(kv, indexes, entryOf('milk'))).toEqual([ 'a1', 'a2' ]);
 		expect(await posted(kv, indexes, entryOf('cow'))).toEqual([ 'a1', 'a2' ]);
-		expect(await termsOf(kv, indexes, 'a1')).toEqual([ entryOf('cow'), entryOf('milk') ]);
 	});
 
 	it('list every oversized row under the overflow entry alone', async () => {
@@ -427,7 +408,6 @@ describe('search postings', () => {
 			change('b2', oversized(''), 'draft', 2n),
 		]);
 		expect(await posted(kv, indexes, OVERFLOW)).toEqual([ 'b1', 'b2' ]);
-		expect(await termsOf(kv, indexes, 'b1')).toEqual([ OVERFLOW ]);
 		expect(await posted(kv, indexes, entryOf('needle'))).toEqual([]);
 	});
 
@@ -702,7 +682,7 @@ describe('a store holding the postings of another search declaration', () => {
 		});
 	};
 
-	it('keeps the declarations apart, takes a row out of the other one it rewrites, and sweeps the rest at the build', async () => {
+	it('keeps the declarations apart, and deletes the other one whole when it writes a row', async () => {
 		const kv = new MemoryKVStore();
 		const indexes = new IndexCache(registry);
 		const widerIndexes = new IndexCache(widerRegistry);
@@ -723,19 +703,44 @@ describe('a store holding the postings of another search declaration', () => {
 		expect(baseOf(indexes)).not.toBe(widerBase);
 		expect(widerBase.startsWith(scope)).toBe(true);
 
-		// This build rewrites a1: the other declaration loses it, since this
-		// build cannot analyze it the way that one does.
+		// This build rewrites a1. It cannot analyze the row the way the other
+		// declaration does, so it cannot take one row out of those postings:
+		// they go whole.
 		await apply(kv, indexes, [ change('a1', 'milk', 'draft', 3n) ]);
-		const r = await kv.read();
-		const head = await readTerm(r, widerBase, entryOf('milk'));
-		expect(head === undefined ? [] : await readAllKeys(r, widerBase, [ head ])).toEqual([ 'a2' ]);
-		r.release();
+		expect(await keysUnder(kv, widerBase)).toEqual([]);
 		expect(await posted(kv, indexes, entryOf('milk'))).toEqual([ 'a1' ]);
 
 		const mutex = new ChainMutex();
 		await buildIndexes(kv, (fn) => mutex.run(fn), registry, indexes, WS);
-		expect(await keysUnder(kv, widerBase)).toEqual([]);
 		expect(await posted(kv, indexes, entryOf('milk'))).toEqual([ 'a1', 'a2' ]);
+	});
+
+	it('makes the other declaration read as unbuilt when a tombstone deletes its postings', async () => {
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(registry);
+		const widerIndexes = new IndexCache(widerRegistry);
+		const tx = await kv.write();
+		await applyServerChanges(
+			tx,
+			widerRegistry,
+			WS,
+			[ widerChange('a1', 'milk', 'draft', 1n), widerChange('a2', 'milk', 'live', 2n) ],
+			new TouchSet(),
+			widerIndexes,
+		);
+		await markIndexesBuilt(tx, widerIndexes, WS, [ 'article' ]);
+		await tx.commit();
+		const marker = metaIndexBuilt(
+			WS,
+			'article',
+			SEARCH_INDEX_NAME,
+			searchIndexOf(widerIndexes.for('article'))!.specHash,
+		);
+		expect(await keysUnder(kv, marker)).toEqual([ marker ]);
+
+		await apply(kv, indexes, [ tombstone('a1', 3n) ]);
+		expect(await keysUnder(kv, baseOf(widerIndexes))).toEqual([]);
+		expect(await keysUnder(kv, marker)).toEqual([]);
 	});
 });
 

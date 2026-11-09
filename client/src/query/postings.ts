@@ -16,8 +16,6 @@
 // 	                          and its tail, the row keys above every chunk
 // 	base 'c' entry bound      one CHUNK of a large term: the row keys in
 // 	                          (previous bound, bound]
-// 	base 'r' key              the TERM LIST of a row: the entries it is
-// 	                          posted under
 //
 // `entry` is the search entry of query/searchindex.ts — a tag, then the term
 // escaped and terminated — so terms sort by entry, a prefix term brackets a
@@ -44,9 +42,10 @@
 // paths that write the most postings (a bootstrap, a build), so those append
 // to the tail.
 //
-// The term list is what lets a writer remove a row's postings without
-// reading the row's previous value: the diff between the stored list and the
-// new entries is the whole of the change.
+// THE POSTED ROWS. One more list, under POSTINGS_POSTED_ENTRY, names every row
+// the index posts under at least one entry. The index keeps no list of the
+// terms of a row: a writer gets the terms a row held from the row's earlier
+// value, and this list says whether those terms were posted.
 //
 // Values are strings of one character per byte where the row keys allow it —
 // lengths and counts are base-128 varints in \u0000-ÿ — so an engine
@@ -54,8 +53,17 @@
 // key is the length it shares with the previous one, the length of the rest,
 // and the rest.
 
-import { SEARCH_SPEC_TAG_LENGTH, searchPostingsScope, searchSpecTag } from '../keys.js';
+import {
+	type IndexBuildCursor,
+	metaIndexBuildCursor,
+	metaIndexBuilt,
+	metaIndexEntityPrefix,
+	SEARCH_SPEC_TAG_LENGTH,
+	searchPostingsScope,
+	searchSpecTag,
+} from '../keys.js';
 import type { KVRead, KVWrite } from '../kv/store.js';
+import { SEARCH_INDEX_NAME } from './searchindex.js';
 
 /**
  * Row keys one chunk, or a large term's tail, holds at most. A chunk that
@@ -80,7 +88,14 @@ const DIRECTORY = 'd';
 const PAGE = 'p';
 const HEAD = 'h';
 const CHUNK = 'c';
-const TERMS = 'r';
+
+/**
+ * The entry every posted row is listed under: the rows the index posts under
+ * at least one other entry. It opens with a tag above every term and the
+ * overflow marker, so it is in no term range, and it equals the bound of the
+ * last page.
+ */
+export const POSTINGS_POSTED_ENTRY = '\u0003';
 
 /**
  * The upper bound of the last page. Every entry opens with a tag below it, so
@@ -100,9 +115,6 @@ export const postingsHeadKey = (base: string, entry: string): string => base + H
 /** The chunk of `entry` whose upper bound is the row key `bound`. */
 export const postingsChunkKey = (base: string, entry: string, bound: string): string =>
 	base + CHUNK + entry + bound;
-
-/** The term list of the row at `key`. */
-export const postingsTermsKey = (base: string, key: string): string => base + TERMS + key;
 
 const upperChar = (c: string): string => String.fromCharCode(c.charCodeAt(0) + 1);
 
@@ -250,8 +262,8 @@ function headOf(value: unknown): PostingsHead | undefined {
 	return typeof value === 'string' ? decodeHead(value) : undefined;
 }
 
-/** The term list stored at a key: empty for an absent or foreign value. */
-export function termListOf(value: unknown): string[] {
+/** The key list stored at a key: empty for an absent or foreign value. */
+function termListOf(value: unknown): string[] {
 	return typeof value === 'string' ? decodeKeyList(value) : [];
 }
 
@@ -476,10 +488,21 @@ interface TermOps {
 	removes: Set<string>;
 }
 
+/** One row as a writer records it. */
+interface RowChange {
+	/** The entries of the row the store held before, undefined for none. */
+	old: (() => readonly string[]) | undefined;
+	/** The entries of the row now: none for a row that is gone. */
+	entries: readonly string[];
+}
+
 /** Rows recorded for one scope, and the tag of the index this build keeps. */
 interface ScopeRows {
+	entity: string;
+	workspaceId: string;
+	specHash: string | undefined;
 	tag: string | undefined;
-	rows: Map<string, readonly string[]>;
+	rows: Map<string, RowChange>;
 }
 
 /** One page a flush changes: its bound, and its terms as the flush leaves them. */
@@ -503,12 +526,18 @@ interface LargePlan {
 
 /**
  * Collects the search terms of rows as they are written, then writes every
- * posting change in one pass: one read each of the recorded rows' term lists,
- * the directories, the pages the changed terms fall in, the heads of the large
- * ones and the chunks their changes land in, and one write per changed record.
- * Reads within a pass are issued together, so a backend that answers a batch
- * in one round trip (KVRead.getMany) does. A pass over a spec with nothing
- * stored yet reads nothing at all.
+ * posting change in one pass: one read of the posted-rows list, the
+ * directories, the pages the changed terms fall in, the heads of the large
+ * ones and the chunks their changes land in, and one write per changed
+ * record. Reads within a pass are issued together, so a backend that answers
+ * a batch in one round trip (KVRead.getMany) does. A pass over a spec with
+ * nothing stored yet reads nothing at all.
+ *
+ * The index holds no list of the terms of a row. A change is the difference
+ * between the entries of the row the store held before and the entries of the
+ * row now, so each caller gives both. The posted-rows list says whether the
+ * index holds the terms of the earlier row: a row that is stored but not
+ * listed posts all its entries, and a listed row posts the difference.
  *
  * The cost of a pass grows with the pages and large terms it touches rather
  * than with its rows, so a writer that records more rows per pass pays less
@@ -516,9 +545,9 @@ interface LargePlan {
  * hold one across transactions.
  *
  * Not safe for concurrent use. A flush runs inside one write transaction,
- * which is what keeps the directory, the pages, the heads, their chunks and
- * the term lists consistent with each other: the store's write lock admits
- * one writer. Every row recorded must still be what the confirmed state holds
+ * which is what keeps the directory, the pages, the heads and their chunks
+ * consistent with each other: the store's write lock admits one writer.
+ * Every row recorded must still be what the confirmed state holds
  * when that transaction commits.
  */
 export class SearchPostingsWriter {
@@ -539,10 +568,16 @@ export class SearchPostingsWriter {
 	/**
 	 * Records that the row at `key` of `entity` in `workspaceId` now posts
 	 * `entries` under the search index with spec hash `specHash` — none for a
-	 * row that is gone or holds no terms. The row is also removed from every
-	 * OTHER spec's postings found for the pair, whose analysis this build
-	 * cannot reproduce; an undefined `specHash` removes it from all of them. A
-	 * later call for the same row replaces an earlier one.
+	 * row that is gone or holds no terms.
+	 *
+	 * `old` gives the entries of the row the store held at `key` before this
+	 * write, analyzed under the same spec, and is undefined when the store held
+	 * none. It is called at most once, in flush. When a row is recorded more
+	 * than once before a flush, the first `old` and the last `entries` count.
+	 *
+	 * A flush deletes the postings of every OTHER spec found for the pair,
+	 * whose analysis this build cannot reproduce; an undefined `specHash`
+	 * deletes them all.
 	 *
 	 * `entries` must not change until flush returns.
 	 */
@@ -551,16 +586,28 @@ export class SearchPostingsWriter {
 		workspaceId: string,
 		specHash: string | undefined,
 		key: string,
+		old: (() => readonly string[]) | undefined,
 		entries: readonly string[],
 	): void {
 		const scope = searchPostingsScope(entity, workspaceId);
 		let s = this.scopes.get(scope);
 		if (s === undefined) {
-			s = { tag: specHash === undefined ? undefined : searchSpecTag(specHash), rows: new Map() };
+			s = {
+				entity,
+				workspaceId,
+				specHash,
+				tag: specHash === undefined ? undefined : searchSpecTag(specHash),
+				rows: new Map(),
+			};
 			this.scopes.set(scope, s);
 		}
-		if (!s.rows.has(key)) this.count++;
-		s.rows.set(key, entries);
+		const held = s.rows.get(key);
+		if (held === undefined) {
+			this.count++;
+			s.rows.set(key, { old, entries });
+		} else {
+			held.entries = entries;
+		}
 	}
 
 	/** Writes every change recorded since the last flush, in `tx`. */
@@ -570,65 +617,106 @@ export class SearchPostingsWriter {
 		this.scopes = new Map();
 		this.count = 0;
 
-		// Which bases each scope holds, other than the one this build keeps.
-		// A base with no record at all needs none of the reads below: every
-		// term list, page and head under it is absent.
-		const lists: { base: string; key: string; own: readonly string[] | undefined }[] = [];
-		const empty = new Set<string>();
 		for (const [ scope, s ] of scopes) {
 			const tags = await specTagsUnder(tx, scope);
-			if (s.tag !== undefined && !tags.includes(s.tag)) empty.add(scope + s.tag);
-			const others = tags.filter((t) => t !== s.tag);
-			for (const [ key, entries ] of s.rows) {
-				if (s.tag !== undefined) lists.push({ base: scope + s.tag, key, own: entries });
-				for (const t of others) lists.push({ base: scope + t, key, own: undefined });
+			// The postings of another declaration go whole: this build cannot
+			// analyze a row the way that declaration does, so it cannot take one
+			// row out of them. The index they made must then read as unbuilt.
+			let foreign = false;
+			for (const t of tags) {
+				if (t === s.tag) continue;
+				foreign = true;
+				const stale: string[] = [];
+				for await (const [ k ] of tx.scan(scope + t)) stale.push(k);
+				for (const k of stale) await tx.del(k);
 			}
-		}
-		const stored = await getManyUnless(
-			tx,
-			lists.map((l) => postingsTermsKey(l.base, l.key)),
-			lists.map((l) => empty.has(l.base)),
-		);
+			if (foreign) await dropForeignSearch(tx, s);
+			if (s.tag === undefined) continue;
+			const base = scope + s.tag;
+			// A base with no record at all needs none of the reads below: every
+			// page and head under it is absent, and no row is posted.
+			const empty = !tags.includes(s.tag);
+			const keys = [ ...s.rows.keys() ];
+			const listed = empty ? undefined : await readTerm(tx, base, POSTINGS_POSTED_ENTRY);
+			const posted = listed === undefined
+				? new Set<string>()
+				: await membersOf(tx, base, listed, keys);
 
-		const byBase = new Map<string, Map<string, TermOps>>();
-		const op = (base: string, entry: string): TermOps => {
-			let terms = byBase.get(base);
-			if (terms === undefined) byBase.set(base, terms = new Map());
-			let o = terms.get(entry);
-			if (o === undefined) {
-				o = { base, entry, adds: [], removes: new Set() };
-				terms.set(entry, o);
+			const terms = new Map<string, TermOps>();
+			const op = (entry: string): TermOps => {
+				let o = terms.get(entry);
+				if (o === undefined) {
+					o = { base, entry, adds: [], removes: new Set() };
+					terms.set(entry, o);
+				}
+				return o;
+			};
+			for (const [ key, row ] of s.rows) {
+				const was = posted.has(key);
+				const old = was && row.old !== undefined ? row.old() : [];
+				if (row.entries.length === 0) {
+					for (const e of old) op(e).removes.add(key);
+					if (was) op(POSTINGS_POSTED_ENTRY).removes.add(key);
+					continue;
+				}
+				if (!was) op(POSTINGS_POSTED_ENTRY).adds.push(key);
+				if (old === row.entries) continue;
+				const had = new Set(old);
+				const has = new Set(row.entries);
+				for (const e of has) if (!had.has(e)) op(e).adds.push(key);
+				for (const e of had) if (!has.has(e)) op(e).removes.add(key);
 			}
-			return o;
-		};
-		for (let i = 0; i < lists.length; i++) {
-			const { base, key, own } = lists[i]!;
-			const old = termListOf(stored[i]);
-			const termsKey = postingsTermsKey(base, key);
-			if (own === undefined) {
-				if (stored[i] === undefined) continue;
-				for (const e of old) op(base, e).removes.add(key);
-				await tx.del(termsKey);
-				continue;
-			}
-			const next = [ ...new Set(own) ].sort();
-			const had = new Set(old);
-			const has = new Set(next);
-			let changed = old.length !== next.length;
-			for (const e of next) {
-				if (had.has(e)) continue;
-				op(base, e).adds.push(key);
-				changed = true;
-			}
-			for (const e of old) if (!has.has(e)) op(base, e).removes.add(key);
-			if (!changed && typeof stored[i] === 'string') continue;
-			if (next.length === 0) await tx.del(termsKey);
-			else await tx.put(termsKey, encodeKeyList(next));
-		}
-		for (const [ base, terms ] of byBase) {
-			await new BaseFlush(tx, base, empty.has(base)).run([ ...terms.values() ]);
+			if (terms.size === 0) continue;
+			await new BaseFlush(tx, base, empty).run([ ...terms.values() ]);
 		}
 	}
+}
+
+/**
+ * Makes the search index of every declaration but the scope's own read as
+ * unbuilt: deletes its built marker, and the cursor of a build walk that
+ * builds it.
+ */
+async function dropForeignSearch(tx: KVWrite, s: ScopeRows): Promise<void> {
+	const prefix = metaIndexEntityPrefix(s.workspaceId, s.entity);
+	const own = s.specHash === undefined
+		? undefined
+		: metaIndexBuilt(s.workspaceId, s.entity, SEARCH_INDEX_NAME, s.specHash);
+	const name = `${SEARCH_INDEX_NAME}@`;
+	const markers: string[] = [];
+	for await (const [ k ] of tx.scan(prefix)) {
+		if (k !== own && k.startsWith(name, prefix.length)) markers.push(k);
+	}
+	for (const k of markers) await tx.del(k);
+	const cursorKey = metaIndexBuildCursor(s.workspaceId, s.entity);
+	const cursor = await tx.get(cursorKey) as IndexBuildCursor | undefined;
+	if (cursor === undefined) return;
+	// The cursor names the indexes its walk builds as their markers do.
+	const built = cursor.m?.split(',').find((m) => m.startsWith(name));
+	if (built !== undefined && prefix + built !== own) await tx.del(cursorKey);
+}
+
+/** Which of `keys` the postings of `term` name. */
+async function membersOf(
+	tx: KVRead,
+	base: string,
+	term: TermHead,
+	keys: readonly string[],
+): Promise<Set<string>> {
+	const { bounds, tail } = term.head;
+	const wanted = new Set<number>();
+	for (const k of keys) {
+		const at = boundFor(bounds, k);
+		if (at < bounds.length) wanted.add(at);
+	}
+	const chunks = wanted.size === 0
+		? []
+		: await tx.getMany([ ...wanted ].map((at) => postingsChunkKey(base, term.entry, bounds[at]!)));
+	const held = new Set<string>(tail);
+	for (const v of chunks) for (const k of termListOf(v)) held.add(k);
+	const out = new Set<string>();
+	for (const k of keys) if (held.has(k)) out.add(k);
+	return out;
 }
 
 /** The flush of one base: its directory, pages, heads and chunks. */
@@ -884,22 +972,6 @@ function pageChars(terms: readonly RawTerm[]): number {
 	let n = 1;
 	for (const t of terms) n += termChars(t);
 	return n;
-}
-
-/** `keys` read in one getMany, except those `skip` marks, which read as absent. */
-async function getManyUnless(
-	tx: KVRead,
-	keys: readonly string[],
-	skip: readonly boolean[],
-): Promise<unknown[]> {
-	const wanted: string[] = [];
-	for (let i = 0; i < keys.length; i++) if (!skip[i]) wanted.push(keys[i]!);
-	if (wanted.length === keys.length) return keys.length === 0 ? [] : tx.getMany(keys);
-	const got = wanted.length === 0 ? [] : await tx.getMany(wanted);
-	const out = new Array<unknown>(keys.length);
-	let at = 0;
-	for (let i = 0; i < keys.length; i++) out[i] = skip[i] ? undefined : got[at++];
-	return out;
 }
 
 /**

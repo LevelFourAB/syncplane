@@ -32,16 +32,15 @@ import {
 	POSTINGS_INLINE_MAX,
 	POSTINGS_LAST_PAGE,
 	POSTINGS_PAGE_CAP,
+	POSTINGS_POSTED_ENTRY,
 	postingsChunkKey,
 	postingsDirectoryKey,
 	postingsHeadKey,
 	postingsPageKey,
-	postingsTermsKey,
 	readAllKeys,
 	readTerm,
 	scanTerms,
 	SearchPostingsWriter,
-	termListOf,
 } from '../../src/query/postings.js';
 import { SEARCH_TERMS_PER_ROW } from '../../src/query/searchindex.js';
 import { defineSchema, entity, type Infer, text } from '../../src/schema/builder.js';
@@ -121,8 +120,9 @@ describe('the postings codec', () => {
  * Every term's row keys under `base`, with every invariant of the layout
  * checked on the way: the directory names exactly the pages there are, pages
  * hold sorted terms inside their bounds and within their cap, a page marks
- * exactly the terms that have a head, and a head's chunks are exactly the
- * chunk records of its term.
+ * exactly the terms that have a head, a head's chunks are exactly the chunk
+ * records of its term, and every row a term names is a posted row. The posted
+ * rows themselves are not in the result; see postedOf.
  */
 async function checkedBase(tx: KVRead, base: string): Promise<Map<string, string[]>> {
 	const kinds = new Map<string, Map<string, unknown>>();
@@ -197,7 +197,18 @@ async function checkedBase(tx: KVRead, base: string): Promise<Map<string, string
 		out.set(entry, keys);
 	}
 	expect(sorted(chunks.keys()), 'a chunk no head names').toEqual(sorted(owned));
+	const posted = new Set(out.get(POSTINGS_POSTED_ENTRY) ?? []);
+	out.delete(POSTINGS_POSTED_ENTRY);
+	for (const [ entry, keys ] of out) {
+		for (const key of keys) expect(posted.has(key), `${entry} names an unposted row`).toBe(true);
+	}
 	return out;
+}
+
+/** The rows the index under `base` lists as posted, in key order. */
+async function postedOf(tx: KVRead, base: string): Promise<string[]> {
+	const read = await readTerm(tx, base, POSTINGS_POSTED_ENTRY);
+	return read === undefined ? [] : await readAllKeys(tx, base, [ read ]);
 }
 
 /** One term's row keys, checked through checkedBase and through readTerm. */
@@ -208,10 +219,21 @@ async function checkedTerm(tx: KVRead, base: string, entry: string): Promise<str
 	return keys;
 }
 
+/** The entries each store's rows hold, as the writes below left them. */
+const held = new WeakMap<KVStore, Map<string, string[]>>();
+
+/** Writes rows as a caller of the writer does: each with the entries the row
+ * held before. */
 async function write(kv: KVStore, rows: [string, string[]][]): Promise<void> {
+	let before = held.get(kv);
+	if (before === undefined) held.set(kv, before = new Map());
 	const tx = await kv.write();
 	const w = new SearchPostingsWriter();
-	for (const [ key, entries ] of rows) w.set('doc', WS, SPEC, key, entries);
+	for (const [ key, entries ] of rows) {
+		const old = before.get(key);
+		w.set('doc', WS, SPEC, key, old === undefined ? undefined : () => old, entries);
+		before.set(key, entries);
+	}
 	await w.flush(tx);
 	await tx.commit();
 }
@@ -318,7 +340,7 @@ describe.each(STORES)('the postings of one term (%s)', (_, open) => {
 			return put(k, v);
 		};
 		const w = new SearchPostingsWriter();
-		w.set('doc', WS, SPEC, 'a', [ T, T ]);
+		w.set('doc', WS, SPEC, 'a', () => [ T ], [ T, T ]);
 		await w.flush(tx);
 		await tx.commit();
 		expect(puts).toEqual([]);
@@ -327,6 +349,93 @@ describe.each(STORES)('the postings of one term (%s)', (_, open) => {
 });
 
 const entryOf = (term: string) => `\u0001${term}\u0000\u0000`;
+
+describe.each(STORES)('the rows a writer is given (%s)', (_, open) => {
+	const A = entryOf('a');
+	const B = entryOf('b');
+	const C = entryOf('c');
+
+	/** One flush of one row, with the entries the caller says the store held. */
+	async function record(
+		kv: KVStore,
+		key: string,
+		old: string[] | undefined,
+		entries: string[],
+	): Promise<number> {
+		let asked = 0;
+		const tx = await kv.write();
+		const w = new SearchPostingsWriter();
+		w.set('doc', WS, SPEC, key, old === undefined ? undefined : () => (asked++, old), entries);
+		await w.flush(tx);
+		await tx.commit();
+		return asked;
+	}
+
+	async function stored(kv: KVStore): Promise<{ terms: Map<string, string[]>; posted: string[] }> {
+		const tx = await kv.read();
+		try {
+			return { terms: await checkedBase(tx, BASE), posted: await postedOf(tx, BASE) };
+		} finally {
+			tx.release();
+		}
+	}
+
+	it('post every entry of a stored row the index does not list', async () => {
+		const kv = await open();
+		await record(kv, 'k1', undefined, [ A ]);
+		// The store held k2 with the same entries, and the index never posted
+		// them: the earlier value says nothing about the index.
+		expect(await record(kv, 'k2', [ A, B ], [ A, B ])).toBe(0);
+		const { terms, posted } = await stored(kv);
+		expect(terms).toEqual(new Map([ [ A, [ 'k1', 'k2' ] ], [ B, [ 'k2' ] ] ]));
+		expect(posted).toEqual([ 'k1', 'k2' ]);
+		await kv.close();
+	});
+
+	it('change only the entries that differ for a listed row', async () => {
+		const kv = await open();
+		await record(kv, 'k1', undefined, [ A, B ]);
+		await record(kv, 'k2', undefined, [ A, B ]);
+		expect(await record(kv, 'k1', [ A, B ], [ B, C ])).toBe(1);
+		const { terms, posted } = await stored(kv);
+		expect(terms).toEqual(new Map([ [ A, [ 'k2' ] ], [ B, [ 'k1', 'k2' ] ], [ C, [ 'k1' ] ] ]));
+		expect(posted).toEqual([ 'k1', 'k2' ]);
+		await kv.close();
+	});
+
+	it('list only the rows that hold an entry, and leave no record when none does', async () => {
+		const kv = await open();
+		await record(kv, 'k1', undefined, []);
+		await record(kv, 'k2', undefined, [ A ]);
+		expect((await stored(kv)).posted).toEqual([ 'k2' ]);
+		// A row the index does not list gains every entry it holds.
+		await record(kv, 'k1', [], [ B ]);
+		expect((await stored(kv)).posted).toEqual([ 'k1', 'k2' ]);
+		await record(kv, 'k2', [ A ], []);
+		expect(await stored(kv)).toEqual({ terms: new Map([ [ B, [ 'k1' ] ] ]), posted: [ 'k1' ] });
+		await record(kv, 'k1', [ B ], []);
+		const tx = await kv.read();
+		const left: string[] = [];
+		for await (const [ k ] of tx.scan(BASE)) left.push(k);
+		tx.release();
+		expect(left).toEqual([]);
+		await kv.close();
+	});
+
+	it('keep the first earlier value and the last entries of a row recorded twice', async () => {
+		const kv = await open();
+		await record(kv, 'k1', undefined, [ A ]);
+		const tx = await kv.write();
+		const w = new SearchPostingsWriter();
+		w.set('doc', WS, SPEC, 'k1', () => [ A ], [ B ]);
+		w.set('doc', WS, SPEC, 'k1', () => [ B ], [ C ]);
+		expect(w.rows).toBe(1);
+		await w.flush(tx);
+		await tx.commit();
+		expect((await stored(kv)).terms).toEqual(new Map([ [ C, [ 'k1' ] ] ]));
+		await kv.close();
+	});
+});
 
 async function baseOf(kv: KVStore): Promise<Map<string, string[]>> {
 	const tx = await kv.read();
@@ -485,11 +594,9 @@ describe.each(STORES)('postings under random writes (%s)', (_, open) => {
 			}
 		}
 		const tx = await kv.read();
-		for (const [ key, entries ] of rows) {
-			expect(termListOf(await tx.get(postingsTermsKey(BASE, key)))).toEqual(
-				sorted(new Set(entries)),
-			);
-		}
+		expect(await postedOf(tx, BASE)).toEqual(
+			sorted([ ...rows ].filter(([ , entries ]) => entries.length > 0).map(([ key ]) => key)),
+		);
 		// The common term outgrew one chunk and the rare ones several pages, or
 		// the run tested less than it claims.
 		expect((await readTerm(tx, BASE, terms[0]!))!.head.bounds.length).toBeGreaterThan(1);
@@ -630,7 +737,7 @@ describe('a build that writes postings across batches', () => {
 				all.filter((k) => k !== 'd00005' && k !== 'd00006' && k !== 'd00650'),
 			);
 			expect(await checkedTerm(tx, base, '\u0001gamma\u0000\u0000')).toEqual([ 'd00005', 'd00650' ]);
-			expect(termListOf(await tx.get(postingsTermsKey(base, 'd00006')))).toEqual([]);
+			expect(await postedOf(tx, base)).toEqual(all.filter((k) => k !== 'd00006'));
 		} finally {
 			tx.release();
 		}

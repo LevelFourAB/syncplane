@@ -33,7 +33,7 @@ import type { SearchDecl } from './match.js';
  * moves existing terms — invalidates every stored search index, which then
  * rebuilds.
  */
-const SEARCH_INDEX_ENCODING_VERSION = 3;
+const SEARCH_INDEX_ENCODING_VERSION = 4;
 
 /**
  * Caps the distinct terms one row stores postings for; past it the row stores
@@ -73,6 +73,26 @@ export function searchEntries(decl: SearchDecl, value: unknown, schema: DescMess
 		appendIndexString(out, t);
 		return bytesToKey(out);
 	});
+}
+
+/**
+ * Whether two values of one entity hold the same text in every searchable
+ * field of `decl`, and therefore analyze to the same entries.
+ */
+export function sameSearchText(
+	decl: SearchDecl,
+	a: unknown,
+	b: unknown,
+	schema: DescMessage,
+): boolean {
+	for (const f of decl.fields) {
+		const ra = resolvePath(a, f.path, schema);
+		const rb = resolvePath(b, f.path, schema);
+		const ta = ra.found && typeof ra.value === 'string' ? ra.value : undefined;
+		const tb = rb.found && typeof rb.value === 'string' ? rb.value : undefined;
+		if (ta !== tb) return false;
+	}
+	return true;
 }
 
 /**

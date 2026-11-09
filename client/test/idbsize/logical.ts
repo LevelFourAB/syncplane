@@ -9,7 +9,7 @@ export interface LogicalBreakdown {
 	 * Records per keyspace: the key up to its second `/` (`c/issue`, `meta/ws`),
 	 * with every `intent/<tabId>` key under `intent`, every `x/` key under `x/`,
 	 * and the `s/` keys by record kind (`s/ directory`, `s/ pages`, `s/ heads`, `s/ chunks`,
-	 * `s/ term lists`).
+	 * `s/ counts`).
 	 */
 	keyspaces: Record<string, KeyspaceCounts>;
 	/** Index positions by kind: `value` on `c/` records, `search` on `x/` records. */
@@ -81,7 +81,7 @@ export async function logicalBreakdown(name: string): Promise<LogicalBreakdown> 
 		p: 'pages',
 		h: 'heads',
 		c: 'chunks',
-		r: 'term lists',
+		n: 'counts',
 	};
 	const keyspaces: Record<string, KeyspaceCounts> = {};
 	const positions: Record<string, PositionCounts> = {};

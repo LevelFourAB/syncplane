@@ -191,7 +191,7 @@ export async function dropForeignIndexes(
 ): Promise<void> {
 	// Tabs of two builds share the store. A write replaces the row's position
 	// list with the positions of its own build, and its postings writer
-	// removes the row from every other search declaration, so the other
+	// deletes the postings of every other search declaration, so the other
 	// build's index loses the row. Its marker must go with it, or that build
 	// keeps answering from an index that no longer covers the entity. A walk
 	// of the other build that is in progress loses its cursor, which makes it
@@ -377,14 +377,12 @@ async function buildEntity(
 						prefix + key,
 						indexedRecord(record, compiled, entity, workspaceId, key, value, def.schema),
 					);
-					// The postings, by contrast, are a diff against the row's term list,
-					// which is what makes a revisit free here too: a row already posted
-					// under its current terms writes nothing. The case that reaches here
-					// most often — an index declared but never built — has no term list,
-					// and the rows come in key order, so every posting appends to its
-					// term's tail.
+					// The row's value does not change here, so a row the index already
+					// posts writes no posting. The case that reaches here most often — an
+					// index declared but never built — posts no row, and the rows come in
+					// key order, so every posting appends to its term's tail.
 					if (search !== undefined) {
-						recordSearchRow(postings, entity, workspaceId, search, key, value, def.schema);
+						recordSearchRow(postings, entity, workspaceId, search, key, value, def.schema, record);
 					}
 				}
 				const last = batch[batch.length - 1]?.key;
@@ -392,9 +390,8 @@ async function buildEntity(
 				const flush = search === undefined || finished || postings.rows >= BUILD_POSTINGS_ROWS;
 				if (flush && postings.rows > 0) {
 					// A row an earlier batch visited may have been rewritten or deleted
-					// since, by a writer that posted what it wrote — and that found no
-					// term list to diff against, since this one was not written yet. Its
-					// recorded terms describe a row that is no longer there.
+					// since, by a writer that posted what it wrote. Its recorded terms
+					// describe a row that is no longer there.
 					const earlier = [ ...visited.keys() ];
 					const now = earlier.length === 0
 						? []
