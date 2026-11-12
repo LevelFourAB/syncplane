@@ -1328,6 +1328,11 @@ func (t *pgTx) PutIndexEntries(entity, key string, entries []storage.IndexEntry)
 	// 1.6M-entry table: 189 buffers down to 36, and half the wall time of a
 	// 200-row push (see BenchmarkPutIndexEntries).
 	//
+	// have is MATERIALIZED because the INSERT is its only reader, and Postgres
+	// inlines a CTE that has one reader. The generic plan of the inlined form
+	// probes the primary key one time for each entry of want, which is the cost
+	// that the filter is there to remove.
+	//
 	// DISTINCT because the caller may hand in the same entry twice — two
 	// components of one index can encode to the same entry for one row — and
 	// the primary key would refuse the second copy. Collapsing the duplicate
@@ -1337,7 +1342,7 @@ func (t *pgTx) PutIndexEntries(entity, key string, entries []storage.IndexEntry)
 	// statement runs.
 	return t.queue(
 		`WITH want AS (SELECT DISTINCT u.idx, u.k FROM unnest($4::text[], $5::bytea[]) AS u(idx, k)),
-		      have AS (
+		      have AS MATERIALIZED (
 		          SELECT idx, k FROM index_entries
 		          WHERE workspace_id = $1 AND entity = $2 AND key = $3
 		      ),
