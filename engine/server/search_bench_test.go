@@ -19,8 +19,9 @@ import (
 
 // What the term-postings index buys a search, and where it stops buying it.
 //
-// A match condition is answered from the postings of its most selective term
-// and re-checked against every candidate row (searchindex.go). The cost has
+// A match condition is answered from the postings of its terms and re-checked
+// against every candidate row (searchindex.go). The posting counts choose the
+// plan before any posting is read (queryBySearch). The cost has
 // two halves that move in opposite directions: the walk is O(postings read),
 // the re-check is O(candidates x document), and a term that occurs everywhere
 // makes both as expensive as the scan the index was meant to replace.
@@ -31,12 +32,13 @@ import (
 //   - rare — one term in searchBenchMatches rows. The case the index exists
 //     for: a bounded posting list and a bounded number of re-checks.
 //   - common — one term in every row. The postings ARE the entity, so the
-//     index can only lose; past MaxIndexScanCandidates it declines and the
-//     query scans.
+//     index can only lose. The candidates are more than the scan share of the
+//     rows in the index (searchScanSharePercent), so the query declines to the
+//     scan and its index arm costs what the scan arm costs.
 //   - common+rare — the shape a real search box produces once a user types a
 //     second word. A row must carry both, so the rare term alone already
-//     bounds the answer, and the walk finds that out without reading the
-//     common term's postings.
+//     bounds the answer, and the counts tell the walk to leave the common
+//     term's postings unread.
 //   - prefix — the same rare term as a prefix, which reads a range of terms
 //     rather than one. What it costs over `rare` is the width of that range.
 //
@@ -158,10 +160,11 @@ func searchBenchQueries(n int) []struct {
 //
 // The shape to read off it: `rare` flat in the corpus size and the scan
 // linear in it; `common+rare` next to `rare` rather than next to `common`,
-// which is what says the walk bounded itself by its most selective term; and
-// `common` no better than the scan, because a term every row carries leaves
-// nothing to narrow. A regression here looks like an index column starting to
-// slope with the corpus.
+// which is what says the walk bounded itself by its smallest term; and
+// `common` next to the scan, because a term every row carries leaves nothing
+// to narrow and the search declines to the scan. An index arm of `common`
+// above its scan arm means the decline stopped. A regression here looks like
+// an index column starting to slope with the corpus.
 func BenchmarkSearchQuery(b *testing.B) {
 	ctx := context.Background()
 	for _, n := range searchBenchSizes {
@@ -237,21 +240,21 @@ func BenchmarkSearchRelevance(b *testing.B) {
 // BenchmarkSearchWrite measures what search maintenance costs the write path —
 // the other half of the trade, paid on every write to a searchable entity.
 //
-// A row occupies one index position per DISTINCT term its searchable fields
-// analyze to, so the cost is set by a document's VOCABULARY and not by its
-// length: `terms` is how many distinct words each document holds, and
-// entries/row is reported beside the timings because that is the number the
-// per-row caps are spent against.
+// A row holds one posting per DISTINCT term its searchable fields analyze to,
+// so the cost is set by a document's VOCABULARY and not by its length:
+// `terms` is how many distinct words each document holds, and entries/row is
+// reported beside the timings because that is the number the per-row caps are
+// spent against.
 //
 // The largest size crosses SearchTermsPerRow, where a row stops storing
 // postings and stores the overflow marker alone. Its entries/row collapses to
 // 1 and its write gets CHEAPER than the size below it — while every search
 // then has to consider it, which is the cost the read side pays instead.
 //
-//   - put — the whole entry set is replaced, because a PUT replaces the whole
-//     row and the write path holds no pre-image to diff against.
-//   - patch/searchable — the mask names a searchable field, so the set is
-//     replaced for the same reason.
+//   - put — a new row each time, so every posting is an add.
+//   - patch/searchable — the mask names a searchable field, so the write
+//     removes the postings of the old title and adds those of the new one,
+//     computed from the stored row.
 //   - patch/untouched — the mask reaches no searchable field and no index
 //     component, so maintenance is skipped entirely
 //     (entityInfo.maskTouchesIndexes) and the write costs what it would on an
@@ -356,7 +359,7 @@ func distinctWords(n int) string {
 	return b.String()
 }
 
-// searchEntriesPerRow is how many search index positions one row occupies.
+// searchEntriesPerRow is how many search postings one row holds.
 func searchEntriesPerRow(b *testing.B, row *testdatav1.Article) float64 {
 	b.Helper()
 	decl, err := query.CompileSearchDecl(row.ProtoReflect().Descriptor())

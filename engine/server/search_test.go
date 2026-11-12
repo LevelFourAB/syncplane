@@ -1,7 +1,6 @@
 package server_test
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -139,40 +138,45 @@ var _ = Describe("Search", func() {
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
 		})
 
-		searchEntries := func() (entries [][]byte, keys []string) {
+		// exact is the posting range that holds key alone.
+		exact := func(key string) storage.IndexRange {
+			return storage.IndexRange{Lo: []byte(key), Hi: []byte(key + "\x00")}
+		}
+		postingRows := func(r storage.IndexRange) []string {
 			GinkgoHelper()
+			rows := []string{}
 			Expect(store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
-				return tx.ScanIndex("article", "__search", nil, nil, 0, storage.ScanAsc,
-					func(entry []byte, rowKey string) error {
-						entries = append(entries, append([]byte(nil), entry...))
-						keys = append(keys, rowKey)
-						return nil
-					})
+				return tx.ScanPostings("article", "__search", nil, []storage.IndexRange{r}, 0, func(rowKey string) error {
+					rows = append(rows, rowKey)
+					return nil
+				})
 			})).To(Succeed())
-			return entries, keys
+			return rows
+		}
+		postingCount := func(r storage.IndexRange) int {
+			GinkgoHelper()
+			var n []int
+			Expect(store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
+				var err error
+				n, _, err = tx.PostingCounts("article", "__search", []storage.IndexRange{r}, 0)
+				return err
+			})).To(Succeed())
+			return n[0]
 		}
 
 		It("maintains term postings on the write path", func() {
-			entries, keys := searchEntries()
 			// a1 "Milk cow" → milk, cow; a2 → milk; a3 → water; a4 → milk.
-			Expect(entries).To(HaveLen(5))
-			Expect(keys).To(ConsistOf("a1", "a1", "a2", "a3", "a4"))
-			for _, e := range entries {
-				Expect(e[0]).To(Equal(byte(0x01)), "term entries carry the term tag")
-			}
+			Expect(postingCount(storage.IndexRange{})).To(Equal(5))
+			Expect(postingCount(storage.IndexRange{Lo: []byte{0x01}, Hi: []byte{0x02}})).To(Equal(5),
+				"term keys carry the term tag")
+			Expect(postingRows(exact("\x01cow\x00\x00"))).To(ConsistOf("a1"))
+			Expect(postingRows(exact("\x01water\x00\x00"))).To(ConsistOf("a3"))
 		})
 
-		It("stores the postings of a term without the row key, byte-equal across rows", func() {
-			entries, keys := searchEntries()
-			milk := []byte("\x01milk\x00\x00")
-			var withMilk []string
-			for i, e := range entries {
-				Expect(string(e)).NotTo(ContainSubstring(keys[i]), "an entry does not carry its row key")
-				if bytes.Equal(e, milk) {
-					withMilk = append(withMilk, keys[i])
-				}
-			}
-			Expect(withMilk).To(ConsistOf("a1", "a2", "a4"))
+		It("stores one posting key per term, shared by the rows that hold it", func() {
+			milk := exact("\x01milk\x00\x00")
+			Expect(postingCount(milk)).To(Equal(3))
+			Expect(postingRows(milk)).To(ConsistOf("a1", "a2", "a4"))
 
 			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
 			Expect(keysOf(runQuery(&syncplanev1.QueryRequest{
@@ -200,15 +204,8 @@ var _ = Describe("Search", func() {
 				Expect(r.GetErrorCode()).To(BeEmpty(), r.GetErrorMessage())
 			}
 
-			entries, keys := searchEntries()
-			var overflow []string
-			for i, e := range entries {
-				if e[0] == 0x02 {
-					Expect(e).To(Equal([]byte{0x02}), "the overflow marker is the tag alone")
-					overflow = append(overflow, keys[i])
-				}
-			}
-			Expect(overflow).To(ConsistOf("big1", "big2"))
+			Expect(postingRows(storage.IndexRange{Lo: []byte{0x02}, Hi: []byte{0x03}})).To(ConsistOf("big1", "big2"))
+			Expect(postingCount(exact("\x02"))).To(Equal(2), "the overflow marker is the tag alone")
 
 			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
 			// "needle" is past the cap in both oversized rows, so only the
@@ -253,7 +250,7 @@ var _ = Describe("Search", func() {
 		})
 
 		It("answers a mix of common and rare terms from the rare one", func() {
-			// The walk is bounded by its most selective term and skips reading
+			// The walk is bounded by its smallest term and skips reading
 			// a posting list too wide to be worth narrowing with, so the terms
 			// here differ by two orders of magnitude in how many rows carry
 			// them — and the common one comes FIRST, where a walk that simply
@@ -302,16 +299,9 @@ var _ = Describe("Search", func() {
 				Expect(r.GetErrorCode()).To(BeEmpty(), r.GetErrorMessage())
 			}
 
-			entries, keys := searchEntries()
-			marker := 0
-			for i, e := range entries {
-				if e[0] == 0x02 {
-					marker++
-					Expect(keys[i]).To(Equal("big"))
-				}
-			}
-			Expect(marker).To(Equal(1), "an oversized row stores the overflow marker alone")
-			Expect(keys).To(ContainElement("big"))
+			Expect(postingRows(exact("\x02"))).To(Equal([]string{"big"}))
+			Expect(postingRows(storage.IndexRange{})).To(ContainElement("big"))
+			Expect(postingCount(storage.IndexRange{})).To(Equal(5+1), "an oversized row stores the overflow marker alone")
 
 			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
 			// "needle" is past the cap, so no posting names it — the overflow

@@ -255,8 +255,9 @@ type buildTarget struct {
 // One walk covers every index because a row's entries are written as a set:
 // storage replaces all of them together (see entityInfo.updateRowIndexes), so
 // visiting a row builds its entry in every declared index whether that index
-// needed building or not. A walk per index would rewrite the same set once per
-// index and read the entity once per index for no extra coverage.
+// needed building or not. The walk adds every search posting of the row too.
+// A walk per index would rewrite the same set once per index and read the
+// entity once per index for no extra coverage.
 //
 // Two things make the batching sound despite concurrent writers:
 //
@@ -351,8 +352,31 @@ func (s *Server) buildEntityIndexes(ctx context.Context, ws string, info *entity
 	// Stamp the specs BEFORE the walk. If a declaration changed, this is what
 	// stops a reader from trusting entries written under the old one: the
 	// state row now names the new spec and says not ready.
+	//
+	// The search postings are cleared in the same transaction when the stored
+	// fingerprint is not the target, which includes a missing one and the
+	// empty one dropForeignIndexes leaves. Value entries need no clear, as
+	// the walk replaces each row's set; postings change by difference, so a
+	// posting made under another spec would stay. After the clear every row
+	// holds a subset of its current postings: a write adds what its new value
+	// makes and its earlier value did not, and the walk adds everything, so
+	// each row the walk passes ends with all of them, and a write after that
+	// keeps them all (see priorPostings). A build that stops part way leaves
+	// the target fingerprint, and the next pass walks again without a clear:
+	// adding a posting the row holds is a no-op.
 	if err := s.store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
 		for _, t := range pending {
+			if info.search != nil && t.name == info.search.name {
+				hash, _, err := tx.IndexState(info.name, t.name)
+				if err != nil {
+					return err
+				}
+				if hash != t.specHash {
+					if err := tx.ClearPostings(info.name, t.name); err != nil {
+						return err
+					}
+				}
+			}
 			if err := tx.SetIndexState(info.name, t.name, t.specHash, false); err != nil {
 				return err
 			}
@@ -362,6 +386,7 @@ func (s *Server) buildEntityIndexes(ctx context.Context, ws string, info *entity
 		return failed(pending, err)
 	}
 
+	searchPending := info.search != nil && containsTarget(pending, info.search.name)
 	batch, budget := s.indexBuild.batchSize(), s.indexBuild.txTimeBudget()
 	afterKey := ""
 	for {
@@ -388,7 +413,7 @@ func (s *Server) buildEntityIndexes(ctx context.Context, ws string, info *entity
 					// one bad row.
 					return nil
 				}
-				if err := info.buildRowIndexes(tx, s.limits, row.Key, msg); err != nil {
+				if err := info.buildRowIndexes(tx, s.limits, row.Key, msg, searchPending); err != nil {
 					return err
 				}
 				// Cut the batch on the clock as well as on the row cap. A row's

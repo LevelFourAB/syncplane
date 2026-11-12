@@ -2,7 +2,6 @@ package server_test
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
@@ -805,11 +805,12 @@ var _ = Describe("Downstream text delta state after a refused in-process write",
 
 			BeforeEach(func() {
 				ctx = context.Background()
-				// A small entry budget, so a long summary is refused by the index
-				// limit, which runs after the write has begun on the delta log.
+				// The article entity is declared here with an index over summary,
+				// so a summary too long for an index entry is refused by the index
+				// check, which runs after the write has begun on the delta log. It
+				// has the full name of the compiled Article, so the specs write it
+				// with that type.
 				srv = mustNewServer(open(),
-					server.WithEntities(&testdatav1.Article{}),
-					server.WithLimits(server.Limits{MaxIndexEntriesPerRow: 16}),
 					server.WithMutator("best_effort", nil, func(_ context.Context, tx *server.EntityTx, _ proto.Message) error {
 						err := tx.Patch(mutatorPatch, []string{"body", "summary"}, nil)
 						if _, ok := server.AsRejection(err); ok {
@@ -818,6 +819,18 @@ var _ = Describe("Downstream text delta state after a refused in-process write",
 						return err
 					}, server.MutatorAccess{Admitted: true}),
 				)
+				Expect(srv.RegisterDynamicEntity(server.DynamicEntity{
+					Name:        "article",
+					Package:     "syncplane.testdata.v1",
+					MessageName: "Article",
+					KeyFields:   []string{"id"},
+					Fields: []server.DynamicField{
+						{Name: "id", Number: 1, Kind: protoreflect.StringKind},
+						{Name: "title", Number: 2, Kind: protoreflect.StringKind},
+						{Name: "summary", Number: 3, Kind: protoreflect.StringKind, Indexed: true},
+						{Name: "body", Number: 4, Kind: protoreflect.BytesKind, Text: true},
+					},
+				})).To(Succeed())
 				path, handler := srv.Handler()
 				mux := http.NewServeMux()
 				mux.Handle(path, handler)
@@ -881,11 +894,7 @@ var _ = Describe("Downstream text delta state after a refused in-process write",
 				return bodyDoc("seed", "the quick brown fox jumps over "+tail+strings.Repeat("x", 600))
 			}
 			refused := func(doc []byte) *testdatav1.Article {
-				words := make([]string, 40)
-				for i := range words {
-					words[i] = fmt.Sprintf("word%d", i)
-				}
-				return &testdatav1.Article{Id: "a1", Summary: strings.Join(words, " "),
+				return &testdatav1.Article{Id: "a1", Summary: strings.Repeat("s", storage.MaxIndexEntryBytes),
 					Body: editBody(doc, "intruder", func(d *text.Doc) {
 						Expect(d.Insert(0, "REFUSED ")).To(Succeed())
 					})}

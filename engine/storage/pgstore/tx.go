@@ -73,6 +73,13 @@ type pgTx struct {
 	queued []queuedStmt
 	sends  int
 	failed error
+	// postingLog holds the PutPostings and DeletePostings calls of the
+	// transaction in order, and postingDone counts the calls at its start
+	// that resolvePostings has written. See postings.go.
+	postingLog  []postingOp
+	postingDone int
+	// scopes is the store's cache of posting scope ids, nil for none.
+	scopes *scopeCache
 }
 
 // The statements that open a transaction. beginTx queues them rather than
@@ -1409,6 +1416,9 @@ func (t *pgTx) NextSeq() (uint64, error) {
 // every mark that matters: the workspace lock, taken before anything else in
 // the transaction, is also what DeleteWorkspace holds.
 func (t *pgTx) flush() error {
+	if err := t.resolvePostings(); err != nil {
+		return err
+	}
 	if t.registered {
 		if err := t.queue(
 			`INSERT INTO deleted_workspaces (workspace_id, deleted_at)
@@ -1595,9 +1605,14 @@ func (t *pgTx) InSavepoint(fn func() error) error {
 	// gap. registered rides along for the same reason: the rewind may undo
 	// register's INSERT.
 	seq, seqPersisted, seqLoaded, registered := t.seq, t.seqPersisted, t.seqLoaded, t.registered
+	// The posting calls fn logged go with the rewind. When fn made
+	// resolvePostings write calls logged before the savepoint as well, the
+	// rewind also undoes those writes, so the calls are pending again.
+	postingLen, postingDone := len(t.postingLog), t.postingDone
 
 	if err := fn(); err != nil {
 		t.seq, t.seqPersisted, t.seqLoaded, t.registered = seq, seqPersisted, seqLoaded, registered
+		t.postingLog, t.postingDone = t.postingLog[:postingLen], postingDone
 		// The rewind may undo a register, a CollectTombstones or a
 		// SetIndexState, so the memos are dropped rather than restored: what fn
 		// saw is not what the tables hold now, and what preceded fn may not be

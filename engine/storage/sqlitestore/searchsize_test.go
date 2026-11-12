@@ -143,6 +143,7 @@ func readIndexSize(path string) indexSizeReport {
 	var count int64
 	Expect(db.QueryRow(`SELECT COUNT(*) FROM index_entries`).Scan(&count)).To(Succeed())
 	r.entries = count
+	countPostings(db, &r)
 	return r
 }
 

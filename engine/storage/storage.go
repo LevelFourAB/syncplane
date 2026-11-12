@@ -82,6 +82,16 @@
 //     order is the row order it wants, and an adapter that applies a collation
 //     instead answers ordered queries wrongly. Entries are derived state:
 //     losing them costs a rebuild, never correctness.
+//   - Posting indexes (PutPostings, DeletePostings, ClearPostings,
+//     PostingCounts, ScanPostings) hold the full-text search postings: sets of
+//     (posting key, row key) pairs. The engine computes what a write removes
+//     and adds from the stored row and the new one, so an adapter keeps no
+//     list of the keys each row holds, and it must make a count per key and
+//     the number of rows in the index cheap to read, because every search
+//     reads them to choose its plan.
+//     Neither PurgeEntityRows nor DeleteIndexEntries changes postings; the
+//     engine never purges an entity that has a posting index. Postings are
+//     derived state like entries.
 //   - The idempotency ledger (IdempotencyRecord, PutIdempotencyRecord,
 //     CollectIdempotencyKeys) records what a completed trusted write did, keyed
 //     by a caller-supplied key. It is read and written inside the SAME
@@ -881,6 +891,59 @@ type ReadTx interface {
 	// A writer uses it to find the indexes that another schema declares over
 	// the rows it writes, whose names its own schema does not hold.
 	IndexStates(entity string) ([]IndexStatus, error)
+	// PostingCounts returns, for each of ranges, the number of (posting key,
+	// row key) pairs of one posting index (see WriteTx.PutPostings) whose key
+	// falls in [Lo, Hi). The result has one element per range, in the order of
+	// ranges. An empty ranges returns an empty slice. ranges is not retained or
+	// changed.
+	//
+	// A count is an UPPER bound on the number of distinct rows of its range: a
+	// row that holds two keys in one range counts twice. For a range that holds
+	// at most one key the count is exact, except that a posting which
+	// WriteTx.DeletePostings did not name in held may still count after it
+	// forgot the row.
+	//
+	// With max > 0 the adapter may stop counting a range when its count passes
+	// max, and then returns some value above max for that range. max <= 0
+	// asks for exact counts.
+	//
+	// rows is an estimate of the number of rows in the index, for cost
+	// decisions. It is the number of distinct row keys that
+	// WriteTx.PutPostings gave at least one posting since the last
+	// WriteTx.ClearPostings and that WriteTx.DeletePostings has not removed
+	// since. An index with no postings has 0. rows differs from the number of
+	// rows that hold a posting: a row from which PutPostings removed all
+	// postings still counts, and so does a row removed in a way other than
+	// DeletePostings (see ScanPostings). It also differs from the rows of the
+	// entity: a row that never got a posting does not count. rows is returned
+	// also when ranges is empty, and a transaction reads its own writes.
+	//
+	// The engine calls it on every indexed search to choose its plan, so it
+	// must be cheap: a count for a range that holds one key must not read the
+	// postings of that key, rows must be read from a stored counter and not
+	// counted, and a networked adapter answers the whole call in one round
+	// trip.
+	PostingCounts(entity, index string, ranges []IndexRange, max int) (counts []int, rows int, err error)
+	// ScanPostings yields the row keys of one posting index (see
+	// WriteTx.PutPostings) that hold at least one posting in EVERY range of
+	// all, together with the row keys that hold at least one posting in ANY
+	// range of any. Each row key is yielded at most once. With an empty all,
+	// only the rows of any are yielded; with both empty, nothing is.
+	//
+	// limit <= 0 is unlimited. With a limit, at most limit rows are yielded.
+	// Which rows a limited scan yields is unspecified, but it stays the same
+	// from one scan to the next while the index does not change. The order of
+	// the yield is unspecified.
+	//
+	// When fn returns an error, the scan stops and ScanPostings returns that
+	// error unchanged. fn must not use the transaction: an adapter may hold a
+	// result set open across the calls.
+	//
+	// A row that WriteTx.DeletePostings or WriteTx.ClearPostings removed is
+	// never yielded. A row removed in any other way (DeleteIndexEntries,
+	// PurgeEntityRows) may still be yielded until the index is cleared, so a
+	// caller must read every yielded row again and check it.
+	ScanPostings(entity, index string, all, any []IndexRange, limit int, fn func(rowKey string) error) error
 }
 
 // IndexStatus is the state of one index of one entity (see
@@ -978,7 +1041,9 @@ type WriteTx interface {
 	// PurgeEntityRows deletes rows of ONE entity — LIVE rows included — together
 	// with the secondary-index entries those rows occupied, and returns how many
 	// rows were removed and whether the selection may still hold more. It leaves
-	// no tombstone and does not move the tombstone horizon.
+	// no tombstone and does not move the tombstone horizon. It does not change
+	// postings (see PutPostings): the engine never purges an entity that has a
+	// posting index.
 	//
 	// Three narrowings, all optional and all applied:
 	//
@@ -1126,18 +1191,54 @@ type WriteTx interface {
 	// is stored. Passing an empty slice therefore clears the row's entries,
 	// which is what DeleteIndexEntries does by name.
 	//
-	// Replace-set rather than add/remove because the caller never has the row's
-	// PREVIOUS value in hand — a PATCH merges into stored bytes, and a DELETE
-	// has nothing but a key — so computing a diff would put a read and a decode
-	// on every write path. An adapter needs a by-row lookup to make this cheap,
-	// and costs nothing for an entry the row already occupies: replacing a set
-	// that differs in one entry writes one entry, not the whole set.
+	// The caller names only the new set, so an adapter needs a by-row lookup
+	// of the entries a row holds to make this cheap. It should cost nothing
+	// for an entry the row already occupies: replacing a set that differs in
+	// one entry writes one entry, not the whole set. Search postings, of which
+	// a row holds many more, change by difference instead (see PutPostings).
 	PutIndexEntries(entity, key string, entries []IndexEntry) error
 	// DeleteIndexEntries removes every index entry of one row, by key alone.
 	// Called when the row is deleted: index entries exist only for LIVE rows.
+	// It does not change postings (see DeletePostings).
 	//
 	// Deleting entries for a row that has none is not an error.
 	DeleteIndexEntries(entity, key string) error
+	// PutPostings changes the postings that one row holds in one posting
+	// index: it removes each key of remove from the row, then adds each key of
+	// add. A posting index is the set of (posting key, row key) pairs of one
+	// (workspace, entity, index name). The engine uses posting indexes for
+	// full-text search, where each posting key is one term.
+	//
+	// Posting keys are opaque bytes that the adapter compares bytewise and
+	// never interprets. Each is at most MaxIndexEntryBytes long. An index name
+	// holds either value entries (PutIndexEntries) or postings, never both.
+	// Build state is kept by IndexState and SetIndexState, as for value
+	// indexes.
+	//
+	// The operation has set semantics and is idempotent: removing a posting
+	// the row does not hold does nothing, and adding a posting it holds does
+	// nothing. A key in both remove and add is held after the call. The caller
+	// computes remove and add from the row's stored value and its new value,
+	// so the adapter keeps no per-row list of keys. remove and add are not
+	// retained or changed.
+	//
+	// It registers the workspace (see Adapter.WithWriteTx) only when add is
+	// not empty.
+	PutPostings(entity, index, key string, remove, add [][]byte) error
+	// DeletePostings removes the postings held, which the row key holds in one
+	// posting index, and forgets the row: ReadTx.ScanPostings does not yield
+	// it again until a later PutPostings adds a posting for it. The engine
+	// calls it when the row is deleted.
+	//
+	// It does not register the workspace. A row that holds nothing, or a key
+	// of held that the row does not hold, is not an error.
+	DeletePostings(entity, index, key string, held [][]byte) error
+	// ClearPostings removes every posting and all row bookkeeping of one
+	// posting index in this workspace. The engine calls it before it builds
+	// the index again from the rows. The build state (SetIndexState) is not
+	// changed. It does not register the workspace, and clearing an empty or
+	// unknown index is not an error.
+	ClearPostings(entity, index string) error
 	// SetIndexState records the spec fingerprint one entity's entries in an index
 	// are being built under, and whether the build has finished (see
 	// ReadTx.IndexState). An unconditional upsert: a rebuild re-stamps the row
@@ -1178,10 +1279,9 @@ type WriteTx interface {
 // field stores one position per element, which is what makes "some assignee is
 // Maya" a range read. So (entity, row key) alone does not identify an entry —
 // an adapter keyed on it would keep only the last element written. Neither does
-// (entity, index, key): entries of DIFFERENT rows may be byte-equal, as every
-// row holding one search term holds the same entry. An entry is identified by
-// (entity, index, key, row key), and an adapter must store and scan back the
-// entry of each row.
+// (entity, index, key): entries of DIFFERENT rows may be byte-equal. An entry
+// is identified by (entity, index, key, row key), and an adapter must store and
+// scan back the entry of each row.
 //
 // An index is DERIVED, DISPOSABLE and never on the wire. Losing every entry
 // costs a rebuild, never correctness, and nothing in a request or response
@@ -1194,17 +1294,18 @@ type IndexEntry struct {
 	Key   []byte
 }
 
-// IndexRange is one range of entry keys that ReadTx.ScanIndexRanges reads: the
-// keys in [Lo, Hi), compared bytewise. A nil Lo starts at the first entry and a
+// IndexRange is one range of entry or posting keys that ReadTx.ScanIndexRanges,
+// ReadTx.PostingCounts and ReadTx.ScanPostings read: the keys in [Lo, Hi),
+// compared bytewise. A nil Lo starts at the first entry and a
 // nil Hi runs past the last one. A range whose Lo is not below its Hi holds no
 // entry.
 type IndexRange struct {
 	Lo, Hi []byte
 }
 
-// MaxIndexEntryBytes caps IndexEntry.Key. An adapter must store and scan back
-// an entry of this length under the longest workspace id, entity name, index
-// name and row key the engine allows. The engine rejects a write whose entries
+// MaxIndexEntryBytes caps IndexEntry.Key and a posting key. An adapter must
+// store and scan back an entry or a posting key of this length under the
+// longest workspace id, entity name, index name and row key the engine allows. The engine rejects a write whose entries
 // would be longer, so an adapter is never handed one.
 //
 // The bound comes from Postgres, whose b-tree holds at most 2704 bytes in one

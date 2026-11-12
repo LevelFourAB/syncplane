@@ -60,7 +60,16 @@ var _ = Describe("SQLite schema versioning", func() {
 	const baselineVersion = 1
 	// The version a database this binary creates or upgrades ends at: the
 	// baseline plus every migration since. Bump it with each migration added.
-	const latestVersion = 8
+	const latestVersion = 9
+
+	// noPostings drops the posting tables of migration 9, which every rewind
+	// below needs.
+	const noPostings = `
+		DROP TABLE posting_scopes;
+		DROP TABLE posting_rows;
+		DROP TABLE posting_nums;
+		DROP TABLE posting_heads;
+		DROP TABLE posting_chunks;`
 
 	// noApplied takes the clients table back to its shape before migration 8,
 	// which every rewind below needs.
@@ -151,7 +160,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// lineage table existed.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noApplied + oldIndexTables + fmt.Sprintf("\nDROP TABLE seq_lineage;\nDROP TABLE deleted_workspaces;\nPRAGMA user_version = %d;", baselineVersion))
+		_, err = db.Exec(noPostings + noApplied + oldIndexTables + fmt.Sprintf("\nDROP TABLE seq_lineage;\nDROP TABLE deleted_workspaces;\nPRAGMA user_version = %d;", baselineVersion))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db.Close()).To(Succeed())
 
@@ -183,7 +192,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// a workspace whose build mark says it is up to date.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noApplied + oldIndexTables + `
+		_, err = db.Exec(noPostings + noApplied + oldIndexTables + `
 			INSERT INTO index_entries VALUES ('ws1', 'widget', 'by_label', x'01', 'k1');
 			INSERT INTO index_state (workspace_id, entity, idx, spec_hash, ready)
 				VALUES ('ws1', 'widget', 'by_label', 'h1', 1);
@@ -246,7 +255,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// a ready index and a workspace whose build mark says it is up to date.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noApplied + `
+		_, err = db.Exec(noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -329,7 +338,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		var scope int
 		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
 		Expect(scope).To(Equal(1))
-		_, err = db.Exec(noApplied + `
+		_, err = db.Exec(noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -416,7 +425,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		var scope int
 		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
 		Expect(scope).To(Equal(1))
-		_, err = db.Exec(noApplied + `
+		_, err = db.Exec(noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -485,6 +494,69 @@ var _ = Describe("SQLite schema versioning", func() {
 			})).To(Succeed())
 			Expect(scan()).To(Equal([]string{"k1", "k1"}))
 		}
+	})
+
+	It("upgrades version-8 index data by dropping it for a rebuild", func() {
+		ctx := context.Background()
+		path := filepath.Join(GinkgoT().TempDir(), "upgrade-index-8.db")
+		store, err := sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			if err := tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{}); err != nil {
+				return err
+			}
+			// A search entry, as the generic tables held them at version 8,
+			// next to a value entry of the same row.
+			if err := tx.PutIndexEntries("widget", "k1", []storage.IndexEntry{
+				{Index: "by_label", Key: []byte("a\x00k1\x00\x00")},
+				{Index: "search", Key: []byte("\x01term\x00\x00")},
+			}); err != nil {
+				return err
+			}
+			if err := tx.SetIndexState("widget", "by_label", "h1", true); err != nil {
+				return err
+			}
+			if err := tx.SetIndexState("widget", "search", "h2", true); err != nil {
+				return err
+			}
+			return tx.SetIndexBuildMark("m1")
+		})).To(Succeed())
+		Expect(store.Close()).To(Succeed())
+
+		db, err := sql.Open("sqlite", path)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = db.Exec(noPostings + `
+			PRAGMA user_version = 8;`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(db.Close()).To(Succeed())
+
+		store, err = sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+			for _, idx := range []string{"by_label", "search"} {
+				Expect(tx.ScanIndex("widget", idx, nil, nil, 0, storage.ScanAsc, func([]byte, string) error {
+					return fmt.Errorf("index %s keeps an entry from before the upgrade", idx)
+				})).To(Succeed())
+				_, ready, err := tx.IndexState("widget", idx)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(ready).To(BeFalse(), "an index without its entries must not read as ready")
+			}
+			return nil
+		})).To(Succeed())
+		stale, err := store.ListStaleIndexWorkspaceIDs(ctx, "m1", storage.Range{}, 10)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(stale).To(ContainElement("ws1"), "the build pass must visit the workspace again")
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			return tx.PutPostings("widget", "search", "k1", nil, [][]byte{[]byte("\x01term\x00\x00")})
+		})).To(Succeed())
+		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+			counts, rows, err := tx.PostingCounts("widget", "search", []storage.IndexRange{{}}, 0)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(counts).To(Equal([]int{1}))
+			Expect(rows).To(Equal(1))
+			return nil
+		})).To(Succeed())
 	})
 
 	It("refuses a database from a schema lineage that predates the stamp", func() {

@@ -4226,6 +4226,10 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		Describe("posting indexes", func() {
+			postingSpecs(func() storage.Adapter { return store }, func() context.Context { return ctx })
+		})
+
 		Describe("recency-ordered entity scan", func() {
 			It("yields live rows newest first, ties broken by key ascending", func() {
 				// The version-5 group uses the byte-order key set: the tie-break
@@ -4314,6 +4318,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					Expect(tx.PutIdempotencyRecord("key", storage.IdempotencyRecord{Seq: seq})).To(Succeed())
 					Expect(tx.PutIndexEntries("widget", "live", []storage.IndexEntry{{Index: "by_x", Key: []byte("x\x00live")}})).To(Succeed())
 					Expect(tx.SetIndexState("widget", "by_x", "spec", true)).To(Succeed())
+					Expect(tx.PutPostings("widget", "search", "live", nil, [][]byte{[]byte("term")})).To(Succeed())
 					Expect(tx.SetConsumerPosition("indexer", storage.ConsumerPosition{Seq: seq})).To(Succeed())
 					Expect(tx.PutConsumerShadow("indexer", "widget", "live", []byte("shadow"))).To(Succeed())
 					Expect(tx.PutConsumerShadow("positionless", "widget", "live", []byte("shadow"))).To(Succeed())
@@ -4358,6 +4363,13 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(hash).To(BeEmpty())
 					Expect(ready).To(BeFalse())
+					postings, postingRows, err := tx.PostingCounts("widget", "search", []storage.IndexRange{{}}, 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(postings).To(Equal([]int{0}))
+					Expect(postingRows).To(BeZero())
+					Expect(tx.ScanPostings("widget", "search", nil, []storage.IndexRange{{}}, 0, func(string) error {
+						return errors.New("a deleted workspace has no postings")
+					})).To(Succeed())
 					_, found, err = tx.ConsumerPosition("indexer")
 					Expect(err).NotTo(HaveOccurred())
 					Expect(found).To(BeFalse())
@@ -4382,6 +4394,10 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					Expect(err).NotTo(HaveOccurred())
 					Expect(tx.ClientLastMutationID("c1")).To(BeEquivalentTo(3))
 					Expect(tx.TextFloor("widget", "live", "body")).NotTo(BeNil())
+					postings, postingRows, err := tx.PostingCounts("widget", "search", []storage.IndexRange{{}}, 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(postings).To(Equal([]int{1}))
+					Expect(postingRows).To(Equal(1))
 					_, found, err := tx.ConsumerPosition("indexer")
 					Expect(err).NotTo(HaveOccurred())
 					Expect(found).To(BeTrue())

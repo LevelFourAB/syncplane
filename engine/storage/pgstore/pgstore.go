@@ -129,6 +129,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -150,6 +151,8 @@ type Store struct {
 	replica *pgxpool.Pool
 	// leases backs the lease.Provider implementation (see leases.go).
 	leases *pgLeases
+	// scopes caches posting scope ids for the transactions of this store.
+	scopes *scopeCache
 }
 
 // Option configures Open, Migrate and Statements.
@@ -207,13 +210,14 @@ func WithReplicaMaxConns(n int32) Option {
 	return func(c *config) { c.replicaMaxConns = n }
 }
 
-// WithPartitions hash-partitions the workspace-scoped tables by workspace_id
-// with the given modulus.
+// WithPartitions hash-partitions the workspace-scoped tables with the given
+// modulus.
 //
-// The tables are rows, field_deltas, idempotency, index_entries and
-// consumer_shadows. The modulus must be a power of two up to 1024; zero, the
-// default, leaves each table whole, and Open, Migrate and Statements reject
-// any other value.
+// The tables rows, field_deltas, idempotency, index_entries and
+// consumer_shadows are partitioned by workspace_id, and the posting tables
+// posting_rows and posting_chunks by their posting scope. The modulus must be
+// a power of two up to 1024; zero, the default, leaves each table whole, and
+// Open, Migrate and Statements reject any other value.
 //
 // It is honoured only when the database has no migrations recorded yet; both
 // Open and Migrate otherwise adopt the layout they find. A deploy step may
@@ -292,7 +296,7 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	}
 	// The lease session dials lazily, on the first TryAcquire, so a
 	// deployment that never leases never pays the connection.
-	return &Store{pool: pool, replica: replica, leases: newPgLeases(poolCfg.ConnConfig.Copy())}, nil
+	return &Store{pool: pool, replica: replica, leases: newPgLeases(poolCfg.ConnConfig.Copy()), scopes: newScopeCache()}, nil
 }
 
 // Close closes the pools and the lease session.
@@ -342,6 +346,7 @@ func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(stor
 		return err
 	}
 	defer t.end()
+	t.scopes = s.scopes
 	return fn(readOnlyTx{t})
 }
 
@@ -381,6 +386,7 @@ func (s *Store) writeOnce(ctx context.Context, workspaceID string, fn func(stora
 		return err
 	}
 	defer t.end()
+	t.scopes = s.scopes
 	// The workspaces row is NOT created here: pgTx.register mints it on the
 	// transaction's first actual write. A closure that only reads (a read-only
 	// Mutate, a push whose every mutation was already applied) must leave the
@@ -424,12 +430,28 @@ func isRetryable(err error) bool {
 	return false
 }
 
-// DeleteWorkspace empties every table in workspaceTables for the workspace and
-// records its mark, in one write transaction under the workspace lock. The
-// statements are queued, so they travel with COMMIT as one batch.
+// DeleteWorkspace empties every table in scopedTables and workspaceTables for
+// the workspace and records its mark, in one write transaction under the
+// workspace lock. The statements are queued, so they travel with COMMIT as one
+// batch.
 func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 	return s.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
 		t := tx.(*pgTx)
+		// The scope ids cost a round trip of their own, which a deletion can
+		// afford.
+		rows, err := t.query(`SELECT scope FROM posting_scopes WHERE workspace_id = $1`, workspaceID)
+		if err != nil {
+			return err
+		}
+		scopes, err := pgx.CollectRows(rows, pgx.RowTo[int32])
+		if err != nil {
+			return err
+		}
+		for _, stmt := range scopedDeletes(scopes) {
+			if err := t.queue(stmt.sql, stmt.args...); err != nil {
+				return err
+			}
+		}
 		for _, table := range workspaceTables {
 			if err := t.queue(`DELETE FROM `+table+` WHERE workspace_id = $1`, workspaceID); err != nil {
 				return err
@@ -440,6 +462,21 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 			workspaceID, time.Now().UnixMilli(),
 		)
 	})
+}
+
+// scopedDeletes are the statements that empty every table in scopedTables for
+// scopes, the scope ids of one workspace: one statement per scope and table,
+// with the scope bound to equality. A partitioned table prunes such a
+// statement to one partition also under a generic plan, where an array of
+// scopes or a subquery of posting_scopes would scan every partition.
+func scopedDeletes(scopes []int32) []queuedStmt {
+	out := make([]queuedStmt, 0, len(scopedTables)*len(scopes))
+	for _, scope := range scopes {
+		for _, table := range scopedTables {
+			out = append(out, queuedStmt{sql: `DELETE FROM ` + table + ` WHERE scope = $1`, args: []any{scope}})
+		}
+	}
+	return out
 }
 
 // RestoreWorkspace removes the workspace's deletion mark, under the workspace

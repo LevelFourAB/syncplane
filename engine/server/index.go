@@ -39,8 +39,9 @@ import (
 // Maintenance is synchronous and in the same transaction as the row: entries
 // commit with the write that produced them or roll back with it, so a reader
 // inside the store never sees a row and its entries disagree. That costs every
-// row write one replace-set call — the write amplification the index buys its
-// read speed with.
+// row write one replace-set call for its value entries, and one call with the
+// difference for its search postings — the write amplification the index buys
+// its read speed with.
 //
 // Entries exist for LIVE rows only. A delete clears them, which is what keeps
 // a range scan from having to re-check whether each hit is a tombstone. A
@@ -209,16 +210,61 @@ func (info *entityInfo) indexByName(name string) *compiledIndex {
 	return nil
 }
 
-// updateRowIndexes refreshes every index entry of one row from its current
-// value. Called wherever a row is written — PUT, PATCH, and the text
-// compaction rewrite — immediately next to the text-floor bookkeeping, which
-// is where same-transaction derived state belongs, and before the row itself
-// is stored.
+// priorPostings is what a write knows of the search postings of the row it
+// replaces.
 //
-// The whole set is replaced rather than diffed: the caller rarely has the
-// row's PREVIOUS value in hand (a PATCH merges into stored bytes; compaction
-// rewrites in place), so a diff would put a read and a decode on the write
-// path for a saving no index can repay.
+// The postings are kept by difference (see storage.WriteTx.PutPostings): a
+// write removes the keys of the earlier value that the new value does not
+// make and adds the keys the new value makes that the earlier value did not.
+// That is correct only while every key of the earlier value is posted, which
+// holds because every write and every build walk posts all keys of the value
+// it leaves stored. A key named here that the row does not hold costs nothing:
+// removing it is a no-op. A key left out here that the row holds only leaves a
+// stale posting, which adds a candidate that the re-check drops. The one
+// failure is a key in keys that is not posted and that the new value makes:
+// the write would not add it and a search would not find the row. So keys must
+// come from the stored value, and a write that cannot decode it passes none.
+type priorPostings struct {
+	keys [][]byte
+	// unchanged is set by a write that cannot change the row's postings, which
+	// then computes none.
+	unchanged bool
+}
+
+// priorOf is the priorPostings of a write that replaces stored, the decoded
+// stored row, or nil when the row is absent, deleted or does not decode.
+func (info *entityInfo) priorOf(stored proto.Message) priorPostings {
+	return priorPostings{keys: info.searchKeys(stored)}
+}
+
+// priorOfPatch is the priorPostings of a PATCH with mask that merges into
+// base. It must run before the merge changes base.
+func (info *entityInfo) priorOfPatch(base proto.Message, mask []string) priorPostings {
+	if info.search == nil || !info.maskTouchesSearch(mask) {
+		return priorPostings{unchanged: true}
+	}
+	return info.priorOf(base)
+}
+
+// searchKeys is every search posting key msg makes, or nil for a nil msg or an
+// entity without search.
+func (info *entityInfo) searchKeys(msg proto.Message) [][]byte {
+	if info.search == nil || msg == nil {
+		return nil
+	}
+	return info.search.decl.SearchEntries(msg.ProtoReflect())
+}
+
+// updateRowIndexes refreshes every index entry and search posting of one row
+// from its new value msg. Called wherever a row is written — PUT, PATCH, and
+// the text compaction rewrite — immediately next to the text-floor
+// bookkeeping, which is where same-transaction derived state belongs, and
+// before the row itself is stored.
+//
+// Value index entries are replaced as a set, which needs nothing of the
+// earlier value. Search postings change by difference against prior (see
+// priorPostings), because a row holds one posting per distinct term and a
+// write usually changes a few of them.
 //
 // An index over a repeated field contributes one entry per element, so the
 // count is no longer bounded by the number of declared indexes — it is bounded
@@ -228,18 +274,21 @@ func (info *entityInfo) indexByName(name string) *compiledIndex {
 // An entry over storage.MaxIndexEntryBytes that the stored row already
 // produces is kept out of the set instead of refusing the write: the value
 // predates the index, which then cannot be ready (see keepOverlongEntries).
-func (info *entityInfo) updateRowIndexes(tx storage.WriteTx, limits Limits, key string, msg proto.Message) error {
-	return info.putRowIndexes(tx, limits, key, msg, true)
+func (info *entityInfo) updateRowIndexes(tx storage.WriteTx, limits Limits, key string, prior priorPostings, msg proto.Message) error {
+	return info.putRowIndexes(tx, limits, key, prior, msg, true)
 }
 
 // buildRowIndexes is updateRowIndexes for an index build, which reads msg from
-// the stored row. Every over-long entry fails it: the build must not mark an
-// index ready that holds no entry for a row.
-func (info *entityInfo) buildRowIndexes(tx storage.WriteTx, limits Limits, key string, msg proto.Message) error {
-	return info.putRowIndexes(tx, limits, key, msg, false)
+// the stored row. With search set it adds every posting msg makes, as the
+// build cannot know which of them the row holds; without it the postings are
+// left as they are, which is right for a search index that is ready. Every
+// over-long entry fails it: the build must not mark an index ready that holds
+// no entry for a row.
+func (info *entityInfo) buildRowIndexes(tx storage.WriteTx, limits Limits, key string, msg proto.Message, search bool) error {
+	return info.putRowIndexes(tx, limits, key, priorPostings{unchanged: !search}, msg, false)
 }
 
-func (info *entityInfo) putRowIndexes(tx storage.WriteTx, limits Limits, key string, msg proto.Message, keepStored bool) error {
+func (info *entityInfo) putRowIndexes(tx storage.WriteTx, limits Limits, key string, prior priorPostings, msg proto.Message, keepStored bool) error {
 	if err := info.dropForeignIndexes(tx); err != nil {
 		return err
 	}
@@ -247,10 +296,17 @@ func (info *entityInfo) putRowIndexes(tx storage.WriteTx, limits Limits, key str
 		return nil
 	}
 	entries := info.rowIndexEntries(msg, key)
+	var postings [][]byte
+	if info.search != nil && !prior.unchanged {
+		postings = info.searchKeys(msg)
+	}
 	if max := limits.maxIndexEntriesPerRow(); len(entries) > max {
 		// A row cannot be allowed to write an unbounded number of entries: the
 		// count is what an index costs on every single write of that row, and
-		// with a fan-out index it grows with the list.
+		// with a fan-out index it grows with the list. Search postings do not
+		// count: query.SearchTermsPerRow bounds them, and a PATCH that cannot
+		// change them does not compute them, so counting them would make the
+		// verdict depend on the write path.
 		//
 		// The write FAILS rather than storing a truncated set. A partial index
 		// disagrees with the scan it is supposed to be indistinguishable from,
@@ -269,6 +325,11 @@ func (info *entityInfo) putRowIndexes(tx storage.WriteTx, limits Limits, key str
 	for _, e := range entries {
 		if len(e.Key) > storage.MaxIndexEntryBytes {
 			overlong = append(overlong, e)
+		}
+	}
+	for _, k := range postings {
+		if len(k) > storage.MaxIndexEntryBytes {
+			overlong = append(overlong, storage.IndexEntry{Index: info.search.name, Key: k})
 		}
 	}
 	if len(overlong) > 0 {
@@ -291,11 +352,53 @@ func (info *entityInfo) putRowIndexes(tx storage.WriteTx, limits Limits, key str
 			}
 		}
 		entries = short
+		shortKeys := postings[:0]
+		for _, k := range postings {
+			if len(k) <= storage.MaxIndexEntryBytes {
+				shortKeys = append(shortKeys, k)
+			}
+		}
+		postings = shortKeys
 	}
-	return tx.PutIndexEntries(info.name, key, entries)
+	if len(info.indexes) > 0 {
+		if err := tx.PutIndexEntries(info.name, key, entries); err != nil {
+			return err
+		}
+	}
+	if info.search == nil || prior.unchanged {
+		return nil
+	}
+	remove, add := postingDiff(prior.keys, postings)
+	if len(remove) == 0 && len(add) == 0 {
+		return nil
+	}
+	return tx.PutPostings(info.name, info.search.name, key, remove, add)
 }
 
-// rowIndexEntries is every index entry msg, stored under key, occupies.
+// postingDiff returns the keys of old that next does not hold and the keys of
+// next that old does not hold.
+func postingDiff(old, next [][]byte) (remove, add [][]byte) {
+	held := make(map[string]struct{}, len(old))
+	for _, k := range old {
+		held[string(k)] = struct{}{}
+	}
+	want := make(map[string]struct{}, len(next))
+	for _, k := range next {
+		want[string(k)] = struct{}{}
+		if _, ok := held[string(k)]; !ok {
+			add = append(add, k)
+		}
+	}
+	for _, k := range old {
+		if _, ok := want[string(k)]; !ok {
+			remove = append(remove, k)
+		}
+	}
+	return remove, add
+}
+
+// rowIndexEntries is every value index entry msg, stored under key, occupies.
+// Search postings are not entries (see searchKeys).
 func (info *entityInfo) rowIndexEntries(msg proto.Message, key string) []storage.IndexEntry {
 	refl := msg.ProtoReflect()
 	entries := make([]storage.IndexEntry, 0, len(info.indexes))
@@ -304,20 +407,13 @@ func (info *entityInfo) rowIndexEntries(msg proto.Message, key string) []storage
 			entries = append(entries, storage.IndexEntry{Index: info.indexes[i].name, Key: k})
 		}
 	}
-	if info.search != nil {
-		// Bounded on its own by the per-row term cap (an oversized document
-		// stores the overflow marker alone), so the shared limit stays
-		// about value indexes plus a constant.
-		for _, k := range info.search.decl.SearchEntries(refl) {
-			entries = append(entries, storage.IndexEntry{Index: info.search.name, Key: k})
-		}
-	}
 	return entries
 }
 
 // keepOverlongEntries reports whether the row stored under key produces every
 // entry of overlong too, and when it does, makes sure each index they belong to
-// reads as unready.
+// reads as unready. An entry of the search index stands for a search posting
+// key.
 //
 // Such a value was written while no index held it, so no write can have stored
 // its entry, and the index build fails on it. Refusing the write would leave
@@ -342,6 +438,9 @@ func (info *entityInfo) keepOverlongEntries(tx storage.WriteTx, key string, over
 	held := map[entry]bool{}
 	for _, e := range info.rowIndexEntries(stored, key) {
 		held[entry{e.Index, string(e.Key)}] = true
+	}
+	for _, k := range info.searchKeys(stored) {
+		held[entry{info.search.name, string(k)}] = true
 	}
 	for _, e := range overlong {
 		if !held[entry{e.Index, string(e.Key)}] {
@@ -391,10 +490,9 @@ func (info *entityInfo) keepOverlongEntries(tx storage.WriteTx, key string, over
 // would leave an index disagreeing with the scan it must be indistinguishable
 // from, which is a wrong query result rather than a slow one.
 //
-// PUT does not get this guard, and cannot: it replaces the whole row, and the
-// entries it must replace are those of a PREVIOUS value the write path does not
-// hold. That asymmetry is fine in practice because the TS client derives a mask
-// from a diff, so ordinary edits arrive as PATCH.
+// PUT does not get this guard: it replaces the whole row, so any entry can
+// change. That asymmetry is fine in practice because the TS client derives a
+// mask from a diff, so ordinary edits arrive as PATCH.
 func (info *entityInfo) maskTouchesIndexes(paths []string) bool {
 	if len(info.indexes) == 0 && info.search == nil {
 		return false
@@ -415,22 +513,50 @@ func (info *entityInfo) maskTouchesIndexes(paths []string) bool {
 	return false
 }
 
-// clearRowIndexes drops every index entry of a row. Called when the row is
-// deleted: index entries exist only for live rows, so a tombstone holds none.
+// maskTouchesSearch reports whether any path of a field mask could change the
+// search postings of a row, as conservatively as maskTouchesIndexes.
+func (info *entityInfo) maskTouchesSearch(paths []string) bool {
+	if info.search == nil {
+		return false
+	}
+	for _, path := range paths {
+		if info.search.decl.MaskTouches(lww.SplitPath(path)) {
+			return true
+		}
+	}
+	return false
+}
+
+// clearRowIndexes drops every index entry and search posting of a row. Called
+// when the row is deleted: index entries exist only for live rows, so a
+// tombstone holds none. prior names the postings to remove (see
+// priorPostings); the row is forgotten by the posting index whatever it names.
 //
-// It takes nothing but the key, which is what lets the delete paths call it —
-// neither the push DELETE nor EntityTx.Delete has a decoded message, and
-// reading one to compute which entries to remove would put a read on the
-// delete path.
-//
-// A schema that declares no index of the entity still drops the entries when
-// another schema, which shares the store, declares one: those entries would
-// name a row that is gone.
-func (info *entityInfo) clearRowIndexes(tx storage.WriteTx, key string) error {
-	if len(info.indexes) == 0 && info.search == nil {
-		states, err := tx.IndexStates(info.name)
-		if err != nil || len(states) == 0 {
+// A schema that declares no value index of the entity still drops the entries
+// when another schema, which shares the store, declares one: those entries
+// would name a row that is gone. The postings of a search index that only
+// another schema declares stay: that index is not ready under this schema, and
+// a stale posting only adds a candidate that the re-check drops.
+func (info *entityInfo) clearRowIndexes(tx storage.WriteTx, key string, prior priorPostings) error {
+	if info.search != nil {
+		if err := tx.DeletePostings(info.name, info.search.name, key, prior.keys); err != nil {
 			return err
+		}
+	}
+	if len(info.indexes) == 0 {
+		states, err := tx.IndexStates(info.name)
+		if err != nil {
+			return err
+		}
+		foreign := false
+		for _, st := range states {
+			if info.search == nil || st.Index != info.search.name {
+				foreign = true
+				break
+			}
+		}
+		if !foreign {
+			return nil
 		}
 	}
 	return tx.DeleteIndexEntries(info.name, key)
@@ -860,25 +986,29 @@ func indexWalk(
 	return true, nil
 }
 
-// queryBySearch answers a query from the entity's term-postings index when a
-// REQUIRED match condition narrows it, reporting whether it did. Candidates
-// come from the most selective query term's postings, narrowed by the other
-// terms where that is cheaper than re-reading rows, and unioned with the
-// overflow rows, whose term sets outgrew their postings; the sink receives them
-// with the FULL predicate as their residual, so the index changes which rows
-// are considered, never which match. A relevance ordering needs nothing from
-// the walk: the caller's heap and sort rank whatever is offered, exactly as
-// they rank a scan's rows.
+// queryBySearch answers a query from the entity's search postings when a
+// REQUIRED match condition narrows it, reporting whether it did. The
+// candidates are the rows that hold a posting under every query term, plus
+// the overflow rows, whose term sets outgrew their postings; the sink receives
+// them with the FULL predicate as their residual, so the index changes which
+// rows are considered, never which match. A relevance ordering needs nothing
+// from the walk: the caller's heap and sort rank whatever is offered, exactly
+// as they rank a scan's rows.
 //
-// Because the candidates are only ever narrowed and never completed, dropping
-// a narrowing pass is always safe: it leaves more rows to re-check, not fewer
-// rows in the answer. That is what lets both passes below bound their reads
-// and give up on a term whose postings are not worth what they would save.
+// The walk costs two storage calls. PostingCounts gives the posting count of
+// each term range and of the overflow range and the number of rows in the
+// index, which choose the plan; then one ScanPostings reads the candidates. A term range whose count is far above the
+// smallest is left out of the intersection: reading it costs more than
+// re-checking the few candidates it could remove. Leaving a range out is
+// always safe, because the candidates are only ever narrowed and never
+// completed: it leaves more rows to re-check, not fewer rows in the answer.
 //
 // Declines — no declaration, no required match, a term-less match (which
-// matches every row, so the postings narrow nothing), an unbuilt index, or a
-// query whose every term blows the candidate budget — all happen before any
-// row is offered, so the caller falls through with nothing to discard.
+// matches every row, so the postings narrow nothing), an unbuilt index, a
+// query whose most selective term leaves more candidates than the budget, or
+// one whose candidates are too large a share of the rows (see
+// searchScanSharePercent) — all happen before any row is offered, so the
+// caller falls through with nothing to discard.
 func queryBySearch(
 	tx storage.ReadTx,
 	info *entityInfo,
@@ -900,69 +1030,21 @@ func queryBySearch(
 	}
 
 	budget := limits.maxIndexScanCandidates()
-	// postings reads the row keys a range names, giving up once it has seen
-	// more than cap of them. The cap rides the storage limit rather than a
-	// counter in the callback so that a range the walk is not going to use
-	// costs one bounded read instead of a full one.
-	postings := func(lo, hi []byte, max int, keep func(rowKey string)) (bool, error) {
-		seen := 0
-		err := tx.ScanIndex(info.name, si.name, lo, hi, max+1, storage.ScanAsc, func(_ []byte, rowKey string) error {
-			seen++
-			if seen > max {
-				return errIndexBudget
-			}
-			keep(rowKey)
-			return nil
-		})
-		if errors.Is(err, errIndexBudget) {
-			return false, nil
-		}
-		return err == nil, err
-	}
-
-	candidates, seeded, err := searchSeed(m.Terms(), budget, postings)
-	if err != nil || candidates == nil {
+	all, any, ok, err := searchPlan(tx, info, m.Terms(), budget)
+	if err != nil || !ok {
 		return false, err
 	}
-
-	// Narrow with the remaining terms. A row that matches carries every term,
-	// so intersecting can only remove candidates — but reading a term's
-	// postings to find that out is only worth it while the list is small
-	// against the rows it could save re-reading, which is what the cap
-	// expresses. A term that blows it is skipped rather than declined.
-	for i, t := range m.Terms() {
-		if i == seeded || len(candidates) == 0 {
-			continue
-		}
-		lo, hi := query.SearchTermRange(t)
-		next := make(map[string]struct{}, len(candidates))
-		ok, err := postings(lo, hi, min(len(candidates)*searchNarrowRatio, budget), func(rowKey string) {
-			if _, in := candidates[rowKey]; in {
-				next[rowKey] = struct{}{}
-			}
-		})
-		if err != nil {
+	var keys []string
+	if len(all) > 0 || len(any) > 0 {
+		if err := tx.ScanPostings(info.name, si.name, all, any, 0, func(rowKey string) error {
+			keys = append(keys, rowKey)
+			return nil
+		}); err != nil {
 			return false, err
 		}
-		if ok {
-			candidates = next
-		}
 	}
-
-	lo, hi := query.SearchOverflowRange()
-	ok, err := postings(lo, hi, budget, func(rowKey string) {
-		candidates[rowKey] = struct{}{}
-	})
-	if !ok || err != nil {
-		return false, err
-	}
-
 	// Sorted so the batched reads visit rows in a deterministic order; the
 	// caller's heap and sort make the result independent of it either way.
-	keys := make([]string, 0, len(candidates))
-	for k := range candidates {
-		keys = append(keys, k)
-	}
 	sort.Strings(keys)
 	sink := sinkFor(predicate)
 	for _, k := range keys {
@@ -976,67 +1058,73 @@ func queryBySearch(
 	return true, nil
 }
 
-// searchSeedCaps are the candidate counts the seed pass offers a term, in
-// order. They grow geometrically so that the total read stays within a
-// constant factor of the winning term's posting list, and they start small
-// because the term a search is worth serving from usually has a short one.
-var searchSeedCaps = []int{64, 512, 4096}
+// searchNarrowRatio is how many times the smallest term count a term range's
+// count may be and still join the intersection. A wider range costs more to
+// read than the re-checks of the candidates it could remove: on SQLite, with
+// 50 candidates in 10,000 rows, intersecting with a term in 60% of the rows
+// (120 times the smallest) still saves a fifth of the query, and a term in
+// 95% of the rows (190 times) costs a fifth more.
+const searchNarrowRatio = 128
 
-// searchNarrowRatio is how many index entries a narrowing pass will read per
-// candidate it could remove. A candidate costs a row read, a decode and a
-// rank; an index entry costs a step of a range already positioned. The ratio
-// is the conservative end of that difference, so a term wide enough to be
-// skipped was never going to pay for itself.
-const searchNarrowRatio = 32
+// searchScanSharePercent is the share of the rows in the index, in percent,
+// above which a search declines to the scan. Each candidate costs a read by
+// key, which costs more than a read of the same row in the sequential scan.
+// With 10,000 rows and one term, the index is as fast as the scan at a term in
+// about 65% of the rows on SQLite and about 77% on Postgres. The share is the
+// higher of the two: above it, the index is slower on both adapters, and
+// between the two, SQLite loses at most a fifth of the scan time.
+const searchScanSharePercent = 75
 
-// searchSeed picks the term whose postings bound the walk most tightly and
-// returns the rows they name, along with the position of the term it used. A
-// nil map means no term is selective enough to be worth a candidate walk at
-// all and the caller must scan.
-//
-// Terms are offered a growing candidate cap rather than read whole, one round
-// per cap: the first term to fit under a cap has the shortest list of them
-// all, to within the ratio between two caps, and every other term is abandoned
-// as soon as it is known not to fit. A query of common words therefore costs a
-// bounded read per term before it declines, instead of reading every list to
-// the budget to discover the same thing.
-func searchSeed(
+// searchPlan chooses the ranges a search reads from the posting counts of its
+// terms and of the overflow range: all, the term ranges a candidate must hold
+// a posting in, and any, the overflow range when it holds a row. ok is false
+// when the walk must not run, because the candidates would exceed budget or
+// searchScanSharePercent of the rows in the index. Both empty with ok set
+// means no row can match.
+func searchPlan(
+	tx storage.ReadTx,
+	info *entityInfo,
 	terms []search.QueryTerm,
 	budget int,
-	postings func(lo, hi []byte, max int, keep func(rowKey string)) (bool, error),
-) (map[string]struct{}, int, error) {
-	caps := searchSeedCaps
-	if len(terms) == 1 {
-		// One term is its own most selective: there is nothing to compare it
-		// against, so the rounds would only read the same list twice.
-		caps = nil
+) (all, any []storage.IndexRange, ok bool, err error) {
+	ranges := make([]storage.IndexRange, 0, len(terms)+1)
+	for _, t := range terms {
+		lo, hi := query.SearchTermRange(t)
+		ranges = append(ranges, storage.IndexRange{Lo: lo, Hi: hi})
 	}
-	// One round per cap, then a final one at the budget — which is the cap that
-	// decides whether the walk happens at all, so it runs however small the
-	// budget is configured to be.
-	for round := 0; round <= len(caps); round++ {
-		max := budget
-		if round < len(caps) {
-			if caps[round] >= budget {
-				continue
-			}
-			max = caps[round]
-		}
-		for i, t := range terms {
-			lo, hi := query.SearchTermRange(t)
-			found := make(map[string]struct{})
-			ok, err := postings(lo, hi, max, func(rowKey string) {
-				found[rowKey] = struct{}{}
-			})
-			if err != nil {
-				return nil, 0, err
-			}
-			if ok {
-				return found, i, nil
+	lo, hi := query.SearchOverflowRange()
+	ranges = append(ranges, storage.IndexRange{Lo: lo, Hi: hi})
+	// A count past this cap changes no decision below, so the adapter may stop
+	// counting there.
+	counts, rows, err := tx.PostingCounts(info.name, info.search.name, ranges, budget*searchNarrowRatio)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if len(counts) != len(ranges) {
+		return nil, nil, false, fmt.Errorf("server: posting counts of %d ranges returned %d counts", len(ranges), len(counts))
+	}
+	overflow := counts[len(terms)]
+	smallest := counts[0]
+	for _, c := range counts[1:len(terms)] {
+		smallest = min(smallest, c)
+	}
+	// A count is an upper bound on the rows of its range, so the candidates
+	// are at most smallest + overflow.
+	candidates := smallest + overflow
+	if candidates > budget || candidates*100 > rows*searchScanSharePercent {
+		return nil, nil, false, nil
+	}
+	if smallest > 0 {
+		for i, c := range counts[:len(terms)] {
+			if c <= smallest*searchNarrowRatio {
+				all = append(all, ranges[i])
 			}
 		}
 	}
-	return nil, 0, nil
+	if overflow > 0 {
+		any = ranges[len(terms):]
+	}
+	return all, any, true, nil
 }
 
 // seekRange narrows one range of an ordered plan to the part of it the page's

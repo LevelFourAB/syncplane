@@ -286,7 +286,9 @@ type Limits struct {
 	// Default 1000.
 	MaxSubscriptionKeys int
 	// Maximum secondary-index entries one row may occupy across all of its
-	// entity's indexes. This is the WRITE cost of indexing: every row write
+	// entity's value indexes. Search postings do not count against it: the
+	// per-row term cap (query.SearchTermsPerRow) bounds them. This is the
+	// WRITE cost of indexing: every row write
 	// re-encodes and stores the whole set, so the count multiplies the price
 	// of every mutation to that entity. Exceeding it fails the write rather
 	// than silently dropping entries, which would leave an index that reads

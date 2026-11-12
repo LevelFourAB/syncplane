@@ -30,9 +30,10 @@ func sizeKey(kind, i int) string {
 	return fmt.Sprintf("%08x-0000-4000-8000-%012x", kind, i)
 }
 
-// indexObjects names every table and b-tree that holds index entries or what
-// finds them: the entries, the per-row entry lists, the row ids and the scope
-// ids.
+// indexObjects names every table and b-tree that holds index entries or
+// postings, or what finds them: the entries, the per-row entry lists, the row
+// ids and the scope ids, and the posting heads, chunks, row numbers and
+// scopes.
 var indexObjects = []string{
 	"index_entries",
 	"index_row_ids",
@@ -40,6 +41,35 @@ var indexObjects = []string{
 	"index_scopes",
 	"sqlite_autoindex_index_scopes_1",
 	"index_row_keys",
+	"posting_scopes",
+	"sqlite_autoindex_posting_scopes_1",
+	"posting_rows",
+	"posting_nums",
+	"posting_heads",
+	"posting_chunks",
+	"posting_chunks_by_scope",
+}
+
+// countPostings adds the postings of each posting index to r, as entries of
+// that index: a posting is what a search entry was before postings had their
+// own storage, so the per-entry figures stay comparable.
+func countPostings(db *sql.DB, r *indexSizeReport) {
+	rows, err := db.Query(`
+		SELECT s.idx, COALESCE(SUM(h.cnt), 0)
+		  FROM posting_heads h JOIN posting_scopes s ON s.id = h.scope
+		 GROUP BY s.idx`)
+	Expect(err).NotTo(HaveOccurred())
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			idx   string
+			count int64
+		)
+		Expect(rows.Scan(&idx, &count)).To(Succeed())
+		r.perIndex[idx] += count
+		r.entries += count
+	}
+	Expect(rows.Err()).NotTo(HaveOccurred())
 }
 
 // emptyObjectBytes is the size of a table or b-tree that holds no data: one
@@ -55,7 +85,7 @@ type indexSizeReport struct {
 	// indexBytes is the on-disk size of every table and b-tree that holds
 	// index entries or the bookkeeping that finds them.
 	indexBytes int64
-	// entries is the total number of index entries.
+	// entries is the total number of index entries and postings.
 	entries int64
 	// perIndex is the entry count of each index.
 	perIndex map[string]int64
@@ -192,6 +222,7 @@ func measureIndexSize() indexSizeReport {
 		r.entries += count
 	}
 	Expect(rows.Err()).NotTo(HaveOccurred())
+	countPostings(db, &r)
 	return r
 }
 

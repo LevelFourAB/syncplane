@@ -1,20 +1,19 @@
 package query
 
 // The search index: term postings derived from an entity's search
-// declaration. It rides the same storage as every other secondary index — a
-// replace-set of entries per row, bytewise-ordered, derived and disposable —
-// but its entries are TERMS rather than field values, so a row occupies one
-// position per distinct term its searchable fields analyze to:
+// declaration. It is derived and disposable like every other secondary index,
+// but it is kept in the storage's posting indexes (storage.WriteTx.PutPostings)
+// rather than as value entries: a row holds one posting per distinct term its
+// searchable fields analyze to, and its posting keys are
 //
-//	entry    := 0x01 term     one per distinct term
+//	key      := 0x01 term     one per distinct term
 //	         |  0x02          the overflow marker, alone
 //	term     := CESU-8, escaped and terminated as every index string is
 //
-// An entry does not end with the row key, as a value index entry does: every
-// search read collects the SET of rows a range names and uses neither the
-// order of the entries within a term nor their bytes past it. The rows that
-// hold one term therefore all hold the same entry, which the storage contract
-// permits (see storage.IndexEntry).
+// A key does not hold the row key, as a value index entry does: every search
+// read collects the SET of rows a range names and uses neither the order of
+// the rows within a term nor anything past the term. The rows that hold one
+// term all hold the same key.
 //
 // A row whose distinct terms exceed SearchTermsPerRow stores the single
 // overflow marker instead. Every term probe unions the overflow rows into its
@@ -24,11 +23,10 @@ package query
 // The index generates CANDIDATES only: matched rows are re-evaluated (and
 // ranked) from the row itself, so the index changes which rows are considered,
 // never which match — the same contract every other index honors. The
-// TypeScript client maintains its own copy of the index as local index
-// positions (client/src/optimistic/index-maintain.ts). What the two sides must
-// agree on is the analysis, the per-row term cap and the overflow rule, as
-// they decide which rows a probe finds; the entry bytes are local to each
-// side.
+// TypeScript client maintains its own copy of the index
+// (client/src/query/postings.ts). What the two sides must agree on is the
+// analysis, the per-row term cap and the overflow rule, as they decide which
+// rows a probe finds; the key bytes are local to each side.
 
 import (
 	"fmt"
@@ -40,9 +38,10 @@ import (
 )
 
 // searchIndexEncodingVersion is folded into every search-index SpecHash.
-// Bumping it — for an entry-encoding change, or an analyzer change that moves
-// existing terms — invalidates every stored search index, which then rebuilds.
-const searchIndexEncodingVersion = 2
+// Bumping it — for a change to the keys or to how they are stored, or an
+// analyzer change that moves existing terms — invalidates every stored search
+// index, which then rebuilds.
+const searchIndexEncodingVersion = 3
 
 // SearchTermsPerRow caps the distinct terms one row stores postings for; past
 // it the row stores the overflow marker alone. It is a constant rather than a
@@ -55,11 +54,11 @@ const (
 	searchOverflowTag byte = 0x02
 )
 
-// SearchEntries returns the entries msg occupies in the entity's search
+// SearchEntries returns the posting keys msg holds in the entity's search
 // index: one per distinct term of its searchable fields in first-occurrence
 // order, or the overflow marker alone past SearchTermsPerRow. A row whose
-// fields analyze to nothing occupies no entries — such a row can match no
-// term probe, and the overflow union covers only rows that opted out by size.
+// fields analyze to nothing holds no keys — such a row can match no term
+// probe, and the overflow union covers only rows that opted out by size.
 func (d *SearchDecl) SearchEntries(msg protoreflect.Message) [][]byte {
 	seen := make(map[string]struct{})
 	var terms []string
@@ -86,7 +85,7 @@ func (d *SearchDecl) SearchEntries(msg protoreflect.Message) [][]byte {
 	return out
 }
 
-// SearchSpecHash fingerprints everything the stored search entries depend on:
+// SearchSpecHash fingerprints everything the stored search postings depend on:
 // the declaration (fields and analyzer options), the per-row term cap, and
 // the encoding version. A stored index whose hash no longer matches is stale
 // and rebuilds, exactly like a value index.
@@ -118,8 +117,8 @@ func (d *SearchDecl) MaskTouches(segs []string) bool {
 	return false
 }
 
-// SearchTermRange brackets the postings a query term selects: the term's own
-// entries, or — for a prefix term — the entries of every term it prefixes.
+// SearchTermRange brackets the posting keys a query term selects: the term's
+// own key, or — for a prefix term — the keys of every term it prefixes.
 func SearchTermRange(t search.QueryTerm) (lo, hi []byte) {
 	if t.Prefix {
 		// The term's own encoding carries a terminator, so it would match only
@@ -133,7 +132,7 @@ func SearchTermRange(t search.QueryTerm) (lo, hi []byte) {
 	return pre, UpperBound(pre)
 }
 
-// SearchOverflowRange brackets the overflow markers — the rows whose term
+// SearchOverflowRange brackets the overflow marker key — the rows whose term
 // sets outgrew their postings. Every term probe unions these rows into its
 // candidates.
 func SearchOverflowRange() (lo, hi []byte) {

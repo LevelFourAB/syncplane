@@ -533,7 +533,9 @@ func (s *Server) captureHistory(
 	if err != nil {
 		return err
 	}
-	if err := histInfo.updateRowIndexes(tx, s.limits, histKey, rec); err != nil {
+	// The history entity declares no search, so the write has no postings
+	// to compute.
+	if err := histInfo.updateRowIndexes(tx, s.limits, histKey, priorPostings{}, rec); err != nil {
 		return err
 	}
 	if err := tx.PutRow(histInfo.name, histKey, encoded, seq, actor); err != nil {

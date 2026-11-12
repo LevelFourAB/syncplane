@@ -224,6 +224,7 @@ func (r *ReplicaTx) put(entity, key string, value []byte) error {
 	var (
 		prevText map[string][]byte
 		prevRead readInputs
+		prior    priorPostings
 	)
 	if live {
 		if base, decErr := info.decode(row.Value); decErr != nil {
@@ -231,6 +232,7 @@ func (r *ReplicaTx) put(entity, key string, value []byte) error {
 		} else {
 			prevText = info.textSnapshot(base)
 			prevRead = readInputsOf(model, info, base)
+			prior = info.priorOf(base)
 		}
 	}
 	// The checks every write path runs, trusted ones included: they keep what
@@ -265,7 +267,7 @@ func (r *ReplicaTx) put(entity, key string, value []byte) error {
 	if err := info.dropUncoveredTextFloors(r.tx, s.textCache, r.ws, key, prevText, msg); err != nil {
 		return err
 	}
-	if err := info.updateRowIndexes(r.tx, s.limits, key, msg); err != nil {
+	if err := info.updateRowIndexes(r.tx, s.limits, key, prior, msg); err != nil {
 		return err
 	}
 	if err := s.captureHistory(r.ctx, r.tx, r.ws, info, key, row, live, msg, nil, seq, r.actor); err != nil {
@@ -299,9 +301,13 @@ func (r *ReplicaTx) delete(entity, key string) error {
 	}
 	// The wire DELETE's sequence of derived-state removals; see applyCrud.
 	textPaths := info.textStatePaths(nil)
-	if info.hasNestedText() {
+	var prior priorPostings
+	if info.hasNestedText() || info.search != nil {
 		if decoded, decErr := info.decode(row.Value); decErr == nil {
-			textPaths = info.textStatePaths(decoded.ProtoReflect())
+			if info.hasNestedText() {
+				textPaths = info.textStatePaths(decoded.ProtoReflect())
+			}
+			prior = info.priorOf(decoded)
 		}
 	}
 	if err := info.recordTextDeltaGaps(r.tx, key, textPaths, seq); err != nil {
@@ -311,7 +317,7 @@ func (r *ReplicaTx) delete(entity, key string) error {
 	if err := info.clearTextFloors(r.tx, key, textPaths); err != nil {
 		return err
 	}
-	if err := info.clearRowIndexes(r.tx, key); err != nil {
+	if err := info.clearRowIndexes(r.tx, key, prior); err != nil {
 		return err
 	}
 	if err := s.purgeHistory(r.tx, info, key); err != nil {

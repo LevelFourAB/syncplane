@@ -784,7 +784,7 @@ func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 		prevText, msg.ProtoReflect()); err != nil {
 		return err
 	}
-	if err := info.updateRowIndexes(e.tx, e.srv.limits, key, msg); err != nil {
+	if err := info.updateRowIndexes(e.tx, e.srv.limits, key, info.priorOf(base), msg); err != nil {
 		return err
 	}
 	// Same contract as the wire PUT: no mask, so capture starts from the whole
@@ -938,6 +938,7 @@ func (e *EntityTx) patch(msg proto.Message, mask []string, expected *uint64, opt
 	prevText := info.textSnapshot(base)
 	model := e.srv.catalogPtr().access
 	prevRead := readInputsOf(model, info, base)
+	prior := info.priorOfPatch(base, mask)
 	if len(o.texts) > 0 || hasPlainString(info, msg) {
 		// Clone before either rewrite so the caller's message is not mutated.
 		msg = proto.Clone(msg)
@@ -1035,7 +1036,7 @@ func (e *EntityTx) patch(msg proto.Message, mask []string, expected *uint64, opt
 	// Same guard as the wire PATCH: a mask that reaches no index component
 	// leaves every entry of the row exactly as it is.
 	if info.maskTouchesIndexes(mask) {
-		if err := info.updateRowIndexes(e.tx, e.srv.limits, key, base); err != nil {
+		if err := info.updateRowIndexes(e.tx, e.srv.limits, key, prior, base); err != nil {
 			return err
 		}
 	} else if err := info.dropForeignIndexes(e.tx); err != nil {
@@ -1083,15 +1084,29 @@ func (e *EntityTx) delete(prototype proto.Message, key string) error {
 	if err := e.authorizeCrud(info, key, syncplanev1.CrudOp_CRUD_OP_DELETE, nil, nil, nil); err != nil {
 		return err
 	}
-	if err := e.gate.guardRow(info, key, func() (storage.Row, bool, error) {
-		return e.liveRow(info, key)
-	}, func() (Write, error) {
+	// The stored row, read at most once: nothing below writes it before the
+	// final DeleteRow, so the memo cannot go stale.
+	var (
+		row     storage.Row
+		live    bool
+		fetched bool
+	)
+	currentRow := func() (storage.Row, bool, error) {
+		if !fetched {
+			r, l, err := e.liveRow(info, key)
+			if err != nil {
+				return storage.Row{}, false, err
+			}
+			row, live, fetched = r, l, true
+		}
+		return row, live, nil
+	}
+	if err := e.gate.guardRow(info, key, currentRow, func() (Write, error) {
 		return writeOf(info, key, syncplanev1.CrudOp_CRUD_OP_DELETE, nil, nil, nil)
 	}); err != nil {
 		return err
 	}
-	if _, err := e.gate.beginAccessWrite(e.tx, info, key, syncplanev1.CrudOp_CRUD_OP_DELETE, nil,
-		func() (storage.Row, bool, error) { return e.liveRow(info, key) }); err != nil {
+	if _, err := e.gate.beginAccessWrite(e.tx, info, key, syncplanev1.CrudOp_CRUD_OP_DELETE, nil, currentRow); err != nil {
 		return err
 	}
 	var (
@@ -1099,7 +1114,7 @@ func (e *EntityTx) delete(prototype proto.Message, key string) error {
 		before []byte
 	)
 	if e.log != nil {
-		row, live, err := e.liveRow(info, key)
+		row, live, err := currentRow()
 		if err != nil {
 			return err
 		}
@@ -1111,14 +1126,21 @@ func (e *EntityTx) delete(prototype proto.Message, key string) error {
 	}
 	// Mirrors the wire DELETE: per-document side state is keyed by instance
 	// path, so a row with element-borne text is decoded to name what it holds.
+	// The search postings to remove are those of the stored row too.
 	textPaths := info.textStatePaths(nil)
-	if info.hasNestedText() {
-		if row, rowErr := e.tx.GetRow(info.name, key); rowErr == nil && !row.Deleted {
+	var prior priorPostings
+	if info.hasNestedText() || info.search != nil {
+		row, live, err := currentRow()
+		if err != nil {
+			return err
+		}
+		if live {
 			if decoded, decErr := info.decode(row.Value); decErr == nil {
-				textPaths = info.textStatePaths(decoded.ProtoReflect())
+				if info.hasNestedText() {
+					textPaths = info.textStatePaths(decoded.ProtoReflect())
+				}
+				prior = info.priorOf(decoded)
 			}
-		} else if rowErr != nil && rowErr != storage.ErrNotFound {
-			return rowErr
 		}
 	}
 	if err := info.recordTextDeltaGaps(e.tx, key, textPaths, seq); err != nil {
@@ -1128,15 +1150,14 @@ func (e *EntityTx) delete(prototype proto.Message, key string) error {
 	if err := info.clearTextFloors(e.tx, key, textPaths); err != nil {
 		return err
 	}
-	if err := info.clearRowIndexes(e.tx, key); err != nil {
+	if err := info.clearRowIndexes(e.tx, key, prior); err != nil {
 		return err
 	}
 	// Same as the wire DELETE: the row's history goes with the row.
 	if err := e.srv.purgeHistory(e.tx, info, key); err != nil {
 		return err
 	}
-	if err := e.srv.recordAccessMove(e.ctx, e.ws, e.tx, info, key,
-		func() (storage.Row, bool, error) { return e.liveRow(info, key) }, nil, seq, e.actor); err != nil {
+	if err := e.srv.recordAccessMove(e.ctx, e.ws, e.tx, info, key, currentRow, nil, seq, e.actor); err != nil {
 		return err
 	}
 	if err := e.tx.DeleteRow(info.name, key, seq, e.actor); err != nil {

@@ -468,7 +468,7 @@ func drainPull(b *testing.B, srv *server.Server) []byte {
 // collection declared on both surfaces pays for both.
 //
 //   - put — the whole entry set is replaced, because a PUT replaces the whole
-//     row and the write path holds no pre-image to diff against.
+//     row, so any entry can change.
 //   - patch/indexed — the mask names a field an index reads, so the set is
 //     replaced for the same reason a PUT replaces it.
 //   - patch/untouched — the mask reaches no index component, so maintenance is

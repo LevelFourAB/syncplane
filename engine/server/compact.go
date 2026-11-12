@@ -509,12 +509,20 @@ func (s *Server) compactRow(
 	}
 	// Every site that writes a row refreshes its index entries, without
 	// exception. Compaction rewrites only text fields, which can never BE
-	// index components, so the entries it recomputes are byte-identical today
-	// — the call is here so that the invariant is "a row write refreshes the
-	// indexes" rather than "a row write refreshes the indexes unless someone
-	// reasoned it need not", which is the version that rots when what
-	// compaction rewrites changes.
-	if err := info.updateRowIndexes(tx, s.limits, row.Key, msg); err != nil {
+	// index components, and keeps the text they read as, so the entries and
+	// postings it recomputes are the same today — the call is here so that
+	// the invariant is "a row write refreshes the indexes" rather than "a row
+	// write refreshes the indexes unless someone reasoned it need not", which
+	// is the version that rots when what compaction rewrites changes. The
+	// stored row is decoded again for the postings, because the compaction
+	// rewrote msg in place.
+	var prior priorPostings
+	if info.search != nil {
+		if stored, err := info.decode(row.Value); err == nil {
+			prior = info.priorOf(stored)
+		}
+	}
+	if err := info.updateRowIndexes(tx, s.limits, row.Key, prior, msg); err != nil {
 		// A rejection means the row breaks an index limit it was written
 		// before. Its components are as stored, so the entries it already has
 		// are still the right ones, and the compaction goes on without them

@@ -194,6 +194,23 @@ func (t *failureTx) IndexStates(entity string) ([]storage.IndexStatus, error) {
 	return v, t.note(err)
 }
 
+func (t *failureTx) PostingCounts(entity, index string, ranges []storage.IndexRange, max int) ([]int, int, error) {
+	v, rows, err := t.WriteTx.PostingCounts(entity, index, ranges, max)
+	return v, rows, t.note(err)
+}
+
+func (t *failureTx) ScanPostings(
+	entity, index string, all, any []storage.IndexRange, limit int,
+	fn func(rowKey string) error,
+) error {
+	var own error
+	err := t.WriteTx.ScanPostings(entity, index, all, any, limit, func(rowKey string) error {
+		own = fn(rowKey)
+		return own
+	})
+	return t.noteAround(err, own)
+}
+
 func (t *failureTx) NextSeq() (uint64, error) {
 	v, err := t.WriteTx.NextSeq()
 	return v, t.note(err)
@@ -299,6 +316,18 @@ func (t *failureTx) PutIndexEntries(entity, key string, entries []storage.IndexE
 
 func (t *failureTx) DeleteIndexEntries(entity, key string) error {
 	return t.note(t.WriteTx.DeleteIndexEntries(entity, key))
+}
+
+func (t *failureTx) PutPostings(entity, index, key string, remove, add [][]byte) error {
+	return t.note(t.WriteTx.PutPostings(entity, index, key, remove, add))
+}
+
+func (t *failureTx) DeletePostings(entity, index, key string, held [][]byte) error {
+	return t.note(t.WriteTx.DeletePostings(entity, index, key, held))
+}
+
+func (t *failureTx) ClearPostings(entity, index string) error {
+	return t.note(t.WriteTx.ClearPostings(entity, index))
 }
 
 func (t *failureTx) SetIndexState(entity, index, specHash string, ready bool) error {

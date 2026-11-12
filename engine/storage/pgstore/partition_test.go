@@ -71,6 +71,8 @@ var _ = Describe("Postgres partitioning", func() {
 			"idempotency":      4,
 			"index_entries":    4,
 			"consumer_shadows": 4,
+			"posting_rows":     4,
+			"posting_chunks":   4,
 		}))
 	})
 
@@ -106,6 +108,16 @@ var _ = Describe("Postgres partitioning", func() {
 				 GROUP BY p.partstrat`, table).Scan(&strategy, &columns)).To(Succeed())
 			Expect(strategy).To(Equal("h"), "%s must be hash-partitioned", table)
 			Expect(columns).To(Equal([]string{"workspace_id"}), "partition key of %s", table)
+		}
+		// The posting tables hold no workspace_id; they are keyed by scope.
+		for _, table := range []string{"posting_rows", "posting_chunks"} {
+			var columns []string
+			Expect(conn.QueryRow(ctx,
+				`SELECT array_agg(a.attname ORDER BY a.attnum)
+				 FROM pg_partitioned_table p
+				 JOIN pg_attribute a ON a.attrelid = p.partrelid AND a.attnum = ANY(p.partattrs)
+				 WHERE p.partrelid = to_regclass($1) AND p.partstrat = 'h'`, table).Scan(&columns)).To(Succeed())
+			Expect(columns).To(Equal([]string{"scope"}), "partition key of %s", table)
 		}
 	})
 

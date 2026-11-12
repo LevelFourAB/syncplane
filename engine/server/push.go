@@ -1358,7 +1358,11 @@ func (s *Server) applyCrud(
 			prevText, msg.ProtoReflect()); err != nil {
 			return err
 		}
-		if err := info.updateRowIndexes(tx, s.limits, crud.GetKey(), msg); err != nil {
+		stored, baseErr := currentBase()
+		if baseErr != nil {
+			return baseErr
+		}
+		if err := info.updateRowIndexes(tx, s.limits, crud.GetKey(), info.priorOf(stored), msg); err != nil {
 			return err
 		}
 		// Capture last, once every rejection is behind us: a record must
@@ -1454,6 +1458,7 @@ func (s *Server) applyCrud(
 		prevText := info.textSnapshot(base)
 		model := s.catalogPtr().access
 		prevRead := readInputsOf(model, info, base)
+		prior := info.priorOfPatch(base, crud.GetFieldMask().GetPaths())
 		mergers := info.mergers
 		if live && len(info.textFields) > 0 {
 			tw, err := info.textWriteFor(s, ws, tx, crud.GetKey())
@@ -1523,7 +1528,7 @@ func (s *Server) applyCrud(
 		// so a mask that changed nothing an index reads produces the set already
 		// stored, and replacing it would be write amplification for nothing.
 		if info.maskTouchesIndexes(crud.GetFieldMask().GetPaths()) {
-			if err := info.updateRowIndexes(tx, s.limits, crud.GetKey(), base); err != nil {
+			if err := info.updateRowIndexes(tx, s.limits, crud.GetKey(), prior, base); err != nil {
 				return err
 			}
 		} else if err := info.dropForeignIndexes(tx); err != nil {
@@ -1578,7 +1583,17 @@ func (s *Server) applyCrud(
 		if err := info.clearTextFloors(tx, crud.GetKey(), textPaths); err != nil {
 			return err
 		}
-		if err := info.clearRowIndexes(tx, crud.GetKey()); err != nil {
+		// The postings to remove are those of the stored row, which costs a
+		// read of it on an entity with search.
+		var prior priorPostings
+		if info.search != nil {
+			stored, baseErr := currentBase()
+			if baseErr != nil {
+				return baseErr
+			}
+			prior = info.priorOf(stored)
+		}
+		if err := info.clearRowIndexes(tx, crud.GetKey(), prior); err != nil {
 			return err
 		}
 		// The row's history goes with the row: nothing can restore into a

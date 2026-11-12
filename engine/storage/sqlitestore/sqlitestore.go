@@ -68,6 +68,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -484,6 +485,68 @@ CREATE TABLE index_entries (
 	// storage.AppliedMutation). NULL until the client's first push after the
 	// upgrade.
 	`ALTER TABLE clients ADD COLUMN applied BLOB;`,
+	// 9: posting indexes (see postings.go), which hold the search postings
+	// that the generic index tables held before. All index data is dropped
+	// for a rebuild, as in migration 7, and not only the search entries: the
+	// migration cannot tell which index names are search indexes, and the
+	// per-row lists hold the search entries packed among the value entries,
+	// which SQL cannot rewrite. A build after the upgrade writes the value
+	// entries again and the postings into the new tables.
+	//
+	// posting_scopes gives each (workspace, entity, index) a scope id and
+	// holds the next row number of the scope and the number of rows that
+	// have a number. AUTOINCREMENT gives each id one time only, so a scope
+	// that ClearPostings drops is never confused with the one that replaces
+	// it. posting_rows and posting_nums map a row key to
+	// its number and back. posting_heads holds one record per posting key,
+	// WITHOUT ROWID so that a range of keys is a range of the primary key.
+	// posting_chunks is a rowid table, because a chunk of 512 numbers is near
+	// a kilobyte, which a rowid table keeps on its page and a WITHOUT ROWID
+	// table moves in part to an overflow page. A chunk holds its scope, and
+	// posting_chunks_by_scope finds the chunks of a scope, so that dropping a
+	// scope decodes no record and a corrupt one cannot stop it. Only the keys
+	// that many rows hold have chunks, so the index is small.
+	`DELETE FROM index_entries;
+DELETE FROM index_row_entries;
+DELETE FROM index_row_ids;
+DELETE FROM index_row_keys;
+DELETE FROM index_state;
+UPDATE workspaces SET index_build_mark = '';
+CREATE TABLE posting_scopes (
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id TEXT NOT NULL,
+	entity       TEXT NOT NULL,
+	idx          TEXT NOT NULL,
+	next_num     INTEGER NOT NULL DEFAULT 1,
+	row_count    INTEGER NOT NULL DEFAULT 0,
+	UNIQUE (workspace_id, entity, idx)
+);
+CREATE TABLE posting_rows (
+	scope INTEGER NOT NULL,
+	key   TEXT NOT NULL,
+	num   INTEGER NOT NULL,
+	PRIMARY KEY (scope, key)
+) WITHOUT ROWID;
+CREATE TABLE posting_nums (
+	scope INTEGER NOT NULL,
+	num   INTEGER NOT NULL,
+	key   TEXT NOT NULL,
+	PRIMARY KEY (scope, num)
+) WITHOUT ROWID;
+CREATE TABLE posting_heads (
+	scope INTEGER NOT NULL,
+	k     BLOB NOT NULL,
+	cnt   INTEGER NOT NULL,
+	dir   BLOB,
+	tail  BLOB,
+	PRIMARY KEY (scope, k)
+) WITHOUT ROWID;
+CREATE TABLE posting_chunks (
+	id    INTEGER PRIMARY KEY,
+	scope INTEGER NOT NULL,
+	nums  BLOB NOT NULL
+);
+CREATE INDEX posting_chunks_by_scope ON posting_chunks (scope);`,
 }
 
 // workspaceTables names every table that holds state of one workspace, keyed
@@ -493,7 +556,9 @@ CREATE TABLE index_entries (
 // it holds the mark DeleteWorkspace leaves. index_entries, index_row_keys and
 // index_row_entries have no such column: their rows belong to a workspace
 // through index_scopes and index_row_ids, and DeleteWorkspace deletes them
-// through those before it empties them.
+// through those before it empties them. The posting tables other than
+// posting_scopes belong to a workspace through a scope, and DeleteWorkspace
+// drops each scope of the workspace with its rows first.
 var workspaceTables = []string{
 	"workspaces",
 	"rows",
@@ -504,6 +569,7 @@ var workspaceTables = []string{
 	"index_scopes",
 	"index_row_ids",
 	"index_state",
+	"posting_scopes",
 	"consumer_positions",
 	"consumer_shadows",
 	"cursor_state",
@@ -523,6 +589,18 @@ type Store struct {
 	leases *lease.Local
 	// rowKeys resolves the row ids that index entries hold (see ScanIndex).
 	rowKeys *rowKeyCache
+	// postingKeys resolves the row numbers that postings hold (see
+	// ScanPostings).
+	postingKeys *postingKeyCache
+	// postingForgets is odd while a write transaction that forgot posting
+	// rows commits, and grows by two with each such transaction (see
+	// WithWriteTx). A read transaction adds to postingKeys only while it is
+	// even and holds the value the transaction read before it began.
+	postingForgets atomic.Uint64
+	// afterPostingCommit, when set, runs between the commit of a transaction
+	// that forgot posting rows and the end of its cache removals. Tests use
+	// it to read in that interval.
+	afterPostingCommit func()
 
 	// The maintenance loop: stop asks it to return and done reports that it
 	// has. Both are nil when
@@ -716,8 +794,9 @@ func Open(path string, opts ...Option) (*Store, error) {
 	s := &Store{
 		read: read, write: write,
 		readStmts: readStmts, writeStmts: writeStmts,
-		leases:  lease.NewLocal(),
-		rowKeys: newRowKeyCache(rowKeyCacheCap),
+		leases:      lease.NewLocal(),
+		rowKeys:     newRowKeyCache(rowKeyCacheCap),
+		postingKeys: newPostingKeyCache(rowKeyCacheCap),
 	}
 	// Creating the schema creates indexes, which is one of the moments SQLite
 	// names for re-analysis; it is also the only pass a short-lived process
@@ -969,6 +1048,9 @@ func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(stor
 	// Before BeginTx, because preparing needs a connection of its own and this
 	// goroutine is about to hold one (the only one, for an in-memory store).
 	s.readStmts.warm(ctx)
+	// Read before BeginTx: a forget committed after this read moves the count
+	// past gen, whether or not this transaction's snapshot holds it.
+	gen := s.postingForgets.Load()
 	// ReadOnly keeps modernc on a plain deferred BEGIN; without it the writer
 	// DSN's _txlock=immediate would make every read take the write lock (and
 	// an in-memory store, whose reads run on the writer pool, serialize).
@@ -979,7 +1061,8 @@ func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(stor
 	defer tx.Rollback()
 	return fn(readOnlyTx{&sqliteTx{
 		tx: tx, stmts: s.readStmts, ws: workspaceID,
-		rowKeys: s.rowKeys, learnRowKeys: true,
+		rowKeys: s.rowKeys, postingKeys: s.postingKeys, learnRowKeys: true,
+		postingForgets: &s.postingForgets, postingGen: gen,
 	}})
 }
 
@@ -996,14 +1079,46 @@ func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(sto
 	// transaction's first actual write. A closure that only reads (a read-only
 	// Mutate, a push whose every mutation was already applied) must leave the
 	// workspace unregistered — see the WithWriteTx contract.
-	st := &sqliteTx{tx: tx, stmts: s.writeStmts, ws: workspaceID, rowKeys: s.rowKeys}
+	st := &sqliteTx{tx: tx, stmts: s.writeStmts, ws: workspaceID, rowKeys: s.rowKeys, postingKeys: s.postingKeys}
 	if err := fn(st); err != nil {
 		return err
 	}
 	if err := st.commitLineage(); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if len(st.forgotten) == 0 {
+		return tx.Commit()
+	}
+	// A transaction that forgot posting rows must not let the cache name them
+	// once it commits. The count goes odd before the commit and even after
+	// it, and a reader adds a mapping only while the count is even and is the
+	// one it read before it began (see sqliteTx.resolvePostingNums):
+	//
+	//   - A reader that began before the first increment holds a count the
+	//     store has left, so it adds nothing from here on.
+	//   - While the count is odd, no reader adds anything, so after the
+	//     removals below no mapping of a forgotten row is in the cache from
+	//     before the commit until after it, and no reader can get one in the
+	//     time between the commit and the second removals.
+	//   - A reader that reads the even count after the commit began after it,
+	//     so its snapshot does not hold the forgotten rows.
+	//
+	// The second removals take what a reader added before it saw the odd
+	// count. When the commit fails, the removals cost cache misses only, and
+	// the second increment still makes the count even again.
+	s.postingForgets.Add(1)
+	for n := range st.forgotten {
+		s.postingKeys.remove(n)
+	}
+	err = tx.Commit()
+	if s.afterPostingCommit != nil {
+		s.afterPostingCommit()
+	}
+	s.postingForgets.Add(1)
+	for n := range st.forgotten {
+		s.postingKeys.remove(n)
+	}
+	return err
 }
 
 // DeleteWorkspace empties every table in workspaceTables for the workspace
@@ -1025,6 +1140,22 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 				workspaceID,
 			); err != nil {
 				return fmt.Errorf("sqlitestore: delete workspace %q from %s: %w", workspaceID, table, err)
+			}
+		}
+		var scopes []int64
+		if err := t.scanRows(`SELECT id FROM posting_scopes WHERE workspace_id = ?`, []any{workspaceID}, func(rows *sql.Rows) error {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			scopes = append(scopes, id)
+			return nil
+		}); err != nil {
+			return fmt.Errorf("sqlitestore: delete workspace %q from posting_scopes: %w", workspaceID, err)
+		}
+		for _, id := range scopes {
+			if err := t.dropPostingScope(id); err != nil {
+				return fmt.Errorf("sqlitestore: delete workspace %q postings: %w", workspaceID, err)
 			}
 		}
 		for _, table := range workspaceTables {
@@ -1402,6 +1533,17 @@ type sqliteTx struct {
 	// reads ids that a later rollback, or a rollback to a savepoint, can free.
 	rowKeys      *rowKeyCache
 	learnRowKeys bool
+	// postingKeys is the Store's cache of posting row numbers (see
+	// ScanPostings), which this transaction may add to under the rule of
+	// learnRowKeys and while postingForgets still holds postingGen.
+	postingKeys    *postingKeyCache
+	postingForgets *atomic.Uint64
+	postingGen     uint64
+	// forgotten holds the posting rows this write transaction forgot, whose
+	// mappings the Store removes from postingKeys once it commits. A
+	// savepoint rollback leaves them in: removing a mapping that is still
+	// right costs a read, not a wrong answer.
+	forgotten map[postingNum]struct{}
 	// savepoint nesting depth; names savepoints sp1, sp2, ...
 	spDepth int
 	// registered memoizes register's INSERT so a write burst does not repeat
