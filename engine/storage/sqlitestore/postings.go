@@ -77,8 +77,10 @@ import (
 // the last chunk. A number added above the last chunk goes into the tail. A
 // full tail moves into the last chunk when it fits, or else becomes a new
 // chunk. A number added below goes into the chunk whose range holds it, and a
-// chunk that grows past postingChunkCap splits in half. A chunk that shrinks
-// below postingMergeBelow merges with a neighbour when the two fit in one.
+// chunk that grows past postingChunkCap splits in half. A chunk that a removal
+// leaves below postingMergeBelow merges with the chunk before it or the chunk
+// after it when the two fit in one, and with the smaller of them when it fits
+// in with both.
 //
 // The count of a head is the number of numbers it holds. PostingCounts reads
 // it without the chunks, and counts a page key from its page without decoding
@@ -90,17 +92,20 @@ import (
 // posting_nums, so a number that the caller did not remove from a page or a
 // head names no row key any more, and ScanPostings skips it.
 
-const (
+// The sizes of the records of a key with a head. They are variables so that a
+// spec can make them small.
+var (
 	// postingTailCap is how many numbers a head holds before they move into a
 	// chunk. A key with a head and few rows is then one record.
 	postingTailCap = 256
 	// postingChunkCap is how many numbers a chunk holds before it splits.
 	postingChunkCap = 512
-	// postingMergeBelow is the size below which a chunk merges with a
-	// neighbour. It is far below half of postingChunkCap, so that a chunk
-	// that a split made does not merge again on the next removal.
-	postingMergeBelow = postingChunkCap / 4
 )
+
+// postingMergeBelow is the size below which a chunk merges with a neighbour.
+// It is far below half of postingChunkCap, so that a chunk that a split made
+// does not merge again on the next removal.
+func postingMergeBelow() int { return postingChunkCap / 4 }
 
 // postingPageBudget is the most bytes a page body with two keys or more
 // takes, and postingPageMaxRows the most row numbers a key in a page has.
@@ -231,7 +236,7 @@ func decodeDir(b []byte) ([]*postingChunk, error) {
 		if d == 0 || d > math.MaxInt64-uint64(prev) {
 			return nil, fmt.Errorf("chunk bound delta %d after %d is out of range", d, prev)
 		}
-		if size == 0 || size > d || size > 2*postingChunkCap {
+		if size == 0 || size > d || size > uint64(2*postingChunkCap) {
 			return nil, fmt.Errorf("chunk of %d row numbers", size)
 		}
 		prev += int64(d)
@@ -559,7 +564,7 @@ func (t *sqliteTx) removePostingNum(h *postingHead, num int64) error {
 			h.freed = append(h.freed, c.id)
 		}
 		h.chunks = slices.Delete(h.chunks, i, i+1)
-	case c.n < postingMergeBelow:
+	case c.n < postingMergeBelow():
 		return t.mergePostingChunk(h, i)
 	default:
 		c.hi = c.nums[c.n-1]
@@ -567,17 +572,28 @@ func (t *sqliteTx) removePostingNum(h *postingHead, num int64) error {
 	return nil
 }
 
-// mergePostingChunk merges the small chunk at position i with its right
-// neighbour, or with its left one when it is the last chunk, when the two fit
-// in one chunk. The left chunk keeps its record and the right one is freed.
+// mergePostingChunk merges the small chunk at position i with the chunk
+// before it or the chunk after it, when the two fit in one chunk. When it
+// fits in with both, it takes the smaller one, and the one after it when the
+// two have the same size. The left chunk of the two keeps its record and the
+// right one is freed.
 func (t *sqliteTx) mergePostingChunk(h *postingHead, i int) error {
 	c := h.chunks[i]
 	c.hi = c.nums[c.n-1]
-	j := i + 1
-	if j == len(h.chunks) {
-		j = i - 1
+	// Both sides are candidates. Rows mostly go in the order they came, so
+	// the chunk after this one is often full now and small later, when this
+	// one changes no more. That chunk then finds this one on its left. The
+	// directory has the size of each chunk, so the choice reads no chunk.
+	j := -1
+	for _, n := range [2]int{i + 1, i - 1} {
+		if n < 0 || n >= len(h.chunks) || h.chunks[n].n+c.n > postingChunkCap {
+			continue
+		}
+		if j < 0 || h.chunks[n].n < h.chunks[j].n {
+			j = n
+		}
 	}
-	if j < 0 || h.chunks[j].n+c.n > postingChunkCap {
+	if j < 0 {
 		return nil
 	}
 	left, right := h.chunks[min(i, j)], h.chunks[max(i, j)]

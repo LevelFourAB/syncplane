@@ -1952,6 +1952,15 @@ var _ = Describe("posting pages in the store", func() {
 		Entry("with the shipped limits of held pages", 128, 16<<20),
 		Entry("with small limits of held pages", 3, 900),
 	)
+
+	It("agrees with an in-memory model under random calls with small chunks", func() {
+		// A tail of up to 2 numbers and chunks of up to 8, which merge with
+		// one number, for keys that get a head at 5 rows.
+		setPostingFormat(48, 4)
+		setPostingChunks(2, 8)
+		seed := uint64(GinkgoRandomSeed())
+		checkModel(ctx, openStore(), rand.New(rand.NewPCG(seed, seed*7+1)), 120)
+	})
 })
 
 func byteKeys(ks ...string) [][]byte {
@@ -1995,6 +2004,14 @@ func setPostingFormat(pageBudget, pageRows int) {
 	wasBudget, wasRows := postingPageBudget, postingPageMaxRows
 	postingPageBudget, postingPageMaxRows = pageBudget, pageRows
 	DeferCleanup(func() { postingPageBudget, postingPageMaxRows = wasBudget, wasRows })
+}
+
+// setPostingChunks sets the most numbers of a tail and of a chunk for the
+// rest of the spec. A chunk merges below a quarter of chunkCap.
+func setPostingChunks(tailCap, chunkCap int) {
+	wasTail, wasChunk := postingTailCap, postingChunkCap
+	postingTailCap, postingChunkCap = tailCap, chunkCap
+	DeferCleanup(func() { postingTailCap, postingChunkCap = wasTail, wasChunk })
 }
 
 // setPostingHeld sets the most keys of one held page and the most bytes of
