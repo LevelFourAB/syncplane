@@ -87,6 +87,7 @@ var workspaceTables = []string{
 // empties them for the workspace's scopes before it deletes the scopes.
 var scopedTables = []string{
 	"posting_chunks",
+	"posting_pages",
 	"posting_rows",
 }
 
@@ -150,7 +151,8 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 // baselineDDL is migration 1. The %[1]s after five of the tables is where the
 // partitioning clause lands; see partitionedTables for which five and why.
-// %[2]s and %[3]s do the same for the two tables of scopePartitionedTables.
+// %[2]s, %[3]s and %[4]s do the same for the three tables of
+// scopePartitionedTables.
 const baselineDDL = `
 CREATE TABLE workspaces (
 	workspace_id        TEXT COLLATE "C" NOT NULL,
@@ -319,8 +321,8 @@ CREATE TABLE consumer_shadows (
 -- evicted at any time, so a deployment large enough for its churn to matter
 -- points it at something else entirely.
 -- The posting indexes (see storage.WriteTx.PutPostings), stored as packed
--- chunks; postings.go describes the format. posting_scopes gives each
--- (workspace, entity, index) an int scope id, and the other two tables are
+-- pages and chunks; postings.go describes the format. posting_scopes gives each
+-- (workspace, entity, index) an int scope id, and the other three tables are
 -- keyed by it rather than by workspace_id, which keeps the id text out of the
 -- small tuple of a rare key. A partitioned layout hashes them by scope (see
 -- scopePartitionedTables), and every statement binds scope to equality.
@@ -359,6 +361,18 @@ CREATE TABLE posting_chunks (
 	ids   BYTEA NOT NULL,
 	PRIMARY KEY (scope, k, chunk)
 )%[3]s;
+-- lo and body are BYTEA for the reason index_entries.k is. fillfactor 70 for
+-- the reason of posting_chunks. body is never compressed or moved to TOAST:
+-- a page is small, and an edit writes the whole body again, so compression
+-- costs CPU on each write and saves little. A partition takes the storage of
+-- the column from the parent when it is created.
+CREATE TABLE posting_pages (
+	scope INTEGER NOT NULL,
+	lo    BYTEA NOT NULL,
+	body  BYTEA NOT NULL,
+	PRIMARY KEY (scope, lo)
+)%[4]s;
+ALTER TABLE posting_pages ALTER COLUMN body SET STORAGE PLAIN;
 
 CREATE TABLE cursor_state (
 	workspace_id TEXT COLLATE "C" NOT NULL,
@@ -399,11 +413,15 @@ var partitionedTables = []string{
 var scopePartitionedTables = []struct{ name, with string }{
 	{"posting_rows", ""},
 	{"posting_chunks", postingChunksWith},
+	{"posting_pages", postingPagesWith},
 }
 
 // postingChunksWith is the storage clause of posting_chunks and of each of its
-// partitions.
-const postingChunksWith = " WITH (fillfactor = 70)"
+// partitions, and postingPagesWith the one of posting_pages.
+const (
+	postingChunksWith = " WITH (fillfactor = 70)"
+	postingPagesWith  = " WITH (fillfactor = 70)"
+)
 
 // maxPartitions caps WithPartitions. The modulus multiplies by
 // len(partitionedTables), and again by the indexes each of them carries, so
@@ -437,7 +455,7 @@ func (l layout) partitionBy() string {
 }
 
 // baselineSchema is migration 1 under the given layout: the tables, then the
-// partitions of the seven that have them.
+// partitions of the tables in partitionedTables and scopePartitionedTables.
 //
 // Partitions come after the indexes rather than before, which is the same
 // schema either way — an index on a partitioned parent is created on every
@@ -445,11 +463,11 @@ func (l layout) partitionBy() string {
 func baselineSchema(l layout) string {
 	var b strings.Builder
 	if l.partitions == 0 {
-		fmt.Fprintf(&b, baselineDDL, "", "", postingChunksWith)
+		fmt.Fprintf(&b, baselineDDL, "", "", postingChunksWith, postingPagesWith)
 		return b.String()
 	}
 	byScope := " PARTITION BY HASH (scope)"
-	fmt.Fprintf(&b, baselineDDL, l.partitionBy(), byScope, byScope)
+	fmt.Fprintf(&b, baselineDDL, l.partitionBy(), byScope, byScope, byScope)
 	// Zero-padded to the width of the largest remainder, so the partitions of
 	// a table sort in the order they are numbered wherever they are listed.
 	width := len(strconv.Itoa(l.partitions - 1))
@@ -591,11 +609,12 @@ func schemaVersion(ctx context.Context, q querier) (int, error) {
 //   - The lineage that partitioned every table by an app namespace, which the
 //     workspaces table carries a namespace column of. The namespace is half of
 //     every primary key, and of the partition key of five of the tables.
-//   - The baseline before the posting tables, or the one with 32-bit row
-//     numbers in them. Its workspaces table exists, and posting_rows.num is
-//     missing or not BIGINT. The posting tables are part of the baseline
-//     because a partitioned layout partitions them with the modulus only the
-//     baseline knows.
+//   - The baseline before the posting tables, the one with 32-bit row
+//     numbers in them, or the one before posting_pages. Its workspaces table
+//     exists, and posting_rows.num is missing or not BIGINT, or posting_pages
+//     is missing. The posting tables are part of the baseline because a
+//     partitioned layout partitions them with the modulus only the baseline
+//     knows.
 //
 // It is checked before the ledger version, because such a database's version
 // numbers do not count within this lineage: the namespace lineage sits above
@@ -604,7 +623,7 @@ func schemaVersion(ctx context.Context, q querier) (int, error) {
 // Nothing upgrades either of them, so it has to be re-created, at the cost of
 // a re-bootstrap for every client of the workspaces it held.
 func checkLineage(ctx context.Context, q querier) error {
-	var namespaced, populated, postings bool
+	var namespaced, populated, postings, pages bool
 	err := q.QueryRow(ctx, `
 		SELECT
 			EXISTS (
@@ -617,8 +636,11 @@ func checkLineage(ctx context.Context, q querier) error {
 			EXISTS (
 				SELECT 1 FROM information_schema.columns
 				WHERE table_schema = current_schema()
-				  AND table_name = 'posting_rows' AND column_name = 'num' AND data_type = 'bigint')`,
-	).Scan(&namespaced, &populated, &postings)
+				  AND table_name = 'posting_rows' AND column_name = 'num' AND data_type = 'bigint'),
+			EXISTS (
+				SELECT 1 FROM information_schema.tables
+				WHERE table_schema = current_schema() AND table_name = 'posting_pages')`,
+	).Scan(&namespaced, &populated, &postings, &pages)
 	if err != nil {
 		return fmt.Errorf("pgstore: read schema lineage: %w", err)
 	}
@@ -627,6 +649,9 @@ func checkLineage(ctx context.Context, q querier) error {
 	}
 	if populated && !postings {
 		return fmt.Errorf("pgstore: database was created by an earlier baseline without the 64-bit posting tables; it cannot be upgraded in place and must be re-created")
+	}
+	if populated && !pages {
+		return fmt.Errorf("pgstore: database was created by an earlier baseline without the posting_pages table; it cannot be upgraded in place and must be re-created")
 	}
 	return nil
 }

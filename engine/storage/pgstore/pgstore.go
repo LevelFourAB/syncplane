@@ -215,7 +215,7 @@ func WithReplicaMaxConns(n int32) Option {
 //
 // The tables rows, field_deltas, idempotency, index_entries and
 // consumer_shadows are partitioned by workspace_id, and the posting tables
-// posting_rows and posting_chunks by their posting scope. The modulus must be
+// posting_rows, posting_chunks and posting_pages by their posting scope. The modulus must be
 // a power of two up to 1024; zero, the default, leaves each table whole, and
 // Open, Migrate and Statements reject any other value.
 //

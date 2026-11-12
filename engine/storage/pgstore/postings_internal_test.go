@@ -13,6 +13,8 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/levelfourab/syncplane/engine/internal/pgtest"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
@@ -20,14 +22,15 @@ import (
 // The conformance suite pins what the posting methods return. These specs pin
 // the chunk format under them: they make chunks small, so that a few rows
 // split and merge them, and check the stored tuples as well as the answers.
+// They put every key in chunks; postings_pages_internal_test.go pins the
+// pages.
 var _ = Describe("Postgres posting chunks", func() {
 	ctx := context.Background()
 
-	// smallChunks makes chunks hold n row numbers for the rest of the spec.
+	// smallChunks makes chunks hold n row numbers and puts every key in
+	// chunks for the rest of the spec.
 	smallChunks := func(n int) {
-		was := postingChunkMax
-		postingChunkMax = n
-		DeferCleanup(func() { postingChunkMax = was })
+		setPostingFormat(n, postingPageBudget, 0)
 	}
 
 	openStore := func(opts ...Option) *Store {
@@ -163,31 +166,39 @@ var _ = Describe("Postgres posting chunks", func() {
 		Expect(scan(store, "ws", []storage.IndexRange{one(a), one(b)}, nil, 0)).To(HaveLen(12))
 	})
 
-	It("stores keys bytewise, with 0x00 and 0xff bytes and at the longest length", func() {
-		store := openStore()
-		long := bytes.Repeat([]byte{0xff}, storage.MaxIndexEntryBytes)
-		keys := [][]byte{{0x00}, {0x00, 0x00}, {0x61}, {0x61, 0x00}, {0xff}, {0xff, 0x00}, long}
-		write(store, "ws", func(tx storage.WriteTx) error {
-			for i, k := range keys {
-				if err := tx.PutPostings("doc", "search", fmt.Sprintf("r%d", i), nil, [][]byte{k}); err != nil {
-					return err
+	DescribeTable("stores keys bytewise, with 0x00 and 0xff bytes and at the longest length",
+		func(pageRows int) {
+			setPostingFormat(postingChunkMax, postingPageBudget, pageRows)
+			store := openStore()
+			long := bytes.Repeat([]byte{0xff}, storage.MaxIndexEntryBytes)
+			keys := [][]byte{{0x00}, {0x00, 0x00}, {0x61}, {0x61, 0x00}, {0xff}, {0xff, 0x00}, long}
+			write(store, "ws", func(tx storage.WriteTx) error {
+				for i, k := range keys {
+					if err := tx.PutPostings("doc", "search", fmt.Sprintf("r%d", i), nil, [][]byte{k}); err != nil {
+						return err
+					}
 				}
+				return nil
+			})
+			for i, k := range keys {
+				Expect(scan(store, "ws", []storage.IndexRange{one(k)}, nil, 0)).To(Equal([]string{fmt.Sprintf("r%d", i)}), "key %x", k)
 			}
-			return nil
-		})
-		for i, k := range keys {
-			Expect(scan(store, "ws", []storage.IndexRange{one(k)}, nil, 0)).To(Equal([]string{fmt.Sprintf("r%d", i)}), "key %x", k)
-		}
-		Expect(counts(store, "ws", []storage.IndexRange{
-			{Lo: []byte{0x00}, Hi: []byte{0x01}},
-			{Lo: []byte{0xff}},
-			{Hi: []byte{0x61, 0x00}},
-			{},
-		}, 0)).To(Equal([]int{2, 3, 3, 7}))
-		Expect(scan(store, "ws", nil, []storage.IndexRange{{Lo: []byte{0xff}}}, 0)).To(Equal([]string{"r4", "r5", "r6"}))
-	})
+			Expect(counts(store, "ws", []storage.IndexRange{
+				{Lo: []byte{0x00}, Hi: []byte{0x01}},
+				{Lo: []byte{0xff}},
+				{Hi: []byte{0x61, 0x00}},
+				{},
+			}, 0)).To(Equal([]int{2, 3, 3, 7}))
+			Expect(scan(store, "ws", nil, []storage.IndexRange{{Lo: []byte{0xff}}}, 0)).To(Equal([]string{"r4", "r5", "r6"}))
+			checkChunks(ctx, store)
+		},
+		Entry("in pages", 128),
+		Entry("in chunks", 0),
+	)
 
 	It("keeps two workspaces apart and empties one on DeleteWorkspace", func() {
+		// The key of each workspace is in a page.
+		setPostingFormat(postingChunkMax, postingPageBudget, 128)
 		store := openStore()
 		for _, ws := range []string{"ws1", "ws2"} {
 			write(store, ws, func(tx storage.WriteTx) error {
@@ -198,10 +209,10 @@ var _ = Describe("Postgres posting chunks", func() {
 		Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
 		Expect(scan(store, "ws1", nil, []storage.IndexRange{{}}, 0)).To(BeEmpty())
 		Expect(scan(store, "ws2", nil, []storage.IndexRange{{}}, 0)).To(Equal([]string{"row-ws2"}))
-		var chunks, rows, scopes int
-		Expect(store.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM posting_chunks), (SELECT count(*) FROM posting_rows),
-			(SELECT count(*) FROM posting_scopes)`).Scan(&chunks, &rows, &scopes)).To(Succeed())
-		Expect([]int{chunks, rows, scopes}).To(Equal([]int{1, 1, 1}), "only ws2's tuples are left")
+		var chunks, pages, rows, scopes int
+		Expect(store.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM posting_chunks), (SELECT count(*) FROM posting_pages),
+			(SELECT count(*) FROM posting_rows), (SELECT count(*) FROM posting_scopes)`).Scan(&chunks, &pages, &rows, &scopes)).To(Succeed())
+		Expect([]int{chunks, pages, rows, scopes}).To(Equal([]int{0, 1, 1, 1}), "only ws2's tuples are left")
 	})
 
 	It("rewinds logged calls with a savepoint, also after a read wrote them", func() {
@@ -363,6 +374,21 @@ var _ = Describe("Postgres posting chunks", func() {
 		Entry("unpartitioned", uint64(1)),
 		Entry("unpartitioned, other seed", uint64(2)),
 		Entry("partitioned", uint64(3), WithPartitions(2)),
+	)
+
+	DescribeTable("agree with an in-memory model under random calls, with keys in pages and chunks",
+		func(seed uint64, opts ...Option) {
+			// Small pages, and keys that move to chunks at 4 rows and back
+			// below 2, so that the random calls split, merge and move often.
+			setPostingFormat(2, 24, 4)
+			store := openStore(opts...)
+			checkModel(ctx, store, rand.New(rand.NewPCG(seed, seed*7+1)), 200)
+		},
+		Entry("unpartitioned", uint64(11)),
+		Entry("unpartitioned, other seed", uint64(12)),
+		Entry("unpartitioned, third seed", uint64(13)),
+		Entry("partitioned", uint64(14), WithPartitions(2)),
+		Entry("partitioned, other seed", uint64(15), WithPartitions(2)),
 	)
 })
 
@@ -549,6 +575,9 @@ func checkModel(ctx context.Context, store *Store, rng *rand.Rand, txs int) {
 		})).To(Succeed())
 		models[ws] = next
 		checkChunks(ctx, store)
+		for _, ws := range workspaces {
+			Expect(storedPostings(ctx, store, ws)).To(Equal(models[ws].nonEmpty()), "stored postings of %s", ws)
+		}
 
 		for _, ws := range workspaces {
 			m := models[ws]
@@ -598,6 +627,88 @@ func checkModel(ctx context.Context, store *Store, rng *rand.Rand, txs int) {
 	}
 }
 
+// setPostingFormat sets the most row numbers of a chunk, the page budget and
+// the most row numbers of a page key for the rest of the spec. A pageRows of
+// 0 puts every key in chunks.
+func setPostingFormat(chunkMax, pageBudget, pageRows int) {
+	wasChunk, wasBudget, wasRows := postingChunkMax, postingPageBudget, postingPageMaxRows
+	postingChunkMax, postingPageBudget, postingPageMaxRows = chunkMax, pageBudget, pageRows
+	DeferCleanup(func() {
+		postingChunkMax, postingPageBudget, postingPageMaxRows = wasChunk, wasBudget, wasRows
+	})
+}
+
+func (m postingModel) nonEmpty() postingModel {
+	out := postingModel{}
+	for r, ks := range m {
+		if len(ks) > 0 {
+			out[r] = ks
+		}
+	}
+	return out
+}
+
+// storedPostings reads the postings of the index doc/search of ws from the
+// stored pages, chunks and row numbers.
+func storedPostings(ctx context.Context, store *Store, ws string) postingModel {
+	GinkgoHelper()
+	out := postingModel{}
+	var scope int32
+	err := store.pool.QueryRow(ctx, `SELECT scope FROM posting_scopes WHERE workspace_id = $1 AND entity = 'doc' AND idx = 'search'`, ws).Scan(&scope)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return out
+	}
+	Expect(err).NotTo(HaveOccurred())
+	keyOf := map[int64]string{}
+	rows, err := store.pool.Query(ctx, `SELECT num, key FROM posting_rows WHERE scope = $1`, scope)
+	Expect(err).NotTo(HaveOccurred())
+	for rows.Next() {
+		var (
+			num int64
+			key string
+		)
+		Expect(rows.Scan(&num, &key)).To(Succeed())
+		keyOf[num] = key
+	}
+	Expect(rows.Err()).NotTo(HaveOccurred())
+	hold := func(k []byte, nums []int64) {
+		for _, n := range nums {
+			key, ok := keyOf[n]
+			Expect(ok).To(BeTrue(), "number %d of key %x has no row", n, k)
+			if out[key] == nil {
+				out[key] = map[string]bool{}
+			}
+			out[key][string(k)] = true
+		}
+	}
+	rows, err = store.pool.Query(ctx, `SELECT k, chunk, ids FROM posting_chunks WHERE scope = $1 AND chunk >= 0`, scope)
+	Expect(err).NotTo(HaveOccurred())
+	for rows.Next() {
+		var (
+			k, ids []byte
+			chunk  int64
+		)
+		Expect(rows.Scan(&k, &chunk, &ids)).To(Succeed())
+		nums, err := decodeIDs(ids, chunk, nil)
+		Expect(err).NotTo(HaveOccurred())
+		hold(k, nums)
+	}
+	Expect(rows.Err()).NotTo(HaveOccurred())
+	rows, err = store.pool.Query(ctx, `SELECT body FROM posting_pages WHERE scope = $1`, scope)
+	Expect(err).NotTo(HaveOccurred())
+	for rows.Next() {
+		var body []byte
+		Expect(rows.Scan(&body)).To(Succeed())
+		es, err := decodePage(body)
+		Expect(err).NotTo(HaveOccurred())
+		for _, e := range es {
+			hold(e.k, e.nums)
+		}
+	}
+	Expect(rows.Err()).NotTo(HaveOccurred())
+	return out
+}
+
 func chunkCount(ctx context.Context, store *Store) int {
 	GinkgoHelper()
 	var n int
@@ -605,12 +716,18 @@ func chunkCount(ctx context.Context, store *Store) int {
 	return n
 }
 
-// checkChunks checks the format of every stored chunk: each key with postings
-// has a chunk 0, which is the only chunk that may be empty and only while the
-// key has other chunks; a header exists exactly when a key has several chunks, and
-// lists them and their total; each chunk holds sorted numbers within its span,
-// as many as its n says, and no more than a chunk may hold; and each number
-// has a row.
+// checkChunks checks the format of every stored chunk and page.
+//
+// Chunks: each key with postings has a chunk 0, which is the only chunk that
+// may be empty and only while the key has other chunks; a header exists
+// exactly when a key has several chunks, and lists them and their total; each
+// chunk holds sorted numbers within its span, as many as its n says, and no
+// more than a chunk may hold; and each number has a row.
+//
+// Pages: each page decodes and holds one key or more, in order, all at or
+// above its lo and below the lo of the next page; a page of two keys or more
+// is within the budget; each key has one to postingPageMaxRows sorted
+// numbers, each with a row; and no key is in a page and in chunks.
 func checkChunks(ctx context.Context, store *Store) {
 	GinkgoHelper()
 	rows, err := store.pool.Query(ctx, `SELECT scope, k, chunk, n, ids FROM posting_chunks ORDER BY scope, k, chunk`)
@@ -697,5 +814,46 @@ func checkChunks(ctx context.Context, store *Store) {
 		listed, err := decodeIDs(header.ids, 0, nil)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(listed).To(Equal(starts), "header chunk list of key %x", ref.k)
+	}
+
+	pages, err := store.pool.Query(ctx, `SELECT scope, lo, body FROM posting_pages ORDER BY scope, lo`)
+	Expect(err).NotTo(HaveOccurred())
+	type page struct {
+		scope    int32
+		lo, body []byte
+	}
+	var all []page
+	for pages.Next() {
+		var pg page
+		Expect(pages.Scan(&pg.scope, &pg.lo, &pg.body)).To(Succeed())
+		all = append(all, pg)
+	}
+	Expect(pages.Err()).NotTo(HaveOccurred())
+	for i, pg := range all {
+		es, err := decodePage(pg.body)
+		Expect(err).NotTo(HaveOccurred(), "scope %d page %x", pg.scope, pg.lo)
+		Expect(es).NotTo(BeEmpty(), "scope %d page %x is empty", pg.scope, pg.lo)
+		if len(es) > 1 {
+			Expect(len(pg.body)).To(BeNumerically("<=", postingPageBudget), "scope %d page %x", pg.scope, pg.lo)
+		}
+		Expect(bytes.Compare(es[0].k, pg.lo)).To(BeNumerically(">=", 0), "scope %d page %x starts below its lo", pg.scope, pg.lo)
+		if i+1 < len(all) && all[i+1].scope == pg.scope {
+			Expect(bytes.Compare(es[len(es)-1].k, all[i+1].lo)).To(BeNumerically("<", 0),
+				"scope %d page %x reaches into the next page", pg.scope, pg.lo)
+		}
+		for j, e := range es {
+			if j > 0 {
+				Expect(bytes.Compare(es[j-1].k, e.k)).To(BeNumerically("<", 0))
+			}
+			Expect(e.nums).NotTo(BeEmpty())
+			Expect(len(e.nums)).To(BeNumerically("<=", postingPageMaxRows), "page key %x", e.k)
+			Expect(slices.IsSorted(e.nums)).To(BeTrue())
+			Expect(slices.Compact(slices.Clone(e.nums))).To(HaveLen(len(e.nums)))
+			for _, id := range e.nums {
+				Expect(nums[pg.scope][id]).To(BeTrue(), "number %d of page key %x has no row", id, e.k)
+			}
+			_, inChunks := byKey[keyRef{pg.scope, string(e.k)}]
+			Expect(inChunks).To(BeFalse(), "key %x is in a page and in chunks", e.k)
+		}
 	}
 }

@@ -263,8 +263,9 @@ var _ = Describe("Postgres migrations", func() {
 
 	DescribeTable("refuses a database that an earlier baseline created",
 		// Such a database is at this binary's ledger version but has no
-		// posting tables, or has them with 32-bit row numbers. Serving it
-		// would fail later, in the first search write.
+		// posting tables, has them with 32-bit row numbers, or has no
+		// posting_pages. Serving it would fail later, in the first search
+		// write.
 		func(earlier string, opts ...pgstore.Option) {
 			dsn := pgtest.DSN()
 			Expect(pgstore.Migrate(ctx, dsn)).To(Succeed())
@@ -279,12 +280,17 @@ var _ = Describe("Postgres migrations", func() {
 			Expect(err).To(MatchError(ContainSubstring("must be re-created")))
 		},
 		Entry("without posting tables, migrating at boot",
-			`DROP TABLE posting_chunks, posting_rows, posting_scopes; DROP SEQUENCE posting_scope_ids`),
+			`DROP TABLE posting_chunks, posting_pages, posting_rows, posting_scopes; DROP SEQUENCE posting_scope_ids`),
 		Entry("without posting tables, verifying at boot",
-			`DROP TABLE posting_chunks, posting_rows, posting_scopes; DROP SEQUENCE posting_scope_ids`,
+			`DROP TABLE posting_chunks, posting_pages, posting_rows, posting_scopes; DROP SEQUENCE posting_scope_ids`,
 			pgstore.WithoutMigrations()),
 		Entry("with 32-bit row numbers",
 			`ALTER TABLE posting_rows ALTER COLUMN num TYPE INTEGER`),
+		Entry("without posting_pages, migrating at boot",
+			`DROP TABLE posting_pages`),
+		Entry("without posting_pages, verifying at boot",
+			`DROP TABLE posting_pages`,
+			pgstore.WithoutMigrations()),
 	)
 
 	Describe("a ledger ahead of this binary", func() {

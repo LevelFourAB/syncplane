@@ -23,7 +23,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
-// TestPostingsLab measures the posting chunks against a real Postgres with a
+// TestPostingsLab measures the posting pages and chunks against a real Postgres with a
 // search corpus: Zipf 1.07 over a 20,000-word vocabulary, an 8-word title and
 // a 300-word body per document, at most 256 distinct terms per document, and
 // 1% more documents with 2,000-word bodies, whose terms the engine replaces
@@ -34,7 +34,9 @@ import (
 //	PGSTORE_POSTINGS_LAB=20000 SYNCPLANE_TEST_PG_DSN=... go test ./engine/storage/pgstore -run TestPostingsLab -v -timeout 0
 //
 // The value is the number of documents. PGSTORE_POSTINGS_CHUNK sets the most
-// row numbers per chunk, PGSTORE_POSTINGS_PARTS the WithPartitions modulus,
+// row numbers per chunk, PGSTORE_POSTINGS_PAGE the page budget in bytes,
+// PGSTORE_POSTINGS_PAGE_ROWS the most row numbers of a page key (0 puts every
+// key in chunks), PGSTORE_POSTINGS_PARTS the WithPartitions modulus,
 // and PGSTORE_POSTINGS_WORKSPACES spreads the documents over that many
 // workspaces, which then hold one posting index each; the probes read the
 // first of them. The server should run with autovacuum off, so that
@@ -50,6 +52,16 @@ func TestPostingsLab(t *testing.T) {
 		was := postingChunkMax
 		postingChunkMax = v
 		t.Cleanup(func() { postingChunkMax = was })
+	}
+	if v, _ := strconv.Atoi(os.Getenv("PGSTORE_POSTINGS_PAGE")); v > 0 {
+		was := postingPageBudget
+		postingPageBudget = v
+		t.Cleanup(func() { postingPageBudget = was })
+	}
+	if v, err := strconv.Atoi(os.Getenv("PGSTORE_POSTINGS_PAGE_ROWS")); err == nil && v >= 0 {
+		was := postingPageMaxRows
+		postingPageMaxRows = v
+		t.Cleanup(func() { postingPageMaxRows = was })
 	}
 	ctx := context.Background()
 	schema := fmt.Sprintf("postings_lab_%d", time.Now().UnixNano())
@@ -114,7 +126,7 @@ func TestPostingsLab(t *testing.T) {
 		}
 		return n
 	}
-	tables := []string{"posting_chunks", "posting_rows", "posting_scopes"}
+	tables := []string{"posting_chunks", "posting_pages", "posting_rows", "posting_scopes"}
 	vacuum := func() {
 		for _, tb := range tables {
 			mustExec(`VACUUM (ANALYZE) ` + schema + `.` + tb)
@@ -225,11 +237,13 @@ func TestPostingsLab(t *testing.T) {
 		}
 		fmt.Printf("after churn %s: %d live, %d dead tuples\n", tb, live, dead)
 	}
-	var hot, upd int64
-	if err := admin.QueryRow(ctx, `SELECT sum(n_tup_hot_upd)::int8, sum(n_tup_upd)::int8 FROM pg_stat_user_tables
-		WHERE schemaname = $1 AND (relname = 'posting_chunks' OR relname ~ '^posting_chunks_p[0-9]+$')`,
-		schema).Scan(&hot, &upd); err == nil {
-		fmt.Printf("posting_chunks updates: %d, of them HOT: %d\n", upd, hot)
+	for _, tb := range []string{"posting_chunks", "posting_pages"} {
+		var hot, upd int64
+		if err := admin.QueryRow(ctx, `SELECT COALESCE(sum(n_tup_hot_upd), 0)::int8, COALESCE(sum(n_tup_upd), 0)::int8 FROM pg_stat_user_tables
+			WHERE schemaname = $1 AND (relname = $2 OR relname ~ ('^' || $2 || '_p[0-9]+$'))`,
+			schema, tb).Scan(&hot, &upd); err == nil {
+			fmt.Printf("%s updates: %d, of them HOT: %d\n", tb, upd, hot)
+		}
 	}
 	sizes("churn")
 	vacuum()

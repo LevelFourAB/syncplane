@@ -73,7 +73,49 @@ var _ = Describe("Postgres partitioning", func() {
 			"consumer_shadows": 4,
 			"posting_rows":     4,
 			"posting_chunks":   4,
+			"posting_pages":    4,
 		}))
+	})
+
+	It("gives each partition of posting_chunks and posting_pages its fillfactor, and page bodies plain storage", func() {
+		for _, parts := range []int{0, 2} {
+			dsn := pgtest.DSN()
+			var opts []pgstore.Option
+			if parts > 0 {
+				opts = append(opts, pgstore.WithPartitions(parts))
+			}
+			store, err := pgstore.Open(ctx, dsn, opts...)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+
+			conn := connect(dsn)
+			rows, err := conn.Query(ctx,
+				`SELECT c.relname, COALESCE(array_to_string(c.reloptions, ','), '')
+				 FROM pg_class c
+				 WHERE c.relnamespace = to_regnamespace(current_schema()) AND c.relkind = 'r'
+				   AND c.relname ~ '^posting_(chunks|pages)(_p[0-9]+)?$'
+				 ORDER BY 1`)
+			Expect(err).NotTo(HaveOccurred())
+			fill := map[string]string{}
+			for rows.Next() {
+				var name, opts string
+				Expect(rows.Scan(&name, &opts)).To(Succeed())
+				fill[name] = opts
+			}
+			Expect(rows.Err()).NotTo(HaveOccurred())
+			Expect(fill).To(HaveLen(2*max(1, parts)), "layout with %d partitions", parts)
+			for name, opts := range fill {
+				Expect(opts).To(Equal("fillfactor=70"), name)
+			}
+
+			var storage []string
+			Expect(conn.QueryRow(ctx,
+				`SELECT array_agg(DISTINCT a.attstorage::text)
+				 FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid
+				 WHERE c.relnamespace = to_regnamespace(current_schema())
+				   AND c.relname ~ '^posting_pages(_p[0-9]+)?$' AND a.attname = 'body'`).Scan(&storage)).To(Succeed())
+			Expect(storage).To(Equal([]string{"p"}), "layout with %d partitions", parts)
+		}
 	})
 
 	It("creates nothing partitioned by default", func() {
@@ -110,7 +152,7 @@ var _ = Describe("Postgres partitioning", func() {
 			Expect(columns).To(Equal([]string{"workspace_id"}), "partition key of %s", table)
 		}
 		// The posting tables hold no workspace_id; they are keyed by scope.
-		for _, table := range []string{"posting_rows", "posting_chunks"} {
+		for _, table := range []string{"posting_rows", "posting_chunks", "posting_pages"} {
 			var columns []string
 			Expect(conn.QueryRow(ctx,
 				`SELECT array_agg(a.attname ORDER BY a.attnum)

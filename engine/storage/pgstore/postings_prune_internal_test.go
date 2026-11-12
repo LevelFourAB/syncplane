@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -19,7 +20,8 @@ import (
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
-// A partitioned layout hashes posting_rows and posting_chunks by scope. These
+// A partitioned layout hashes posting_rows, posting_chunks and posting_pages
+// by scope. These
 // specs run every posting statement under EXPLAIN ANALYZE with a generic plan,
 // which is the plan pgx's statement cache can end up with and the one that
 // cannot prune when it plans, and count the partitions each statement reads.
@@ -27,9 +29,8 @@ var _ = Describe("Postgres posting partition pruning", func() {
 	ctx := context.Background()
 
 	It("reads one partition per scope in every posting statement, also with a generic plan", func() {
-		was := postingChunkMax
-		postingChunkMax = 4
-		DeferCleanup(func() { postingChunkMax = was })
+		// common and x are in chunks, rare and the p keys in small pages.
+		setPostingFormat(4, 16, 6)
 
 		dsn := pgtest.DSN()
 		store, err := Open(ctx, dsn, WithPartitions(8))
@@ -59,6 +60,9 @@ var _ = Describe("Postgres posting partition pruning", func() {
 					if i%5 == 0 {
 						add = append(add, []byte("rare"))
 					}
+					if i < 10 {
+						add = append(add, []byte(fmt.Sprintf("p%02d", i)))
+					}
 					if err := tx.PutPostings("doc", "search", row, nil, add); err != nil {
 						return err
 					}
@@ -76,7 +80,12 @@ var _ = Describe("Postgres posting partition pruning", func() {
 		Expect(traced.WithWriteTx(ctx, "a", func(tx storage.WriteTx) error {
 			Expect(tx.PutPostings("doc", "search", "r01", keys("common"), keys("rare"))).To(Succeed())
 			Expect(tx.PutPostings("doc", "search", "new", nil, keys("common", "fresh"))).To(Succeed())
-			Expect(tx.DeletePostings("doc", "search", "r05", keys("common", "rare"))).To(Succeed())
+			Expect(tx.DeletePostings("doc", "search", "r05", keys("common", "rare", "p05"))).To(Succeed())
+			// Empties and shrinks pages, so that pages merge and go.
+			for _, i := range []int{1, 2, 3, 4, 6, 7} {
+				row := fmt.Sprintf("r%02d", i)
+				Expect(tx.PutPostings("doc", "search", row, keys(fmt.Sprintf("p%02d", i)), nil)).To(Succeed())
+			}
 			t := tx.(*pgTx)
 			tracer.reset()
 			Expect(t.resolvePostings()).To(Succeed())
@@ -111,6 +120,17 @@ var _ = Describe("Postgres posting partition pruning", func() {
 		stmts = append(stmts, postingQueuedStmts(scopedDeletes(scopes))...)
 
 		Expect(len(stmts)).To(BeNumerically(">=", 12))
+		for _, want := range []string{
+			"FROM posting_pages WHERE scope = $1 AND lo <= u.k", // the writer's read
+			"INSERT INTO posting_pages",
+			"DELETE FROM posting_pages p",
+			"DELETE FROM posting_pages WHERE scope = (",  // ClearPostings
+			"DELETE FROM posting_pages WHERE scope = $1", // DeleteWorkspace
+			"x.n, x.body",   // PostingCounts
+			"NULL::int8, 0", // ScanPostings
+		} {
+			Expect(slices.ContainsFunc(stmts, func(s tracedQuery) bool { return strings.Contains(s.sql, want) })).To(BeTrue(), want)
+		}
 		conn := genericConn(ctx, dsn)
 		for i, s := range stmts {
 			// Each statement runs on the stored state alone: the clear must
@@ -144,7 +164,7 @@ func genericConn(ctx context.Context, dsn string) *pgx.Conn {
 	return conn
 }
 
-var partitionName = regexp.MustCompile(`^(posting_rows|posting_chunks)_p\d+$`)
+var partitionName = regexp.MustCompile(`^(posting_rows|posting_chunks|posting_pages)_p\d+$`)
 
 // partitionsRead prepares s, runs it under EXPLAIN ANALYZE and returns, for
 // each partitioned posting table, the partitions a plan node ran on.
