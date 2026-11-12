@@ -86,6 +86,46 @@ Run data connectors in an independent deployment:
 2. Configure connector deployments to run a single replica.
 3. Use a recreate deployment strategy instead of a rolling update.
 
+### 7. Maintain the search tables
+
+If an entity declares search fields and the application creates and deletes many rows of that entity, the search tables grow while the number of live rows stays the same. Keep the growth small:
+
+1. Make autovacuum run often on `posting_pages`. Set `autovacuum_vacuum_scale_factor` on the table to a value below its default of 0.2. On a partitioned layout, set it on each partition, because PostgreSQL does not accept storage parameters on a partitioned parent table. When autovacuum keeps up with the writes, the table is about 1.3 times the size of a new build. When it does not, the table is about 2.2 times that size.
+2. Monitor the dead tuples of the search tables:
+
+   ```sql
+   SELECT relname, n_live_tup, n_dead_tup, last_autovacuum
+   FROM pg_stat_user_tables
+   WHERE schemaname = current_schema() AND relname LIKE 'posting\_%'
+   ORDER BY n_dead_tup DESC;
+   ```
+
+   If `n_dead_tup` of `posting_pages` or of one of its partitions stays high compared with `n_live_tup`, autovacuum does not keep up. Lower the scale factor.
+3. Monitor the indexes of `posting_rows` and `rows`:
+
+   ```sql
+   SELECT s.relname AS table_name,
+          s.indexrelname AS index_name,
+          pg_size_pretty(pg_relation_size(s.indexrelid)) AS index_size,
+          t.n_live_tup AS live_rows
+   FROM pg_stat_user_indexes s
+   JOIN pg_stat_user_tables t USING (relid)
+   WHERE s.schemaname = current_schema()
+     AND s.relname ~ '^(posting_rows|rows)(_p[0-9]+)?$'
+   ORDER BY pg_relation_size(s.indexrelid) DESC;
+   ```
+
+   The indexes are `posting_rows_pkey`, `posting_rows_by_num`, and `rows_pkey`. On a partitioned layout, each partition has its own indexes, and the query shows their names. Record the sizes after a rebuild. An index that grows while `live_rows` stays the same is sparse, and `VACUUM` does not make it smaller.
+4. Rebuild a sparse index:
+
+   ```sql
+   REINDEX INDEX CONCURRENTLY posting_rows_by_num;
+   ```
+
+   `REINDEX TABLE CONCURRENTLY posting_rows` rebuilds all indexes of the table. On a partitioned layout, a command that names the parent rebuilds the partitions one after the other. A command that names a partition, such as `REINDEX TABLE CONCURRENTLY posting_rows_p07`, rebuilds only that partition. A rebuild needs disk space for a second copy of the index until it completes. Do not use `VACUUM FULL` or `REINDEX` without `CONCURRENTLY` (see step 1).
+
+For the causes of the growth, see [Search table growth under row churn](../explanation/multi-node-architecture.md#search-table-growth-under-row-churn).
+
 ## Confirming the deployment
 
 To confirm that your high-availability deployment is operational:

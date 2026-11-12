@@ -245,6 +245,14 @@ One process, one SQLite file (a single writer across every application on the ho
 
 This setup stops fitting when sustained writes saturate the single writer, or when you need more than one node. You can migrate to [`pgstore`](../reference/storage-adapter.md#adapters) plus a shared notifier with `WithNotifier`. (Clients on other nodes otherwise converge by polling, correctly but with poll latency.) Nothing above the storage seam changes when that migration occurs; `Manager`, application partitioning, and authentication wiring are unaffected. See [Run more than one node](../how-to/run-multiple-nodes.md).
 
+## A PostgreSQL database gives out 2^31 index ids in its life
+
+`pgstore` stores index entries and search postings under 32-bit integer ids in place of names. A workspace that holds value index entries takes one id, and one more for each entity and each value index that holds entries. A search index takes one id in each workspace where it holds postings. All these ids come from one sequence, `posting_scope_ids`.
+
+An id is not used again. A deleted workspace does not give its ids back, and a search index takes a new id each time an index build clears it. A database can thus give out 2^31 ids, about 2.1 billion, in its life. After that, a write that needs a new id fails: the first write of index entries or postings for a new workspace, entity, or index.
+
+`SELECT last_value FROM posting_scope_ids` shows the last id that the database gave out. For the tables that hold the ids, see [Table layout and partitioning](multi-node-architecture.md#table-layout-and-partitioning).
+
 ## `app_id` is a coarser partition than `workspace_id`
 
 When using a `Manager`, each application runs as an isolated `*Server` instance with its own prefix of the workspace-ID space and its own entity catalog. The `workspace_id` parameter partitions data within an individual application. Two applications can declare identical entity schemas without colliding.

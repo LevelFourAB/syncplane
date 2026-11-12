@@ -61,6 +61,23 @@ The ids in `index_scopes` are 32-bit integers from one sequence, which the searc
 
 Tables such as `workspaces`, `clients`, `text_floors`, `index_state`, `index_scopes`, `consumer_positions`, `cursor_state`, and `schemas` remain unpartitioned because they are small or scanned across workspaces.
 
+## Search table growth under row churn
+
+An entity that declares search fields and creates and deletes many rows makes the search tables larger than a new build of the same rows. This also occurs when the number of live rows stays the same. Where the extra bytes are depends on the workspaces:
+
+- **Many small workspaces:** The extra bytes are dead tuples in `posting_pages`. A write to a page record stores the whole record again, and the old version uses space until a vacuum frees it. The table is about 1.3 times the size of a new build when autovacuum keeps up with the writes, and about 2.2 times that size when it does not.
+- **One large workspace where most rows live a short time and some rows live long:** The search tables reach about 2.6 times the size of a new build. About three quarters of the extra bytes are in the two b-tree indexes of `posting_rows`, which are `posting_rows_pkey` and `posting_rows_by_num`. Each can be 9 times its size after a rebuild.
+
+A PostgreSQL b-tree becomes sparse when its keys increase with time and most of the keys are deleted later. New entries go after the existing entries. A deletion leaves a leaf page with the few entries that stay, and no new entry belongs on that page. PostgreSQL uses a leaf page again only when the page is empty, and `VACUUM` does not merge pages that are partly full.
+
+The row numbers in `posting_rows_by_num` only increase, so this index becomes sparse with all row keys. The keys in `posting_rows_pkey` increase only when the row keys of the application are ordered by time, such as UUIDv7 or ULID keys. With such keys, the primary key of `rows` becomes sparse in the same way. Rows that are deleted in the order of their creation cause almost no growth, because their leaf pages become empty.
+
+A vacuum makes the space of dead tuples available to later writes. The table files do not shrink, but they stop growing. `REINDEX` writes a new index file and gives the bytes of the old file back to the file system. `VACUUM FULL` does the same for a table and its indexes, but it takes an `ACCESS EXCLUSIVE` lock.
+
+`sqlitestore` needs no maintenance for this workload. SQLite uses freed pages again, and [Schema upgrades in `sqlitestore`](../reference/storage-adapter.md#schema-upgrades-in-sqlitestore) describes how to give them back to the file system.
+
+To monitor the tables and rebuild the indexes, see [Maintain the search tables](../how-to/deploy-for-high-availability.md#7-maintain-the-search-tables).
+
 ## Per-workspace leases
 
 Notifications reach every node. A write on any node wakes clients across all nodes. Different workspaces commit concurrently instead of serializing behind a single writer connection.
