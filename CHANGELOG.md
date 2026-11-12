@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.8.0](https://github.com/LevelFourAB/syncplane/compare/v0.7.0...v0.8.0) (2026-11-12)
+
+
+### Features
+
+* **engine:** Refuse a push when another writer used the client id ([66a765f](https://github.com/LevelFourAB/syncplane/commit/66a765f4d1194073dc83fca27ce066e5cdf13cee))
+* **engine:** Refuse a queue written before a workspace was deleted ([4c6913f](https://github.com/LevelFourAB/syncplane/commit/4c6913fd906b784cd52f452d2133b0afb7f819b8))
+
+
+### Bug Fixes
+
+* **client:** Drop writes queued before a workspace was deleted ([82028ca](https://github.com/LevelFourAB/syncplane/commit/82028ca20a742c6df63163358b4450d7dcf23163))
+* **client:** Keep queue compaction under the configured write limits ([213b522](https://github.com/LevelFourAB/syncplane/commit/213b52247ce576c95ef64bbdaa8f08d201fc1122))
+* **client:** Keep writes when another install shares the client id ([c47bde0](https://github.com/LevelFourAB/syncplane/commit/c47bde09479a53261459a6ae4341e255f015841d))
+* **client:** Refuse a key set over the server cap when it is set ([e677385](https://github.com/LevelFourAB/syncplane/commit/e6773859027c68356c1ecdc39864cfc7dc8fe1a9))
+* **client:** Send large queued text edits that fit the limit alone ([2c771cc](https://github.com/LevelFourAB/syncplane/commit/2c771cc1b9e2121f34640da308ec246e0ce3eff4))
+* **engine:** Keep a link's skew block when an older origin streams pages ([15499b8](https://github.com/LevelFourAB/syncplane/commit/15499b8136c8494ccefb5e531b1ae475cd226d66))
+* **engine:** Keep a link's writes when another writer shares its id ([937c1b1](https://github.com/LevelFourAB/syncplane/commit/937c1b1788b8e9dd07b9ba5489bd41610b3f0f95))
+* **engine:** Keep origin-only field changes across a forwarded PUT ([129055b](https://github.com/LevelFourAB/syncplane/commit/129055b711acd5577932cfa1f237ba2b4ef7097c))
+* **engine:** Keep unsent client edits when a connector loses its State ([5e09890](https://github.com/LevelFourAB/syncplane/commit/5e09890197ff3dd3f27097cb20f62215c1d84853))
+* **engine:** Refuse a oneof write of a member the server lacks ([eb0982e](https://github.com/LevelFourAB/syncplane/commit/eb0982e99e84d730886c9aedec6624b1dddb33a6))
+* **engine:** Report ErrClientIDInUse when the Go client's id is shared ([0445920](https://github.com/LevelFourAB/syncplane/commit/0445920f5874d0e079f5d0faae31a23fb149c03f))
+* **engine:** Stop telling callers the next expected mutation id ([a91b612](https://github.com/LevelFourAB/syncplane/commit/a91b612d3fbf03f80f1d35dc9ca7ff353087bed6))
+* Keep an unmark through compaction so a late mark loses to it ([370161c](https://github.com/LevelFourAB/syncplane/commit/370161cbe26666e236a6b58606ddc28018def480))
+
+
+### Performance Improvements
+
+* **client:** Cut IndexedDB storage for search by a fifth ([de07839](https://github.com/LevelFourAB/syncplane/commit/de078390db9e3af0fad2f5e23aca4df2bc4bd31d))
+* **client:** Cut IndexedDB storage for search to a tenth ([b768836](https://github.com/LevelFourAB/syncplane/commit/b7688363efcc38ab13c1b2ff2103068653bee969))
+* **engine:** Halve SQLite search size in small workspaces ([f4ab4c3](https://github.com/LevelFourAB/syncplane/commit/f4ab4c3ced22c36f72ae8b8b720977886d641d1c))
+* **engine:** Halve the cost of an index entry write on Postgres ([4336101](https://github.com/LevelFourAB/syncplane/commit/43361014272370f5cb612e08f7e2973d1ccc600a))
+* **engine:** Keep SQLite search small as rows come and go ([6dac4fb](https://github.com/LevelFourAB/syncplane/commit/6dac4fbcb4b098f726dced542ad2473403c4f4f8))
+* **engine:** Make server search indexes smaller and faster ([4760d95](https://github.com/LevelFourAB/syncplane/commit/4760d95f861d505f5e1f261d7c6be9fc4d9b49b9))
+* **engine:** Shrink Postgres value indexes to 0.6x the size ([738a835](https://github.com/LevelFourAB/syncplane/commit/738a835d00f0f902f4800632e1704e21a4c0b4c6))
+* **engine:** Store rare search terms in shared Postgres pages ([eff93d7](https://github.com/LevelFourAB/syncplane/commit/eff93d7c269cee8ec9534c5300c0766fff0d7cc3))
+
 ## [0.7.0](https://github.com/LevelFourAB/syncplane/compare/v0.6.0...v0.7.0) (2026-11-08)
 
 
