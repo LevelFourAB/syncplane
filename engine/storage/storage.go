@@ -1026,6 +1026,10 @@ type WriteTx interface {
 	// every write fn made (including allocated sequences) rolls back and the
 	// error propagates; on nil the savepoint is released into the enclosing
 	// transaction. Savepoints may nest.
+	//
+	// When the adapter cannot start the savepoint, InSavepoint returns the
+	// adapter's error and does not call fn. Such an error, and an error from
+	// the release, is a failure of the storage and not an answer of fn.
 	InSavepoint(fn func() error) error
 	// CollectTombstones deletes tombstones last written before cutoff and
 	// advances the workspace's tombstone horizon to the highest version it

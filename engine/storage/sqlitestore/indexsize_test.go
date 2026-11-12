@@ -13,6 +13,7 @@ import (
 
 	benchv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/bench/v1"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
 
@@ -32,8 +33,8 @@ func sizeKey(kind, i int) string {
 
 // indexObjects names every table and b-tree that holds index entries or
 // postings, or what finds them: the entries, the per-row entry lists, the row
-// ids and the scope ids, and the posting heads, chunks, row numbers and
-// scopes.
+// ids and the scope ids, and the posting pages, heads, chunks, row numbers
+// and scopes.
 var indexObjects = []string{
 	"index_entries",
 	"index_row_ids",
@@ -45,6 +46,7 @@ var indexObjects = []string{
 	"sqlite_autoindex_posting_scopes_1",
 	"posting_rows",
 	"posting_nums",
+	"posting_pages",
 	"posting_heads",
 	"posting_chunks",
 	"posting_chunks_by_scope",
@@ -52,24 +54,37 @@ var indexObjects = []string{
 
 // countPostings adds the postings of each posting index to r, as entries of
 // that index: a posting is what a search entry was before postings had their
-// own storage, so the per-entry figures stay comparable.
-func countPostings(db *sql.DB, r *indexSizeReport) {
-	rows, err := db.Query(`
-		SELECT s.idx, COALESCE(SUM(h.cnt), 0)
-		  FROM posting_heads h JOIN posting_scopes s ON s.id = h.scope
-		 GROUP BY s.idx`)
+// own storage, so the per-entry figures stay comparable. db is the closed
+// store's file at path. The counts come from a Store opened on it, so call it
+// after the sizes are read.
+func countPostings(path string, db *sql.DB, r *indexSizeReport) {
+	type scope struct{ ws, entity, idx string }
+	var scopes []scope
+	rows, err := db.Query(`SELECT workspace_id, entity, idx FROM posting_scopes`)
 	Expect(err).NotTo(HaveOccurred())
-	defer rows.Close()
 	for rows.Next() {
-		var (
-			idx   string
-			count int64
-		)
-		Expect(rows.Scan(&idx, &count)).To(Succeed())
-		r.perIndex[idx] += count
-		r.entries += count
+		var sc scope
+		Expect(rows.Scan(&sc.ws, &sc.entity, &sc.idx)).To(Succeed())
+		scopes = append(scopes, sc)
 	}
 	Expect(rows.Err()).NotTo(HaveOccurred())
+	Expect(rows.Close()).To(Succeed())
+
+	store, err := sqlitestore.Open(path)
+	Expect(err).NotTo(HaveOccurred())
+	defer func() { Expect(store.Close()).To(Succeed()) }()
+	for _, sc := range scopes {
+		Expect(store.WithReadTx(context.Background(), sc.ws, func(tx storage.ReadTx) error {
+			counts, _, err := tx.PostingCounts(sc.entity, sc.idx, []storage.IndexRange{{}}, 0)
+			if err != nil {
+				return err
+			}
+			r.perIndex[sc.idx] += int64(counts[0])
+			r.entries += int64(counts[0])
+			r.postings += int64(counts[0])
+			return nil
+		})).To(Succeed())
+	}
 }
 
 // emptyObjectBytes is the size of a table or b-tree that holds no data: one
@@ -87,6 +102,8 @@ type indexSizeReport struct {
 	indexBytes int64
 	// entries is the total number of index entries and postings.
 	entries int64
+	// postings is the number of postings alone.
+	postings int64
 	// perIndex is the entry count of each index.
 	perIndex map[string]int64
 	// missingLead is, per index, the entries whose leading component is
@@ -222,7 +239,7 @@ func measureIndexSize() indexSizeReport {
 		r.entries += count
 	}
 	Expect(rows.Err()).NotTo(HaveOccurred())
-	countPostings(db, &r)
+	countPostings(path, db, &r)
 	return r
 }
 

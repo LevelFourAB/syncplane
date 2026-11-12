@@ -33,12 +33,12 @@ type postingNum struct {
 // A committed (scope, number) pair names one row key for the life of the file
 // (see postings.go), and the cache learns only committed pairs (see
 // sqliteTx.learnRowKeys). A scope id is not given out again either, as
-// posting_scopes is an AUTOINCREMENT table. But a number can stay in a head
-// after DeletePostings forgot its row, when the caller did not name every key
-// the row held, and ScanPostings must then not yield the row. So a commit that
-// forgot rows removes their mappings before and after it commits, and a read
-// transaction adds a mapping only while no such commit is in progress or has
-// happened since it began (see Store.WithWriteTx).
+// posting_scopes is an AUTOINCREMENT table. But a number can stay in a page or
+// a head after DeletePostings forgot its row, when the caller did not name
+// every key the row held, and ScanPostings must then not yield the row. So a
+// commit that forgot rows removes their mappings before and after it commits,
+// and a read transaction adds a mapping only while no such commit is in
+// progress or has happened since it began (see Store.WithWriteTx).
 type postingKeyCache = keyCache[postingNum]
 
 // newPostingKeyCache returns an empty postingKeyCache that holds about

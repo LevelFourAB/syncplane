@@ -98,53 +98,20 @@ var _ = Describe("posting lists in the store", func() {
 		Expect(store.read.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n)).To(Succeed())
 		return n
 	}
-	// stored reads every head of the index, checks each against its chunks,
-	// checks that the chunk table holds exactly the chunks the directories
-	// name, and returns the row numbers of each key with the chunk sizes.
+	// stored checks every stored record (see checkPostings) and returns the
+	// row numbers of each key, from its page or its head, with the chunk sizes
+	// of each key that has a head. The specs that use it write one scope.
 	stored := func() (map[string][]int64, map[string][]int) {
 		GinkgoHelper()
-		rows, err := store.read.Query(`SELECT k, cnt, dir, tail FROM posting_heads`)
-		Expect(err).NotTo(HaveOccurred())
-		type head struct {
-			k string
-			h postingHead
-		}
-		var heads []head
-		for rows.Next() {
-			var (
-				k, dir, tail []byte
-				h            postingHead
-			)
-			Expect(rows.Scan(&k, &h.cnt, &dir, &tail)).To(Succeed())
-			Expect(fillHead(&h, dir, tail)).To(Succeed())
-			heads = append(heads, head{string(k), h})
-		}
-		Expect(rows.Err()).NotTo(HaveOccurred())
-		Expect(rows.Close()).To(Succeed())
+		idx := checkPostings(store)
 		nums := map[string][]int64{}
 		sizes := map[string][]int{}
-		chunks := 0
-		for _, hd := range heads {
-			var all []int64
-			for _, c := range hd.h.chunks {
-				Expect(c.n).To(BeNumerically("<=", postingChunkCap))
-				var b []byte
-				Expect(store.read.QueryRow(`SELECT nums FROM posting_chunks WHERE id = ?`, c.id).Scan(&b)).To(Succeed())
-				got, err := decodeChunk(c, b, nil)
-				Expect(err).NotTo(HaveOccurred())
-				if len(all) > 0 {
-					Expect(got[0]).To(BeNumerically(">", all[len(all)-1]))
-				}
-				all = append(all, got...)
-				sizes[hd.k] = append(sizes[hd.k], c.n)
-				chunks++
-			}
-			Expect(len(hd.h.tail)).To(BeNumerically("<", postingTailCap))
-			all = append(all, hd.h.tail...)
-			Expect(all).NotTo(BeEmpty(), "a head that holds nothing is deleted")
-			nums[hd.k] = all
+		for ref, ns := range idx.nums {
+			nums[ref.k] = ns
 		}
-		Expect(count("posting_chunks")).To(Equal(chunks), "no chunk record outlives its directory entry")
+		for ref, sz := range idx.sizes {
+			sizes[ref.k] = sz
+		}
 		return nums, sizes
 	}
 	numOf := func(key string) int64 {
@@ -314,13 +281,18 @@ var _ = Describe("posting lists in the store", func() {
 		})
 		Expect(count("posting_heads")).To(BeZero())
 		Expect(count("posting_chunks")).To(BeZero())
+		Expect(count("posting_pages")).To(BeZero())
 	})
 
 	It("leaves no record behind when the index is cleared or the workspace deleted", func() {
 		for _, ws := range []string{"ws1", "ws2"} {
 			Expect(store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
 				for i := 0; i < 700; i++ {
-					if err := tx.PutPostings(entity, index, rowKey(i), nil, [][]byte{[]byte("x"), []byte("y")}); err != nil {
+					keys := [][]byte{[]byte("x"), []byte("y")}
+					if i < 3 {
+						keys = append(keys, []byte("rare"))
+					}
+					if err := tx.PutPostings(entity, index, rowKey(i), nil, keys); err != nil {
 						return err
 					}
 				}
@@ -328,18 +300,23 @@ var _ = Describe("posting lists in the store", func() {
 			})).To(Succeed())
 		}
 		Expect(count("posting_chunks")).To(Equal(4))
+		Expect(count("posting_heads")).To(Equal(4))
+		Expect(count("posting_pages")).To(Equal(4), "each index of each workspace has one page")
 		write(func(tx storage.WriteTx) error { return tx.ClearPostings(entity, index) })
 		Expect(count("posting_chunks")).To(Equal(2))
-		Expect(count("posting_heads")).To(Equal(4), "ws2 keeps two heads, and each workspace keeps the other index")
+		Expect(count("posting_heads")).To(Equal(2), "ws2 keeps its two heads")
+		Expect(count("posting_pages")).To(Equal(3), "ws2 keeps its page, and each workspace keeps the other index")
 		Expect(count("posting_rows")).To(Equal(702))
 		Expect(count("posting_nums")).To(Equal(702))
 		Expect(count("posting_scopes")).To(Equal(3))
 		Expect(store.DeleteWorkspace(ctx, "ws2")).To(Succeed())
 		Expect(count("posting_chunks")).To(BeZero())
-		Expect(count("posting_heads")).To(Equal(1))
+		Expect(count("posting_heads")).To(BeZero())
+		Expect(count("posting_pages")).To(Equal(1))
 		Expect(count("posting_rows")).To(Equal(1))
 		Expect(count("posting_nums")).To(Equal(1))
 		Expect(count("posting_scopes")).To(Equal(1))
+		checkPostings(store)
 	})
 
 	It("gives a cleared index a new scope, so no old row number is read in it", func() {
@@ -514,7 +491,7 @@ var _ = Describe("posting lists in the store", func() {
 
 		expectNoPostingRecords := func() {
 			GinkgoHelper()
-			for _, table := range []string{"posting_scopes", "posting_rows", "posting_nums", "posting_heads", "posting_chunks"} {
+			for _, table := range []string{"posting_scopes", "posting_rows", "posting_nums", "posting_pages", "posting_heads", "posting_chunks"} {
 				Expect(count(table)).To(BeZero(), table)
 			}
 		}

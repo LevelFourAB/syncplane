@@ -547,6 +547,24 @@ CREATE TABLE posting_chunks (
 	nums  BLOB NOT NULL
 );
 CREATE INDEX posting_chunks_by_scope ON posting_chunks (scope);`,
+	// 10: posting pages (see postings.go), which hold the posting keys that
+	// few rows hold, many keys to a record. No stored posting is dropped or
+	// rewritten: a head record stays valid whatever its count, so a file
+	// from version 9, which has a head for every key, reads the same. Each
+	// of its keys moves to a page when a write leaves the key with fewer
+	// rows than half of the most a page key has, as every key with a head
+	// does.
+	//
+	// posting_pages is WITHOUT ROWID so that the page of a key is one
+	// descent of the primary key, and the pages of a key range are a range
+	// of it. postingPageBudget keeps a page record small enough to stay on
+	// its b-tree page.
+	`CREATE TABLE posting_pages (
+	scope INTEGER NOT NULL,
+	lo    BLOB NOT NULL,
+	body  BLOB NOT NULL,
+	PRIMARY KEY (scope, lo)
+) WITHOUT ROWID;`,
 }
 
 // workspaceTables names every table that holds state of one workspace, keyed
@@ -1083,6 +1101,9 @@ func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(sto
 	if err := fn(st); err != nil {
 		return err
 	}
+	if err := st.flushPostings(); err != nil {
+		return err
+	}
 	if err := st.commitLineage(); err != nil {
 		return err
 	}
@@ -1544,6 +1565,14 @@ type sqliteTx struct {
 	// savepoint rollback leaves them in: removing a mapping that is still
 	// right costs a read, not a wrong answer.
 	forgotten map[postingNum]struct{}
+	// postingPages holds, by scope, the posting page changes of this write
+	// transaction that are not stored yet (see flushPostings).
+	postingPages map[int64]*postingPages
+	// postingErr is the error of a write of posting page changes that
+	// failed. Such a write leaves some of the changes of earlier calls
+	// stored and the others lost, so while it is set every posting call
+	// fails and the transaction does not commit (see flushPostings).
+	postingErr error
 	// savepoint nesting depth; names savepoints sp1, sp2, ...
 	spDepth int
 	// registered memoizes register's INSERT so a write burst does not repeat
@@ -3012,6 +3041,13 @@ func (t *sqliteTx) InSavepoint(fn func() error) error {
 	t.spDepth++
 	name := fmt.Sprintf("sp%d", t.spDepth)
 	defer func() { t.spDepth-- }()
+	// The posting page changes made so far go into the tables first, so that
+	// a rewind can drop what is held in memory and lose none of them. When
+	// that fails, fn does not run: the failure is not inside the savepoint,
+	// so no rewind of it can undo it, and postingErr stays set.
+	if err := t.flushPostings(); err != nil {
+		return err
+	}
 	if _, err := t.exec(`SAVEPOINT ` + name); err != nil {
 		return err
 	}
@@ -3025,11 +3061,18 @@ func (t *sqliteTx) InSavepoint(fn func() error) error {
 		// the INSERT predates the savepoint the extra statement is a harmless
 		// ON CONFLICT DO NOTHING.
 		t.registered = false
+		// The page changes fn made are not in the tables, or the rewind
+		// takes them out.
+		t.postingPages = nil
 		// ROLLBACK TO rewinds the writes but keeps the savepoint open;
 		// RELEASE discards it.
 		if _, rbErr := t.exec(`ROLLBACK TO ` + name); rbErr != nil {
 			return errors.Join(err, fmt.Errorf("sqlitestore: rollback savepoint: %w", rbErr))
 		}
+		// postingErr was nil when fn began, so a failed write of page
+		// changes that set it wrote inside the savepoint, and the rewind
+		// took out what it wrote. The changes it lost were made by fn.
+		t.postingErr = nil
 		if _, rbErr := t.exec(`RELEASE ` + name); rbErr != nil {
 			return errors.Join(err, fmt.Errorf("sqlitestore: release savepoint: %w", rbErr))
 		}

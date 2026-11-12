@@ -193,6 +193,8 @@ Fixed SQLite settings include:
 
 `Open` migrates the database file to the schema version of the binary. A migration that changes how index entries or postings are stored drops the stored entries and marks every index as not ready. The index build pass then rebuilds the entries in the background. Until an index is ready, queries scan the entity instead and return the same results.
 
+A migration that only adds a kind of record keeps the stored entries, and every index stays ready. The migration that adds posting pages is one. A search term that was stored before it keeps its own record. The term moves to a page record when a write changes its postings and leaves it with fewer than 64 rows.
+
 SQLite keeps freed pages in the file for reuse, so the file does not shrink after such a migration. To give the space back to the file system, stop every process that has the file open, then run `sqlite3 <file> VACUUM`.
 
 ### Tuning `pgstore`

@@ -17,8 +17,16 @@ import (
 )
 
 // searchSizeDocs is the number of text-heavy issues the search size fixture
-// writes.
+// writes into one workspace.
 const searchSizeDocs = 2000
+
+// The fixture of many small workspaces writes searchSizeSmallDocs issues,
+// spread over searchSizeSmallWorkspaces workspaces. In a small workspace most
+// terms are in one or two issues.
+const (
+	searchSizeSmallDocs       = 1000
+	searchSizeSmallWorkspaces = 20
+)
 
 // searchSizeVocab is the number of distinct words the fixture draws from.
 const searchSizeVocab = 20000
@@ -49,11 +57,16 @@ func searchVocab(rng *rand.Rand, n int) []string {
 	return out
 }
 
-// measureSearchSize writes text-heavy issues through a server over a fresh
-// store and measures the file. Word frequency follows a Zipf distribution, the
-// shape of natural-language text, so a document holds a mix of common and
-// rare terms.
-func measureSearchSize() indexSizeReport {
+// searchSizeWS makes the id of workspace i, shaped like indexSizeWS.
+func searchSizeWS(i int) string {
+	return fmt.Sprintf("%08x%s", i, indexSizeWS[8:])
+}
+
+// measureSearchSize writes docs text-heavy issues through a server over a
+// fresh store, issue i into workspace i modulo workspaces, and measures the
+// file. Word frequency follows a Zipf distribution, the shape of
+// natural-language text, so a document holds a mix of common and rare terms.
+func measureSearchSize(docs, workspaces int) indexSizeReport {
 	ctx := context.Background()
 	path := filepath.Join(GinkgoT().TempDir(), "search.db")
 	store, err := sqlitestore.Open(path)
@@ -77,37 +90,44 @@ func measureSearchSize() indexSizeReport {
 	}
 
 	const projects, users = 20, 50
-	for batch := 0; batch < searchSizeDocs; batch += 200 {
-		Expect(srv.Mutate(server.Trusted(ctx), indexSizeWS, func(tx *server.EntityTx) error {
-			if batch == 0 {
-				for i := 0; i < projects; i++ {
-					if err := tx.Put(&benchv1.Project{Id: sizeKey(1, i), Name: "project", Status: "active"}); err != nil {
+	// Each workspace gets its issues in transactions of up to 200.
+	for ws := 0; ws < workspaces; ws++ {
+		var mine []int
+		for i := ws; i < docs; i += workspaces {
+			mine = append(mine, i)
+		}
+		for batch := 0; batch < len(mine); batch += 200 {
+			Expect(srv.Mutate(server.Trusted(ctx), searchSizeWS(ws), func(tx *server.EntityTx) error {
+				if batch == 0 {
+					for i := 0; i < projects; i++ {
+						if err := tx.Put(&benchv1.Project{Id: sizeKey(1, i), Name: "project", Status: "active"}); err != nil {
+							return err
+						}
+					}
+					for i := 0; i < users; i++ {
+						if err := tx.Put(&benchv1.User{Id: sizeKey(2, i), Name: "user"}); err != nil {
+							return err
+						}
+					}
+				}
+				for _, i := range mine[batch:min(batch+200, len(mine))] {
+					issue := &benchv1.Issue{
+						Id:          sizeKey(3, i),
+						Title:       text(8),
+						Body:        text(searchSizeWords),
+						Project:     &benchv1.Project{Id: sizeKey(1, i%projects)},
+						Reporter:    &benchv1.User{Id: sizeKey(2, i%users)},
+						State:       "open",
+						Priority:    int32(i % 4),
+						UpdatedAtMs: int64(i),
+					}
+					if err := tx.Put(issue); err != nil {
 						return err
 					}
 				}
-				for i := 0; i < users; i++ {
-					if err := tx.Put(&benchv1.User{Id: sizeKey(2, i), Name: "user"}); err != nil {
-						return err
-					}
-				}
-			}
-			for i := batch; i < batch+200; i++ {
-				issue := &benchv1.Issue{
-					Id:          sizeKey(3, i),
-					Title:       text(8),
-					Body:        text(searchSizeWords),
-					Project:     &benchv1.Project{Id: sizeKey(1, i%projects)},
-					Reporter:    &benchv1.User{Id: sizeKey(2, i%users)},
-					State:       "open",
-					Priority:    int32(i % 4),
-					UpdatedAtMs: int64(i),
-				}
-				if err := tx.Put(issue); err != nil {
-					return err
-				}
-			}
-			return nil
-		})).To(Succeed())
+				return nil
+			})).To(Succeed())
+		}
 	}
 	Expect(srv.Close()).To(Succeed())
 	Expect(store.Close()).To(Succeed())
@@ -143,15 +163,49 @@ func readIndexSize(path string) indexSizeReport {
 	var count int64
 	Expect(db.QueryRow(`SELECT COUNT(*) FROM index_entries`).Scan(&count)).To(Succeed())
 	r.entries = count
-	countPostings(db, &r)
+	countPostings(path, db, &r)
 	return r
 }
 
+// postingBytes is the on-disk size of every table and b-tree that holds
+// postings or what finds them.
+func (r indexSizeReport) postingBytes() int64 {
+	var n int64
+	for name, size := range r.objects {
+		if strings.Contains(name, "posting_") {
+			n += size
+		}
+	}
+	return n
+}
+
+// The ceilings bound the on-disk cost of one search posting in the two search
+// size fixtures. Each sits about 10% above the measured value, so a change
+// that grows the posting records fails here. Lower one when a change makes
+// its postings smaller.
+const (
+	bytesPerPostingCeiling      = 3.0
+	bytesPerPostingSmallCeiling = 7.4
+)
+
 var _ = Describe("search index storage size", func() {
-	It("reports the size of a text-heavy search index", func() {
-		r := measureSearchSize()
-		AddReportEntry("search index storage", r.String())
-		fmt.Fprintf(GinkgoWriter, "%s", r.String())
-		Expect(r.entries).To(BeNumerically(">", 0))
+	It("keeps the postings of a text-heavy workspace within the per-posting ceiling", func() {
+		r := measureSearchSize(searchSizeDocs, 1)
+		perPosting := float64(r.postingBytes()) / float64(r.postings)
+		report := fmt.Sprintf("%.2f B/posting\n%s", perPosting, r.String())
+		AddReportEntry("search index storage", report)
+		fmt.Fprintf(GinkgoWriter, "%s", report)
+		Expect(r.postings).To(BeNumerically(">", 0))
+		Expect(perPosting).To(BeNumerically("<=", bytesPerPostingCeiling), report)
+	})
+
+	It("keeps the postings of many small workspaces within the per-posting ceiling", func() {
+		r := measureSearchSize(searchSizeSmallDocs, searchSizeSmallWorkspaces)
+		perPosting := float64(r.postingBytes()) / float64(r.postings)
+		report := fmt.Sprintf("%.2f B/posting\n%s", perPosting, r.String())
+		AddReportEntry("search index storage, small workspaces", report)
+		fmt.Fprintf(GinkgoWriter, "%s", report)
+		Expect(r.postings).To(BeNumerically(">", 0))
+		Expect(perPosting).To(BeNumerically("<=", bytesPerPostingSmallCeiling), report)
 	})
 })

@@ -60,11 +60,12 @@ var _ = Describe("SQLite schema versioning", func() {
 	const baselineVersion = 1
 	// The version a database this binary creates or upgrades ends at: the
 	// baseline plus every migration since. Bump it with each migration added.
-	const latestVersion = 9
+	const latestVersion = 10
 
-	// noPostings drops the posting tables of migration 9, which every rewind
-	// below needs.
+	// noPostings drops the posting tables of migrations 9 and 10, which every
+	// rewind below needs.
 	const noPostings = `
+		DROP TABLE posting_pages;
 		DROP TABLE posting_scopes;
 		DROP TABLE posting_rows;
 		DROP TABLE posting_nums;
