@@ -143,6 +143,28 @@ func postingSpecs(getStore func() storage.Adapter, getCtx func() context.Context
 		})
 	})
 
+	It("counts a row whose postings one transaction adds and removes again", func() {
+		// No read between the calls: an adapter that collects the calls of a
+		// transaction sees them together.
+		write("ws1", func(tx storage.WriteTx) {
+			Expect(tx.PutPostings("doc", "search", "r1", nil, keys("a"))).To(Succeed())
+			Expect(tx.PutPostings("doc", "search", "r1", keys("a"), nil)).To(Succeed())
+			Expect(tx.PutPostings("doc", "search", "r2", nil, keys("a"))).To(Succeed())
+			Expect(tx.DeletePostings("doc", "search", "r2", keys("a"))).To(Succeed())
+		})
+		read("ws1", func(tx storage.ReadTx) {
+			Expect(counts(tx, "doc", "search", 0, storage.IndexRange{})).To(Equal([]int{0}))
+			Expect(rowsIn(tx, "doc", "search")).To(Equal(1),
+				"r1 got a posting and no DeletePostings removed it; r2 was deleted")
+		})
+		write("ws1", func(tx storage.WriteTx) {
+			Expect(tx.DeletePostings("doc", "search", "r1", nil)).To(Succeed())
+		})
+		read("ws1", func(tx storage.ReadTx) {
+			Expect(rowsIn(tx, "doc", "search")).To(BeZero())
+		})
+	})
+
 	It("counts and yields the rows of each key", func() {
 		write("ws1", func(tx storage.WriteTx) {
 			Expect(tx.PutPostings("doc", "search", "r1", nil, keys("apple", "pear"))).To(Succeed())
@@ -723,7 +745,14 @@ func postingSpecs(getStore func() storage.Adapter, getCtx func() context.Context
 						delete(known[i], row)
 					default:
 						remove := pick(rng.Intn(4))
+						// In key order, so that a seed gives the same
+						// operations in each run.
+						heldKeys := make([]string, 0, len(held))
 						for k := range held {
+							heldKeys = append(heldKeys, k)
+						}
+						sort.Strings(heldKeys)
+						for _, k := range heldKeys {
 							if rng.Intn(3) == 0 {
 								remove = append(remove, []byte(k))
 							}
