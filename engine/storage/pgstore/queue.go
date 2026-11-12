@@ -6,20 +6,22 @@ import (
 )
 
 // A write transaction does not send its writes one at a time. Every statement
-// whose result it does not need — the row upsert, the index-entry replacement,
-// the savepoint that brackets them — is appended to a queue instead, and the
-// whole queue travels as one pgx batch at the next moment a round trip is
-// unavoidable: a read, a statement whose command tag is inspected, or COMMIT.
+// whose result it does not need — the row upsert, the savepoint that brackets
+// it, the statement that replaces the index entries of the transaction's rows
+// — is appended to a queue instead, and the whole queue travels as one pgx
+// batch at the next moment a round trip is unavoidable: a read, a statement
+// whose command tag is inspected, or COMMIT.
 //
 // The statements that open a transaction — BEGIN, and a write transaction's
 // workspace lock — wait in the same queue (see beginTx), so they travel with
 // the transaction's first statement instead of costing a round trip each.
 //
 // The cost this removes is latency, not work. A push of N mutations issues
-// three write-only statements per mutation and reads nothing between them, so
-// under a per-statement Exec it pays N×3 round trips to a database that is
-// idle for almost all of them; batched, the same statements are one. Postgres
-// executes them identically and in the same order either way.
+// three write-only statements per mutation — the two that move its savepoint
+// and the row upsert — and reads nothing between them, so under a
+// per-statement Exec it pays N×3 round trips to a database that is idle for
+// almost all of them; batched, the same statements are one. Postgres executes
+// them identically and in the same order either way.
 //
 // Two rules keep the semantics unchanged:
 //

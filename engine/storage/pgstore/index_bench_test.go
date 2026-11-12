@@ -17,18 +17,19 @@ import (
 
 // What replacing one row's index entries costs against a real Postgres.
 //
-// It is the hottest statement of a push: the server rewrites the whole entry
+// It is the hottest write of a push: the server hands over the whole entry
 // set of every row a mutation touched, once per mutation, and a PATCH of one
-// field moves three entries out of thirty-one. The corpus is sized so the
-// primary key has the depth a deployment's has — a few hundred thousand entries
-// — because the cost being measured is btree descents, and a table that fits in
-// two pages has none.
+// field moves three entries out of thirty-one. The store writes the sets of a
+// transaction with one statement. The corpus is sized so the primary key has
+// the depth a deployment's has — a few hundred thousand entries — because the
+// cost being measured is btree descents, and a table that fits in two pages
+// has none.
 //
 // The shape to expect (Apple M5 Pro, Postgres 18 in Docker, 200 rows per
 // transaction):
 //
 //	batch     per call
-//	12.5 ms     62 µs
+//	8.5 ms      42 µs
 //
 // A regression looks like the per-call number roughly doubling, which is what
 // it costs to touch the primary key once per entry the row already holds

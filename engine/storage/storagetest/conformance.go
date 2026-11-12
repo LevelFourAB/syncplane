@@ -3984,6 +3984,63 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 			})
 
+			It("keeps the entries of one row key in several entities apart, write by write", func() {
+				// A row key means nothing outside its entity, also to an
+				// adapter that keeps something per row: a write of one entity's
+				// row must find that row and not the row another entity holds
+				// under the same key. Each write is a transaction of its own,
+				// so it meets the rows of the others as stored state.
+				entities := []string{"widget", "gadget", "gizmo"}
+				want := map[string][]byte{}
+				check := func(step string) {
+					GinkgoHelper()
+					read("ws1", func(tx storage.ReadTx) {
+						for _, entity := range entities {
+							for _, idx := range []string{"by_label", "by_other"} {
+								var got [][]byte
+								Expect(tx.ScanIndex(entity, idx, nil, nil, 0, storage.ScanAsc, func(k []byte, rowKey string) error {
+									Expect(rowKey).To(Equal("k1"))
+									got = append(got, append([]byte(nil), k...))
+									return nil
+								})).To(Succeed())
+								if v, ok := want[entity]; ok {
+									Expect(got).To(Equal([][]byte{v}), "%s of %s after %s", idx, entity, step)
+								} else {
+									Expect(got).To(BeEmpty(), "%s of %s after %s", idx, entity, step)
+								}
+							}
+						}
+					})
+				}
+				put := func(entity string, v byte) {
+					GinkgoHelper()
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.PutIndexEntries(entity, "k1", []storage.IndexEntry{entry("by_label", v), entry("by_other", v)})).To(Succeed())
+					})
+					want[entity] = []byte{v}
+					check(fmt.Sprintf("the put of %s at %#x", entity, v))
+				}
+				del := func(entity string) {
+					GinkgoHelper()
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.DeleteIndexEntries(entity, "k1")).To(Succeed())
+					})
+					delete(want, entity)
+					check("the delete of " + entity)
+				}
+				put("widget", 0x01)
+				put("gadget", 0x02)
+				put("gizmo", 0x03)
+				put("widget", 0x04)
+				// The row written between the two others, so that neither the
+				// first nor the last row under the key is the right one.
+				del("gadget")
+				put("gizmo", 0x05)
+				del("widget")
+				put("gadget", 0x06)
+				del("gizmo")
+			})
+
 			It("rolls entries back with their savepoint", func() {
 				write("ws1", func(tx storage.WriteTx) {
 					Expect(tx.PutIndexEntries("widget", "k1", []storage.IndexEntry{entry("by_label", 0x01)})).To(Succeed())

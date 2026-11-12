@@ -57,12 +57,34 @@ func scanRows[T any](
 	decode func(pgx.Rows) (T, error),
 	yield func(T) error,
 ) error {
+	return scanBatches(t, query, args, limit, decode, func(batch []T) error {
+		for _, v := range batch {
+			if err := yield(v); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// scanBatches is scanRows for a caller that takes the rows a batch at a time:
+// yield gets each batch the scan reads, in order, with the result set closed.
+// A scan that has something to read for the rows of a batch reads it once per
+// batch through this, where scanRows would make it read once per row.
+func scanBatches[T any](
+	t *pgTx,
+	query string,
+	args []any,
+	limit int,
+	decode func(pgx.Rows) (T, error),
+	yield func([]T) error,
+) error {
 	if limit > 0 && limit <= maxDirectScan {
 		batch, err := queryBatch(t, query, args, min(limit, scanBatch), decode)
 		if err != nil {
 			return err
 		}
-		return yieldAll(batch, yield)
+		return yield(batch)
 	}
 	firstArgs := slices.Clone(args)
 	firstArgs[len(firstArgs)-1] = int64(scanBatch + 1)
@@ -71,7 +93,7 @@ func scanRows[T any](
 		return err
 	}
 	if len(first) <= scanBatch {
-		return yieldAll(first, yield)
+		return yield(first)
 	}
 	return scanCursor(t, query, args, first[:scanBatch], decode, yield)
 }
@@ -86,7 +108,7 @@ func scanCursor[T any](
 	args []any,
 	first []T,
 	decode func(pgx.Rows) (T, error),
-	yield func(T) error,
+	yield func([]T) error,
 ) error {
 	// The cursor is declared before any row reaches yield, so a write a
 	// callback makes is not in the rows the cursor returns later. A read
@@ -118,7 +140,7 @@ func scanCursor[T any](
 		_, _ = t.exec("CLOSE " + name)
 	}()
 
-	if err := yieldAll(first, yield); err != nil {
+	if err := yield(first); err != nil {
 		return err
 	}
 	fetch := fmt.Sprintf("FETCH FORWARD %d FROM %s", scanBatch, name)
@@ -127,7 +149,7 @@ func scanCursor[T any](
 		if err != nil {
 			return err
 		}
-		if err := yieldAll(batch, yield); err != nil {
+		if err := yield(batch); err != nil {
 			return err
 		}
 		// A short batch means the cursor is exhausted, which saves the empty
@@ -156,15 +178,6 @@ func queryBatch[T any](t *pgTx, query string, args []any, capacity int, decode f
 		batch = append(batch, v)
 	}
 	return batch, rows.Err()
-}
-
-func yieldAll[T any](batch []T, yield func(T) error) error {
-	for _, v := range batch {
-		if err := yield(v); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // nextCursorName names a cursor uniquely within the transaction, and by the

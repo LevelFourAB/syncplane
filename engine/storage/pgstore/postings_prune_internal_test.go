@@ -269,6 +269,16 @@ func sqlLiteral(v any) string {
 			items[i] = fmt.Sprint(x)
 		}
 		return array(items)
+	case []*int64:
+		items := make([]string, len(v))
+		for i, x := range v {
+			items[i] = "NULL"
+			if x != nil {
+				items[i] = fmt.Sprint(*x)
+			}
+		}
+		// The cast gives an array of nothing but NULLs its type.
+		return array(items) + "::int8[]"
 	}
 	panic(fmt.Sprintf("sqlLiteral: %T", v))
 }

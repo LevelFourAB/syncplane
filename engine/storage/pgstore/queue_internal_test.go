@@ -36,7 +36,8 @@ var _ = Describe("Postgres write queue", func() {
 	It("sends one batch for a run of savepointed writes", func() {
 		// The shape of a push: a savepoint per mutation, a row and its index
 		// entries inside each, and nothing read in between. Only NextSeq's first
-		// allocation has to reach the server before the commit.
+		// allocation has to reach the server before the commit. The index
+		// entries wait in a log of their own until then (see index.go).
 		inWriteTx(func(t *pgTx) error {
 			for i := 0; i < 20; i++ {
 				if err := t.InSavepoint(func() error {
@@ -55,6 +56,7 @@ var _ = Describe("Postgres write queue", func() {
 				}
 			}
 			Expect(t.sends).To(Equal(1), "the sequence allocation is the only read")
+			Expect(t.entryLog).To(HaveLen(20))
 			return nil
 		})
 	})
@@ -70,7 +72,10 @@ var _ = Describe("Postgres write queue", func() {
 			if err := t.PutRow("widget", "before", []byte("v"), 1, storage.Actor{}); err != nil {
 				return err
 			}
-			queued, sends := len(t.queued), t.sends
+			if err := t.PutIndexEntries("widget", "before", []storage.IndexEntry{{Index: "by_v", Key: []byte("v")}}); err != nil {
+				return err
+			}
+			queued, logged, sends := len(t.queued), len(t.entryLog), t.sends
 
 			Expect(t.InSavepoint(func() error {
 				Expect(t.PutRow("widget", "doomed", []byte("v"), 2, storage.Actor{})).To(Succeed())
@@ -81,6 +86,7 @@ var _ = Describe("Postgres write queue", func() {
 			Expect(t.sends).To(Equal(sends), "the rewind must not talk to the server")
 			Expect(t.queued).To(HaveLen(queued),
 				"and must drop its own entries exactly, keeping what preceded it")
+			Expect(t.entryLog).To(HaveLen(logged), "and the same for the index entry calls")
 			return nil
 		})
 	})

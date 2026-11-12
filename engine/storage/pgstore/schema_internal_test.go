@@ -32,6 +32,13 @@ var _ = Describe("Baseline schema", func() {
 		}
 		Expect(ddl).To(ContainSubstring(
 			"CREATE TABLE rows_p3 PARTITION OF rows FOR VALUES WITH (MODULUS 4, REMAINDER 3);"))
+		// The index tables hold the workspace number in place of the id.
+		Expect(strings.Count(ddl, "PARTITION BY HASH (wsn)")).
+			To(Equal(len(numberPartitionedTables)))
+		for _, table := range numberPartitionedTables {
+			Expect(strings.Count(ddl, "PARTITION OF "+table+" ")).To(Equal(4),
+				"%s must have one partition per remainder", table)
+		}
 	})
 
 	It("pads partition names to the width of the largest remainder", func() {

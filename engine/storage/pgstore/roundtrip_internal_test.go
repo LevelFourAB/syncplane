@@ -214,6 +214,54 @@ var _ = Describe("Postgres round trips", func() {
 			return tx.PutRow("widget", "b", []byte("v"), 2, storage.Actor{})
 		}))).To(BeEquivalentTo(2), "the opening, the first write and the read; then the second write and COMMIT")
 	})
+
+	It("writes index entries with COMMIT, after the read of the index states that loads their ids", func() {
+		Expect(trips(write(func(tx storage.WriteTx) error {
+			// The engine reads the index states of an entity before it writes
+			// a row of it.
+			if _, err := tx.IndexStates("widget"); err != nil {
+				return err
+			}
+			for _, key := range []string{"a", "b", "c"} {
+				if err := tx.PutIndexEntries("widget", key, []storage.IndexEntry{
+					{Index: "by_v", Key: []byte("\x01v\x00\x00" + key + "\x00\x00")},
+					{Index: "by_tag", Key: []byte("t")},
+				}); err != nil {
+					return err
+				}
+			}
+			return tx.DeleteIndexEntries("widget", "d")
+		}))).To(BeEquivalentTo(2), "the opening and the read; then the entry statements and COMMIT")
+	})
+
+	It("reads an index in one round trip, and the row keys its entries do not hold in one more", func() {
+		write(func(tx storage.WriteTx) error {
+			for _, key := range []string{"a", "b", "c"} {
+				if err := tx.PutIndexEntries("widget", key, []storage.IndexEntry{
+					{Index: "by_v", Key: []byte("\x01v\x00\x00" + key + "\x00\x00")},
+					{Index: "by_tag", Key: []byte("t")},
+				}); err != nil {
+					return err
+				}
+			}
+			return nil
+		})()
+		scan := func(index string) func() {
+			return read(func(tx storage.ReadTx) error {
+				_, _, err := tx.IndexState("widget", index)
+				Expect(err).NotTo(HaveOccurred())
+				var keys []string
+				Expect(tx.ScanIndex("widget", index, nil, nil, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
+					keys = append(keys, rowKey)
+					return nil
+				})).To(Succeed())
+				Expect(keys).To(ConsistOf("a", "b", "c"))
+				return nil
+			})
+		}
+		Expect(trips(scan("by_v"))).To(BeEquivalentTo(3), "the index state with BEGIN, the scan, then the ROLLBACK")
+		Expect(trips(scan("by_tag"))).To(BeEquivalentTo(4), "and the read of the row keys")
+	})
 })
 
 // A transaction runs on a connection it holds outside any pgx.Tx, so it is the

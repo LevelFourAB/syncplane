@@ -80,6 +80,20 @@ type pgTx struct {
 	postingDone int
 	// scopes is the store's cache of posting scope ids, nil for none.
 	scopes *scopeCache
+	// partitioned reports that the database has the partitioned layout.
+	partitioned bool
+	// entryLog holds PutIndexEntries and DeleteIndexEntries calls of the
+	// transaction in order: the calls that are not written, and before them
+	// the written calls that the rewind of an open savepoint can make pending
+	// again. entryDone counts the written calls, and entryPending the calls
+	// after them and their entries. See index.go.
+	entryLog     []entryOp
+	entryDone    int
+	entryPending int
+	// indexScopes memoizes every index_scopes row of the workspace (see
+	// loadIndexScopes). nil means "not read yet, or dropped by a savepoint
+	// rewind".
+	indexScopes map[indexKey]int32
 }
 
 // The statements that open a transaction. beginTx queues them rather than
@@ -199,11 +213,25 @@ func (t *pgTx) loadIndexStates() error {
 	return t.loadState()
 }
 
-// loadState fills whichever of the workspace memo and the index state memo is
-// empty, both in one round trip. Most transactions that need one of them need
-// the other — a request reads its position and probes indexes — and the
-// second read costs the server less than the round trip it saves when it is
-// needed.
+// loadIndexScopes reads every index_scopes row of the workspace into the
+// memo, unless it holds them already.
+//
+// Holding the set is exact for loadWorkspace's reason: a read transaction's
+// snapshot cannot change, and a write transaction holds the workspace lock,
+// under which only the transaction itself adds a row (see makeIndexScopes).
+func (t *pgTx) loadIndexScopes() error {
+	if t.indexScopes != nil {
+		return nil
+	}
+	return t.loadState()
+}
+
+// loadState fills whichever of the workspace memo, the index state memo and
+// the index scope memo is empty, all in one round trip. Most transactions that
+// need one of them need the others — a request reads its position and probes
+// indexes, and a write of a row reads its index states before it writes its
+// entries — and each further read costs the server less than the round trip it
+// saves when it is needed.
 func (t *pgTx) loadState() error {
 	var reads []queuedStmt
 	if !t.wsLoaded {
@@ -226,6 +254,12 @@ func (t *pgTx) loadState() error {
 	if t.indexStates == nil {
 		reads = append(reads, queuedStmt{
 			sql:  `SELECT entity, idx, spec_hash, ready FROM index_state WHERE workspace_id = $1`,
+			args: []any{t.ws},
+		})
+	}
+	if t.indexScopes == nil {
+		reads = append(reads, queuedStmt{
+			sql:  `SELECT entity, idx, scope FROM index_scopes WHERE workspace_id = $1`,
 			args: []any{t.ws},
 		})
 	}
@@ -263,7 +297,6 @@ func (t *pgTx) decodeState(br pgx.BatchResults) error {
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
 		states := make(map[indexKey]indexState)
 		for rows.Next() {
 			var (
@@ -271,14 +304,40 @@ func (t *pgTx) decodeState(br pgx.BatchResults) error {
 				st indexState
 			)
 			if err := rows.Scan(&k.entity, &k.index, &st.specHash, &st.ready); err != nil {
+				rows.Close()
 				return err
 			}
 			states[k] = st
 		}
+		// Closed here and not deferred: the batch gives the next result only
+		// when this one is closed.
+		rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
 		}
 		t.indexStates = states
+	}
+	if t.indexScopes == nil {
+		rows, err := br.Query()
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		scopes := make(map[indexKey]int32)
+		for rows.Next() {
+			var (
+				k     indexKey
+				scope int32
+			)
+			if err := rows.Scan(&k.entity, &k.index, &scope); err != nil {
+				return err
+			}
+			scopes[k] = scope
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		t.indexScopes = scopes
 	}
 	return nil
 }
@@ -962,221 +1021,6 @@ func (t *pgTx) PutTextFloor(entity, key, field string, vv []byte) error {
 	)
 }
 
-func (t *pgTx) ScanIndex(
-	entity, index string,
-	lo, hi []byte,
-	limit int,
-	order storage.ScanOrder,
-	fn func(entry []byte, rowKey string) error,
-) error {
-	// The bounds are optional on both ends, and a "compare only if bound"
-	// predicate would defeat the index, so the WHERE clause is built to match
-	// what was given. k is BYTEA, which Postgres compares bytewise — the order
-	// the entry encoding is built for, and the reason this must never become a
-	// text column.
-	var where strings.Builder
-	where.WriteString(`workspace_id = $1 AND entity = $2 AND idx = $3`)
-	args := []any{t.ws, entity, index}
-	if lo != nil {
-		args = append(args, lo)
-		fmt.Fprintf(&where, ` AND k >= $%d`, len(args))
-	}
-	if hi != nil {
-		args = append(args, hi)
-		fmt.Fprintf(&where, ` AND k < $%d`, len(args))
-	}
-	args = append(args, limitArg(limit))
-	// The row key is part of the sort so that two entries sharing a key come
-	// out in a fixed order; reversing the walk has to reverse it too, or the
-	// descending scan would not be the exact mirror of the ascending one.
-	orderBy := `k, key`
-	if order == storage.ScanDesc {
-		orderBy = `k DESC, key DESC`
-	}
-	query := fmt.Sprintf(
-		`SELECT k, key FROM index_entries WHERE %s ORDER BY %s LIMIT $%d`, where.String(), orderBy, len(args))
-
-	type indexRow struct {
-		entry  []byte
-		rowKey string
-	}
-	return scanRows(t, query, args, limit,
-		func(rows pgx.Rows) (indexRow, error) {
-			var r indexRow
-			if err := rows.Scan(&r.entry, &r.rowKey); err != nil {
-				return indexRow{}, err
-			}
-			return r, nil
-		},
-		func(r indexRow) error { return fn(r.entry, r.rowKey) })
-}
-
-// ScanIndexRanges reads a run of bounded ranges a page at a time, every range
-// of the run in one statement (see scanBoundedRanges), so a probe of many keys
-// costs the round trips of its entries rather than one per key. A range with
-// no upper bound reads through ScanIndex on its own, which costs a round trip
-// more and is rare: a prefix range has a Hi unless its prefix is all 0xff.
-func (t *pgTx) ScanIndexRanges(
-	entity, index string,
-	ranges []storage.IndexRange,
-	fn func(i int, entry []byte, rowKey string) error,
-) error {
-	for start := 0; start < len(ranges); {
-		if ranges[start].Hi == nil {
-			i := start
-			if err := t.ScanIndex(entity, index, ranges[i].Lo, nil, 0, storage.ScanAsc, func(entry []byte, rowKey string) error {
-				return fn(i, entry, rowKey)
-			}); err != nil {
-				return err
-			}
-			start++
-			continue
-		}
-		end := start + 1
-		for end < len(ranges) && ranges[end].Hi != nil {
-			end++
-		}
-		if err := t.scanBoundedRanges(entity, index, ranges[start:end], start, fn); err != nil {
-			return err
-		}
-		start = end
-	}
-	return nil
-}
-
-// rangeEntry is one entry a multi-range read returns: the position of its
-// range in the caller's list, the entry, and the row it points at.
-type rangeEntry struct {
-	i      int
-	entry  []byte
-	rowKey string
-}
-
-// scanBoundedRanges yields the entries of ranges, every one of which has a Hi,
-// to fn as ScanIndexRanges does. first is the position of ranges[0] in the
-// caller's list.
-//
-// It pages by key rather than through scanRows's cursor. Postgres cannot tell
-// that the join below returns its rows in the order of the outer ORDER BY, so
-// it sorts each range's entries, and an unlimited read sorts every entry of a
-// range before it returns the first: 79 ms for the first 257 entries of a
-// range of 200000, where a page of the same range takes 0.2 ms. A LIMIT inside
-// the join bounds that sort to one page, and the next page starts after the
-// last entry yielded.
-func (t *pgTx) scanBoundedRanges(
-	entity, index string,
-	ranges []storage.IndexRange,
-	first int,
-	fn func(i int, entry []byte, rowKey string) error,
-) error {
-	if len(ranges) == 1 {
-		// ScanIndex reads one range as fast, with a plan that has no join.
-		return t.ScanIndex(entity, index, ranges[0].Lo, ranges[0].Hi, 0, storage.ScanAsc, func(entry []byte, rowKey string) error {
-			return fn(first, entry, rowKey)
-		})
-	}
-	los := make([][]byte, len(ranges))
-	his := make([][]byte, len(ranges))
-	for i, r := range ranges {
-		// The empty key sorts first, so it stands in for a nil Lo as a bound
-		// the index can seek to.
-		los[i] = notNilBytes(r.Lo)
-		his[i] = r.Hi
-	}
-	// Each page reads one entry more than it yields, which tells whether the
-	// range of the last entry yielded goes on.
-	const pageRead = scanBatch + 1
-	// Each range is a primary-key probe of its own through the LATERAL join,
-	// which reads the range in index order and stops at the LIMIT. The ORDER
-	// BY inside the join makes the LIMIT take the first entries of the range,
-	// and it keeps the probe plan when the statement cache makes the statement
-	// generic, where the planner does not know how many ranges there are: a
-	// generic plan of the join without it reads every entry of the entity
-	// once and filters it against each range. (k, key) is unique within one
-	// range, as the primary key holds it, so the outer ORDER BY is a total
-	// order.
-	const across = `SELECT r.i, e.k, e.key
-		FROM unnest($4::bytea[], $5::bytea[]) WITH ORDINALITY AS r(lo, hi, i)
-		CROSS JOIN LATERAL (
-			SELECT k, key FROM index_entries
-			WHERE workspace_id = $1 AND entity = $2 AND idx = $3 AND k >= r.lo AND k < r.hi
-			ORDER BY k, key
-			LIMIT $6
-		) e
-		ORDER BY r.i, e.k, e.key
-		LIMIT $6`
-	// The rest of one range after an entry. The row comparison seeks in the
-	// primary key, where a test of k alone would read every entry before it
-	// again that shares its k, as all the rows below one parent do.
-	const rest = `SELECT k, key FROM index_entries
-		WHERE workspace_id = $1 AND entity = $2 AND idx = $3 AND (k, key) > ($4, $5) AND k < $6
-		ORDER BY k, key
-		LIMIT $7`
-
-	// from is the first range not yet read to its end, and after is the last
-	// entry yielded from it, nil when it has yielded none.
-	from := 0
-	var after *rangeEntry
-	for from < len(ranges) {
-		var (
-			page []rangeEntry
-			err  error
-		)
-		if after == nil {
-			offset := from
-			page, err = queryBatch(t, across,
-				[]any{t.ws, entity, index, los[from:], his[from:], int64(pageRead)}, pageRead,
-				func(rows pgx.Rows) (rangeEntry, error) {
-					var (
-						e   rangeEntry
-						ord int64
-					)
-					if err := rows.Scan(&ord, &e.entry, &e.rowKey); err != nil {
-						return rangeEntry{}, err
-					}
-					e.i = offset + int(ord-1) // WITH ORDINALITY counts from 1
-					return e, nil
-				})
-		} else {
-			i := from
-			page, err = queryBatch(t, rest,
-				[]any{t.ws, entity, index, after.entry, after.rowKey, his[from], int64(pageRead)}, pageRead,
-				func(rows pgx.Rows) (rangeEntry, error) {
-					e := rangeEntry{i: i}
-					if err := rows.Scan(&e.entry, &e.rowKey); err != nil {
-						return rangeEntry{}, err
-					}
-					return e, nil
-				})
-		}
-		if err != nil {
-			return err
-		}
-		more := len(page) > scanBatch
-		yielded := page[:min(len(page), scanBatch)]
-		for _, e := range yielded {
-			if err := fn(first+e.i, e.entry, e.rowKey); err != nil {
-				return err
-			}
-		}
-		switch {
-		case !more && after == nil:
-			// No range from `from` on held more than this page.
-			return nil
-		case !more:
-			from, after = from+1, nil
-		case page[scanBatch].i == yielded[scanBatch-1].i:
-			last := yielded[scanBatch-1]
-			from, after = last.i, &last
-		default:
-			// The entry read past the page opens a range of its own, so the
-			// ranges up to it are done and the next page starts at it.
-			from, after = page[scanBatch].i, nil
-		}
-	}
-	return nil
-}
-
 // indexKey names one (entity, index) pair of index_state.
 type indexKey struct {
 	entity, index string
@@ -1290,85 +1134,6 @@ func (t *pgTx) SetIndexState(entity, index, specHash string, ready bool) error {
 	return nil
 }
 
-func (t *pgTx) PutIndexEntries(entity, key string, entries []storage.IndexEntry) error {
-	if len(entries) == 0 {
-		// Replace-with-nothing IS the delete, but a row that has never had
-		// entries must not register the workspace on its account.
-		return t.DeleteIndexEntries(entity, key)
-	}
-	if err := t.register(); err != nil {
-		return err
-	}
-	// Replace-set by DIFFERENCE, not by clear-and-reinsert. A row carries an
-	// entry per index and per element of every indexed list, while the PATCH
-	// that triggered the write usually moves one or two of them; re-inserting
-	// the unchanged rest leaves a dead tuple per entry for vacuum and dirties
-	// a page per btree the entry sits in. The new set arrives as two parallel
-	// arrays so the whole replacement stays one statement whatever the fan-out.
-	idxs := make([]string, len(entries))
-	ks := make([][]byte, len(entries))
-	for i, e := range entries {
-		idxs[i], ks[i] = e.Index, notNilBytes(e.Key)
-	}
-	// Both directions ride in one data-modifying CTE, which is one round trip
-	// where two statements were two. Every part reads the same snapshot, so
-	// have holds the row's entries as they stood before the statement and the
-	// two halves cannot see each other's effect: the DELETE takes only entries
-	// OUTSIDE the new set and the INSERT adds only entries inside it that have
-	// does not already hold, so the rows they touch are disjoint by
-	// construction.
-	//
-	// Filtering the INSERT against have is what makes an unchanged entry free.
-	// The obvious shape — insert the whole set under ON CONFLICT DO NOTHING and
-	// let the primary key sort it out — makes every row a SPECULATIVE insert,
-	// so Postgres descends the wide primary key once per entry only to discard
-	// it, for all but the two or three a PATCH moved. have comes off
-	// index_entries_by_row, the index the DELETE scans anyway, at one descent
-	// for the whole row. Replacing a 31-entry row of which 3 changed, in a
-	// 1.6M-entry table: 189 buffers down to 36, and half the wall time of a
-	// 200-row push (see BenchmarkPutIndexEntries).
-	//
-	// have is MATERIALIZED because the INSERT is its only reader, and Postgres
-	// inlines a CTE that has one reader. The generic plan of the inlined form
-	// probes the primary key one time for each entry of want, which is the cost
-	// that the filter is there to remove.
-	//
-	// DISTINCT because the caller may hand in the same entry twice — two
-	// components of one index can encode to the same entry for one row — and
-	// the primary key would refuse the second copy. Collapsing the duplicate
-	// here is what keeps that harmless caller bug off the write path. It is the
-	// only conflict there is to absorb: a write transaction holds the workspace
-	// advisory lock, so nothing else writes this row's entries while the
-	// statement runs.
-	return t.queue(
-		`WITH want AS (SELECT DISTINCT u.idx, u.k FROM unnest($4::text[], $5::bytea[]) AS u(idx, k)),
-		      have AS MATERIALIZED (
-		          SELECT idx, k FROM index_entries
-		          WHERE workspace_id = $1 AND entity = $2 AND key = $3
-		      ),
-		      stale AS (
-		          DELETE FROM index_entries e
-		          WHERE e.workspace_id = $1 AND e.entity = $2 AND e.key = $3
-		            AND NOT EXISTS (SELECT 1 FROM want w WHERE w.idx = e.idx AND w.k = e.k)
-		      )
-		 INSERT INTO index_entries (workspace_id, entity, idx, k, key)
-		 SELECT $1::text, $2::text, w.idx, w.k, $3::text FROM want w
-		 WHERE NOT EXISTS (SELECT 1 FROM have h WHERE h.idx = w.idx AND h.k = w.k)`,
-		t.ws, entity, key, idxs, ks,
-	)
-}
-
-func (t *pgTx) DeleteIndexEntries(entity, key string) error {
-	// No register(): removing entries a row never had must leave no trace, the
-	// same reason a write closure that writes nothing does not create a
-	// workspace.
-	return t.queue(
-		`DELETE FROM index_entries
-		 WHERE workspace_id = $1 AND entity = $2 AND key = $3`,
-		t.ws, entity, key,
-	)
-}
-
 // NextSeq claims the first sequence with a statement and every later one from
 // memory, so a push of N mutations costs one allocation statement rather than
 // N. The workspace advisory lock has already made this transaction the only
@@ -1421,6 +1186,9 @@ func (t *pgTx) NextSeq() (uint64, error) {
 // every mark that matters: the workspace lock, taken before anything else in
 // the transaction, is also what DeleteWorkspace holds.
 func (t *pgTx) flush() error {
+	if err := t.resolveEntries(); err != nil {
+		return err
+	}
 	if err := t.resolvePostings(); err != nil {
 		return err
 	}
@@ -1614,16 +1382,20 @@ func (t *pgTx) InSavepoint(fn func() error) error {
 	// resolvePostings write calls logged before the savepoint as well, the
 	// rewind also undoes those writes, so the calls are pending again.
 	postingLen, postingDone := len(t.postingLog), t.postingDone
+	// The same holds for the index entry calls.
+	entryLen, entryDone, entryPending := len(t.entryLog), t.entryDone, t.entryPending
 
 	if err := fn(); err != nil {
 		t.seq, t.seqPersisted, t.seqLoaded, t.registered = seq, seqPersisted, seqLoaded, registered
 		t.postingLog, t.postingDone = t.postingLog[:postingLen], postingDone
-		// The rewind may undo a register, a CollectTombstones or a
-		// SetIndexState, so the memos are dropped rather than restored: what fn
-		// saw is not what the tables hold now, and what preceded fn may not be
-		// either.
+		t.entryLog, t.entryDone, t.entryPending = t.entryLog[:entryLen], entryDone, entryPending
+		// The rewind may undo a register, a CollectTombstones, a SetIndexState
+		// or a new index scope, so the memos are dropped rather than restored:
+		// what fn saw is not what the tables hold now, and what preceded fn may
+		// not be either.
 		t.wsLoaded = false
 		t.indexStates = nil
+		t.indexScopes = nil
 		switch {
 		case t.failed != nil:
 			// A queued statement has already failed, which aborts the whole
@@ -1726,9 +1498,9 @@ func (t *pgTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 // comparison every other key predicate makes — and, unlike LIKE, it can use the
 // primary-key index and needs no escaping of wildcards.
 //
-// A limit turns both statements into the same `key IN (SELECT … ORDER BY key
-// LIMIT n)` subquery — Postgres has no DELETE … LIMIT, and the subquery is what
-// the row delete needs anyway. The ORDER BY is load-bearing rather than cosmetic:
+// A limit makes both statements select through the same `SELECT key … ORDER BY
+// key LIMIT n` subquery — Postgres has no DELETE … LIMIT, and the subquery is
+// what the row delete needs anyway. The ORDER BY is load-bearing rather than cosmetic:
 // the two subqueries run against the same rows (the entries delete does not touch
 // them) and must select the SAME set, or entries outlive their row or die before
 // it. A total order over a unique key is what makes them agree.
@@ -1737,6 +1509,14 @@ func (t *pgTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 // exactly emptied the selection costs one more no-op call, which is cheaper than
 // probing for a next row on every chunk.
 func (t *pgTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, limit int) (int, bool, error) {
+	// The logged index entry calls go first: the delete below must take the
+	// entries they give the selected rows.
+	if err := t.resolveEntries(); err != nil {
+		return 0, false, err
+	}
+	if err := t.loadIndexScopes(); err != nil {
+		return 0, false, err
+	}
 	where, args := purgeWhere(t.ws, entity, keyPrefix, before)
 	selected, rowsWhere := where, where
 	if limit > 0 {
@@ -1747,14 +1527,33 @@ func (t *pgTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, limit
 		rowsWhere = `workspace_id = $1 AND entity = $2 AND key IN (
 		   SELECT key FROM rows WHERE ` + selected + `)`
 	}
-	if _, err := t.exec(
-		`DELETE FROM index_entries
-		 WHERE workspace_id = $1 AND entity = $2 AND key IN (
-		   SELECT key FROM rows WHERE `+selected+`
-		 )`,
-		args...,
-	); err != nil {
-		return 0, false, err
+	wsn, hasEntries := t.indexScopes[indexKey{}]
+	ent, entityHasEntries := t.indexScopes[indexKey{entity: entity}]
+	// A workspace or an entity without an id holds no entry.
+	if hasEntries && entityHasEntries {
+		// tgt holds the row ids before either delete runs. It finds them with a
+		// probe per selected row and the deletes take them as an array, for
+		// the reasons indexPutSQL gives.
+		w, e := len(args)+1, len(args)+2
+		restore := t.customPlanIfPartitioned()
+		_, err := t.exec(fmt.Sprintf(
+			`WITH tgt AS MATERIALIZED (
+			     SELECT r.rid FROM (SELECT key FROM rows WHERE %[3]s) s
+			     CROSS JOIN LATERAL (
+			       SELECT x.rid FROM index_rows x WHERE x.ent = $%[2]d AND x.wsn = $%[1]d AND x.key = s.key LIMIT 1
+			     ) r
+			 ),
+			 gone AS (
+			     DELETE FROM index_rows x WHERE x.wsn = $%[1]d AND x.rid = ANY (ARRAY(SELECT t.rid FROM tgt t))
+			 )
+			 DELETE FROM index_entries e WHERE e.wsn = $%[1]d AND e.rid = ANY (ARRAY(SELECT t.rid FROM tgt t))`,
+			w, e, selected),
+			append(slices.Clone(args), wsn, ent)...,
+		)
+		restore()
+		if err != nil {
+			return 0, false, err
+		}
 	}
 	tag, err := t.exec(`DELETE FROM rows WHERE `+rowsWhere, args...)
 	if err != nil {
@@ -1765,7 +1564,7 @@ func (t *pgTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, limit
 }
 
 // purgeWhere builds PurgeEntityRows' row predicate and its arguments. The first
-// two placeholders are shared with the enclosing index_entries statement, so
+// two placeholders are shared with the statements that enclose it, so
 // the numbering starts where that one's does.
 //
 // Both narrowings are optional: an empty prefix bounds nothing, and a zero

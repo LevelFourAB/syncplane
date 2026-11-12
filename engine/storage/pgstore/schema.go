@@ -3,6 +3,7 @@ package pgstore
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -73,7 +74,7 @@ var workspaceTables = []string{
 	"field_deltas",
 	"text_floors",
 	"idempotency",
-	"index_entries",
+	"index_scopes",
 	"index_state",
 	"consumer_positions",
 	"consumer_shadows",
@@ -89,6 +90,16 @@ var scopedTables = []string{
 	"posting_chunks",
 	"posting_pages",
 	"posting_rows",
+}
+
+// numberedTables names the tables that hold state of one workspace keyed by
+// its workspace number, the wsn column, rather than by workspace_id, with the
+// column that holds an id of index_scopes and leads the primary key.
+// DeleteWorkspace empties them for each id of the workspace before it deletes
+// the index_scopes rows that hold the ids.
+var numberedTables = []struct{ name, id string }{
+	{"index_entries", "scope"},
+	{"index_rows", "ent"},
 }
 
 // seqLineageDDL is migration 2: one row per committed write transaction that
@@ -149,10 +160,10 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 );
 `
 
-// baselineDDL is migration 1. The %[1]s after five of the tables is where the
-// partitioning clause lands; see partitionedTables for which five and why.
+// baselineDDL is migration 1. The %[1]s after four of the tables is where the
+// partitioning clause lands; see partitionedTables for which four and why.
 // %[2]s, %[3]s and %[4]s do the same for the three tables of
-// scopePartitionedTables.
+// scopePartitionedTables, and %[5]s for the two of numberPartitionedTables.
 const baselineDDL = `
 CREATE TABLE workspaces (
 	workspace_id        TEXT COLLATE "C" NOT NULL,
@@ -261,23 +272,58 @@ CREATE TABLE idempotency (
 )%[1]s;
 CREATE INDEX idempotency_gc ON idempotency (workspace_id, updated_at);
 
--- k is BYTEA, which Postgres compares bytewise — the order the engine's key
--- encoder is built for, and the reason this must never become a text column
--- whatever its collation. The key column sits in the primary key after k
--- because entries of different rows can be byte-equal: a search entry does not
--- end with its row key.
-CREATE TABLE index_entries (
+-- The value index entries (see storage.WriteTx.PutIndexEntries); index.go
+-- describes the layout. index_scopes gives an int id to each workspace, entity
+-- and index that holds entries, from the sequence of the posting scopes, so an
+-- id names one thing across both. The row with an empty entity and an empty idx
+-- is the workspace: its scope is the workspace number, the wsn column of the
+-- two tables below. The row with an empty idx is the entity, and its scope is
+-- the ent column of index_rows. index_scopes holds a few small rows per
+-- workspace and stays whole, as index_state does.
+CREATE TABLE index_scopes (
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	entity       TEXT COLLATE "C" NOT NULL,
 	idx          TEXT COLLATE "C" NOT NULL,
-	k            BYTEA NOT NULL,
-	key          TEXT COLLATE "C" NOT NULL,
-	PRIMARY KEY (workspace_id, entity, idx, k, key)
-)%[1]s;
+	scope        INTEGER NOT NULL,
+	PRIMARY KEY (workspace_id, entity, idx)
+);
+-- One tuple per row that holds entries: its row id, from index_row_ids. An id
+-- names one row for as long as the database lives.
+--
+-- No index of this table or of index_entries leads with wsn, though every
+-- statement binds it. An index that did would give the planner a second way to
+-- find the rows of a statement: read everything of the workspace and filter.
+-- It takes that way when the average workspace is small, and the plan then
+-- reads a large workspace whole on every write.
+CREATE SEQUENCE index_row_ids AS BIGINT;
+CREATE TABLE index_rows (
+	wsn INTEGER NOT NULL,
+	ent INTEGER NOT NULL,
+	rid BIGINT NOT NULL,
+	key TEXT COLLATE "C" NOT NULL,
+	PRIMARY KEY (ent, wsn, key)
+)%[5]s;
+CREATE UNIQUE INDEX index_rows_by_rid ON index_rows (rid, wsn);
+-- k is BYTEA, which Postgres compares bytewise — the order the engine's key
+-- encoder is built for, and the reason this must never become a text column
+-- whatever its collation. rk says where the row key of the entry is: zero or
+-- less is the byte length of the row key negated, for an entry whose k ends
+-- with the row key and two zero bytes; above zero it is the row id, for any
+-- other entry. It sits in the primary key after k because entries of different
+-- rows can be byte-equal, and rk then tells them apart: of the rows whose key
+-- the entry ends with, each has a key of another length, and every other row
+-- has its own row id.
+CREATE TABLE index_entries (
+	wsn   INTEGER NOT NULL,
+	scope INTEGER NOT NULL,
+	rk    BIGINT NOT NULL,
+	rid   BIGINT NOT NULL,
+	k     BYTEA NOT NULL,
+	PRIMARY KEY (scope, wsn, k, rk)
+)%[5]s;
 -- Entries are replaced and deleted per ROW, and neither caller knows which
 -- indexes the row occupies; this is what makes that affordable.
-CREATE INDEX index_entries_by_row
-	ON index_entries (workspace_id, entity, key);
+CREATE INDEX index_entries_by_row ON index_entries (rid);
 
 CREATE TABLE index_state (
 	workspace_id TEXT COLLATE "C" NOT NULL,
@@ -394,15 +440,23 @@ CREATE TABLE cursor_state (
 // The rest are left whole on purpose. workspaces is scanned ACROSS workspaces
 // by ListWorkspaceIDs and ListPendingWorkspaceIDs, with no equality on the key
 // to prune by, and holds one row per workspace. clients, text_floors,
-// index_state, consumer_positions, cursor_state and catalog are small enough
-// that the partition count would cost more than the maintenance granularity
-// buys.
+// index_state, index_scopes, consumer_positions, cursor_state and catalog are
+// small enough that the partition count would cost more than the maintenance
+// granularity buys.
 var partitionedTables = []string{
 	"rows",
 	"field_deltas",
 	"idempotency",
-	"index_entries",
 	"consumer_shadows",
+}
+
+// numberPartitionedTables names the tables a partitioned layout hash-partitions
+// by the workspace number, the wsn column, rather than by workspace_id. Every
+// statement against them binds wsn to equality as a parameter, so pruning
+// reaches one partition, and all entries of a workspace share it.
+var numberPartitionedTables = []string{
+	"index_rows",
+	"index_entries",
 }
 
 // scopePartitionedTables names the tables a partitioned layout hash-partitions
@@ -423,8 +477,8 @@ const (
 	postingPagesWith  = " WITH (fillfactor = 70)"
 )
 
-// maxPartitions caps WithPartitions. The modulus multiplies by
-// len(partitionedTables), and again by the indexes each of them carries, so
+// maxPartitions caps WithPartitions. The modulus multiplies by the number of
+// partitioned tables, and again by the indexes each of them carries, so
 // the ceiling already means tens of thousands of relations — past the point
 // where planning time and the file count cost more than the maintenance
 // granularity is worth.
@@ -455,7 +509,8 @@ func (l layout) partitionBy() string {
 }
 
 // baselineSchema is migration 1 under the given layout: the tables, then the
-// partitions of the tables in partitionedTables and scopePartitionedTables.
+// partitions of the tables in partitionedTables, numberPartitionedTables and
+// scopePartitionedTables.
 //
 // Partitions come after the indexes rather than before, which is the same
 // schema either way — an index on a partitioned parent is created on every
@@ -463,15 +518,15 @@ func (l layout) partitionBy() string {
 func baselineSchema(l layout) string {
 	var b strings.Builder
 	if l.partitions == 0 {
-		fmt.Fprintf(&b, baselineDDL, "", "", postingChunksWith, postingPagesWith)
+		fmt.Fprintf(&b, baselineDDL, "", "", postingChunksWith, postingPagesWith, "")
 		return b.String()
 	}
 	byScope := " PARTITION BY HASH (scope)"
-	fmt.Fprintf(&b, baselineDDL, l.partitionBy(), byScope, byScope, byScope)
+	fmt.Fprintf(&b, baselineDDL, l.partitionBy(), byScope, byScope, byScope, " PARTITION BY HASH (wsn)")
 	// Zero-padded to the width of the largest remainder, so the partitions of
 	// a table sort in the order they are numbered wherever they are listed.
 	width := len(strconv.Itoa(l.partitions - 1))
-	for _, table := range partitionedTables {
+	for _, table := range slices.Concat(partitionedTables, numberPartitionedTables) {
 		b.WriteString("\n")
 		for i := range l.partitions {
 			fmt.Fprintf(&b, "CREATE TABLE %s_p%0*d PARTITION OF %s FOR VALUES WITH (MODULUS %d, REMAINDER %d);\n",
@@ -610,11 +665,11 @@ func schemaVersion(ctx context.Context, q querier) (int, error) {
 //     workspaces table carries a namespace column of. The namespace is half of
 //     every primary key, and of the partition key of five of the tables.
 //   - The baseline before the posting tables, the one with 32-bit row
-//     numbers in them, or the one before posting_pages. Its workspaces table
-//     exists, and posting_rows.num is missing or not BIGINT, or posting_pages
-//     is missing. The posting tables are part of the baseline because a
-//     partitioned layout partitions them with the modulus only the baseline
-//     knows.
+//     numbers in them, the one before posting_pages, or the one before
+//     index_rows. Its workspaces table exists, and posting_rows.num is missing
+//     or not BIGINT, or posting_pages or index_rows is missing. These tables
+//     are part of the baseline because a partitioned layout partitions them
+//     with the modulus only the baseline knows.
 //
 // It is checked before the ledger version, because such a database's version
 // numbers do not count within this lineage: the namespace lineage sits above
@@ -623,7 +678,7 @@ func schemaVersion(ctx context.Context, q querier) (int, error) {
 // Nothing upgrades either of them, so it has to be re-created, at the cost of
 // a re-bootstrap for every client of the workspaces it held.
 func checkLineage(ctx context.Context, q querier) error {
-	var namespaced, populated, postings, pages bool
+	var namespaced, populated, postings, pages, indexRows bool
 	err := q.QueryRow(ctx, `
 		SELECT
 			EXISTS (
@@ -639,8 +694,11 @@ func checkLineage(ctx context.Context, q querier) error {
 				  AND table_name = 'posting_rows' AND column_name = 'num' AND data_type = 'bigint'),
 			EXISTS (
 				SELECT 1 FROM information_schema.tables
-				WHERE table_schema = current_schema() AND table_name = 'posting_pages')`,
-	).Scan(&namespaced, &populated, &postings, &pages)
+				WHERE table_schema = current_schema() AND table_name = 'posting_pages'),
+			EXISTS (
+				SELECT 1 FROM information_schema.tables
+				WHERE table_schema = current_schema() AND table_name = 'index_rows')`,
+	).Scan(&namespaced, &populated, &postings, &pages, &indexRows)
 	if err != nil {
 		return fmt.Errorf("pgstore: read schema lineage: %w", err)
 	}
@@ -652,6 +710,9 @@ func checkLineage(ctx context.Context, q querier) error {
 	}
 	if populated && !pages {
 		return fmt.Errorf("pgstore: database was created by an earlier baseline without the posting_pages table; it cannot be upgraded in place and must be re-created")
+	}
+	if populated && !indexRows {
+		return fmt.Errorf("pgstore: database was created by an earlier baseline without the index_rows table; it cannot be upgraded in place and must be re-created")
 	}
 	return nil
 }

@@ -69,6 +69,11 @@
 // statement nothing at all. Savepoints ride in the queue with the writes they
 // bracket. See queue.go, which carries the rules this rests on.
 //
+// The index entries of a transaction's rows reach the queue as one delete and
+// one replace statement for each 500 rows, when the transaction commits or
+// first reads an index (see index.go), and its search postings in the same
+// manner (see postings.go).
+//
 // # Scans and re-entrant reads
 //
 // Every scan method decodes rows into memory before handing any of them to the
@@ -153,6 +158,10 @@ type Store struct {
 	leases *pgLeases
 	// scopes caches posting scope ids for the transactions of this store.
 	scopes *scopeCache
+	// partitioned reports that the database has the partitioned layout (see
+	// WithPartitions). The statements on the index tables choose their plan
+	// mode by it (see entryPlanMode).
+	partitioned bool
 }
 
 // Option configures Open, Migrate and Statements.
@@ -213,11 +222,13 @@ func WithReplicaMaxConns(n int32) Option {
 // WithPartitions hash-partitions the workspace-scoped tables with the given
 // modulus.
 //
-// The tables rows, field_deltas, idempotency, index_entries and
-// consumer_shadows are partitioned by workspace_id, and the posting tables
-// posting_rows, posting_chunks and posting_pages by their posting scope. The modulus must be
-// a power of two up to 1024; zero, the default, leaves each table whole, and
-// Open, Migrate and Statements reject any other value.
+// The tables rows, field_deltas, idempotency and consumer_shadows are
+// partitioned by workspace_id, the index tables index_rows and index_entries
+// by the workspace number that index_scopes gives each workspace, and the
+// posting tables posting_rows, posting_chunks and posting_pages by their
+// posting scope. The modulus must be a power of two up to 1024; zero, the
+// default, leaves each table whole, and Open, Migrate and Statements reject
+// any other value.
 //
 // It is honoured only when the database has no migrations recorded yet; both
 // Open and Migrate otherwise adopt the layout they find. A deploy step may
@@ -294,9 +305,32 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 			return nil, err
 		}
 	}
+	partitioned, err := isPartitioned(ctx, pool)
+	if err != nil {
+		if replica != nil {
+			replica.Close()
+		}
+		pool.Close()
+		return nil, err
+	}
 	// The lease session dials lazily, on the first TryAcquire, so a
 	// deployment that never leases never pays the connection.
-	return &Store{pool: pool, replica: replica, leases: newPgLeases(poolCfg.ConnConfig.Copy()), scopes: newScopeCache()}, nil
+	return &Store{
+		pool: pool, replica: replica, leases: newPgLeases(poolCfg.ConnConfig.Copy()),
+		scopes: newScopeCache(), partitioned: partitioned,
+	}, nil
+}
+
+// isPartitioned reads from the catalog whether the database behind pool has
+// the partitioned layout.
+func isPartitioned(ctx context.Context, pool *pgxpool.Pool) (bool, error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return false, fmt.Errorf("pgstore: acquire connection to read the table layout: %w", err)
+	}
+	defer conn.Release()
+	l, err := detectLayout(ctx, conn)
+	return l.partitions > 0, err
 }
 
 // Close closes the pools and the lease session.
@@ -346,7 +380,7 @@ func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(stor
 		return err
 	}
 	defer t.end()
-	t.scopes = s.scopes
+	t.scopes, t.partitioned = s.scopes, s.partitioned
 	return fn(readOnlyTx{t})
 }
 
@@ -386,7 +420,7 @@ func (s *Store) writeOnce(ctx context.Context, workspaceID string, fn func(stora
 		return err
 	}
 	defer t.end()
-	t.scopes = s.scopes
+	t.scopes, t.partitioned = s.scopes, s.partitioned
 	// The workspaces row is NOT created here: pgTx.register mints it on the
 	// transaction's first actual write. A closure that only reads (a read-only
 	// Mutate, a push whose every mutation was already applied) must leave the
@@ -430,10 +464,10 @@ func isRetryable(err error) bool {
 	return false
 }
 
-// DeleteWorkspace empties every table in scopedTables and workspaceTables for
-// the workspace and records its mark, in one write transaction under the
-// workspace lock. The statements are queued, so they travel with COMMIT as one
-// batch.
+// DeleteWorkspace empties every table in scopedTables, numberedTables and
+// workspaceTables for the workspace and records its mark, in one write
+// transaction under the workspace lock. The statements are queued, so they
+// travel with COMMIT as one batch.
 func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 	return s.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
 		t := tx.(*pgTx)
@@ -452,6 +486,18 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 				return err
 			}
 		}
+		// The ids are in the index_scopes rows the loop below deletes, so the
+		// tables keyed by them go first.
+		if err := t.loadIndexScopes(); err != nil {
+			return err
+		}
+		restore := t.customPlanIfPartitioned()
+		for _, stmt := range numberedDeletes(t.indexScopes) {
+			if err := t.queue(stmt.sql, stmt.args...); err != nil {
+				return err
+			}
+		}
+		restore()
 		for _, table := range workspaceTables {
 			if err := t.queue(`DELETE FROM `+table+` WHERE workspace_id = $1`, workspaceID); err != nil {
 				return err
@@ -474,6 +520,31 @@ func scopedDeletes(scopes []int32) []queuedStmt {
 	for _, scope := range scopes {
 		for _, table := range scopedTables {
 			out = append(out, queuedStmt{sql: `DELETE FROM ` + table + ` WHERE scope = $1`, args: []any{scope}})
+		}
+	}
+	return out
+}
+
+// numberedDeletes are the statements that empty every table in numberedTables
+// for scopes, the index_scopes rows of one workspace: one statement per id and
+// table, with the id bound to equality on the column that leads the primary
+// key. A workspace without a number holds nothing in them.
+//
+// Every id goes to every table, whatever it names. An id is that of an entity
+// and of an index at once when an index has the empty name, and a statement
+// for an id the table does not hold costs one probe.
+func numberedDeletes(scopes map[indexKey]int32) []queuedStmt {
+	wsn, ok := scopes[indexKey{}]
+	if !ok {
+		return nil
+	}
+	out := make([]queuedStmt, 0, len(numberedTables)*len(scopes))
+	for _, id := range scopes {
+		for _, table := range numberedTables {
+			out = append(out, queuedStmt{
+				sql:  `DELETE FROM ` + table.name + ` WHERE ` + table.id + ` = $1 AND wsn = $2`,
+				args: []any{id, wsn},
+			})
 		}
 	}
 	return out

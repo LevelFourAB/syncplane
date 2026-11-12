@@ -49,9 +49,17 @@ A pull with no cursor always reads on the primary. A client with no state uses i
 
 ## Table layout and partitioning
 
-Partitioning five tables (`rows`, `field_deltas`, `idempotency`, `index_entries`, and `consumer_shadows`) improves autovacuum maintenance by isolating dead tuples into smaller concurrent tasks.
+Partitioning the large tables improves autovacuum maintenance by isolating dead tuples into smaller concurrent tasks. `rows`, `field_deltas`, `idempotency`, and `consumer_shadows` are partitioned by `workspace_id`. The value index tables `index_rows` and `index_entries` are partitioned by a workspace number, and the search tables `posting_rows`, `posting_chunks`, and `posting_pages` by a posting scope. In each case, all the data of one workspace or one search index is in one partition.
 
-Tables such as `workspaces`, `clients`, `text_floors`, `index_state`, `consumer_positions`, `cursor_state`, and `schemas` remain unpartitioned because they are small or scanned across workspaces.
+The index tables hold integer ids in place of names. `index_scopes` gives each workspace, entity, and index an id, and `index_rows` gives each indexed row an id. An index entry then holds ids and the entry bytes. The workspace id, the entity name, the index name, and the row key are not repeated in each entry and in each index of the table.
+
+`pgstore` writes the index entries of the rows of a transaction with one statement for each 500 rows. A statement has a fixed cost: PostgreSQL plans it, locks the tables it reads, and starts it. One statement for the rows of a transaction pays this cost one time. One statement for each row pays it for each row.
+
+On a partitioned layout, `pgstore` makes PostgreSQL plan each statement on the index tables with the workspace number of the transaction. PostgreSQL then locks only the partition of that workspace. A plan that PostgreSQL makes one time and uses for all workspaces locks every partition on each use. An exclusive lock on one partition, which some maintenance commands take, then stalls the index writes of all workspaces.
+
+The ids in `index_scopes` are 32-bit integers from one sequence, which the search indexes share. A workspace takes one id, and one more for each entity and each index that holds entries. An id is not used again, so a database can give out 2^31 ids in its life. After that, a write that needs a new id fails.
+
+Tables such as `workspaces`, `clients`, `text_floors`, `index_state`, `index_scopes`, `consumer_positions`, `cursor_state`, and `schemas` remain unpartitioned because they are small or scanned across workspaces.
 
 ## Per-workspace leases
 

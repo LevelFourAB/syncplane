@@ -40,6 +40,12 @@ var _ = storagetest.Conformance("postgres", func() storage.Adapter {
 	return open()
 })
 
+// The contract must hold unchanged on a partitioned layout, where every
+// statement has to reach the one partition of its workspace or scope.
+var _ = storagetest.Conformance("postgres (partitioned)", func() storage.Adapter {
+	return open(pgstore.WithPartitions(4))
+})
+
 // The replica pointed at the primary itself: always fresh, so the routing and
 // read contracts are exercised without a second database. The fake-lagging
 // specs in replica_test.go cover the stale side.
@@ -263,9 +269,9 @@ var _ = Describe("Postgres migrations", func() {
 
 	DescribeTable("refuses a database that an earlier baseline created",
 		// Such a database is at this binary's ledger version but has no
-		// posting tables, has them with 32-bit row numbers, or has no
-		// posting_pages. Serving it would fail later, in the first search
-		// write.
+		// posting tables, has them with 32-bit row numbers, has no
+		// posting_pages, or has index entries without index_rows. Serving it
+		// would fail later, in the first search or index write.
 		func(earlier string, opts ...pgstore.Option) {
 			dsn := pgtest.DSN()
 			Expect(pgstore.Migrate(ctx, dsn)).To(Succeed())
@@ -290,6 +296,14 @@ var _ = Describe("Postgres migrations", func() {
 			`DROP TABLE posting_pages`),
 		Entry("without posting_pages, verifying at boot",
 			`DROP TABLE posting_pages`,
+			pgstore.WithoutMigrations()),
+		Entry("with index entries keyed by workspace id, migrating at boot",
+			`DROP TABLE index_rows, index_entries, index_scopes;
+			 CREATE TABLE index_entries (
+			   workspace_id TEXT COLLATE "C" NOT NULL, entity TEXT COLLATE "C" NOT NULL, idx TEXT COLLATE "C" NOT NULL,
+			   k BYTEA NOT NULL, key TEXT COLLATE "C" NOT NULL, PRIMARY KEY (workspace_id, entity, idx, k, key))`),
+		Entry("without index_rows, verifying at boot",
+			`DROP TABLE index_rows`,
 			pgstore.WithoutMigrations()),
 	)
 

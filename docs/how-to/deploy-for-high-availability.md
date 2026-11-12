@@ -15,9 +15,11 @@ Before you begin, verify that you have:
 
 If you set up a new database, configure hash partitioning for tenant tables:
 
-1. Configure 32 hash partitions by passing `pgstore.WithPartitions(32)` in Go or `-db-partitions 32` to `syncplaned`. This partitions `rows`, `field_deltas`, `idempotency`, `index_entries`, and `consumer_shadows` by `workspace_id`, and `posting_rows`, `posting_chunks`, and `posting_pages` by their posting scope.
+1. Configure 32 hash partitions by passing `pgstore.WithPartitions(32)` in Go or `-db-partitions 32` to `syncplaned`. This partitions `rows`, `field_deltas`, `idempotency`, and `consumer_shadows` by `workspace_id`, `index_rows` and `index_entries` by their workspace number, and `posting_rows`, `posting_chunks`, and `posting_pages` by their posting scope.
 2. Apply this setting during initial database creation. Schema migrations apply the partition layout when creating tables. The modulus must be a power of two. You cannot partition an existing database that contains data.
 3. Schedule a job to run `ANALYZE` on partitioned parent tables. Autovacuum does not analyze partitioned parent tables automatically.
+4. Keep `max_locks_per_transaction` at its default of 64 or higher. A transaction that writes a row and its index entries locks approximately 40 relations: 39 in the steady state and 44 in the first transaction of a connection or after an `ANALYZE`. The number is the same with 8 and with 32 partitions, because each statement locks only the partitions of its workspace. PostgreSQL sizes the shared lock table as `max_locks_per_transaction` x (`max_connections` + `max_prepared_transactions`) slots. Each locked object takes one slot, and all sessions share the slots.
+5. Use the `CONCURRENTLY` forms of maintenance commands on partitions. An `ACCESS EXCLUSIVE` lock on a partition stalls the writers of all workspaces in that partition, and a request for such a lock that waits in the lock queue does the same. `VACUUM FULL`, `REINDEX` without `CONCURRENTLY`, and most forms of `ALTER TABLE` take this lock.
 
 **Note:** PostgreSQL does not support `CREATE INDEX CONCURRENTLY` on partitioned parent tables. Adding an index to a partitioned parent table requires an exclusive write lock. To add indexes online later, apply index migrations per partition.
 
