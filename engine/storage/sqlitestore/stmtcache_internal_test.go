@@ -235,4 +235,51 @@ var _ = Describe("Prepared statement cache", func() {
 		Expect(read()).To(Equal([]byte("v")),
 			"a statement whose connection was retired must be re-prepared, not fail")
 	})
+
+	// database/sql rolls a transaction back when its context ends and closes
+	// the statements bound to it, so the next run of a memoized handle fails
+	// with "sql: statement is closed". A caller must still see that the
+	// context ended, or it takes a client walking away for a storage fault.
+	It("reports a context that ends mid-transaction as the context's error", func() {
+		store, err := Open(filepath.Join(GinkgoT().TempDir(), "cancel.db"))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+
+		Expect(store.WithWriteTx(context.Background(), "ws", func(tx storage.WriteTx) error {
+			return tx.PutRow("e", "k", []byte("v"), 1, storage.Actor{})
+		})).To(Succeed())
+
+		// Every call reads the same text twice: once while the context is
+		// live, which memoizes the transaction's handle, and again after it
+		// ends. The first call leaves the text queued and the second warms it,
+		// so the second goes through the prepared path.
+		readAcrossCancel := func(with func(context.Context, func(storage.ReadTx) error) error) error {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			return with(ctx, func(tx storage.ReadTx) error {
+				if _, err := tx.GetRow("e", "k"); err != nil {
+					return err
+				}
+				cancel()
+				// The rollback runs on database/sql's own goroutine.
+				var err error
+				Eventually(func() error {
+					_, err = tx.GetRow("e", "k")
+					return err
+				}).Should(HaveOccurred())
+				return err
+			})
+		}
+
+		reads := func(ctx context.Context, fn func(storage.ReadTx) error) error {
+			return store.WithReadTx(ctx, "ws", fn)
+		}
+		writes := func(ctx context.Context, fn func(storage.ReadTx) error) error {
+			return store.WithWriteTx(ctx, "ws", func(tx storage.WriteTx) error { return fn(tx) })
+		}
+		for range 2 {
+			Expect(readAcrossCancel(reads)).To(MatchError(context.Canceled))
+			Expect(readAcrossCancel(writes)).To(MatchError(context.Canceled))
+		}
+	})
 })

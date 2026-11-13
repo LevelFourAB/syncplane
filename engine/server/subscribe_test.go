@@ -42,6 +42,27 @@ func (s *readFailingStore) WithReadTx(ctx context.Context, ws string, fn func(st
 	return s.Adapter.WithReadTx(ctx, ws, fn)
 }
 
+// cancellingStore ends the caller's request in the middle of a read while
+// cancelling is set, then fails the read as SQLite does once database/sql has
+// rolled the transaction back under it.
+type cancellingStore struct {
+	storage.Adapter
+	cancelling atomic.Bool
+	cancel     context.CancelFunc
+}
+
+func (s *cancellingStore) WithReadTx(ctx context.Context, ws string, fn func(storage.ReadTx) error) error {
+	if !s.cancelling.Load() {
+		return s.Adapter.WithReadTx(ctx, ws, fn)
+	}
+	s.cancel()
+	select {
+	case <-ctx.Done():
+	case <-time.After(5 * time.Second):
+	}
+	return errors.New("sql: statement is closed")
+}
+
 // scopes builds a one-workspace-per-id scope set with no cursor and no
 // subscription filter — full sync from the beginning, the shape most specs
 // want.
@@ -599,6 +620,46 @@ var _ = Describe("Subscribe", func() {
 				}
 			}
 			Expect(drops).To(BeEquivalentTo(1))
+		})
+
+		// A client that walks away mid-read is routine, however the store
+		// words the failure it causes: no drop frame, no drop counted, and
+		// the stream's end logged at Debug.
+		It("ends the stream quietly when the client leaves during a read", func() {
+			logs := &recordingHandler{}
+			reader := sdkmetric.NewManualReader()
+			streamCtx, streamCancel := context.WithCancel(ctx)
+			defer streamCancel()
+			store := &cancellingStore{Adapter: newTestStore(), cancel: streamCancel}
+			client = start(mustNewServer(store, testEntities(),
+				server.WithLogger(slog.New(logs)), server.WithHeartbeat(50*time.Millisecond),
+				server.WithMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))))
+			stream, err := client.Subscribe(streamCtx, connect.NewRequest(&syncplanev1.SubscribeRequest{ClientId: "c1", Scopes: scopes(ws)}))
+			Expect(err).NotTo(HaveOccurred())
+			drainToCaughtUp(stream, ws)
+
+			// When the next heartbeat drain reads while the client leaves
+			store.cancelling.Store(true)
+			Eventually(func() int { return logs.count("stream closed") }, 5*time.Second).To(Equal(1))
+
+			// Then nothing was logged as a fault, and the stream's end at Debug
+			logs.mu.Lock()
+			for _, r := range logs.records {
+				Expect(r.Level).To(BeNumerically("<", slog.LevelWarn), "%s logged at %s", r.Message, r.Level)
+				if r.Message == "stream closed" {
+					Expect(r.Level).To(Equal(slog.LevelDebug))
+				}
+			}
+			logs.mu.Unlock()
+
+			// And no drop was counted
+			var rm metricdata.ResourceMetrics
+			Expect(reader.Collect(context.Background(), &rm)).To(Succeed())
+			for _, sm := range rm.ScopeMetrics {
+				for _, m := range sm.Metrics {
+					Expect(m.Name).NotTo(Equal("syncplane.subscribe.dropped"))
+				}
+			}
 		})
 
 		It("rejects a request with no scopes", func() {

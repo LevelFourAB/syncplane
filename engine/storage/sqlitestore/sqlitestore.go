@@ -1124,6 +1124,25 @@ func (s *Store) Close() error {
 	return err
 }
 
+// contextError puts the context's error in front of err when the context
+// ended before the transaction did.
+//
+// database/sql rolls a transaction back when its context ends and closes the
+// statements bound to it, so a statement run after that fails with "sql:
+// statement is closed" or "sql: transaction has already been committed or
+// rolled back". Neither says why, and a caller that branches on
+// context.Canceled would take a client walking away for a storage fault.
+func contextError(ctx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	ctxErr := ctx.Err()
+	if ctxErr == nil || errors.Is(err, ctxErr) {
+		return err
+	}
+	return fmt.Errorf("sqlitestore: %w: %w", ctxErr, err)
+}
+
 // readOnlyTx narrows a sqliteTx to the read surface. Embedding the INTERFACE
 // rather than the struct is what does the work: only ReadTx's methods are
 // promoted, so a closure that type-asserts its way to storage.WriteTx gets a
@@ -1147,7 +1166,8 @@ var (
 	_ storage.RowCounter = readOnlyTx{}
 )
 
-func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(storage.ReadTx) error) error {
+func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(storage.ReadTx) error) (err error) {
+	defer func() { err = contextError(ctx, err) }()
 	// Before BeginTx, because preparing needs a connection of its own and this
 	// goroutine is about to hold one (the only one, for an in-memory store).
 	s.readStmts.warm(ctx)
@@ -1169,7 +1189,8 @@ func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(stor
 	}})
 }
 
-func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(storage.WriteTx) error) error {
+func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(storage.WriteTx) error) (err error) {
+	defer func() { err = contextError(ctx, err) }()
 	// Before BeginTx: the writer pool has one connection, so preparing from
 	// inside the transaction would wait on the connection the transaction holds.
 	s.writeStmts.warm(ctx)

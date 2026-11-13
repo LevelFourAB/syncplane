@@ -588,7 +588,16 @@ func (s *Server) dropScope(ctx context.Context, stream *connect.ServerStream[syn
 // sendDropped emits a WorkspaceDropped frame, counts the drop by reason and
 // logs a REASON_ERROR drop with its cause. The message is for logs only —
 // clients branch on reason — so it carries the cause verbatim.
+//
+// When ctx has ended it sends nothing and returns the Canceled or
+// DeadlineExceeded error that ends the stream.
 func (s *Server) sendDropped(ctx context.Context, logger *slog.Logger, stream *connect.ServerStream[syncplanev1.SubscribeResponse], ws string, reason syncplanev1.WorkspaceDropped_Reason, cause error) error {
+	// A request that ended is why the work failed, whatever the cause says:
+	// a store reports a transaction rolled back under a cancelled context as
+	// a fault of its own. The client is gone, so there is no one to tell.
+	if err := contextEnded(ctx); err != nil {
+		return err
+	}
 	s.tel().subscribeDrops.Add(ctx, 1, metric.WithAttributes(
 		telemetry.AttrDropReason.String(dropReasonAttr(reason))))
 	// The stream goes on after a drop, so the RPC interceptor that logs
@@ -612,6 +621,19 @@ func (s *Server) sendDropped(ctx context.Context, logger *slog.Logger, stream *c
 			Message: msg,
 		}},
 	})
+}
+
+// contextEnded returns ctx's error as a Connect error, or nil while ctx is
+// live. A plain context error has code Unknown, which logs as a server fault.
+func contextEnded(ctx context.Context) error {
+	switch err := ctx.Err(); {
+	case err == nil:
+		return nil
+	case errors.Is(err, context.DeadlineExceeded):
+		return connect.NewError(connect.CodeDeadlineExceeded, err)
+	default:
+		return connect.NewError(connect.CodeCanceled, err)
+	}
 }
 
 // dropReasonAttr is the drop_reason metric value of a WorkspaceDropped
