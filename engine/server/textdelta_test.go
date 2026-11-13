@@ -31,11 +31,12 @@ var _ = Describe("Downstream text delta state", func() {
 	var (
 		ctx    context.Context
 		srv    *server.Server
+		store  storage.Adapter
 		client syncplanev1connect.SyncServiceClient
 	)
 
 	newServerWith := func(opts ...server.Option) {
-		srv = newTestServer(opts...)
+		srv, store = newTestServerStore(opts...)
 		path, handler := srv.Handler()
 		mux := http.NewServeMux()
 		mux.Handle(path, handler)
@@ -458,6 +459,40 @@ var _ = Describe("Downstream text delta state", func() {
 		// the row as of its cursor and still have no schema to fold a fragment
 		// into. It says so per request, and the entity falls back for that
 		// recipient alone.
+		It("ships the document when the row was created past the cursor and edited since", func() {
+			push(putMutation("c1", 1, "widget", "w0", &testdatav1.Widget{Id: "w0", Label: "older"}))
+			first := pull(nil)
+
+			base := bodyDoc("seed", "a document long enough that an edit to it is far smaller than the whole")
+			push(putMutation("c1", 2, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))
+			edited := editBody(base, "alice", func(d *text.Doc) {
+				Expect(d.Insert(d.Len(), "!")).To(Succeed())
+			})
+			push(patchMutation("c2", 1, "widget", "w1", &testdatav1.Widget{Body: edited}, "body"))
+
+			rc := changeFor(pull(first.GetNextCursor()), "w1")
+			Expect(rc.GetTextDeltas()).To(BeEmpty(), "the reader never held the row")
+			Expect(reconstruct(rc, nil)).To(Equal(storedRow("w1")))
+		})
+
+		It("ships the document when one batch creates the row and edits it", func() {
+			push(putMutation("c1", 1, "widget", "w0", &testdatav1.Widget{Id: "w0", Label: "older"}))
+			first := pull(nil)
+
+			base := bodyDoc("seed", "a document long enough that an edit to it is far smaller than the whole")
+			edited := editBody(base, "alice", func(d *text.Doc) {
+				Expect(d.Insert(d.Len(), "!")).To(Succeed())
+			})
+			push(batchMutation("c1", 2,
+				crudPut("widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}),
+				crudPatch("widget", "w1", &testdatav1.Widget{Body: edited}, "body"),
+			))
+
+			rc := changeFor(pull(first.GetNextCursor()), "w1")
+			Expect(rc.GetTextDeltas()).To(BeEmpty(), "the reader never held the row")
+			Expect(reconstruct(rc, nil)).To(Equal(storedRow("w1")))
+		})
+
 		It("ships the document for an entity the client named as undecodable", func() {
 			base := bodyDoc("seed", "the quick brown fox jumps over the lazy dog")
 			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))
@@ -579,6 +614,63 @@ var _ = Describe("Downstream text delta state", func() {
 
 			rc := changeFor(pull(first.GetNextCursor()), "w1")
 			Expect(reconstruct(rc, held)).To(Equal(storedRow("w1")))
+		})
+
+		// A reader whose span covers a row's creation never held the row, and
+		// the row's creation sequence tells the pull so. An entry for the
+		// creating write would add nothing to that, so none is logged. A
+		// replicated store loads every row this way, one write per row.
+		It("logs nothing for the write that creates a row", func() {
+			base := bodyDoc("seed", "the quick brown fox jumps over the lazy dog")
+			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))
+			Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.Widget{Id: "w2"},
+					server.WithTextPeer("server"),
+					server.WithTextString("body", "written on the server"))
+			})).To(Succeed())
+			Expect(srv.Replicate(ctx, ws, func(tx *server.ReplicaTx) error {
+				return tx.Put("widget", "w3", mustMarshal(&testdatav1.Widget{Id: "w3", Body: base}))
+			})).To(Succeed())
+
+			Expect(store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
+				for _, key := range []string{"w1", "w2", "w3"} {
+					frags, complete, err := tx.FieldDeltas("widget", key, "body", 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(complete).To(BeTrue(), "%s: a gap marker was logged", key)
+					Expect(frags).To(BeEmpty(), key)
+				}
+				return nil
+			})).To(Succeed())
+		})
+
+		It("logs a gap for a document added to a row the reader may hold", func() {
+			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Label: "no text yet"}))
+			first := pull(nil)
+			held := changeFor(first, "w1").GetValue()
+
+			base := bodyDoc("seed", "a document long enough that an edit to it is far smaller than the whole")
+			push(patchMutation("c2", 1, "widget", "w1", &testdatav1.Widget{Body: base}, "body"))
+			edited := editBody(base, "alice", func(d *text.Doc) {
+				Expect(d.Insert(d.Len(), "!")).To(Succeed())
+			})
+			push(patchMutation("c2", 2, "widget", "w1", &testdatav1.Widget{Body: edited}, "body"))
+
+			rc := changeFor(pull(first.GetNextCursor()), "w1")
+			Expect(reconstruct(rc, held)).To(Equal(storedRow("w1")))
+		})
+
+		It("logs a gap for a row re-created over its tombstone", func() {
+			base := bodyDoc("seed", "the quick brown fox jumps over the lazy dog")
+			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))
+			push(deleteMutation("c1", 2, "widget", "w1"))
+			push(putMutation("c1", 3, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))
+
+			Expect(store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
+				_, complete, err := tx.FieldDeltas("widget", "w1", "body", 0)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(complete).To(BeFalse(), "the row keeps its first creation sequence")
+				return nil
+			})).To(Succeed())
 		})
 
 		It("covers trusted server-side writes too", func() {

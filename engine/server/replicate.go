@@ -255,7 +255,7 @@ func (r *ReplicaTx) put(entity, key string, value []byte) error {
 	// the stored one, which is what a replaced (for example reverted) document
 	// is: a reader then gets it whole rather than folding a fragment into
 	// state the document no longer holds.
-	if err := info.recordTextDeltas(r.tx, key, prevText, msg.ProtoReflect(), seq); err != nil {
+	if err := info.recordTextDeltas(r.tx, key, prevText, msg.ProtoReflect(), seq, createsRow(row)); err != nil {
 		return err
 	}
 	if err := info.recordReadGaps(r.tx, model, key, prevRead, msg, seq); err != nil {
@@ -332,10 +332,15 @@ func (r *ReplicaTx) delete(entity, key string) error {
 
 func (r *ReplicaTx) liveRow(info *entityInfo, key string) (storage.Row, bool, error) {
 	row, err := r.tx.GetRow(info.name, key)
-	if err != nil && err != storage.ErrNotFound {
+	if err == storage.ErrNotFound {
+		// The zero row, so that createsRow can tell an absent key from a
+		// tombstone whatever the adapter returned beside the error.
+		return storage.Row{}, false, nil
+	}
+	if err != nil {
 		return storage.Row{}, false, err
 	}
-	return row, err == nil && !row.Deleted, nil
+	return row, !row.Deleted, nil
 }
 
 // dropUncoveredTextFloors clears the compaction floor of every document of

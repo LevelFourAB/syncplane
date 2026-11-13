@@ -57,6 +57,12 @@ func (info *entityInfo) textSnapshot(msg proto.Message) map[string][]byte {
 // write's sequence. next is the message about to be stored; prev is the
 // snapshot taken before the merge (nil for a row this write creates).
 //
+// A write that creates the row's stored state, with no row and no tombstone
+// before it, records nothing: the row's CreatedVersion is then this write's
+// sequence, and a pull ships whole every row created inside the reader's span
+// (see rowEmitter.emitChange). A tombstone keeps the first CreatedVersion, so
+// a re-creation over one is not such a write.
+//
 // A document whose bytes did not move records nothing: "no entry in the span"
 // is how a pull learns the reader can keep what it holds. Anything else
 // records a fragment, or a gap marker when one would not help — the new state
@@ -71,7 +77,11 @@ func (info *entityInfo) recordTextDeltas(
 	prev map[string][]byte,
 	next protoreflect.Message,
 	seq uint64,
+	created bool,
 ) error {
+	if created {
+		return nil
+	}
 	seen := make(map[string]bool, len(info.textFields))
 	for _, tf := range info.textFields {
 		for _, ti := range tf.Instances(next) {
@@ -102,6 +112,14 @@ func (info *entityInfo) recordTextDeltas(
 		}
 	}
 	return nil
+}
+
+// createsRow reports whether a write over stored creates the key's stored
+// state, which is when the adapter stamps the write's sequence as the row's
+// CreatedVersion. stored is the row as the write found it, the zero Row for a
+// key with no row and no tombstone.
+func createsRow(stored storage.Row) bool {
+	return stored.Version == 0
 }
 
 // maxTextCounterStep is how far one write may move the highest counter of a

@@ -736,8 +736,11 @@ func (e *rowEmitter) emitChange(tx storage.ReadTx, row storage.Row) (*syncplanev
 		return nil, err
 	}
 	// A row at or below deltaAfter is one the recipient may never have held,
-	// so its state cannot be assumed.
-	if !e.deltas || row.Deleted || row.Version <= e.deltaAfter {
+	// so its state cannot be assumed. A row created above it is one the
+	// recipient cannot hold, and the write that created it logs no delta
+	// entry (see recordTextDeltas), so only this check keeps a later edit's
+	// fragment from being folded into nothing.
+	if !e.deltas || row.Deleted || row.Version <= e.deltaAfter || row.CreatedVersion > e.deltaAfter {
 		return rc, nil
 	}
 	info, ok := e.srv.catalogPtr().entities[row.Entity]

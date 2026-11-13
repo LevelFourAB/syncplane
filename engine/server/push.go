@@ -1127,10 +1127,17 @@ func (s *Server) applyCrud(
 	currentRow := func() (storage.Row, bool, error) {
 		if !fetched {
 			row, err := rows.get(info.name, crud.GetKey())
-			if err != nil && err != storage.ErrNotFound {
+			switch {
+			case err == storage.ErrNotFound:
+				// The zero row, so that createsRow can tell an absent key
+				// from a tombstone.
+				cachedRow, cachedLive = storage.Row{}, false
+			case err != nil:
 				return storage.Row{}, false, err
+			default:
+				cachedRow, cachedLive = row, !row.Deleted
 			}
-			cachedRow, cachedLive, fetched = row, err == nil && !row.Deleted, true
+			fetched = true
 		}
 		return cachedRow, cachedLive, nil
 	}
@@ -1341,7 +1348,11 @@ func (s *Server) applyCrud(
 		if err := info.checkTextWrites(prevText, msg.ProtoReflect()); err != nil {
 			return err
 		}
-		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, msg.ProtoReflect(), seq); err != nil {
+		storedRow, _, err := currentRow()
+		if err != nil {
+			return err
+		}
+		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, msg.ProtoReflect(), seq, createsRow(storedRow)); err != nil {
 			return err
 		}
 		if len(info.textFields) > 0 {
@@ -1514,7 +1525,7 @@ func (s *Server) applyCrud(
 		if err := info.checkTextWrites(prevText, base.ProtoReflect()); err != nil {
 			return err
 		}
-		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, base.ProtoReflect(), seq); err != nil {
+		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, base.ProtoReflect(), seq, false); err != nil {
 			return err
 		}
 		if err := info.recordReadGaps(tx, model, crud.GetKey(), prevRead, base, seq); err != nil {

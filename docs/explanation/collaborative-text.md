@@ -28,7 +28,7 @@ If the server cannot apply a fragment, it rejects the edit with `text_full_state
 
 ### Downstream: pulls ship deltas
 
-Downstream synchronization mirrors the upstream design. Every write of a text-bearing row appends its added fragment to a per-(row, field) log keyed by the sequence number of the write. A pull operation folds the entries above the client's cursor into one fragment carried beside the row (`RowChange.text_deltas`, with those fields cleared from `value`). When the pull limit cuts a catch-up into pages, a row written after a page's last row is not on that page, so the client holds the row only as of the cursor where the catch-up started. Every page of the catch-up therefore folds the entries above that start cursor, until a page ends the catch-up.
+Downstream synchronization mirrors the upstream design. Every write of a text-bearing row appends its added fragment to a per-(row, field) log keyed by the sequence number of the write. The write that creates a row is the exception: it logs nothing, because a reader whose span covers it did not hold the row, and the row's creation sequence tells the server so. A replicated store, which loads each row with one creating write, therefore starts with an empty log. A pull operation folds the entries above the client's cursor into one fragment carried beside the row (`RowChange.text_deltas`, with those fields cleared from `value`). When the pull limit cuts a catch-up into pages, a row written after a page's last row is not on that page, so the client holds the row only as of the cursor where the catch-up started. Every page of the catch-up therefore folds the entries above that start cursor, until a page ends the catch-up.
 
 Catching up on another peer's typing costs a payload proportional to what they typed. A field that remained untouched over the span ships as an empty fragment that means "keep what you hold". A row whose other fields changed stops re-sending its document entirely. The client folds the fragments back into its confirmed row, so IndexedDB, reads, watches, and rebase replay continue to observe whole documents.
 
@@ -36,6 +36,7 @@ The server sends full state instead whenever a fold cannot be trusted:
 
 - The log no longer covers the span because garbage collection (GC) pruned it (see `WithTextDeltaRetention`).
 - A write in the log cannot be expressed as a delta, such as a cleared or deleted document.
+- The row was created after the client's cursor.
 - The fragment saves too little data.
 - The client visibility of the entity might have changed since its cursor due to an application `ReadFilter`, a predicate, a window, or a follow closure.
 - A write in the span changed the row's access parent, or a field that a read rule compares with the caller's subjects. Such a write can show the row to a caller for the first time, and the log cannot tell that caller apart from a caller that held the row. Every reader whose span covers the write therefore receives the documents whole once.

@@ -424,10 +424,15 @@ func writeOf(
 // and tombstoned read alike, as everywhere a write consults the row.
 func (e *EntityTx) liveRow(info *entityInfo, key string) (storage.Row, bool, error) {
 	row, err := e.tx.GetRow(info.name, key)
-	if err != nil && err != storage.ErrNotFound {
+	if err == storage.ErrNotFound {
+		// The zero row, so that createsRow can tell an absent key from a
+		// tombstone whatever the adapter returned beside the error.
+		return storage.Row{}, false, nil
+	}
+	if err != nil {
 		return storage.Row{}, false, err
 	}
-	return row, err == nil && !row.Deleted, nil
+	return row, !row.Deleted, nil
 }
 
 // Workspace returns the workspace this tx writes to. A mutator body that
@@ -774,7 +779,11 @@ func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 	if err := info.checkTextWrites(prevText, msg.ProtoReflect()); err != nil {
 		return err
 	}
-	if err := info.recordTextDeltas(e.tx, key, prevText, msg.ProtoReflect(), seq); err != nil {
+	stored, _, err := currentRow()
+	if err != nil {
+		return err
+	}
+	if err := info.recordTextDeltas(e.tx, key, prevText, msg.ProtoReflect(), seq, createsRow(stored)); err != nil {
 		return err
 	}
 	if err := info.recordReadGaps(e.tx, e.srv.catalogPtr().access, key, prevRead, msg, seq); err != nil {
@@ -1023,7 +1032,7 @@ func (e *EntityTx) patch(msg proto.Message, mask []string, expected *uint64, opt
 	if err := info.checkTextWrites(prevText, base.ProtoReflect()); err != nil {
 		return err
 	}
-	if err := info.recordTextDeltas(e.tx, key, prevText, base.ProtoReflect(), seq); err != nil {
+	if err := info.recordTextDeltas(e.tx, key, prevText, base.ProtoReflect(), seq, false); err != nil {
 		return err
 	}
 	if err := info.recordReadGaps(e.tx, model, key, prevRead, base, seq); err != nil {
