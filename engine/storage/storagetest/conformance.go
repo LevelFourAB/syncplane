@@ -3450,34 +3450,19 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 			})
 
-			It("deletes the field's older entries when it writes a gap marker", func() {
+			It("answers every span correctly after a gap marker replaces older entries", func() {
 				write("ws1", func(tx storage.WriteTx) {
 					Expect(tx.PutFieldDelta("widget", "k", "body", 1, []byte("one"))).To(Succeed())
 					Expect(tx.PutFieldDelta("widget", "k", "body", 2, []byte("two"))).To(Succeed())
-				})
-				cutoff := time.Now().Add(time.Millisecond)
-				time.Sleep(5 * time.Millisecond)
-				write("ws1", func(tx storage.WriteTx) {
 					Expect(tx.PutFieldDelta("widget", "k", "body", 3, nil)).To(Succeed())
+					Expect(tx.PutFieldDelta("widget", "k", "body", 4, []byte("four"))).To(Succeed())
 				})
 				read("ws1", func(tx storage.ReadTx) {
 					for after := range uint64(3) {
 						_, complete, err := tx.FieldDeltas("widget", "k", "body", after)
 						Expect(err).NotTo(HaveOccurred())
-						Expect(complete).To(BeFalse(), "the marker stays, so a span from %d still reaches it", after)
+						Expect(complete).To(BeFalse(), "a span from %d reaches the marker", after)
 					}
-				})
-				// Only the prune horizon makes the deletion observable: a prune
-				// that finds nothing older than the cutoff does not move it.
-				write("ws1", func(tx storage.WriteTx) {
-					horizon, err := tx.PruneFieldDeltas(cutoff)
-					Expect(err).NotTo(HaveOccurred())
-					Expect(horizon).To(BeZero(), "entries 1 and 2 were already gone")
-				})
-				write("ws1", func(tx storage.WriteTx) {
-					Expect(tx.PutFieldDelta("widget", "k", "body", 4, []byte("four"))).To(Succeed())
-				})
-				read("ws1", func(tx storage.ReadTx) {
 					frags, complete, err := tx.FieldDeltas("widget", "k", "body", 3)
 					Expect(err).NotTo(HaveOccurred())
 					Expect(complete).To(BeTrue())

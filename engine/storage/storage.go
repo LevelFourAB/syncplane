@@ -66,9 +66,9 @@
 //     commit is in flight does not make a committed write report failure.
 //   - The collaborative-text delta log (PutFieldDelta, FieldDeltas,
 //     PruneFieldDeltas, FieldDeltaHorizon) is a side table the pull path
-//     reads over a sequence span. Writes append to it, except that a gap
-//     marker deletes the entries of its field below it. It exists only to
-//     make pulls smaller, so an adapter may always report a span incomplete
+//     reads over a sequence span. Writes append to it, and a gap marker
+//     lets the adapter delete the entries of its field below it. It exists
+//     only to make pulls smaller, so an adapter may always report a span incomplete
 //     and lose nothing but wire size; reporting an under-covered span as
 //     COMPLETE is the one failure that corrupts documents.
 //   - Secondary index entries (PutIndexEntries, DeleteIndexEntries,
@@ -175,13 +175,8 @@ type Row struct {
 	// nothing.
 	//
 	// Every read that returns a Row must return the stored value, ScanChanges
-	// included. The write that creates a row logs no text delta entry, so a
-	// pull ships a text-bearing row whole only because its CreatedVersion is
-	// above the reader's cursor. A 0 read back for a row created with a
-	// recorded creation lets a later edit's fragment fold onto an empty
-	// document. A row that is 0 in storage is safe: the code that created it
-	// logged an entry at the creation, which keeps every span that reaches the
-	// creation from folding onto nothing.
+	// included. See docs/explanation/collaborative-text.md for why the pull
+	// path depends on it.
 	CreatedVersion uint64
 	Deleted        bool
 	// Actor attributes the write that produced this state — including a
@@ -1178,12 +1173,12 @@ type WriteTx interface {
 	// usable delta" — which makes every span containing it incomplete. Writes
 	// that leave the field byte-identical record nothing.
 	//
-	// A gap marker also deletes the field's entries below seq: every span that
-	// reaches them contains the marker, so FieldDeltas cannot return them. It
-	// keeps the entries above seq, and the deletion does not move the
-	// field-delta horizon. This holds only while a marker stays a marker: the
-	// engine never overwrites a gap marker with a fragment, and an adapter may
-	// rely on that.
+	// An adapter may delete the field's entries below a gap marker: every span
+	// that reaches them contains the marker, so FieldDeltas cannot return them.
+	// It must keep the entries above seq, other fields, keys and workspaces,
+	// and the deletion must not move the field-delta horizon. The engine never
+	// overwrites a gap marker with a fragment, so an adapter may rely on a
+	// marker staying a marker.
 	//
 	// Entries are per (entity, key, field, seq) and overwrite on conflict, so a
 	// retried write closure is idempotent. The engine writes a field path only
