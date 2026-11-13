@@ -60,7 +60,36 @@ var _ = Describe("SQLite schema versioning", func() {
 	const baselineVersion = 1
 	// The version a database this binary creates or upgrades ends at: the
 	// baseline plus every migration since. Bump it with each migration added.
-	const latestVersion = 10
+	const latestVersion = 11
+
+	// oldSideTables puts the delta log and the consumer shadows back in the
+	// shape every version before 11 has, empty, which every rewind below
+	// needs.
+	const oldSideTables = `
+		DROP TABLE field_deltas;
+		DROP TABLE field_ids;
+		DROP TABLE field_scopes;
+		DROP TABLE consumer_shadows;
+		DROP TABLE consumer_scopes;
+		CREATE TABLE field_deltas (
+			workspace_id TEXT NOT NULL,
+			entity       TEXT NOT NULL,
+			key          TEXT NOT NULL,
+			field        TEXT NOT NULL,
+			seq          INTEGER NOT NULL,
+			frag         BLOB NOT NULL,
+			updated_at   INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (workspace_id, entity, key, field, seq)
+		);
+		CREATE INDEX field_deltas_gc ON field_deltas (workspace_id, updated_at);
+		CREATE TABLE consumer_shadows (
+			workspace_id TEXT NOT NULL,
+			consumer     TEXT NOT NULL,
+			entity       TEXT NOT NULL,
+			key          TEXT NOT NULL,
+			snapshot     BLOB NOT NULL,
+			PRIMARY KEY (workspace_id, consumer, entity, key)
+		);`
 
 	// noPostings drops the posting tables of migrations 9 and 10, which every
 	// rewind below needs.
@@ -161,7 +190,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// lineage table existed.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noPostings + noApplied + oldIndexTables + fmt.Sprintf("\nDROP TABLE seq_lineage;\nDROP TABLE deleted_workspaces;\nPRAGMA user_version = %d;", baselineVersion))
+		_, err = db.Exec(oldSideTables + noPostings + noApplied + oldIndexTables + fmt.Sprintf("\nDROP TABLE seq_lineage;\nDROP TABLE deleted_workspaces;\nPRAGMA user_version = %d;", baselineVersion))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db.Close()).To(Succeed())
 
@@ -193,7 +222,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// a workspace whose build mark says it is up to date.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noPostings + noApplied + oldIndexTables + `
+		_, err = db.Exec(oldSideTables + noPostings + noApplied + oldIndexTables + `
 			INSERT INTO index_entries VALUES ('ws1', 'widget', 'by_label', x'01', 'k1');
 			INSERT INTO index_state (workspace_id, entity, idx, spec_hash, ready)
 				VALUES ('ws1', 'widget', 'by_label', 'h1', 1);
@@ -256,7 +285,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// a ready index and a workspace whose build mark says it is up to date.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noPostings + noApplied + `
+		_, err = db.Exec(oldSideTables + noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -339,7 +368,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		var scope int
 		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
 		Expect(scope).To(Equal(1))
-		_, err = db.Exec(noPostings + noApplied + `
+		_, err = db.Exec(oldSideTables + noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -426,7 +455,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		var scope int
 		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
 		Expect(scope).To(Equal(1))
-		_, err = db.Exec(noPostings + noApplied + `
+		_, err = db.Exec(oldSideTables + noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -526,7 +555,7 @@ var _ = Describe("SQLite schema versioning", func() {
 
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noPostings + `
+		_, err = db.Exec(oldSideTables + noPostings + `
 			PRAGMA user_version = 8;`)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db.Close()).To(Succeed())
@@ -556,6 +585,84 @@ var _ = Describe("SQLite schema versioning", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(counts).To(Equal([]int{1}))
 			Expect(rows).To(Equal(1))
+			return nil
+		})).To(Succeed())
+	})
+
+	It("upgrades version-10 delta logs and shadows and keeps their data", func() {
+		ctx := context.Background()
+		path := filepath.Join(GinkgoT().TempDir(), "upgrade-side-10.db")
+		store, err := sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		for _, ws := range []string{"ws1", "ws2"} {
+			Expect(store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
+				return tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{})
+			})).To(Succeed())
+		}
+		Expect(store.Close()).To(Succeed())
+
+		// Back to the version-10 shape, holding two workspaces' entries: a
+		// field with two fragments, a field with a gap marker, and shadows of
+		// two consumers.
+		db, err := sql.Open("sqlite", path)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = db.Exec(oldSideTables + `
+			INSERT INTO field_deltas VALUES
+				('ws1', 'widget', 'k1', 'body', 2, x'0a', 1),
+				('ws1', 'widget', 'k1', 'body', 3, x'0b', 1),
+				('ws1', 'widget', 'k1', 'title', 2, x'', 1),
+				('ws2', 'widget', 'k1', 'body', 5, x'0c', 1);
+			INSERT INTO consumer_shadows VALUES
+				('ws1', 'mailer', 'widget', 'k1', x'01'),
+				('ws1', 'indexer', 'widget', 'k1', x'02'),
+				('ws2', 'mailer', 'widget', 'k1', x'03');
+			PRAGMA user_version = 10;`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(db.Close()).To(Succeed())
+
+		store, err = sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+			frags, complete, err := tx.FieldDeltas("widget", "k1", "body", 1)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(complete).To(BeTrue())
+			Expect(frags).To(Equal([][]byte{{0x0a}, {0x0b}}))
+			_, complete, err = tx.FieldDeltas("widget", "k1", "title", 1)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(complete).To(BeFalse(), "a gap marker must survive the upgrade")
+			Expect(tx.ConsumerShadow("mailer", "widget", "k1")).To(Equal([]byte{0x01}))
+			Expect(tx.ConsumerShadow("indexer", "widget", "k1")).To(Equal([]byte{0x02}))
+			return nil
+		})).To(Succeed())
+		Expect(store.WithReadTx(ctx, "ws2", func(tx storage.ReadTx) error {
+			frags, complete, err := tx.FieldDeltas("widget", "k1", "body", 1)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(complete).To(BeTrue())
+			Expect(frags).To(Equal([][]byte{{0x0c}}))
+			Expect(tx.ConsumerShadow("mailer", "widget", "k1")).To(Equal([]byte{0x03}))
+			return nil
+		})).To(Succeed())
+
+		// A field new after the upgrade gets an id of its own, not one of the
+		// ids the upgrade gave.
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			if err := tx.PutFieldDelta("widget", "k2", "body", 7, []byte{0x0d}); err != nil {
+				return err
+			}
+			return tx.PutConsumerShadow("mailer", "widget", "k2", []byte{0x04})
+		})).To(Succeed())
+		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+			for _, field := range []string{"body", "title"} {
+				frags, _, err := tx.FieldDeltas("widget", "k1", field, 1)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(frags).NotTo(ContainElement([]byte{0x0d}), "field %s", field)
+			}
+			frags, complete, err := tx.FieldDeltas("widget", "k2", "body", 1)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(complete).To(BeTrue())
+			Expect(frags).To(Equal([][]byte{{0x0d}}))
+			Expect(tx.ConsumerShadow("mailer", "widget", "k2")).To(Equal([]byte{0x04}))
 			return nil
 		})).To(Succeed())
 	})

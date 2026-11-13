@@ -1779,7 +1779,34 @@ var _ = Describe("posting pages in the store", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 		}
-		_, err = db.Exec(`DROP TABLE posting_pages; PRAGMA user_version = 9;`)
+		// The delta log and the shadows also go back to the shape of version
+		// 9, which migration 11 reads.
+		_, err = db.Exec(`DROP TABLE posting_pages;
+			DROP TABLE field_deltas;
+			DROP TABLE field_ids;
+			DROP TABLE field_scopes;
+			DROP TABLE consumer_shadows;
+			DROP TABLE consumer_scopes;
+			CREATE TABLE field_deltas (
+				workspace_id TEXT NOT NULL,
+				entity       TEXT NOT NULL,
+				key          TEXT NOT NULL,
+				field        TEXT NOT NULL,
+				seq          INTEGER NOT NULL,
+				frag         BLOB NOT NULL,
+				updated_at   INTEGER NOT NULL DEFAULT 0,
+				PRIMARY KEY (workspace_id, entity, key, field, seq)
+			);
+			CREATE INDEX field_deltas_gc ON field_deltas (workspace_id, updated_at);
+			CREATE TABLE consumer_shadows (
+				workspace_id TEXT NOT NULL,
+				consumer     TEXT NOT NULL,
+				entity       TEXT NOT NULL,
+				key          TEXT NOT NULL,
+				snapshot     BLOB NOT NULL,
+				PRIMARY KEY (workspace_id, consumer, entity, key)
+			);
+			PRAGMA user_version = 9;`)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db.Close()).To(Succeed())
 

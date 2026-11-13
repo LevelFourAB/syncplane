@@ -565,6 +565,88 @@ CREATE INDEX posting_chunks_by_scope ON posting_chunks (scope);`,
 	body  BLOB NOT NULL,
 	PRIMARY KEY (scope, lo)
 ) WITHOUT ROWID;`,
+	// 11: short ids in the delta log and the consumer shadows. Both tables
+	// held the workspace id and the row key in each entry two times, in the
+	// table and in the index of its primary key, and the delta log held them a
+	// third time in its GC index. The entries are copied, not dropped: a
+	// shadow is not derived state.
+	//
+	// field_scopes gives each workspace with a delta log a scope id, and
+	// field_ids gives each text field in it a field id, from the scope's
+	// next_field. field_ids holds the names of a field one time, and an entry
+	// of field_deltas holds the two ids, so its primary key and its GC index
+	// are a few bytes. Both tables are WITHOUT ROWID: a rowid table needs an
+	// index for its key, which holds the key a second time, and a secondary
+	// index of a WITHOUT ROWID table holds the primary key, which is short
+	// here. AUTOINCREMENT and next_field give each id one time only, so an
+	// entry left under an old id is never read as an entry of a new field.
+	// PruneFieldDeltas deletes the field ids that no entry holds.
+	//
+	// consumer_scopes gives each (workspace, consumer) a scope id, as
+	// index_scopes does for an index, and a shadow holds the scope id in
+	// place of the two names.
+	`CREATE TABLE field_scopes (
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id TEXT NOT NULL UNIQUE,
+	next_field   INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO field_scopes (workspace_id)
+	SELECT DISTINCT workspace_id FROM field_deltas ORDER BY workspace_id;
+CREATE TABLE field_ids (
+	scope  INTEGER NOT NULL,
+	entity TEXT NOT NULL,
+	key    TEXT NOT NULL,
+	field  TEXT NOT NULL,
+	id     INTEGER NOT NULL,
+	PRIMARY KEY (scope, entity, key, field)
+) WITHOUT ROWID;
+INSERT INTO field_ids (scope, entity, key, field, id)
+	SELECT s.id, f.entity, f.key, f.field,
+	       ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY f.entity, f.key, f.field)
+	  FROM (SELECT DISTINCT workspace_id, entity, key, field FROM field_deltas) f
+	  JOIN field_scopes s ON s.workspace_id = f.workspace_id;
+UPDATE field_scopes
+   SET next_field = (SELECT COALESCE(MAX(id), 0) FROM field_ids WHERE scope = field_scopes.id);
+DROP INDEX field_deltas_gc;
+ALTER TABLE field_deltas RENAME TO field_deltas_old;
+CREATE TABLE field_deltas (
+	scope      INTEGER NOT NULL,
+	field_id   INTEGER NOT NULL,
+	seq        INTEGER NOT NULL,
+	frag       BLOB NOT NULL,
+	updated_at INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (scope, field_id, seq)
+) WITHOUT ROWID;
+INSERT INTO field_deltas (scope, field_id, seq, frag, updated_at)
+	SELECT f.scope, f.id, o.seq, o.frag, o.updated_at
+	  FROM field_deltas_old o
+	  JOIN field_scopes s ON s.workspace_id = o.workspace_id
+	  JOIN field_ids f ON f.scope = s.id AND f.entity = o.entity
+	                  AND f.key = o.key AND f.field = o.field;
+DROP TABLE field_deltas_old;
+CREATE INDEX field_deltas_gc ON field_deltas (scope, updated_at);
+CREATE TABLE consumer_scopes (
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id TEXT NOT NULL,
+	consumer     TEXT NOT NULL,
+	UNIQUE (workspace_id, consumer)
+);
+INSERT INTO consumer_scopes (workspace_id, consumer)
+	SELECT DISTINCT workspace_id, consumer FROM consumer_shadows
+	 ORDER BY workspace_id, consumer;
+ALTER TABLE consumer_shadows RENAME TO consumer_shadows_old;
+CREATE TABLE consumer_shadows (
+	scope    INTEGER NOT NULL,
+	entity   TEXT NOT NULL,
+	key      TEXT NOT NULL,
+	snapshot BLOB NOT NULL,
+	PRIMARY KEY (scope, entity, key)
+) WITHOUT ROWID;
+INSERT INTO consumer_shadows (scope, entity, key, snapshot)
+	SELECT c.id, o.entity, o.key, o.snapshot
+	  FROM consumer_shadows_old o
+	  JOIN consumer_scopes c ON c.workspace_id = o.workspace_id AND c.consumer = o.consumer;
+DROP TABLE consumer_shadows_old;`,
 }
 
 // workspaceTables names every table that holds state of one workspace, keyed
@@ -576,12 +658,15 @@ CREATE INDEX posting_chunks_by_scope ON posting_chunks (scope);`,
 // through index_scopes and index_row_ids, and DeleteWorkspace deletes them
 // through those before it empties them. The posting tables other than
 // posting_scopes belong to a workspace through a scope, and DeleteWorkspace
-// drops each scope of the workspace with its rows first.
+// drops each scope of the workspace with its rows first. field_ids,
+// field_deltas and consumer_shadows also belong to a workspace through a
+// scope, and DeleteWorkspace deletes their rows before it empties the scope
+// tables.
 var workspaceTables = []string{
 	"workspaces",
 	"rows",
 	"clients",
-	"field_deltas",
+	"field_scopes",
 	"text_floors",
 	"idempotency",
 	"index_scopes",
@@ -589,7 +674,7 @@ var workspaceTables = []string{
 	"index_state",
 	"posting_scopes",
 	"consumer_positions",
-	"consumer_shadows",
+	"consumer_scopes",
 	"cursor_state",
 	"seq_lineage",
 }
@@ -1179,6 +1264,19 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 				return fmt.Errorf("sqlitestore: delete workspace %q postings: %w", workspaceID, err)
 			}
 		}
+		for _, scoped := range []struct{ table, scopes string }{
+			{"field_deltas", "field_scopes"},
+			{"field_ids", "field_scopes"},
+			{"consumer_shadows", "consumer_scopes"},
+		} {
+			if _, err := t.exec(
+				`DELETE FROM `+scoped.table+`
+				 WHERE scope IN (SELECT id FROM `+scoped.scopes+` WHERE workspace_id = ?)`,
+				workspaceID,
+			); err != nil {
+				return fmt.Errorf("sqlitestore: delete workspace %q from %s: %w", workspaceID, scoped.table, err)
+			}
+		}
 		for _, table := range workspaceTables {
 			if _, err := t.exec(`DELETE FROM `+table+` WHERE workspace_id = ?`, workspaceID); err != nil {
 				return fmt.Errorf("sqlitestore: delete workspace %q from %s: %w", workspaceID, table, err)
@@ -1369,7 +1467,8 @@ func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []a
 		exists(scoped("idempotency") + " AND t.updated_at < " + next(cutoffs.IdempotencyKeys.UnixMilli()))
 	}
 	if !cutoffs.FieldDeltas.IsZero() {
-		exists(scoped("field_deltas") + " AND t.updated_at < " + next(cutoffs.FieldDeltas.UnixMilli()))
+		exists("field_scopes s JOIN field_deltas t ON t.scope = s.id WHERE s.workspace_id = w.workspace_id" +
+			" AND t.updated_at < " + next(cutoffs.FieldDeltas.UnixMilli()))
 	}
 	for _, e := range cutoffs.Entities {
 		if e.Before.IsZero() {
@@ -2088,9 +2187,10 @@ func (t *sqliteTx) SetConsumerPosition(consumer string, p storage.ConsumerPositi
 func (t *sqliteTx) ConsumerShadow(consumer, entity, key string) ([]byte, error) {
 	var snapshot []byte
 	err := t.queryRow(
-		`SELECT snapshot FROM consumer_shadows
-		 WHERE workspace_id = ? AND consumer = ? AND entity = ? AND key = ?`,
-		t.ws, consumer, entity, key,
+		`SELECT sh.snapshot FROM consumer_scopes c
+		 JOIN consumer_shadows sh ON sh.scope = c.id AND sh.entity = ? AND sh.key = ?
+		 WHERE c.workspace_id = ? AND c.consumer = ?`,
+		entity, key, t.ws, consumer,
 	).Scan(&snapshot)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -2110,20 +2210,43 @@ func (t *sqliteTx) PutConsumerShadow(consumer, entity, key string, snapshot []by
 	if snapshot == nil {
 		snapshot = []byte{}
 	}
-	_, err := t.exec(
-		`INSERT INTO consumer_shadows (workspace_id, consumer, entity, key, snapshot)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT (workspace_id, consumer, entity, key)
-		 DO UPDATE SET snapshot = excluded.snapshot`,
-		t.ws, consumer, entity, key, snapshot,
-	)
+	// The scope of the consumer exists for all writes but its first, so the
+	// write tries the shadow first and adds the scope only when the SELECT
+	// found none. An upsert that updates also counts as a changed row.
+	//
+	// The WHERE clause is also what lets SQLite parse the ON CONFLICT clause
+	// of an INSERT from a SELECT: without one, ON reads as a join constraint.
+	put := func() (int64, error) {
+		res, err := t.exec(
+			`INSERT INTO consumer_shadows (scope, entity, key, snapshot)
+			 SELECT id, ?, ?, ? FROM consumer_scopes WHERE workspace_id = ? AND consumer = ?
+			 ON CONFLICT (scope, entity, key)
+			 DO UPDATE SET snapshot = excluded.snapshot`,
+			entity, key, snapshot, t.ws, consumer,
+		)
+		if err != nil {
+			return 0, err
+		}
+		return res.RowsAffected()
+	}
+	if n, err := put(); err != nil || n > 0 {
+		return err
+	}
+	if _, err := t.exec(
+		`INSERT INTO consumer_scopes (workspace_id, consumer) VALUES (?, ?)`,
+		t.ws, consumer,
+	); err != nil {
+		return err
+	}
+	_, err := put()
 	return err
 }
 
 func (t *sqliteTx) DeleteConsumerShadow(consumer, entity, key string) error {
 	_, err := t.exec(
 		`DELETE FROM consumer_shadows
-		 WHERE workspace_id = ? AND consumer = ? AND entity = ? AND key = ?`,
+		 WHERE scope = (SELECT id FROM consumer_scopes WHERE workspace_id = ? AND consumer = ?)
+		   AND entity = ? AND key = ?`,
 		t.ws, consumer, entity, key,
 	)
 	return err
@@ -2131,7 +2254,14 @@ func (t *sqliteTx) DeleteConsumerShadow(consumer, entity, key string) error {
 
 func (t *sqliteTx) DeleteConsumer(consumer string) error {
 	if _, err := t.exec(
-		`DELETE FROM consumer_shadows WHERE workspace_id = ? AND consumer = ?`,
+		`DELETE FROM consumer_shadows
+		 WHERE scope = (SELECT id FROM consumer_scopes WHERE workspace_id = ? AND consumer = ?)`,
+		t.ws, consumer,
+	); err != nil {
+		return err
+	}
+	if _, err := t.exec(
+		`DELETE FROM consumer_scopes WHERE workspace_id = ? AND consumer = ?`,
 		t.ws, consumer,
 	); err != nil {
 		return err
@@ -2144,15 +2274,24 @@ func (t *sqliteTx) DeleteConsumer(consumer string) error {
 }
 
 func (t *sqliteTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int, error) {
-	// Shadows first, while the positions that name their consumers still exist:
-	// the reverse order would leave every collected consumer's shadows behind
-	// with nothing left to identify them by.
+	// Shadows and scopes first, while the positions that name their consumers
+	// still exist: the reverse order would leave every collected consumer's
+	// shadows behind with nothing left to identify them by.
+	idle := `SELECT consumer FROM consumer_positions
+		     WHERE workspace_id = ? AND updated_at < ? AND seq < ?`
 	if _, err := t.exec(
 		`DELETE FROM consumer_shadows
-		 WHERE workspace_id = ? AND consumer IN (
-		     SELECT consumer FROM consumer_positions
-		     WHERE workspace_id = ? AND updated_at < ? AND seq < ?
+		 WHERE scope IN (
+		     SELECT id FROM consumer_scopes
+		     WHERE workspace_id = ? AND consumer IN (`+idle+`)
 		 )`,
+		t.ws, t.ws, cutoff.UnixMilli(), belowSeq,
+	); err != nil {
+		return 0, err
+	}
+	if _, err := t.exec(
+		`DELETE FROM consumer_scopes
+		 WHERE workspace_id = ? AND consumer IN (`+idle+`)`,
 		t.ws, t.ws, cutoff.UnixMilli(), belowSeq,
 	); err != nil {
 		return 0, err
@@ -2191,10 +2330,12 @@ func (t *sqliteTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]
 		return nil, false, nil
 	}
 	rows, err := t.query(
-		`SELECT frag FROM field_deltas
-		 WHERE workspace_id = ? AND entity = ? AND key = ? AND field = ? AND seq > ?
-		 ORDER BY seq`,
-		t.ws, entity, key, field, afterSeq,
+		`SELECT d.frag FROM field_scopes s
+		 JOIN field_ids f ON f.scope = s.id AND f.entity = ? AND f.key = ? AND f.field = ?
+		 JOIN field_deltas d ON d.scope = s.id AND d.field_id = f.id AND d.seq > ?
+		 WHERE s.workspace_id = ?
+		 ORDER BY d.seq`,
+		entity, key, field, afterSeq, t.ws,
 	)
 	if err != nil {
 		return nil, false, err
@@ -2863,34 +3004,70 @@ func (t *sqliteTx) PutFieldDelta(entity, key, field string, seq uint64, frag []b
 		// NOT NULL and the read path distinguishes empty from present.
 		frag = []byte{}
 	}
-	_, err := t.exec(
-		`INSERT INTO field_deltas (workspace_id, entity, key, field, seq, frag, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (workspace_id, entity, key, field, seq)
+	scope, id, err := t.fieldID(entity, key, field)
+	if err != nil {
+		return err
+	}
+	_, err = t.exec(
+		`INSERT INTO field_deltas (scope, field_id, seq, frag, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (scope, field_id, seq)
 		 DO UPDATE SET frag = excluded.frag, updated_at = excluded.updated_at`,
-		t.ws, entity, key, field, seq, frag, time.Now().UnixMilli(),
+		scope, id, seq, frag, time.Now().UnixMilli(),
 	)
 	return err
 }
 
+// fieldID returns the scope id of the workspace's delta log and the field id
+// of one text field in it, and allocates the ids that do not exist yet.
+func (t *sqliteTx) fieldID(entity, key, field string) (scope, id int64, err error) {
+	var found sql.NullInt64
+	err = t.queryRow(
+		`SELECT s.id, f.id FROM field_scopes s
+		 LEFT JOIN field_ids f ON f.scope = s.id AND f.entity = ? AND f.key = ? AND f.field = ?
+		 WHERE s.workspace_id = ?`,
+		entity, key, field, t.ws,
+	).Scan(&scope, &found)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		res, err := t.exec(`INSERT INTO field_scopes (workspace_id) VALUES (?)`, t.ws)
+		if err != nil {
+			return 0, 0, err
+		}
+		if scope, err = res.LastInsertId(); err != nil {
+			return 0, 0, err
+		}
+	case err != nil:
+		return 0, 0, err
+	case found.Valid:
+		return scope, found.Int64, nil
+	}
+	if err := t.queryRow(
+		`UPDATE field_scopes SET next_field = next_field + 1 WHERE id = ? RETURNING next_field`,
+		scope,
+	).Scan(&id); err != nil {
+		return 0, 0, err
+	}
+	_, err = t.exec(
+		`INSERT INTO field_ids (scope, entity, key, field, id) VALUES (?, ?, ?, ?, ?)`,
+		scope, entity, key, field, id,
+	)
+	return scope, id, err
+}
+
 func (t *sqliteTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
-	cutoffMillis := cutoff.UnixMilli()
-	var maxPruned uint64
-	err := t.queryRow(
-		`SELECT COALESCE(MAX(seq), 0) FROM field_deltas
-		 WHERE workspace_id = ? AND updated_at < ?`,
-		t.ws, cutoffMillis,
-	).Scan(&maxPruned)
-	if err != nil {
+	var scope int64
+	err := t.queryRow(`SELECT id FROM field_scopes WHERE workspace_id = ?`, t.ws).Scan(&scope)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return 0, err
 	}
-	if maxPruned > 0 {
-		if _, err := t.exec(
-			`DELETE FROM field_deltas WHERE workspace_id = ? AND updated_at < ?`,
-			t.ws, cutoffMillis,
-		); err != nil {
+	var maxPruned uint64
+	if err == nil {
+		if maxPruned, err = t.pruneFieldDeltas(scope, cutoff.UnixMilli()); err != nil {
 			return 0, err
 		}
+	}
+	if maxPruned > 0 {
 		// MAX() keeps the horizon monotonic even if an older cutoff runs after a
 		// newer one, exactly as CollectTombstones does.
 		if _, err := t.exec(
@@ -2909,6 +3086,75 @@ func (t *sqliteTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
 		return 0, nil
 	}
 	return horizon, err
+}
+
+// pruneFieldDeltas deletes the entries of the delta log scope that were
+// written before cutoffMillis, and the field ids that hold no entry after
+// that. It returns the highest sequence it deleted, or 0 when it deleted
+// nothing.
+func (t *sqliteTx) pruneFieldDeltas(scope, cutoffMillis int64) (uint64, error) {
+	rows, err := t.query(
+		`DELETE FROM field_deltas WHERE scope = ? AND updated_at < ?
+		 RETURNING field_id, seq`,
+		scope, cutoffMillis,
+	)
+	if err != nil {
+		return 0, err
+	}
+	var maxPruned uint64
+	touched := make(map[int64]struct{})
+	for rows.Next() {
+		var id int64
+		var seq uint64
+		if err := rows.Scan(&id, &seq); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		touched[id] = struct{}{}
+		maxPruned = max(maxPruned, seq)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	if len(touched) == 0 {
+		return 0, nil
+	}
+	// A field id that no entry holds is deleted, so the ids do not grow with
+	// every text field the workspace ever wrote. Only the ids this prune
+	// touched can have become empty, and a probe of the delta log finds them
+	// at a cost that follows the entries deleted. The delete from field_ids
+	// then reads all ids of the workspace, because no index goes from id to
+	// field: such an index adds the names of the field a second time, for the
+	// life of the id. It runs only when an id became empty, and it compares
+	// each id with an in-memory set, with no probe of the delta log per id.
+	ids := make([]int64, 0, len(touched))
+	for id := range touched {
+		ids = append(ids, id)
+	}
+	touchedJSON, err := json.Marshal(ids)
+	if err != nil {
+		return 0, err
+	}
+	var emptyJSON string
+	if err := t.queryRow(
+		`SELECT COALESCE(json_group_array(j.value), '[]') FROM json_each(?) j
+		 WHERE NOT EXISTS (
+		     SELECT 1 FROM field_deltas d WHERE d.scope = ? AND d.field_id = j.value
+		 )`,
+		string(touchedJSON), scope,
+	).Scan(&emptyJSON); err != nil {
+		return 0, err
+	}
+	if emptyJSON != "[]" {
+		if _, err := t.exec(
+			`DELETE FROM field_ids
+			 WHERE scope = ? AND id IN (SELECT value FROM json_each(?))`,
+			scope, emptyJSON,
+		); err != nil {
+			return 0, err
+		}
+	}
+	return maxPruned, nil
 }
 
 func (t *sqliteTx) NextSeq() (uint64, error) {
