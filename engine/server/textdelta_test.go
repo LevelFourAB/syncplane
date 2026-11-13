@@ -455,10 +455,6 @@ var _ = Describe("Downstream text delta state", func() {
 			Expect(rc.GetValue()).To(Equal(storedRow("w1")))
 		})
 
-		// The half of the delta premise the server cannot see: a client may hold
-		// the row as of its cursor and still have no schema to fold a fragment
-		// into. It says so per request, and the entity falls back for that
-		// recipient alone.
 		It("ships the document when the row was created past the cursor and edited since", func() {
 			push(putMutation("c1", 1, "widget", "w0", &testdatav1.Widget{Id: "w0", Label: "older"}))
 			first := pull(nil)
@@ -493,6 +489,10 @@ var _ = Describe("Downstream text delta state", func() {
 			Expect(reconstruct(rc, nil)).To(Equal(storedRow("w1")))
 		})
 
+		// The half of the delta premise the server cannot see: a client may hold
+		// the row as of its cursor and still have no schema to fold a fragment
+		// into. It says so per request, and the entity falls back for that
+		// recipient alone.
 		It("ships the document for an entity the client named as undecodable", func() {
 			base := bodyDoc("seed", "the quick brown fox jumps over the lazy dog")
 			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))

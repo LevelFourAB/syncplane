@@ -779,11 +779,7 @@ func (e *EntityTx) put(msg proto.Message, opts ...WriteOption) error {
 	if err := info.checkTextWrites(prevText, msg.ProtoReflect()); err != nil {
 		return err
 	}
-	stored, _, err := currentRow()
-	if err != nil {
-		return err
-	}
-	if err := info.recordTextDeltas(e.tx, key, prevText, msg.ProtoReflect(), seq, createsRow(stored)); err != nil {
+	if err := info.recordTextDeltas(e.tx, key, prevText, msg.ProtoReflect(), seq, createsRow(row)); err != nil {
 		return err
 	}
 	if err := info.recordReadGaps(e.tx, e.srv.catalogPtr().access, key, prevRead, msg, seq); err != nil {
