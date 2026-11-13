@@ -94,10 +94,10 @@ type pgTx struct {
 	// loadIndexScopes). nil means "not read yet, or dropped by a savepoint
 	// rewind".
 	indexScopes map[indexKey]int32
-	// names memoizes every text_fields and shadow_sets row of the workspace
-	// (see loadNames). nil means "not read yet, or dropped by a savepoint
-	// rewind or by a delete of names".
-	names map[nameKey]int32
+	// names memoizes the text_fields and shadow_sets rows of the workspace
+	// that the transaction has read or written (see names.go). A name that is
+	// missing is not known to be absent. A savepoint rewind empties it.
+	names map[nameKey]int64
 }
 
 // The statements that open a transaction. beginTx queues them rather than
@@ -230,23 +230,13 @@ func (t *pgTx) loadIndexScopes() error {
 	return t.loadState()
 }
 
-// loadNames reads every index_scopes, text_fields and shadow_sets row of the
-// workspace into the memos, unless they hold them already. It holds them
-// exactly, for the reason loadIndexScopes gives.
-func (t *pgTx) loadNames() error {
-	if t.names != nil && t.indexScopes != nil {
-		return nil
-	}
-	return t.loadState()
-}
-
-// loadState fills whichever of the workspace memo, the index state memo, the
-// index scope memo and the memo of names is empty, all in one round trip. Most
-// transactions that need one of them need the others — a request reads its
-// position and probes indexes, a write of a row reads its index states before
-// it writes its entries, and a pull or a write of a text field reads its
-// names — and each further read costs the server less than the round trip it
-// saves when it is needed.
+// loadState fills whichever of the workspace memo, the index state memo and
+// the index scope memo is empty, all in one round trip. Most transactions that
+// need one of them need the others — a request reads its position and probes
+// indexes, a write of a row reads its index states before it writes its
+// entries, and a pull or a write of a text field reads the workspace number —
+// and each further read costs the server less than the round trip it saves
+// when it is needed.
 func (t *pgTx) loadState() error {
 	var reads []queuedStmt
 	if !t.wsLoaded {
@@ -277,9 +267,6 @@ func (t *pgTx) loadState() error {
 			sql:  `SELECT entity, idx, scope FROM index_scopes WHERE workspace_id = $1`,
 			args: []any{t.ws},
 		})
-	}
-	if t.names == nil {
-		reads = append(reads, queuedStmt{sql: namesSQL, args: []any{t.ws}})
 	}
 	br, err := t.sendWith(reads...)
 	if err != nil {
@@ -357,13 +344,6 @@ func (t *pgTx) decodeState(br pgx.BatchResults) error {
 			return err
 		}
 		t.indexScopes = scopes
-	}
-	if t.names == nil {
-		names, err := decodeNames(br)
-		if err != nil {
-			return err
-		}
-		t.names = names
 	}
 	return nil
 }
@@ -830,21 +810,28 @@ func (t *pgTx) SetConsumerPosition(consumer string, p storage.ConsumerPosition) 
 }
 
 func (t *pgTx) ConsumerShadow(consumer, entity, key string) ([]byte, error) {
-	wsn, sid, ok, err := t.nameIDs(nameKey{shadowSet, consumer, entity}, false)
+	wsn, ok, err := t.workspaceNumber()
 	if err != nil || !ok {
 		return nil, err
 	}
-	var snapshot []byte
+	// The read of the name rides in the statement that reads the shadow.
+	var (
+		sid      int64
+		snapshot []byte
+	)
 	err = t.queryRow(
-		`SELECT snapshot FROM consumer_shadows WHERE sid = $1 AND wsn = $2 AND key = $3`,
-		sid, wsn, key,
-	).Scan(&snapshot)
+		`SELECT n.id, s.snapshot FROM shadow_sets n
+		 LEFT JOIN consumer_shadows s ON s.sid = n.id AND s.wsn = $2 AND s.key = $5
+		 WHERE n.workspace_id = $1 AND n.consumer = $3 AND n.entity = $4`,
+		t.ws, wsn, consumer, entity, key,
+	).Scan(&sid, &snapshot)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+	t.rememberName(nameKey{shadowSet, consumer, entity}, sid)
 	return snapshot, nil
 }
 
@@ -852,41 +839,50 @@ func (t *pgTx) PutConsumerShadow(consumer, entity, key string, snapshot []byte) 
 	if err := t.register(); err != nil {
 		return err
 	}
-	wsn, sid, _, err := t.nameIDs(nameKey{shadowSet, consumer, entity}, true)
+	wsn, sid, err := t.nameIDs(nameKey{shadowSet, consumer, entity})
 	if err != nil {
 		return err
 	}
 	// The column is NOT NULL, so a nil snapshot stores as an empty blob and
 	// reads back as one. A consumer that wants "no shadow" deletes it.
 	return t.queue(
-		`INSERT INTO consumer_shadows (wsn, sid, key, snapshot)
+		`INSERT INTO consumer_shadows (sid, wsn, key, snapshot)
 		 VALUES ($1, $2, $3, $4)
 		 ON CONFLICT (sid, wsn, key)
 		 DO UPDATE SET snapshot = excluded.snapshot`,
-		wsn, sid, key, notNilBytes(snapshot),
+		sid, wsn, key, notNilBytes(snapshot),
 	)
 }
 
 func (t *pgTx) DeleteConsumerShadow(consumer, entity, key string) error {
-	wsn, sid, ok, err := t.nameIDs(nameKey{shadowSet, consumer, entity}, false)
+	wsn, ok, err := t.workspaceNumber()
 	if err != nil || !ok {
 		return err
 	}
+	if sid, ok := t.names[nameKey{shadowSet, consumer, entity}]; ok {
+		return t.queue(
+			`DELETE FROM consumer_shadows WHERE sid = $1 AND wsn = $2 AND key = $3`,
+			sid, wsn, key,
+		)
+	}
+	// The id is not known, and a read of it would cost a round trip.
 	return t.queue(
-		`DELETE FROM consumer_shadows WHERE sid = $1 AND wsn = $2 AND key = $3`,
-		sid, wsn, key,
+		`DELETE FROM consumer_shadows WHERE wsn = $2 AND key = $5 AND sid = (
+		     SELECT id FROM shadow_sets WHERE workspace_id = $1 AND consumer = $3 AND entity = $4)`,
+		t.ws, wsn, consumer, entity, key,
 	)
 }
 
 func (t *pgTx) DeleteConsumer(consumer string) error {
-	wsn, sids, ok, err := t.shadowSetIDs(consumer)
+	wsn, ok, err := t.workspaceNumber()
 	if err != nil {
 		return err
 	}
-	if ok && len(sids) > 0 {
+	if ok {
 		if err := t.queue(
-			`DELETE FROM consumer_shadows WHERE sid = ANY($1::int4[]) AND wsn = $2`,
-			sids, wsn,
+			`DELETE FROM consumer_shadows WHERE wsn = $3 AND sid IN (
+			     SELECT id FROM shadow_sets WHERE workspace_id = $1 AND consumer = $2)`,
+			t.ws, consumer, wsn,
 		); err != nil {
 			return err
 		}
@@ -896,11 +892,7 @@ func (t *pgTx) DeleteConsumer(consumer string) error {
 		); err != nil {
 			return err
 		}
-		for k := range t.names {
-			if k.kind == shadowSet && k.a == consumer {
-				delete(t.names, k)
-			}
-		}
+		t.forgetNames(func(k nameKey) bool { return k.kind == shadowSet && k.a == consumer })
 	}
 	return t.queue(
 		`DELETE FROM consumer_positions WHERE workspace_id = $1 AND consumer = $2`,
@@ -909,45 +901,45 @@ func (t *pgTx) DeleteConsumer(consumer string) error {
 }
 
 func (t *pgTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int, error) {
-	if err := t.loadNames(); err != nil {
-		return 0, err
-	}
-	// Shadows and their sets first, while the positions that name their
-	// consumers still exist: the reverse order would leave every collected
-	// consumer's shadows behind with nothing left to identify them by. A
-	// workspace without a number holds no shadow.
-	if wsn, ok := t.indexScopes[indexKey{}]; ok {
-		if _, err := t.exec(
-			`DELETE FROM consumer_shadows s USING shadow_sets n
-			 WHERE s.sid = n.id AND s.wsn = $4 AND n.workspace_id = $1 AND n.consumer IN (
-			     SELECT consumer FROM consumer_positions
-			     WHERE workspace_id = $1 AND updated_at < $2 AND seq < $3
-			 )`,
-			t.ws, cutoff.UnixMilli(), int64(belowSeq), wsn,
-		); err != nil {
-			return 0, err
-		}
-		if _, err := t.exec(
-			`DELETE FROM shadow_sets
-			 WHERE workspace_id = $1 AND consumer IN (
-			     SELECT consumer FROM consumer_positions
-			     WHERE workspace_id = $1 AND updated_at < $2 AND seq < $3
-			 )`,
-			t.ws, cutoff.UnixMilli(), int64(belowSeq),
-		); err != nil {
-			return 0, err
-		}
-		t.names = nil
-	}
-	tag, err := t.exec(
-		`DELETE FROM consumer_positions
-		 WHERE workspace_id = $1 AND updated_at < $2 AND seq < $3`,
-		t.ws, cutoff.UnixMilli(), int64(belowSeq),
-	)
+	wsn, hasWS, err := t.workspaceNumber()
 	if err != nil {
 		return 0, err
 	}
-	return int(tag.RowsAffected()), nil
+	// One statement deletes the positions and, by the consumers it returns,
+	// their sets and shadows, so nothing is left behind with no position to
+	// identify it by, and a pass that finds nothing idle costs one probe. A
+	// workspace without a number holds no shadow.
+	sql := `DELETE FROM consumer_positions
+		 WHERE workspace_id = $1 AND updated_at < $2 AND seq < $3
+		 RETURNING consumer`
+	args := []any{t.ws, cutoff.UnixMilli(), int64(belowSeq)}
+	if hasWS {
+		sql = `WITH idle AS (
+		     DELETE FROM consumer_positions
+		     WHERE workspace_id = $1 AND updated_at < $2 AND seq < $3
+		     RETURNING consumer
+		 ), sets AS (
+		     DELETE FROM shadow_sets
+		     WHERE workspace_id = $1 AND consumer IN (SELECT consumer FROM idle)
+		     RETURNING id
+		 ), shadows AS (
+		     DELETE FROM consumer_shadows WHERE wsn = $4 AND sid IN (SELECT id FROM sets)
+		 )
+		 SELECT consumer FROM idle`
+		args = append(args, wsn)
+	}
+	rows, err := t.query(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	idle, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return 0, err
+	}
+	if len(idle) > 0 {
+		t.forgetNames(func(k nameKey) bool { return k.kind == shadowSet && slices.Contains(idle, k.a) })
+	}
+	return len(idle), nil
 }
 
 func (t *pgTx) FieldDeltaHorizon() (uint64, error) {
@@ -966,28 +958,22 @@ func (t *pgTx) FieldDeltaHorizon() (uint64, error) {
 }
 
 func (t *pgTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]byte, bool, error) {
-	horizon, err := t.FieldDeltaHorizon()
+	// A workspace without a number holds no entry, and wsn 0 matches none.
+	wsn, _, err := t.workspaceNumber()
 	if err != nil {
 		return nil, false, err
 	}
-	// The span starts where the caller's knowledge ends; anything pruned at or
-	// above that point is a hole the fold cannot see.
-	if afterSeq < uint64(horizon) {
-		return nil, false, nil
-	}
-	wsn, fid, ok, err := t.nameIDs(nameKey{textField, entity, field}, false)
-	if err != nil {
-		return nil, false, err
-	}
-	if !ok {
-		// No entry of the field was ever written: an empty span.
-		return nil, true, nil
-	}
+	// The horizon, the name and the span travel as one statement. The span
+	// is read also when the horizon makes it of no use, which costs less than
+	// the round trip a separate read of the horizon would.
 	rows, err := t.query(
-		`SELECT frag FROM field_deltas
-		 WHERE fid = $1 AND wsn = $2 AND key = $3 AND seq > $4
-		 ORDER BY seq`,
-		fid, wsn, key, int64(afterSeq),
+		`SELECT h.horizon, f.id, d.seq, d.frag
+		 FROM (SELECT COALESCE(
+		     (SELECT field_delta_horizon FROM workspaces WHERE workspace_id = $1), 0) AS horizon) h
+		 LEFT JOIN text_fields f ON f.workspace_id = $1 AND f.entity = $3 AND f.field = $4
+		 LEFT JOIN field_deltas d ON d.fid = f.id AND d.wsn = $2 AND d.key = $5 AND d.seq > $6
+		 ORDER BY d.seq`,
+		t.ws, wsn, entity, field, key, int64(afterSeq),
 	)
 	if err != nil {
 		return nil, false, err
@@ -995,9 +981,26 @@ func (t *pgTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]byte
 	defer rows.Close()
 	var frags [][]byte
 	for rows.Next() {
-		var frag []byte
-		if err := rows.Scan(&frag); err != nil {
+		var (
+			horizon  int64
+			fid, seq *int64
+			frag     []byte
+		)
+		if err := rows.Scan(&horizon, &fid, &seq, &frag); err != nil {
 			return nil, false, err
+		}
+		// The span starts where the caller's knowledge ends; anything pruned
+		// at or above that point is a hole the fold cannot see.
+		if afterSeq < uint64(horizon) {
+			return nil, false, nil
+		}
+		if fid != nil {
+			t.rememberName(nameKey{textField, entity, field}, *fid)
+		}
+		if seq == nil {
+			// No entry of the field after afterSeq, or no entry of the field
+			// at all: an empty span.
+			break
 		}
 		if len(frag) == 0 {
 			// A gap marker: the span is not expressible as deltas. Drain nothing
@@ -1016,18 +1019,18 @@ func (t *pgTx) PutFieldDelta(entity, key, field string, seq uint64, frag []byte)
 	if err := t.register(); err != nil {
 		return err
 	}
-	wsn, fid, _, err := t.nameIDs(nameKey{textField, entity, field}, true)
+	wsn, fid, err := t.nameIDs(nameKey{textField, entity, field})
 	if err != nil {
 		return err
 	}
 	// A gap marker must round-trip as an empty (not NULL) blob: the column is
 	// NOT NULL and the read path distinguishes empty from present.
 	if err := t.queue(
-		`INSERT INTO field_deltas (seq, updated_at, wsn, fid, key, frag)
+		`INSERT INTO field_deltas (seq, updated_at, fid, wsn, key, frag)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (fid, wsn, key, seq)
 		 DO UPDATE SET frag = excluded.frag, updated_at = excluded.updated_at`,
-		int64(seq), time.Now().UnixMilli(), wsn, fid, key, notNilBytes(frag),
+		int64(seq), time.Now().UnixMilli(), fid, wsn, key, notNilBytes(frag),
 	); err != nil || len(frag) > 0 {
 		return err
 	}
@@ -1038,48 +1041,57 @@ func (t *pgTx) PutFieldDelta(entity, key, field string, seq uint64, frag []byte)
 }
 
 func (t *pgTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
-	if err := t.loadIndexScopes(); err != nil {
+	wsn, hasEntries, err := t.workspaceNumber()
+	if err != nil {
 		return 0, err
 	}
-	// A workspace without a number holds no entry.
-	wsn, hasEntries := t.indexScopes[indexKey{}]
-	cutoffMillis := cutoff.UnixMilli()
-	var maxPruned int64
+	var horizon, namesPruned int64
 	if hasEntries {
-		if err := t.queryRow(
-			`SELECT COALESCE(MAX(seq), 0) FROM field_deltas
-			 WHERE wsn = $1 AND updated_at < $2`,
-			wsn, cutoffMillis,
-		).Scan(&maxPruned); err != nil {
-			return 0, err
-		}
+		// One statement deletes the entries, the names of the ids it deleted
+		// the last entries of, and moves the horizon. The sub-statements read
+		// one snapshot, which holds the entries they delete, so an id keeps its
+		// name when it has an entry at or after the cutoff. The cost follows
+		// the entries deleted: each id they hold is looked up once, and its
+		// probe of field_deltas stops at the first entry that stays. GREATEST
+		// keeps the horizon monotonic even if an older cutoff runs after a
+		// newer one, exactly as CollectTombstones does; a pass that deletes
+		// nothing leaves the workspaces row alone.
+		err = t.queryRow(
+			`WITH gone AS (
+			     DELETE FROM field_deltas WHERE wsn = $1 AND updated_at < $2
+			     RETURNING fid, seq
+			 ), names AS (
+			     DELETE FROM text_fields f
+			     WHERE f.id IN (SELECT fid FROM gone) AND f.workspace_id = $3
+			       AND NOT EXISTS (
+			           SELECT 1 FROM field_deltas d
+			           WHERE d.fid = f.id AND d.wsn = $1 AND d.updated_at >= $2)
+			     RETURNING f.id
+			 ), moved AS (
+			     UPDATE workspaces SET field_delta_horizon = GREATEST(field_delta_horizon, (SELECT max(seq) FROM gone))
+			     WHERE workspace_id = $3 AND EXISTS (SELECT 1 FROM gone)
+			     RETURNING field_delta_horizon
+			 )
+			 SELECT COALESCE((SELECT field_delta_horizon FROM moved),
+			                 (SELECT field_delta_horizon FROM workspaces WHERE workspace_id = $3), 0),
+			        (SELECT count(*) FROM names)`,
+			wsn, cutoff.UnixMilli(), t.ws,
+		).Scan(&horizon, &namesPruned)
+	} else {
+		err = t.queryRow(
+			`SELECT COALESCE((SELECT field_delta_horizon FROM workspaces WHERE workspace_id = $1), 0)`,
+			t.ws,
+		).Scan(&horizon)
 	}
-	if maxPruned > 0 {
-		if _, err := t.exec(
-			`DELETE FROM field_deltas WHERE wsn = $1 AND updated_at < $2`,
-			wsn, cutoffMillis,
-		); err != nil {
-			return 0, err
-		}
-		// GREATEST keeps the horizon monotonic even if an older cutoff runs
-		// after a newer one, exactly as CollectTombstones does.
-		if _, err := t.exec(
-			`UPDATE workspaces SET field_delta_horizon = GREATEST(field_delta_horizon, $2)
-			 WHERE workspace_id = $1`,
-			t.ws, maxPruned,
-		); err != nil {
-			return 0, err
-		}
+	if err != nil {
+		return 0, err
 	}
-	var horizon int64
-	err := t.queryRow(
-		`SELECT field_delta_horizon FROM workspaces WHERE workspace_id = $1`,
-		t.ws,
-	).Scan(&horizon)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil
+	if namesPruned > 0 {
+		// A later write of a pruned field must give it a new id: an entry
+		// under the old one would have no name to be found by.
+		t.forgetNames(func(k nameKey) bool { return k.kind == textField })
 	}
-	return uint64(horizon), err
+	return uint64(horizon), nil
 }
 
 func (t *pgTx) TextFloor(entity, key, field string) ([]byte, error) {

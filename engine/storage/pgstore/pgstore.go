@@ -501,10 +501,7 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 		// field_deltas and consumer_shadows are keyed by the workspace number
 		// and the ids of text_fields and shadow_sets, which the loop below
 		// also deletes.
-		if err := t.loadNames(); err != nil {
-			return err
-		}
-		for _, stmt := range namedDeletes(t.indexScopes, t.names) {
+		for _, stmt := range namedDeletes(workspaceID, t.indexScopes) {
 			if err := t.queue(stmt.sql, stmt.args...); err != nil {
 				return err
 			}
@@ -562,29 +559,23 @@ func numberedDeletes(scopes map[indexKey]int32) []queuedStmt {
 }
 
 // namedDeletes are the statements that empty field_deltas and
-// consumer_shadows for one workspace, given its index_scopes rows and its
-// names. field_deltas goes by the workspace number, which leads its GC index;
-// consumer_shadows by the ids of its shadow sets, which lead its primary key.
-// A workspace without a number holds nothing in them.
-func namedDeletes(scopes map[indexKey]int32, names map[nameKey]int32) []queuedStmt {
+// consumer_shadows for workspace ws, given its index_scopes rows.
+// field_deltas goes by the workspace number, which leads its GC index;
+// consumer_shadows by the ids of the workspace's shadow sets, which lead its
+// primary key. A workspace without a number holds nothing in them.
+func namedDeletes(ws string, scopes map[indexKey]int32) []queuedStmt {
 	wsn, ok := scopes[indexKey{}]
 	if !ok {
 		return nil
 	}
-	out := []queuedStmt{{sql: `DELETE FROM field_deltas WHERE wsn = $1`, args: []any{wsn}}}
-	var sids []int32
-	for k, id := range names {
-		if k.kind == shadowSet {
-			sids = append(sids, id)
-		}
+	return []queuedStmt{
+		{sql: `DELETE FROM field_deltas WHERE wsn = $1`, args: []any{wsn}},
+		{
+			sql: `DELETE FROM consumer_shadows WHERE wsn = $2 AND sid IN (
+			          SELECT id FROM shadow_sets WHERE workspace_id = $1)`,
+			args: []any{ws, wsn},
+		},
 	}
-	if len(sids) > 0 {
-		out = append(out, queuedStmt{
-			sql:  `DELETE FROM consumer_shadows WHERE sid = ANY($1::int4[]) AND wsn = $2`,
-			args: []any{sids, wsn},
-		})
-	}
-	return out
 }
 
 // RestoreWorkspace removes the workspace's deletion mark, under the workspace

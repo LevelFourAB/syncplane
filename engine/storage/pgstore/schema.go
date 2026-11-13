@@ -49,7 +49,8 @@ var migrations = []migration{
 // The workspace number, the wsn column, is the one index_scopes gives each
 // workspace. text_fields gives an id to each (entity, field) of a workspace
 // that holds delta entries, and shadow_sets an id to each (consumer, entity)
-// of a workspace that holds shadows. Both take their ids from name_ids.
+// of a workspace that holds shadows. Both take their BIGINT ids from name_ids,
+// because the names come and go for as long as the database lives.
 //
 // The step copies the entries of the old tables to new ones, drops the old
 // tables and gives the new ones their names. It is not additive: a binary
@@ -59,19 +60,19 @@ var migrations = []migration{
 // %[1]s is where the partitioning clause of the two new tables lands, and
 // %[2]s and %[3]s are where their partitions are created and renamed.
 const internedNamesDDL = `
-CREATE SEQUENCE name_ids AS INTEGER;
+CREATE SEQUENCE name_ids AS BIGINT;
 CREATE TABLE text_fields (
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	entity       TEXT COLLATE "C" NOT NULL,
 	field        TEXT COLLATE "C" NOT NULL,
-	id           INTEGER NOT NULL,
+	id           BIGINT NOT NULL,
 	PRIMARY KEY (workspace_id, entity, field)
 );
 CREATE TABLE shadow_sets (
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	consumer     TEXT COLLATE "C" NOT NULL,
 	entity       TEXT COLLATE "C" NOT NULL,
-	id           INTEGER NOT NULL,
+	id           BIGINT NOT NULL,
 	PRIMARY KEY (workspace_id, consumer, entity)
 );
 
@@ -83,11 +84,14 @@ FROM (SELECT workspace_id FROM field_deltas UNION SELECT workspace_id FROM consu
 WHERE NOT EXISTS (
 	SELECT 1 FROM index_scopes s WHERE s.workspace_id = x.workspace_id AND s.entity = '' AND s.idx = '');
 INSERT INTO text_fields (workspace_id, entity, field, id)
-SELECT x.workspace_id, x.entity, x.field, nextval('name_ids')::int4
+SELECT x.workspace_id, x.entity, x.field, nextval('name_ids')
 FROM (SELECT DISTINCT workspace_id, entity, field FROM field_deltas) x;
 INSERT INTO shadow_sets (workspace_id, consumer, entity, id)
-SELECT x.workspace_id, x.consumer, x.entity, nextval('name_ids')::int4
+SELECT x.workspace_id, x.consumer, x.entity, nextval('name_ids')
 FROM (SELECT DISTINCT workspace_id, consumer, entity FROM consumer_shadows) x;
+-- Serves PruneFieldDeltas, which deletes the names of the ids it pruned the
+-- last entries of.
+CREATE UNIQUE INDEX text_fields_id ON text_fields (id);
 
 -- The fixed-width columns come first, in an order that packs without
 -- alignment padding. The primary key leads with fid rather than wsn for the
@@ -95,27 +99,27 @@ FROM (SELECT DISTINCT workspace_id, consumer, entity FROM consumer_shadows) x;
 CREATE TABLE field_deltas_v5 (
 	seq        BIGINT NOT NULL,
 	updated_at BIGINT NOT NULL,
+	fid        BIGINT NOT NULL,
 	wsn        INTEGER NOT NULL,
-	fid        INTEGER NOT NULL,
 	key        TEXT COLLATE "C" NOT NULL,
 	frag       BYTEA NOT NULL,
 	CONSTRAINT field_deltas_v5_pkey PRIMARY KEY (fid, wsn, key, seq)
 )%[1]s;
 CREATE TABLE consumer_shadows_v5 (
+	sid      BIGINT NOT NULL,
 	wsn      INTEGER NOT NULL,
-	sid      INTEGER NOT NULL,
 	key      TEXT COLLATE "C" NOT NULL,
 	snapshot BYTEA NOT NULL,
 	CONSTRAINT consumer_shadows_v5_pkey PRIMARY KEY (sid, wsn, key)
 )%[1]s;
 %[2]s
-INSERT INTO field_deltas_v5 (seq, updated_at, wsn, fid, key, frag)
-SELECT d.seq, d.updated_at, s.scope, f.id, d.key, d.frag
+INSERT INTO field_deltas_v5 (seq, updated_at, fid, wsn, key, frag)
+SELECT d.seq, d.updated_at, f.id, s.scope, d.key, d.frag
 FROM field_deltas d
 JOIN index_scopes s ON s.workspace_id = d.workspace_id AND s.entity = '' AND s.idx = ''
 JOIN text_fields f ON f.workspace_id = d.workspace_id AND f.entity = d.entity AND f.field = d.field;
-INSERT INTO consumer_shadows_v5 (wsn, sid, key, snapshot)
-SELECT s.scope, n.id, c.key, c.snapshot
+INSERT INTO consumer_shadows_v5 (sid, wsn, key, snapshot)
+SELECT n.id, s.scope, c.key, c.snapshot
 FROM consumer_shadows c
 JOIN index_scopes s ON s.workspace_id = c.workspace_id AND s.entity = '' AND s.idx = ''
 JOIN shadow_sets n ON n.workspace_id = c.workspace_id AND n.consumer = c.consumer AND n.entity = c.entity;

@@ -23,9 +23,9 @@ var _ = Describe("Table size", func() {
 	// and row keys are 36-character uuids, one consumer of 18 characters
 	// keeps a 12-byte shadow of each row, and each row has three delta
 	// entries in two text fields, almost all of them gap markers. The shape
-	// with int ids takes about 170 bytes per shadow and 185 per delta entry;
-	// the shape keyed by text ids took about 330 per shadow and 400 per delta
-	// entry before VACUUM FULL. The ceilings sit about 10% above.
+	// with BIGINT name ids takes about 180 bytes per shadow and 200 per delta
+	// entry; the shape keyed by text ids took about 330 per shadow and 400 per
+	// delta entry before VACUUM FULL. The ceilings sit about 10% above.
 	It("keeps the delta log and the shadows small per entry", func() {
 		const (
 			workspaces = 3
@@ -100,7 +100,7 @@ var _ = Describe("Table size", func() {
 		}
 		shadows, fieldDeltas := perEntry("consumer_shadows"), perEntry("field_deltas")
 		GinkgoWriter.Printf("consumer_shadows %.0f bytes/entry, field_deltas %.0f bytes/entry\n", shadows, fieldDeltas)
-		Expect(shadows).To(BeNumerically("<", 190))
-		Expect(fieldDeltas).To(BeNumerically("<", 205))
+		Expect(shadows).To(BeNumerically("<", 195))
+		Expect(fieldDeltas).To(BeNumerically("<", 220))
 	})
 })
