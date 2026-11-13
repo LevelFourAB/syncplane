@@ -173,6 +173,15 @@ type Row struct {
 	// creations. Consumers must treat unknown conservatively — the pull path
 	// reads this to prove a client's cursor predates the row, and 0 proves
 	// nothing.
+	//
+	// Every read that returns a Row must return the stored value, ScanChanges
+	// included. The write that creates a row logs no text delta entry, so a
+	// pull ships a text-bearing row whole only because its CreatedVersion is
+	// above the reader's cursor. A 0 read back for a row created with a
+	// recorded creation lets a later edit's fragment fold onto an empty
+	// document. A row that is 0 in storage is safe: the code that created it
+	// logged an entry at the creation, which keeps every span that reaches the
+	// creation from folding onto nothing.
 	CreatedVersion uint64
 	Deleted        bool
 	// Actor attributes the write that produced this state — including a
