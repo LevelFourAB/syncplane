@@ -18,13 +18,14 @@ import (
 var _ = Describe("Table size", func() {
 	ctx := context.Background()
 
-	// The bytes of the heap and every index of a table, per entry, for a
-	// load shaped like a real app database: workspace ids and row keys are
-	// 36-character uuids, one consumer of 18 characters keeps a 12-byte
-	// shadow of each row, and each row has three delta entries in two text
-	// fields, almost all of them gap markers. The shape with int ids takes
-	// about 200 bytes per entry of each table; the shape keyed by text ids took
-	// about 330 per shadow and 400 per delta entry.
+	// The bytes of the heap and every index of a table, per live entry after
+	// VACUUM FULL, for a load shaped like a real app database: workspace ids
+	// and row keys are 36-character uuids, one consumer of 18 characters
+	// keeps a 12-byte shadow of each row, and each row has three delta
+	// entries in two text fields, almost all of them gap markers. The shape
+	// with int ids takes about 170 bytes per shadow and 185 per delta entry;
+	// the shape keyed by text ids took about 330 per shadow and 400 per delta
+	// entry before VACUUM FULL. The ceilings sit about 10% above.
 	It("keeps the delta log and the shadows small per entry", func() {
 		const (
 			workspaces = 3
@@ -85,6 +86,11 @@ var _ = Describe("Table size", func() {
 		DeferCleanup(func() { Expect(conn.Close(ctx)).To(Succeed()) })
 		perEntry := func(table string) float64 {
 			GinkgoHelper()
+			// A gap marker deletes the older entries of its field, and the
+			// dead tuples would count against the entries that are left.
+			// VACUUM FULL rewrites the table, so the size is the layout only.
+			_, err := conn.Exec(ctx, `VACUUM FULL `+table)
+			Expect(err).NotTo(HaveOccurred())
 			var size, n int64
 			Expect(conn.QueryRow(ctx,
 				`SELECT pg_total_relation_size(to_regclass($1)), (SELECT count(*) FROM `+table+`)`,
@@ -94,7 +100,7 @@ var _ = Describe("Table size", func() {
 		}
 		shadows, fieldDeltas := perEntry("consumer_shadows"), perEntry("field_deltas")
 		GinkgoWriter.Printf("consumer_shadows %.0f bytes/entry, field_deltas %.0f bytes/entry\n", shadows, fieldDeltas)
-		Expect(shadows).To(BeNumerically("<", 230))
-		Expect(fieldDeltas).To(BeNumerically("<", 240))
+		Expect(shadows).To(BeNumerically("<", 190))
+		Expect(fieldDeltas).To(BeNumerically("<", 205))
 	})
 })

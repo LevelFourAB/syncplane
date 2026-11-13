@@ -3450,6 +3450,87 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 			})
 
+			It("deletes the field's older entries when it writes a gap marker", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutFieldDelta("widget", "k", "body", 1, []byte("one"))).To(Succeed())
+					Expect(tx.PutFieldDelta("widget", "k", "body", 2, []byte("two"))).To(Succeed())
+				})
+				cutoff := time.Now().Add(time.Millisecond)
+				time.Sleep(5 * time.Millisecond)
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutFieldDelta("widget", "k", "body", 3, nil)).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					for after := range uint64(3) {
+						_, complete, err := tx.FieldDeltas("widget", "k", "body", after)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(complete).To(BeFalse(), "the marker stays, so a span from %d still reaches it", after)
+					}
+				})
+				// Only the prune horizon makes the deletion observable: a prune
+				// that finds nothing older than the cutoff does not move it.
+				write("ws1", func(tx storage.WriteTx) {
+					horizon, err := tx.PruneFieldDeltas(cutoff)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(horizon).To(BeZero(), "entries 1 and 2 were already gone")
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutFieldDelta("widget", "k", "body", 4, []byte("four"))).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					frags, complete, err := tx.FieldDeltas("widget", "k", "body", 3)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(complete).To(BeTrue())
+					Expect(frags).To(Equal([][]byte{[]byte("four")}))
+				})
+			})
+
+			It("keeps other fields, keys and later entries when it writes a gap marker", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutFieldDelta("widget", "k", "body", 1, []byte("one"))).To(Succeed())
+					Expect(tx.PutFieldDelta("widget", "k", "note", 2, []byte("note"))).To(Succeed())
+					Expect(tx.PutFieldDelta("widget", "k2", "body", 3, []byte("k2"))).To(Succeed())
+					Expect(tx.PutFieldDelta("gadget", "k", "body", 4, []byte("gadget"))).To(Succeed())
+					Expect(tx.PutFieldDelta("widget", "k", "body", 6, []byte("six"))).To(Succeed())
+				})
+				write("ws2", func(tx storage.WriteTx) {
+					Expect(tx.PutFieldDelta("widget", "k", "body", 1, []byte("ws2"))).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutFieldDelta("widget", "k", "body", 5, nil)).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					for _, c := range []struct {
+						entity, key, field string
+						want               string
+					}{
+						{"widget", "k", "note", "note"},
+						{"widget", "k2", "body", "k2"},
+						{"gadget", "k", "body", "gadget"},
+					} {
+						frags, complete, err := tx.FieldDeltas(c.entity, c.key, c.field, 0)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(complete).To(BeTrue())
+						Expect(frags).To(Equal([][]byte{[]byte(c.want)}), "%s/%s/%s", c.entity, c.key, c.field)
+					}
+					frags, complete, err := tx.FieldDeltas("widget", "k", "body", 5)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(complete).To(BeTrue())
+					Expect(frags).To(Equal([][]byte{[]byte("six")}), "an entry above the marker stays")
+				})
+				read("ws2", func(tx storage.ReadTx) {
+					frags, complete, err := tx.FieldDeltas("widget", "k", "body", 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(complete).To(BeTrue())
+					Expect(frags).To(Equal([][]byte{[]byte("ws2")}), "another workspace's marker is not ours")
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					horizon, err := tx.PruneFieldDeltas(time.Now().Add(time.Hour))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(horizon).To(BeEquivalentTo(6))
+				})
+			})
+
 			It("prunes entries past the cutoff and reports spans below the horizon incomplete", func() {
 				write("ws1", func(tx storage.WriteTx) {
 					Expect(tx.PutFieldDelta("widget", "k", "body", 1, []byte("one"))).To(Succeed())

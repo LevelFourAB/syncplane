@@ -1022,12 +1022,18 @@ func (t *pgTx) PutFieldDelta(entity, key, field string, seq uint64, frag []byte)
 	}
 	// A gap marker must round-trip as an empty (not NULL) blob: the column is
 	// NOT NULL and the read path distinguishes empty from present.
-	return t.queue(
+	if err := t.queue(
 		`INSERT INTO field_deltas (seq, updated_at, wsn, fid, key, frag)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (fid, wsn, key, seq)
 		 DO UPDATE SET frag = excluded.frag, updated_at = excluded.updated_at`,
 		int64(seq), time.Now().UnixMilli(), wsn, fid, key, notNilBytes(frag),
+	); err != nil || len(frag) > 0 {
+		return err
+	}
+	return t.queue(
+		`DELETE FROM field_deltas WHERE fid = $1 AND wsn = $2 AND key = $3 AND seq < $4`,
+		fid, wsn, key, int64(seq),
 	)
 }
 

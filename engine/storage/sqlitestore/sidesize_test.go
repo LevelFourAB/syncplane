@@ -166,12 +166,15 @@ func measureSideSize() sideSizeReport {
 }
 
 // shadowBytesCeiling and deltaBytesCeiling bound the on-disk cost of one
-// consumer shadow and of one delta-log entry in the side-table fixture. They
+// consumer shadow and of one delta-log entry in the side-table fixture. An
+// entry is one PutFieldDelta call: a gap marker deletes the older entries of
+// its field, so the delta log keeps fewer entries than the fixture writes,
+// and the ceiling also catches a change that stops deleting them. They
 // sit about 10% above the measured values, so a change that grows entries
 // fails here. Lower them when a change makes entries smaller.
 const (
 	shadowBytesCeiling = 77
-	deltaBytesCeiling  = 72
+	deltaBytesCeiling  = 46
 )
 
 var _ = Describe("side table size", func() {

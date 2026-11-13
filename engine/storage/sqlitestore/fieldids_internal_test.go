@@ -91,4 +91,33 @@ var _ = Describe("field ids of the delta log", func() {
 		})).To(Succeed())
 		Expect(fieldIDs(store)).To(Equal([]int64{1}), "k1 holds an entry, k2 holds none")
 	})
+
+	It("deletes the older entries of a field when a gap marker is written", func() {
+		store, err := Open(filepath.Join(GinkgoT().TempDir(), "fieldids.db"))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			for seq, field := range []string{"body", "body", "title", "body"} {
+				if err := tx.PutFieldDelta("widget", "k1", field, uint64(seq+1), []byte{byte(seq + 1)}); err != nil {
+					return err
+				}
+			}
+			return tx.PutFieldDelta("widget", "k1", "body", 5, nil)
+		})).To(Succeed())
+
+		// The marker hides seq 1, 2 and 4 of body from every reader, so they
+		// are deleted; title's entry belongs to another field and stays.
+		rows, err := store.read.Query(`SELECT seq, length(frag) FROM field_deltas ORDER BY seq`)
+		Expect(err).NotTo(HaveOccurred())
+		var entries [][2]int64
+		for rows.Next() {
+			var seq, n int64
+			Expect(rows.Scan(&seq, &n)).To(Succeed())
+			entries = append(entries, [2]int64{seq, n})
+		}
+		Expect(rows.Err()).NotTo(HaveOccurred())
+		Expect(rows.Close()).To(Succeed())
+		Expect(entries).To(Equal([][2]int64{{3, 1}, {5, 0}}))
+	})
 })

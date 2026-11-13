@@ -3015,6 +3015,13 @@ func (t *sqliteTx) PutFieldDelta(entity, key, field string, seq uint64, frag []b
 		 DO UPDATE SET frag = excluded.frag, updated_at = excluded.updated_at`,
 		scope, id, seq, frag, time.Now().UnixMilli(),
 	)
+	if err != nil || len(frag) > 0 {
+		return err
+	}
+	_, err = t.exec(
+		`DELETE FROM field_deltas WHERE scope = ? AND field_id = ? AND seq < ?`,
+		scope, id, seq,
+	)
 	return err
 }
 

@@ -65,12 +65,12 @@
 //     partial commit from a cancelled write. A context that ends while the
 //     commit is in flight does not make a committed write report failure.
 //   - The collaborative-text delta log (PutFieldDelta, FieldDeltas,
-//     PruneFieldDeltas, FieldDeltaHorizon) is an append-only side table the
-//     pull path reads over a sequence span. It exists only to make pulls
-//     smaller, so an adapter may
-//     always report a span incomplete and lose nothing but wire size; reporting
-//     an under-covered span as COMPLETE is the one failure that corrupts
-//     documents.
+//     PruneFieldDeltas, FieldDeltaHorizon) is a side table the pull path
+//     reads over a sequence span. Writes append to it, except that a gap
+//     marker deletes the entries of its field below it. It exists only to
+//     make pulls smaller, so an adapter may always report a span incomplete
+//     and lose nothing but wire size; reporting an under-covered span as
+//     COMPLETE is the one failure that corrupts documents.
 //   - Secondary index entries (PutIndexEntries, DeleteIndexEntries,
 //     ScanIndex, ScanIndexRanges, IndexState, SetIndexState) exist only for
 //     LIVE rows: a DeleteRow is paired with a DeleteIndexEntries by the
@@ -1168,6 +1168,13 @@ type WriteTx interface {
 	// EMPTY frag is a gap marker — "this write changed the field but produced no
 	// usable delta" — which makes every span containing it incomplete. Writes
 	// that leave the field byte-identical record nothing.
+	//
+	// A gap marker also deletes the field's entries below seq: every span that
+	// reaches them contains the marker, so FieldDeltas cannot return them. It
+	// keeps the entries above seq, and the deletion does not move the
+	// field-delta horizon. This holds only while a marker stays a marker: the
+	// engine never overwrites a gap marker with a fragment, and an adapter may
+	// rely on that.
 	//
 	// Entries are per (entity, key, field, seq) and overwrite on conflict, so a
 	// retried write closure is idempotent. The engine writes a field path only

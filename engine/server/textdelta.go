@@ -282,7 +282,10 @@ func (info *entityInfo) putTextDelta(tx storage.WriteTx, key, field string, seq 
 	switch {
 	case !complete:
 		// Something already logged at this sequence cannot be folded (a gap
-		// marker from an earlier crud of the same batch). Stay a gap.
+		// marker from an earlier crud of the same batch). Stay a gap: the
+		// marker deleted the field's older entries (see
+		// storage.WriteTx.PutFieldDelta), so a fragment here would make a span
+		// complete that is missing them.
 		frag = nil
 	case len(existing) > 0 && len(frag) > 0:
 		merged, mergeErr := text.MergeFragments(existing[0], frag)
