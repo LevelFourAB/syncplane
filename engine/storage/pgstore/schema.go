@@ -37,6 +37,118 @@ var migrations = []migration{
 	{additive: true, sql: fixed(seqLineageDDL)},
 	{additive: true, sql: fixed(deletedWorkspacesDDL)},
 	{additive: true, sql: fixed(clientsAppliedDDL)},
+	{additive: false, sql: internedNamesSchema},
+}
+
+// internedNamesDDL is migration 5: field_deltas and consumer_shadows keyed by
+// int ids in place of the workspace id, the entity, the field and the
+// consumer, which repeat in every entry and in each index of it. That makes
+// each table about 0.6 times the size. Each entry keeps its row key as text;
+// names.go describes the ids.
+//
+// The workspace number, the wsn column, is the one index_scopes gives each
+// workspace. text_fields gives an id to each (entity, field) of a workspace
+// that holds delta entries, and shadow_sets an id to each (consumer, entity)
+// of a workspace that holds shadows. Both take their ids from name_ids.
+//
+// The step copies the entries of the old tables to new ones, drops the old
+// tables and gives the new ones their names. It is not additive: a binary
+// that does not know it reads and writes the columns it drops. It holds an
+// exclusive lock on both tables while it copies them.
+//
+// %[1]s is where the partitioning clause of the two new tables lands, and
+// %[2]s and %[3]s are where their partitions are created and renamed.
+const internedNamesDDL = `
+CREATE SEQUENCE name_ids AS INTEGER;
+CREATE TABLE text_fields (
+	workspace_id TEXT COLLATE "C" NOT NULL,
+	entity       TEXT COLLATE "C" NOT NULL,
+	field        TEXT COLLATE "C" NOT NULL,
+	id           INTEGER NOT NULL,
+	PRIMARY KEY (workspace_id, entity, field)
+);
+CREATE TABLE shadow_sets (
+	workspace_id TEXT COLLATE "C" NOT NULL,
+	consumer     TEXT COLLATE "C" NOT NULL,
+	entity       TEXT COLLATE "C" NOT NULL,
+	id           INTEGER NOT NULL,
+	PRIMARY KEY (workspace_id, consumer, entity)
+);
+
+-- nextval is evaluated only for the rows the WHERE clause keeps, so a
+-- workspace that has a number already uses no id.
+INSERT INTO index_scopes (workspace_id, entity, idx, scope)
+SELECT x.workspace_id, '', '', nextval('posting_scope_ids')::int4
+FROM (SELECT workspace_id FROM field_deltas UNION SELECT workspace_id FROM consumer_shadows) x
+WHERE NOT EXISTS (
+	SELECT 1 FROM index_scopes s WHERE s.workspace_id = x.workspace_id AND s.entity = '' AND s.idx = '');
+INSERT INTO text_fields (workspace_id, entity, field, id)
+SELECT x.workspace_id, x.entity, x.field, nextval('name_ids')::int4
+FROM (SELECT DISTINCT workspace_id, entity, field FROM field_deltas) x;
+INSERT INTO shadow_sets (workspace_id, consumer, entity, id)
+SELECT x.workspace_id, x.consumer, x.entity, nextval('name_ids')::int4
+FROM (SELECT DISTINCT workspace_id, consumer, entity FROM consumer_shadows) x;
+
+-- The fixed-width columns come first, in an order that packs without
+-- alignment padding. The primary key leads with fid rather than wsn for the
+-- reason index_rows does. frag is empty for a gap marker.
+CREATE TABLE field_deltas_v5 (
+	seq        BIGINT NOT NULL,
+	updated_at BIGINT NOT NULL,
+	wsn        INTEGER NOT NULL,
+	fid        INTEGER NOT NULL,
+	key        TEXT COLLATE "C" NOT NULL,
+	frag       BYTEA NOT NULL,
+	CONSTRAINT field_deltas_v5_pkey PRIMARY KEY (fid, wsn, key, seq)
+)%[1]s;
+CREATE TABLE consumer_shadows_v5 (
+	wsn      INTEGER NOT NULL,
+	sid      INTEGER NOT NULL,
+	key      TEXT COLLATE "C" NOT NULL,
+	snapshot BYTEA NOT NULL,
+	CONSTRAINT consumer_shadows_v5_pkey PRIMARY KEY (sid, wsn, key)
+)%[1]s;
+%[2]s
+INSERT INTO field_deltas_v5 (seq, updated_at, wsn, fid, key, frag)
+SELECT d.seq, d.updated_at, s.scope, f.id, d.key, d.frag
+FROM field_deltas d
+JOIN index_scopes s ON s.workspace_id = d.workspace_id AND s.entity = '' AND s.idx = ''
+JOIN text_fields f ON f.workspace_id = d.workspace_id AND f.entity = d.entity AND f.field = d.field;
+INSERT INTO consumer_shadows_v5 (wsn, sid, key, snapshot)
+SELECT s.scope, n.id, c.key, c.snapshot
+FROM consumer_shadows c
+JOIN index_scopes s ON s.workspace_id = c.workspace_id AND s.entity = '' AND s.idx = ''
+JOIN shadow_sets n ON n.workspace_id = c.workspace_id AND n.consumer = c.consumer AND n.entity = c.entity;
+
+DROP TABLE field_deltas, consumer_shadows;
+ALTER TABLE field_deltas_v5 RENAME TO field_deltas;
+ALTER INDEX field_deltas_v5_pkey RENAME TO field_deltas_pkey;
+ALTER TABLE consumer_shadows_v5 RENAME TO consumer_shadows;
+ALTER INDEX consumer_shadows_v5_pkey RENAME TO consumer_shadows_pkey;
+%[3]s
+-- Serves PruneFieldDeltas and the collectable probe. Created after the copy,
+-- which builds it in one pass. A BRIN index on updated_at would be smaller, but
+-- its ranges widen as pruned space is used again, until a probe of one
+-- workspace reads most of the table.
+CREATE INDEX field_deltas_gc ON field_deltas (wsn, updated_at);
+`
+
+// internedNamesSchema is migration 5 under the given layout. A partitioned
+// layout creates the two new tables with as many partitions as the layout
+// found, hashed by the workspace number.
+func internedNamesSchema(l layout) string {
+	if l.partitions == 0 {
+		return fmt.Sprintf(internedNamesDDL, "", "", "")
+	}
+	var create, rename strings.Builder
+	for _, table := range []string{"field_deltas", "consumer_shadows"} {
+		writePartitions(&create, table+"_v5", l.partitions, "")
+		for _, name := range partitionSuffixes(l.partitions) {
+			fmt.Fprintf(&rename, "ALTER TABLE %[1]s_v5%[2]s RENAME TO %[1]s%[2]s;\n", table, name)
+			fmt.Fprintf(&rename, "ALTER INDEX %[1]s_v5%[2]s_pkey RENAME TO %[1]s%[2]s_pkey;\n", table, name)
+		}
+	}
+	return fmt.Sprintf(internedNamesDDL, " PARTITION BY HASH (wsn)", create.String(), rename.String())
 }
 
 // clientsAppliedDDL is migration 4: the sequences of each client's latest
@@ -66,21 +178,23 @@ CREATE TABLE deleted_workspaces (
 // by its workspace_id column. DeleteWorkspace empties each of them for the
 // workspace it deletes, so a table added by a migration must be added here
 // too; deleted_workspaces is the one table with that column left out, because
-// it holds the mark DeleteWorkspace leaves.
+// it holds the mark DeleteWorkspace leaves. field_deltas and consumer_shadows
+// hold no workspace_id, and DeleteWorkspace empties them by their ids (see
+// namedDeletes).
 var workspaceTables = []string{
 	"workspaces",
 	"rows",
 	"clients",
-	"field_deltas",
 	"text_floors",
 	"idempotency",
 	"index_scopes",
 	"index_state",
 	"consumer_positions",
-	"consumer_shadows",
 	"cursor_state",
 	"seq_lineage",
 	"posting_scopes",
+	"text_fields",
+	"shadow_sets",
 }
 
 // scopedTables names the tables that hold state of one workspace keyed by a
@@ -161,9 +275,10 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 `
 
 // baselineDDL is migration 1. The %[1]s after four of the tables is where the
-// partitioning clause lands; see partitionedTables for which four and why.
+// partitioning clause lands; see baselinePartitionedTables for which four.
 // %[2]s, %[3]s and %[4]s do the same for the three tables of
-// scopePartitionedTables, and %[5]s for the two of numberPartitionedTables.
+// scopePartitionedTables, and %[5]s for the two of
+// baselineNumberPartitionedTables.
 const baselineDDL = `
 CREATE TABLE workspaces (
 	workspace_id        TEXT COLLATE "C" NOT NULL,
@@ -240,7 +355,8 @@ CREATE TABLE catalog (
 -- One row per (text field, write), holding the fragment that write added so
 -- a pull can ship a keystroke instead of a document. The primary key is
 -- ordered so the per-field span read (one row, one field, seq > cursor) is a
--- range scan of its tail. frag is empty for a gap marker.
+-- range scan of its tail. frag is empty for a gap marker. Migration 5 replaces
+-- the table.
 CREATE TABLE field_deltas (
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	entity       TEXT COLLATE "C" NOT NULL,
@@ -348,7 +464,7 @@ CREATE INDEX consumer_positions_gc
 
 -- No GC index: shadows are deleted per row or wholesale with their
 -- consumer, and the primary key's (workspace_id, consumer)
--- prefix is the range scan for that.
+-- prefix is the range scan for that. Migration 5 replaces the table.
 CREATE TABLE consumer_shadows (
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	consumer     TEXT COLLATE "C" NOT NULL,
@@ -430,8 +546,8 @@ CREATE TABLE cursor_state (
 );
 `
 
-// partitionedTables names the tables a partitioned layout hash-partitions, in
-// the order the baseline creates them. Each one leads its primary key with
+// partitionedTables names the tables a partitioned layout hash-partitions by
+// workspace_id, in the order the baseline creates them. Each one leads its primary key with
 // workspace_id — which is what Postgres demands of a unique constraint on a
 // partitioned table — and every statement against them binds that column to
 // equality, so pruning reaches a single partition and no update ever moves a
@@ -445,9 +561,7 @@ CREATE TABLE cursor_state (
 // granularity buys.
 var partitionedTables = []string{
 	"rows",
-	"field_deltas",
 	"idempotency",
-	"consumer_shadows",
 }
 
 // numberPartitionedTables names the tables a partitioned layout hash-partitions
@@ -457,7 +571,20 @@ var partitionedTables = []string{
 var numberPartitionedTables = []string{
 	"index_rows",
 	"index_entries",
+	"field_deltas",
+	"consumer_shadows",
 }
+
+// baselinePartitionedTables and baselineNumberPartitionedTables are the tables
+// the baseline partitions by workspace_id and by the workspace number. They
+// differ from partitionedTables and numberPartitionedTables because migration
+// 5 creates field_deltas and consumer_shadows again, keyed by the workspace
+// number. They must not change: the baseline is the schema every database
+// starts from.
+var (
+	baselinePartitionedTables       = []string{"rows", "field_deltas", "idempotency", "consumer_shadows"}
+	baselineNumberPartitionedTables = []string{"index_rows", "index_entries"}
+)
 
 // scopePartitionedTables names the tables a partitioned layout hash-partitions
 // by their scope column rather than by workspace_id, with the storage
@@ -488,18 +615,20 @@ const maxPartitions = 1024
 // the database rather than to a Store: every workspace in one schema sees the
 // same layout.
 type layout struct {
-	// partitions is the hash modulus the baseline creates the tables in
-	// partitionedTables with; zero leaves each of them a single table.
+	// partitions is the hash modulus the baseline creates the partitioned
+	// tables with; zero leaves each of them a single table.
 	//
 	// On a database that is already migrated this is the number of partitions
-	// found attached, which distinguishes partitioned from not and nothing
-	// finer — splitting one partition into two leaves a set of mixed moduli.
-	// A migration may therefore branch on `partitions > 0` and on nothing else.
+	// found attached to rows, which distinguishes partitioned from not and
+	// nothing finer — splitting one partition into two leaves a set of mixed
+	// moduli. A migration may therefore branch on `partitions > 0`, and a
+	// migration that creates a partitioned table again uses the number as its
+	// modulus, which Postgres accepts whatever the number is.
 	partitions int
 }
 
 // partitionBy is the clause the baseline appends to each table in
-// partitionedTables, empty when the layout is unpartitioned. It carries its
+// baselinePartitionedTables, empty when the layout is unpartitioned. It carries its
 // own leading space, so an unpartitioned schema reads as `);`.
 func (l layout) partitionBy() string {
 	if l.partitions == 0 {
@@ -509,8 +638,8 @@ func (l layout) partitionBy() string {
 }
 
 // baselineSchema is migration 1 under the given layout: the tables, then the
-// partitions of the tables in partitionedTables, numberPartitionedTables and
-// scopePartitionedTables.
+// partitions of the tables in baselinePartitionedTables,
+// baselineNumberPartitionedTables and scopePartitionedTables.
 //
 // Partitions come after the indexes rather than before, which is the same
 // schema either way — an index on a partitioned parent is created on every
@@ -523,24 +652,36 @@ func baselineSchema(l layout) string {
 	}
 	byScope := " PARTITION BY HASH (scope)"
 	fmt.Fprintf(&b, baselineDDL, l.partitionBy(), byScope, byScope, byScope, " PARTITION BY HASH (wsn)")
-	// Zero-padded to the width of the largest remainder, so the partitions of
-	// a table sort in the order they are numbered wherever they are listed.
-	width := len(strconv.Itoa(l.partitions - 1))
-	for _, table := range slices.Concat(partitionedTables, numberPartitionedTables) {
-		b.WriteString("\n")
-		for i := range l.partitions {
-			fmt.Fprintf(&b, "CREATE TABLE %s_p%0*d PARTITION OF %s FOR VALUES WITH (MODULUS %d, REMAINDER %d);\n",
-				table, width, i, table, l.partitions, i)
-		}
+	for _, table := range slices.Concat(baselinePartitionedTables, baselineNumberPartitionedTables) {
+		writePartitions(&b, table, l.partitions, "")
 	}
 	for _, table := range scopePartitionedTables {
-		b.WriteString("\n")
-		for i := range l.partitions {
-			fmt.Fprintf(&b, "CREATE TABLE %s_p%0*d PARTITION OF %s FOR VALUES WITH (MODULUS %d, REMAINDER %d)%s;\n",
-				table.name, width, i, table.name, l.partitions, i, table.with)
-		}
+		writePartitions(&b, table.name, l.partitions, table.with)
 	}
 	return b.String()
+}
+
+// writePartitions writes the statements that create the partitions of table,
+// one per remainder of the modulus n, each with the storage clause with.
+func writePartitions(b *strings.Builder, table string, n int, with string) {
+	b.WriteString("\n")
+	for i, suffix := range partitionSuffixes(n) {
+		fmt.Fprintf(b, "CREATE TABLE %s%s PARTITION OF %s FOR VALUES WITH (MODULUS %d, REMAINDER %d)%s;\n",
+			table, suffix, table, n, i, with)
+	}
+}
+
+// partitionSuffixes returns the suffix of the partition name of each remainder
+// of the modulus n, in order. Zero-padded to the width of the largest
+// remainder, so the partitions of a table sort in the order they are numbered
+// wherever they are listed.
+func partitionSuffixes(n int) []string {
+	width := len(strconv.Itoa(n - 1))
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("_p%0*d", width, i)
+	}
+	return out
 }
 
 // SchemaVersion returns the ledger version this binary migrates a database to,

@@ -206,7 +206,7 @@ Pass configuration options as `Option` values to `Open`, `Migrate`, and `Stateme
 | `WithMaxConns(n)`        | pgx default or DSN | Connection pool size, bounding concurrent write operations.                                                                                                                                                                                                                                                  |
 | `WithReadReplica(dsn)`   | No replica         | Connection string for a hot standby pool exposed as `storage.ReplicaProvider`. `Open` fails if the standby schema version does not match the binary schema version.                                                                                                                                          |
 | `WithReplicaMaxConns(n)` | pgx default or DSN | Connection pool size for the read replica pool, bounding concurrent replica reads.                                                                                                                                                                                                                           |
-| `WithPartitions(n)`      | Unpartitioned      | Hash-partitions `rows`, `field_deltas`, `idempotency`, and `consumer_shadows` by `workspace_id`, `index_rows` and `index_entries` by workspace number, and `posting_rows`, `posting_chunks`, and `posting_pages` by posting scope. Must be a power of two up to 1024. Applied only when creating the schema. |
+| `WithPartitions(n)`      | Unpartitioned      | Hash-partitions `rows` and `idempotency` by `workspace_id`, `index_rows`, `index_entries`, `field_deltas`, and `consumer_shadows` by workspace number, and `posting_rows`, `posting_chunks`, and `posting_pages` by posting scope. Must be a power of two up to 1024. Applied only when creating the schema. |
 | `WithoutMigrations()`    | Migrate at boot    | Disables automatic migration during `Open`. `Open` verifies the schema matches the binary version without executing DDL or acquiring migration advisory locks.                                                                                                                                               |
 
 The package provides the following migration functions:
@@ -217,6 +217,10 @@ The package provides the following migration functions:
 - `CanServe(binaryVersion, schemaVersion)`: Checks whether a binary version can operate against a specified schema version.
 
 `Open` serves a database migrated to a newer schema version if all intermediate migration steps are additive.
+
+#### Schema upgrades in `pgstore`
+
+Migration 5 is not additive. It keys `field_deltas` and `consumer_shadows` by integer ids in place of the workspace id, entity, field, and consumer names, which makes each table approximately 0.6 times its earlier size. The migration copies the stored entries to the new tables and keeps all of them. While it copies, it holds an exclusive lock on both tables. A binary at schema version 4 or lower cannot open a database at version 5, so stop all older nodes before you apply it.
 
 #### Connection budget
 

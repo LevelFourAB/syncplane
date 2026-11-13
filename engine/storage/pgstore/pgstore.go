@@ -222,9 +222,9 @@ func WithReplicaMaxConns(n int32) Option {
 // WithPartitions hash-partitions the workspace-scoped tables with the given
 // modulus.
 //
-// The tables rows, field_deltas, idempotency and consumer_shadows are
-// partitioned by workspace_id, the index tables index_rows and index_entries
-// by the workspace number that index_scopes gives each workspace, and the
+// The tables rows and idempotency are partitioned by workspace_id, the tables
+// index_rows, index_entries, field_deltas and consumer_shadows by the
+// workspace number that index_scopes gives each workspace, and the
 // posting tables posting_rows, posting_chunks and posting_pages by their
 // posting scope. The modulus must be a power of two up to 1024; zero, the
 // default, leaves each table whole, and Open, Migrate and Statements reject
@@ -498,6 +498,17 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 			}
 		}
 		restore()
+		// field_deltas and consumer_shadows are keyed by the workspace number
+		// and the ids of text_fields and shadow_sets, which the loop below
+		// also deletes.
+		if err := t.loadNames(); err != nil {
+			return err
+		}
+		for _, stmt := range namedDeletes(t.indexScopes, t.names) {
+			if err := t.queue(stmt.sql, stmt.args...); err != nil {
+				return err
+			}
+		}
 		for _, table := range workspaceTables {
 			if err := t.queue(`DELETE FROM `+table+` WHERE workspace_id = $1`, workspaceID); err != nil {
 				return err
@@ -546,6 +557,32 @@ func numberedDeletes(scopes map[indexKey]int32) []queuedStmt {
 				args: []any{id, wsn},
 			})
 		}
+	}
+	return out
+}
+
+// namedDeletes are the statements that empty field_deltas and
+// consumer_shadows for one workspace, given its index_scopes rows and its
+// names. field_deltas goes by the workspace number, which leads its GC index;
+// consumer_shadows by the ids of its shadow sets, which lead its primary key.
+// A workspace without a number holds nothing in them.
+func namedDeletes(scopes map[indexKey]int32, names map[nameKey]int32) []queuedStmt {
+	wsn, ok := scopes[indexKey{}]
+	if !ok {
+		return nil
+	}
+	out := []queuedStmt{{sql: `DELETE FROM field_deltas WHERE wsn = $1`, args: []any{wsn}}}
+	var sids []int32
+	for k, id := range names {
+		if k.kind == shadowSet {
+			sids = append(sids, id)
+		}
+	}
+	if len(sids) > 0 {
+		out = append(out, queuedStmt{
+			sql:  `DELETE FROM consumer_shadows WHERE sid = ANY($1::int4[]) AND wsn = $2`,
+			args: []any{sids, wsn},
+		})
 	}
 	return out
 }
@@ -676,7 +713,9 @@ func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []a
 		exists(scoped("idempotency") + " AND t.updated_at < " + next(cutoffs.IdempotencyKeys.UnixMilli()))
 	}
 	if !cutoffs.FieldDeltas.IsZero() {
-		exists(scoped("field_deltas") + " AND t.updated_at < " + next(cutoffs.FieldDeltas.UnixMilli()))
+		exists("index_scopes s JOIN field_deltas t ON t.wsn = s.scope" +
+			" WHERE s.workspace_id = w.workspace_id AND s.entity = '' AND s.idx = ''" +
+			" AND t.updated_at < " + next(cutoffs.FieldDeltas.UnixMilli()))
 	}
 	for _, e := range cutoffs.Entities {
 		if e.Before.IsZero() {

@@ -49,9 +49,11 @@ A pull with no cursor always reads on the primary. A client with no state uses i
 
 ## Table layout and partitioning
 
-Partitioning the large tables improves autovacuum maintenance by isolating dead tuples into smaller concurrent tasks. `rows`, `field_deltas`, `idempotency`, and `consumer_shadows` are partitioned by `workspace_id`. The value index tables `index_rows` and `index_entries` are partitioned by a workspace number, and the search tables `posting_rows`, `posting_chunks`, and `posting_pages` by a posting scope. In each case, all the data of one workspace or one search index is in one partition.
+Partitioning the large tables improves autovacuum maintenance by isolating dead tuples into smaller concurrent tasks. `rows` and `idempotency` are partitioned by `workspace_id`. The value index tables `index_rows` and `index_entries`, the text delta log `field_deltas`, and `consumer_shadows` are partitioned by a workspace number, and the search tables `posting_rows`, `posting_chunks`, and `posting_pages` by a posting scope. In each case, all the data of one workspace or one search index is in one partition.
 
 The index tables hold integer ids in place of names. `index_scopes` gives each workspace, entity, and index an id, and `index_rows` gives each indexed row an id. An index entry then holds ids and the entry bytes. The workspace id, the entity name, the index name, and the row key are not repeated in each entry and in each index of the table.
+
+`field_deltas` and `consumer_shadows` hold ids in the same way. Each entry holds the workspace number, and an id that `text_fields` gives each text field of an entity, or an id that `shadow_sets` gives the shadows of one consumer in one entity. These entries keep the row key as text.
 
 `pgstore` writes the index entries of the rows of a transaction with one statement for each 500 rows. A statement has a fixed cost: PostgreSQL plans it, locks the tables it reads, and starts it. One statement for the rows of a transaction pays this cost one time. One statement for each row pays it for each row.
 

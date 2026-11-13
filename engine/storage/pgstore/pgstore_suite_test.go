@@ -28,6 +28,26 @@ func TestPgstore(t *testing.T) {
 
 var _ = AfterSuite(pgtest.Shutdown)
 
+// migrateThrough applies the migrations up to and including version to the
+// empty database at dsn, and then runs sql against it, which leaves a database
+// as a binary of that version would have left it. Only WithPartitions in opts
+// counts.
+func migrateThrough(dsn string, version int, sql string, opts ...pgstore.Option) {
+	GinkgoHelper()
+	ctx := context.Background()
+	steps, err := pgstore.Statements(opts...)
+	Expect(err).NotTo(HaveOccurred())
+	conn, err := pgx.Connect(ctx, dsn)
+	Expect(err).NotTo(HaveOccurred())
+	defer func() { _ = conn.Close(ctx) }()
+	for _, step := range steps[:version] {
+		_, err := conn.Exec(ctx, step.SQL)
+		Expect(err).NotTo(HaveOccurred(), "migration %d", step.Version)
+	}
+	_, err = conn.Exec(ctx, sql)
+	Expect(err).NotTo(HaveOccurred())
+}
+
 // open is the shared "fresh, empty store" every spec below builds on.
 func open(opts ...pgstore.Option) *pgstore.Store {
 	GinkgoHelper()
@@ -232,28 +252,16 @@ var _ = Describe("Postgres migrations", func() {
 		}
 		rows.Close()
 		Expect(rows.Err()).NotTo(HaveOccurred())
-		Expect(applied).To(Equal([]int{1, 2, 3, 4}), "every migration, each recorded exactly once")
+		Expect(applied).To(Equal([]int{1, 2, 3, 4, 5}), "every migration, each recorded exactly once")
 	})
 
 	It("upgrades a baseline database to record sequence lineage", func() {
+		// A baseline database, holding a sequence allocated before the lineage
+		// table existed.
 		dsn := pgtest.DSN()
+		migrateThrough(dsn, 1, `INSERT INTO workspaces (workspace_id, last_seq) VALUES ('ws1', 1)`)
+
 		store, err := pgstore.Open(ctx, dsn)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
-			_, err := tx.NextSeq()
-			return err
-		})).To(Succeed())
-		Expect(store.Close()).To(Succeed())
-
-		// Back to the baseline shape, holding a sequence allocated before the
-		// lineage table existed.
-		conn, err := pgx.Connect(ctx, dsn)
-		Expect(err).NotTo(HaveOccurred())
-		_, err = conn.Exec(ctx, `DROP TABLE seq_lineage, deleted_workspaces; ALTER TABLE clients DROP COLUMN applied; DELETE FROM schema_migrations WHERE version >= 2`)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(conn.Close(ctx)).To(Succeed())
-
-		store, err = pgstore.Open(ctx, dsn)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
 		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
@@ -266,6 +274,73 @@ var _ = Describe("Postgres migrations", func() {
 			return nil
 		})).To(Succeed())
 	})
+
+	DescribeTable("upgrades the delta log and the shadows to int ids, keeping them",
+		func(opts ...pgstore.Option) {
+			dsn := pgtest.DSN()
+			// Entries of two workspaces in the shape before migration 5: two
+			// fields of one row, one with a gap marker, and the shadows of two
+			// consumers, one of them in two entities.
+			migrateThrough(dsn, 4, `
+				INSERT INTO workspaces (workspace_id, last_seq) VALUES ('ws1', 9), ('ws2', 9);
+				INSERT INTO field_deltas (workspace_id, entity, key, field, seq, frag, updated_at) VALUES
+				  ('ws1', 'doc', 'k1', 'body', 3, '\x0a', 1),
+				  ('ws1', 'doc', 'k1', 'body', 5, '\x0b', 1),
+				  ('ws1', 'doc', 'k1', 'title', 4, '', 1),
+				  ('ws2', 'doc', 'k1', 'body', 7, '\x0c', 1);
+				INSERT INTO consumer_shadows (workspace_id, consumer, entity, key, snapshot) VALUES
+				  ('ws1', 'mail', 'doc', 'k1', '\x01'),
+				  ('ws1', 'mail', 'note', 'k1', '\x02'),
+				  ('ws1', 'hook', 'doc', 'k1', '\x03'),
+				  ('ws2', 'mail', 'doc', 'k1', '\x04');`,
+				opts...)
+
+			store, err := pgstore.Open(ctx, dsn)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+
+			Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+				frags, complete, err := tx.FieldDeltas("doc", "k1", "body", 0)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(complete).To(BeTrue())
+				Expect(frags).To(Equal([][]byte{{0x0a}, {0x0b}}))
+				_, complete, err = tx.FieldDeltas("doc", "k1", "title", 0)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(complete).To(BeFalse(), "the gap marker survives the copy")
+				for _, c := range []struct {
+					consumer, entity string
+					want             []byte
+				}{{"mail", "doc", []byte{1}}, {"mail", "note", []byte{2}}, {"hook", "doc", []byte{3}}} {
+					Expect(tx.ConsumerShadow(c.consumer, c.entity, "k1")).To(Equal(c.want))
+				}
+				return nil
+			})).To(Succeed())
+			Expect(store.WithReadTx(ctx, "ws2", func(tx storage.ReadTx) error {
+				frags, _, err := tx.FieldDeltas("doc", "k1", "body", 0)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(frags).To(Equal([][]byte{{0x0c}}))
+				Expect(tx.ConsumerShadow("mail", "doc", "k1")).To(Equal([]byte{4}))
+				return nil
+			})).To(Succeed())
+
+			// The copied entries take the ids the migration gave, so a write
+			// after it lands beside them and a delete reaches them.
+			Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+				Expect(tx.PutFieldDelta("doc", "k1", "body", 8, []byte{0x0d})).To(Succeed())
+				return tx.DeleteConsumer("mail")
+			})).To(Succeed())
+			Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+				frags, _, err := tx.FieldDeltas("doc", "k1", "body", 3)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(frags).To(Equal([][]byte{{0x0b}, {0x0d}}))
+				Expect(tx.ConsumerShadow("mail", "doc", "k1")).To(BeNil())
+				Expect(tx.ConsumerShadow("hook", "doc", "k1")).To(Equal([]byte{3}))
+				return nil
+			})).To(Succeed())
+		},
+		Entry("unpartitioned"),
+		Entry("partitioned", pgstore.WithPartitions(4)),
+	)
 
 	DescribeTable("refuses a database that an earlier baseline created",
 		// Such a database is at this binary's ledger version but has no

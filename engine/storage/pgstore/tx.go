@@ -94,6 +94,10 @@ type pgTx struct {
 	// loadIndexScopes). nil means "not read yet, or dropped by a savepoint
 	// rewind".
 	indexScopes map[indexKey]int32
+	// names memoizes every text_fields and shadow_sets row of the workspace
+	// (see loadNames). nil means "not read yet, or dropped by a savepoint
+	// rewind or by a delete of names".
+	names map[nameKey]int32
 }
 
 // The statements that open a transaction. beginTx queues them rather than
@@ -226,11 +230,22 @@ func (t *pgTx) loadIndexScopes() error {
 	return t.loadState()
 }
 
-// loadState fills whichever of the workspace memo, the index state memo and
-// the index scope memo is empty, all in one round trip. Most transactions that
-// need one of them need the others — a request reads its position and probes
-// indexes, and a write of a row reads its index states before it writes its
-// entries — and each further read costs the server less than the round trip it
+// loadNames reads every index_scopes, text_fields and shadow_sets row of the
+// workspace into the memos, unless they hold them already. It holds them
+// exactly, for the reason loadIndexScopes gives.
+func (t *pgTx) loadNames() error {
+	if t.names != nil && t.indexScopes != nil {
+		return nil
+	}
+	return t.loadState()
+}
+
+// loadState fills whichever of the workspace memo, the index state memo, the
+// index scope memo and the memo of names is empty, all in one round trip. Most
+// transactions that need one of them need the others — a request reads its
+// position and probes indexes, a write of a row reads its index states before
+// it writes its entries, and a pull or a write of a text field reads its
+// names — and each further read costs the server less than the round trip it
 // saves when it is needed.
 func (t *pgTx) loadState() error {
 	var reads []queuedStmt
@@ -262,6 +277,9 @@ func (t *pgTx) loadState() error {
 			sql:  `SELECT entity, idx, scope FROM index_scopes WHERE workspace_id = $1`,
 			args: []any{t.ws},
 		})
+	}
+	if t.names == nil {
+		reads = append(reads, queuedStmt{sql: namesSQL, args: []any{t.ws}})
 	}
 	br, err := t.sendWith(reads...)
 	if err != nil {
@@ -322,7 +340,6 @@ func (t *pgTx) decodeState(br pgx.BatchResults) error {
 		if err != nil {
 			return err
 		}
-		defer rows.Close()
 		scopes := make(map[indexKey]int32)
 		for rows.Next() {
 			var (
@@ -330,14 +347,23 @@ func (t *pgTx) decodeState(br pgx.BatchResults) error {
 				scope int32
 			)
 			if err := rows.Scan(&k.entity, &k.index, &scope); err != nil {
+				rows.Close()
 				return err
 			}
 			scopes[k] = scope
 		}
+		rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
 		}
 		t.indexScopes = scopes
+	}
+	if t.names == nil {
+		names, err := decodeNames(br)
+		if err != nil {
+			return err
+		}
+		t.names = names
 	}
 	return nil
 }
@@ -804,11 +830,14 @@ func (t *pgTx) SetConsumerPosition(consumer string, p storage.ConsumerPosition) 
 }
 
 func (t *pgTx) ConsumerShadow(consumer, entity, key string) ([]byte, error) {
+	wsn, sid, ok, err := t.nameIDs(nameKey{shadowSet, consumer, entity}, false)
+	if err != nil || !ok {
+		return nil, err
+	}
 	var snapshot []byte
-	err := t.queryRow(
-		`SELECT snapshot FROM consumer_shadows
-		 WHERE workspace_id = $1 AND consumer = $2 AND entity = $3 AND key = $4`,
-		t.ws, consumer, entity, key,
+	err = t.queryRow(
+		`SELECT snapshot FROM consumer_shadows WHERE sid = $1 AND wsn = $2 AND key = $3`,
+		sid, wsn, key,
 	).Scan(&snapshot)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
@@ -823,31 +852,55 @@ func (t *pgTx) PutConsumerShadow(consumer, entity, key string, snapshot []byte) 
 	if err := t.register(); err != nil {
 		return err
 	}
+	wsn, sid, _, err := t.nameIDs(nameKey{shadowSet, consumer, entity}, true)
+	if err != nil {
+		return err
+	}
 	// The column is NOT NULL, so a nil snapshot stores as an empty blob and
 	// reads back as one. A consumer that wants "no shadow" deletes it.
 	return t.queue(
-		`INSERT INTO consumer_shadows (workspace_id, consumer, entity, key, snapshot)
-		 VALUES ($1, $2, $3, $4, $5)
-		 ON CONFLICT (workspace_id, consumer, entity, key)
+		`INSERT INTO consumer_shadows (wsn, sid, key, snapshot)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (sid, wsn, key)
 		 DO UPDATE SET snapshot = excluded.snapshot`,
-		t.ws, consumer, entity, key, notNilBytes(snapshot),
+		wsn, sid, key, notNilBytes(snapshot),
 	)
 }
 
 func (t *pgTx) DeleteConsumerShadow(consumer, entity, key string) error {
+	wsn, sid, ok, err := t.nameIDs(nameKey{shadowSet, consumer, entity}, false)
+	if err != nil || !ok {
+		return err
+	}
 	return t.queue(
-		`DELETE FROM consumer_shadows
-		 WHERE workspace_id = $1 AND consumer = $2 AND entity = $3 AND key = $4`,
-		t.ws, consumer, entity, key,
+		`DELETE FROM consumer_shadows WHERE sid = $1 AND wsn = $2 AND key = $3`,
+		sid, wsn, key,
 	)
 }
 
 func (t *pgTx) DeleteConsumer(consumer string) error {
-	if err := t.queue(
-		`DELETE FROM consumer_shadows WHERE workspace_id = $1 AND consumer = $2`,
-		t.ws, consumer,
-	); err != nil {
+	wsn, sids, ok, err := t.shadowSetIDs(consumer)
+	if err != nil {
 		return err
+	}
+	if ok && len(sids) > 0 {
+		if err := t.queue(
+			`DELETE FROM consumer_shadows WHERE sid = ANY($1::int4[]) AND wsn = $2`,
+			sids, wsn,
+		); err != nil {
+			return err
+		}
+		if err := t.queue(
+			`DELETE FROM shadow_sets WHERE workspace_id = $1 AND consumer = $2`,
+			t.ws, consumer,
+		); err != nil {
+			return err
+		}
+		for k := range t.names {
+			if k.kind == shadowSet && k.a == consumer {
+				delete(t.names, k)
+			}
+		}
 	}
 	return t.queue(
 		`DELETE FROM consumer_positions WHERE workspace_id = $1 AND consumer = $2`,
@@ -856,18 +909,35 @@ func (t *pgTx) DeleteConsumer(consumer string) error {
 }
 
 func (t *pgTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int, error) {
-	// Shadows first, while the positions that name their consumers still exist:
-	// the reverse order would leave every collected consumer's shadows behind
-	// with nothing left to identify them by.
-	if _, err := t.exec(
-		`DELETE FROM consumer_shadows
-		 WHERE workspace_id = $1 AND consumer IN (
-		     SELECT consumer FROM consumer_positions
-		     WHERE workspace_id = $1 AND updated_at < $2 AND seq < $3
-		 )`,
-		t.ws, cutoff.UnixMilli(), int64(belowSeq),
-	); err != nil {
+	if err := t.loadNames(); err != nil {
 		return 0, err
+	}
+	// Shadows and their sets first, while the positions that name their
+	// consumers still exist: the reverse order would leave every collected
+	// consumer's shadows behind with nothing left to identify them by. A
+	// workspace without a number holds no shadow.
+	if wsn, ok := t.indexScopes[indexKey{}]; ok {
+		if _, err := t.exec(
+			`DELETE FROM consumer_shadows s USING shadow_sets n
+			 WHERE s.sid = n.id AND s.wsn = $4 AND n.workspace_id = $1 AND n.consumer IN (
+			     SELECT consumer FROM consumer_positions
+			     WHERE workspace_id = $1 AND updated_at < $2 AND seq < $3
+			 )`,
+			t.ws, cutoff.UnixMilli(), int64(belowSeq), wsn,
+		); err != nil {
+			return 0, err
+		}
+		if _, err := t.exec(
+			`DELETE FROM shadow_sets
+			 WHERE workspace_id = $1 AND consumer IN (
+			     SELECT consumer FROM consumer_positions
+			     WHERE workspace_id = $1 AND updated_at < $2 AND seq < $3
+			 )`,
+			t.ws, cutoff.UnixMilli(), int64(belowSeq),
+		); err != nil {
+			return 0, err
+		}
+		t.names = nil
 	}
 	tag, err := t.exec(
 		`DELETE FROM consumer_positions
@@ -905,12 +975,19 @@ func (t *pgTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]byte
 	if afterSeq < uint64(horizon) {
 		return nil, false, nil
 	}
+	wsn, fid, ok, err := t.nameIDs(nameKey{textField, entity, field}, false)
+	if err != nil {
+		return nil, false, err
+	}
+	if !ok {
+		// No entry of the field was ever written: an empty span.
+		return nil, true, nil
+	}
 	rows, err := t.query(
 		`SELECT frag FROM field_deltas
-		 WHERE workspace_id = $1 AND entity = $2 AND key = $3 AND field = $4
-		   AND seq > $5
+		 WHERE fid = $1 AND wsn = $2 AND key = $3 AND seq > $4
 		 ORDER BY seq`,
-		t.ws, entity, key, field, int64(afterSeq),
+		fid, wsn, key, int64(afterSeq),
 	)
 	if err != nil {
 		return nil, false, err
@@ -939,31 +1016,42 @@ func (t *pgTx) PutFieldDelta(entity, key, field string, seq uint64, frag []byte)
 	if err := t.register(); err != nil {
 		return err
 	}
+	wsn, fid, _, err := t.nameIDs(nameKey{textField, entity, field}, true)
+	if err != nil {
+		return err
+	}
 	// A gap marker must round-trip as an empty (not NULL) blob: the column is
 	// NOT NULL and the read path distinguishes empty from present.
 	return t.queue(
-		`INSERT INTO field_deltas (workspace_id, entity, key, field, seq, frag, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 ON CONFLICT (workspace_id, entity, key, field, seq)
+		`INSERT INTO field_deltas (seq, updated_at, wsn, fid, key, frag)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 ON CONFLICT (fid, wsn, key, seq)
 		 DO UPDATE SET frag = excluded.frag, updated_at = excluded.updated_at`,
-		t.ws, entity, key, field, int64(seq), notNilBytes(frag), time.Now().UnixMilli(),
+		int64(seq), time.Now().UnixMilli(), wsn, fid, key, notNilBytes(frag),
 	)
 }
 
 func (t *pgTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
+	if err := t.loadIndexScopes(); err != nil {
+		return 0, err
+	}
+	// A workspace without a number holds no entry.
+	wsn, hasEntries := t.indexScopes[indexKey{}]
 	cutoffMillis := cutoff.UnixMilli()
 	var maxPruned int64
-	if err := t.queryRow(
-		`SELECT COALESCE(MAX(seq), 0) FROM field_deltas
-		 WHERE workspace_id = $1 AND updated_at < $2`,
-		t.ws, cutoffMillis,
-	).Scan(&maxPruned); err != nil {
-		return 0, err
+	if hasEntries {
+		if err := t.queryRow(
+			`SELECT COALESCE(MAX(seq), 0) FROM field_deltas
+			 WHERE wsn = $1 AND updated_at < $2`,
+			wsn, cutoffMillis,
+		).Scan(&maxPruned); err != nil {
+			return 0, err
+		}
 	}
 	if maxPruned > 0 {
 		if _, err := t.exec(
-			`DELETE FROM field_deltas WHERE workspace_id = $1 AND updated_at < $2`,
-			t.ws, cutoffMillis,
+			`DELETE FROM field_deltas WHERE wsn = $1 AND updated_at < $2`,
+			wsn, cutoffMillis,
 		); err != nil {
 			return 0, err
 		}
@@ -1396,6 +1484,7 @@ func (t *pgTx) InSavepoint(fn func() error) error {
 		t.wsLoaded = false
 		t.indexStates = nil
 		t.indexScopes = nil
+		t.names = nil
 		switch {
 		case t.failed != nil:
 			// A queued statement has already failed, which aborts the whole

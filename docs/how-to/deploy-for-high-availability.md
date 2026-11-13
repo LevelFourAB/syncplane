@@ -15,7 +15,7 @@ Before you begin, verify that you have:
 
 If you set up a new database, configure hash partitioning for tenant tables:
 
-1. Configure 32 hash partitions by passing `pgstore.WithPartitions(32)` in Go or `-db-partitions 32` to `syncplaned`. This partitions `rows`, `field_deltas`, `idempotency`, and `consumer_shadows` by `workspace_id`, `index_rows` and `index_entries` by their workspace number, and `posting_rows`, `posting_chunks`, and `posting_pages` by their posting scope.
+1. Configure 32 hash partitions by passing `pgstore.WithPartitions(32)` in Go or `-db-partitions 32` to `syncplaned`. This partitions `rows` and `idempotency` by `workspace_id`, `index_rows`, `index_entries`, `field_deltas`, and `consumer_shadows` by their workspace number, and `posting_rows`, `posting_chunks`, and `posting_pages` by their posting scope.
 2. Apply this setting during initial database creation. Schema migrations apply the partition layout when creating tables. The modulus must be a power of two. You cannot partition an existing database that contains data.
 3. Schedule a job to run `ANALYZE` on partitioned parent tables. Autovacuum does not analyze partitioned parent tables automatically.
 4. Keep `max_locks_per_transaction` at its default of 64 or higher. A transaction that writes a row and its index entries locks approximately 40 relations: 39 in the steady state and 44 in the first transaction of a connection or after an `ANALYZE`. The number is the same with 8 and with 32 partitions, because each statement locks only the partitions of its workspace. PostgreSQL sizes the shared lock table as `max_locks_per_transaction` x (`max_connections` + `max_prepared_transactions`) slots. Each locked object takes one slot, and all sessions share the slots.
@@ -35,7 +35,7 @@ Run schema migrations in a dedicated deployment step instead of at node startup:
    syncplaned -db "$DATABASE_URL" -db-migrate=false
    ```
 
-4. Connect sync nodes with a restricted database role that has only `SELECT`, `INSERT`, `UPDATE`, and `DELETE` permissions on tables.
+4. Connect sync nodes with a restricted database role that has only `SELECT`, `INSERT`, `UPDATE`, and `DELETE` permissions on tables, and `USAGE` on sequences.
 
 ### 3. Configure database connections and read replicas
 

@@ -25,8 +25,8 @@ var _ = Describe("Baseline schema", func() {
 	It("partitions the workspace-scoped tables and nothing else", func() {
 		ddl := baselineSchema(layout{partitions: 4})
 		Expect(strings.Count(ddl, "PARTITION BY HASH (workspace_id)")).
-			To(Equal(len(partitionedTables)))
-		for _, table := range partitionedTables {
+			To(Equal(len(baselinePartitionedTables)))
+		for _, table := range baselinePartitionedTables {
 			Expect(strings.Count(ddl, "PARTITION OF "+table+" ")).To(Equal(4),
 				"%s must have one partition per remainder", table)
 		}
@@ -34,8 +34,8 @@ var _ = Describe("Baseline schema", func() {
 			"CREATE TABLE rows_p3 PARTITION OF rows FOR VALUES WITH (MODULUS 4, REMAINDER 3);"))
 		// The index tables hold the workspace number in place of the id.
 		Expect(strings.Count(ddl, "PARTITION BY HASH (wsn)")).
-			To(Equal(len(numberPartitionedTables)))
-		for _, table := range numberPartitionedTables {
+			To(Equal(len(baselineNumberPartitionedTables)))
+		for _, table := range baselineNumberPartitionedTables {
 			Expect(strings.Count(ddl, "PARTITION OF "+table+" ")).To(Equal(4),
 				"%s must have one partition per remainder", table)
 		}
@@ -45,6 +45,22 @@ var _ = Describe("Baseline schema", func() {
 		ddl := baselineSchema(layout{partitions: 16})
 		Expect(ddl).To(ContainSubstring("CREATE TABLE rows_p00 "))
 		Expect(ddl).To(ContainSubstring("CREATE TABLE rows_p15 "))
+	})
+})
+
+var _ = Describe("Migration 5", func() {
+	It("leaves the two tables whole when the layout is unpartitioned", func() {
+		Expect(internedNamesSchema(layout{})).NotTo(ContainSubstring("PARTITION"))
+	})
+
+	It("partitions the two tables by the workspace number with the modulus it found", func() {
+		ddl := internedNamesSchema(layout{partitions: 3})
+		Expect(strings.Count(ddl, "PARTITION BY HASH (wsn)")).To(Equal(2))
+		for _, table := range []string{"field_deltas", "consumer_shadows"} {
+			Expect(ddl).To(ContainSubstring(
+				"CREATE TABLE " + table + "_v5_p2 PARTITION OF " + table + "_v5 FOR VALUES WITH (MODULUS 3, REMAINDER 2);"))
+			Expect(ddl).To(ContainSubstring("ALTER TABLE " + table + "_v5_p2 RENAME TO " + table + "_p2;"))
+		}
 	})
 })
 
@@ -68,14 +84,19 @@ var _ = Describe("Migration scripts", func() {
 		Expect(migrationSQL(2, layout{})).To(ContainSubstring("VALUES (2, false);"))
 	})
 
-	It("keeps every shipped step additive", func() {
+	It("keeps every shipped step additive but the ones decided otherwise", func() {
 		// Not a law — a later step may need to drop something — but a step
 		// that turns this red should be a decision, since it strands every
-		// older binary in the fleet until the roll reaches it.
+		// older binary in the fleet until the roll reaches it. The decided
+		// ones are listed here.
+		decided := map[int]bool{
+			5: true, // field_deltas and consumer_shadows keyed by int ids
+		}
 		for version, step := range migrations {
-			Expect(step.additive).To(BeTrue(), "migration %d", version+1)
+			Expect(step.additive).To(Equal(!decided[version+1]), "migration %d", version+1)
 		}
 	})
+
 })
 
 // stub replaces the package's migration list for one spec. CanServe and the
