@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.1](https://github.com/LevelFourAB/syncplane/compare/v0.8.0...v0.8.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **engine:** Bound Postgres name lookups and prune old names ([cd7551f](https://github.com/LevelFourAB/syncplane/commit/cd7551f8d702c5567d37c296e218720e513bca3f))
+
+
+### Performance Improvements
+
+* **engine:** Cut SQLite delta log and shadow size by 3-4x ([0786e88](https://github.com/LevelFourAB/syncplane/commit/0786e88a1340123ad3abcd954b9f20cb2307b510))
+* **engine:** Drop text deltas that a later gap marker hides ([b0225a7](https://github.com/LevelFourAB/syncplane/commit/b0225a77bc1c794f824f2688e48de50fff2eff31))
+* **engine:** Shrink Postgres text deltas and shadows to 0.6x ([9156d6b](https://github.com/LevelFourAB/syncplane/commit/9156d6baa9f7fff7e6a4fabda9dc6d071d1116bb))
+* **engine:** Stop logging text delta gaps for new rows ([149d856](https://github.com/LevelFourAB/syncplane/commit/149d856a3db01127260a0f39221dd2b604bcff69))
+
 ## [0.8.0](https://github.com/LevelFourAB/syncplane/compare/v0.7.0...v0.8.0) (2026-11-12)
 
 
