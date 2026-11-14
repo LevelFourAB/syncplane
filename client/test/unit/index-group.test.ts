@@ -48,7 +48,7 @@ const issue = entity('issue', {
 	rank: int32(),
 	score: double(),
 	labels: list(text()).indexed(),
-	custom: map('string', message({ number: int32(), tag: text() })),
+	custom: map('string', message({ number: int32(), tag: text(), ids: list(text()) })),
 }, {
 	indexes: [
 		{ name: 'by_state_rank', key: [ { path: 'state' }, { path: 'rank', desc: true } ] },
@@ -57,6 +57,10 @@ const issue = entity('issue', {
 		{
 			name: 'cf_number',
 			key: [ { path: 'custom.*.key' }, { path: 'custom.*.value.number' } ],
+		},
+		{
+			name: 'cf_ids',
+			key: [ { path: 'custom.*.key' }, { path: 'custom.*.value.ids' } ],
 		},
 	],
 });
@@ -75,7 +79,7 @@ const SEED: Issue[] = [
 		rank: 5,
 		score: 1.5,
 		labels: [ 'bug', 'ui' ],
-		custom: { priority: { number: 5, tag: '' } },
+		custom: { priority: { number: 5, tag: '', ids: [] } },
 	},
 	{ id: 'i2', title: 'two', state: 'open', rank: 9, score: 0, labels: [ 'ui' ], custom: {} },
 	{
@@ -85,7 +89,7 @@ const SEED: Issue[] = [
 		rank: 3,
 		score: Number.NaN,
 		labels: [ 'bug' ],
-		custom: { priority: { number: 1, tag: '' } },
+		custom: { priority: { number: 1, tag: '', ids: [] } },
 	},
 	// No labels at all: the row belongs to the no-value group rather than to
 	// none, which is what keeps a facet's counts covering every matching row.
@@ -98,7 +102,7 @@ const SEED: Issue[] = [
 		rank: 9,
 		score: 1.5,
 		labels: [ 'ui', 'ui' ],
-		custom: { priority: { number: 5, tag: '' } },
+		custom: { priority: { number: 5, tag: '', ids: [] } },
 	},
 	// Implicit-presence empty string: a group of its own, never conflated with
 	// the no-value group.
@@ -347,6 +351,37 @@ describe('grouped reads', () => {
 		]);
 	});
 
+	it('groups a list inside a map entry per element once the key is pinned', async () => {
+		// One row per shape the walk has to agree with the scan on: several
+		// elements, one, none, a repeat, the key absent, and elements held only
+		// under a different key.
+		const entry = (ids: string[]) => ({ number: 0, tag: '', ids });
+		const base = { title: '', state: '', rank: 0, score: 0, labels: [] };
+		const rows: Issue[] = [
+			{ ...base, id: 'c1', custom: { tags: entry([ 'a', 'b' ]) } },
+			{ ...base, id: 'c2', custom: { tags: entry([ 'a' ]) } },
+			{ ...base, id: 'c3', custom: { tags: entry([]) } },
+			{ ...base, id: 'c4', custom: { tags: entry([ 'b', 'b' ]) } },
+			{ ...base, id: 'c5', custom: { other: entry([ 'a', 'z' ]) } },
+			{ ...base, id: 'c6', custom: {} },
+		];
+		const q: GroupQuery<Issue> = {
+			by: (i) => i.custom.at('tags').ids,
+			where: (i) => i.custom.at('tags').isSet(),
+		};
+		expect(await agree(q, [], [], rows)).toEqual([
+			[ 'a', 2 ],
+			[ 'b', 2 ],
+			[ undefined, 1 ],
+		]);
+		const client = await clientWith(true, [], [], rows);
+		try {
+			expect(await client.distinct(IssueSchema, q as never)).toEqual([ 'a', 'b', undefined ]);
+		} finally {
+			await client.close();
+		}
+	});
+
 	it('caps the groups returned at `limit`, from the first in value order', async () => {
 		expect(await agree({ by: (i) => i.state, limit: 2 })).toEqual([
 			[ '', 1 ],
@@ -433,6 +468,24 @@ describe('grouped reads', () => {
 				}),
 			).toBe('cf_number');
 			expect(await served({ by: (i) => i.custom.at('priority').number })).toBeUndefined();
+		});
+
+		it('partitions a list inside a map entry once the key is pinned', async () => {
+			// The pinned key leaves the list fan, which gives one position per
+			// element — the same as a top-level repeated path.
+			expect(
+				await served({
+					by: (i) => i.custom.at('priority').ids,
+					where: (i) => i.custom.at('priority').isSet(),
+				}),
+			).toBe('cf_ids');
+			expect(await served({ by: (i) => i.custom.at('priority').ids })).toBeUndefined();
+			expect(
+				await served({
+					by: (i) => i.custom.at('priority').ids,
+					where: (i) => i.custom.at('other').isSet(),
+				}),
+			).toBeUndefined();
 		});
 
 		it('declines a path no index leads with', async () => {

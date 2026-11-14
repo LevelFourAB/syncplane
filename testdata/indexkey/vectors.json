@@ -8026,6 +8026,270 @@
 				"desc": true,
 				"entriesAreRows": true
 			}
+		},
+		{
+			"name": "partitions a list inside a map entry whose key the prefix pinned",
+			"type": "issue",
+			"indexes": [
+				{
+					"name": "cf_labels",
+					"key": [
+						{
+							"path": [
+								"custom",
+								"*",
+								"key"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"custom",
+								"*",
+								"value",
+								"labels",
+								"values"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"present": {
+					"path": [
+						"custom",
+						"tags"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"groupBy": [
+				"custom",
+				"tags",
+				"labels",
+				"values"
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"id": "r1",
+						"custom": {
+							"tags": {
+								"labels": {
+									"values": [
+										"ui",
+										"bug"
+									]
+								}
+							}
+						}
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"id": "r2",
+						"custom": {
+							"tags": {
+								"labels": {
+									"values": [
+										"ui"
+									]
+								}
+							}
+						}
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"id": "r3",
+						"custom": {
+							"tags": {
+								"labels": {}
+							}
+						}
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"id": "r4",
+						"custom": {
+							"tags": {
+								"number": 3
+							}
+						}
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"id": "r5",
+						"custom": {
+							"other": {
+								"labels": {
+									"values": [
+										"ui"
+									]
+								}
+							}
+						}
+					}
+				},
+				{
+					"key": "r6",
+					"row": {
+						"id": "r6"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r3",
+				"r4"
+			],
+			"want": {
+				"index": "cf_labels",
+				"residual": true,
+				"desc": false,
+				"entriesAreRows": true
+			}
+		},
+		{
+			"name": "declines a list inside a map entry whose key nothing pinned",
+			"type": "issue",
+			"indexes": [
+				{
+					"name": "cf_labels",
+					"key": [
+						{
+							"path": [
+								"custom",
+								"*",
+								"key"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"custom",
+								"*",
+								"value",
+								"labels",
+								"values"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"groupBy": [
+				"custom",
+				"tags",
+				"labels",
+				"values"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "declines a list inside a map entry when the prefix pins a different key",
+			"type": "issue",
+			"indexes": [
+				{
+					"name": "cf_labels",
+					"key": [
+						{
+							"path": [
+								"custom",
+								"*",
+								"key"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"custom",
+								"*",
+								"value",
+								"labels",
+								"values"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"present": {
+					"path": [
+						"custom",
+						"other"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"groupBy": [
+				"custom",
+				"tags",
+				"labels",
+				"values"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "rows per group: a list inside a pinned map entry partitions like a top-level list",
+			"type": "issue",
+			"indexes": [
+				{
+					"name": "cf_labels",
+					"key": [
+						{
+							"path": [
+								"custom",
+								"*",
+								"key"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"custom",
+								"*",
+								"value",
+								"labels",
+								"values"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"present": {
+					"path": [
+						"custom",
+						"tags"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"groupBy": [
+				"custom",
+				"tags",
+				"labels",
+				"values"
+			],
+			"perGroup": 1,
+			"want": {
+				"index": "cf_labels",
+				"residual": true,
+				"desc": false,
+				"entriesAreRows": true
+			}
 		}
 	]
 }

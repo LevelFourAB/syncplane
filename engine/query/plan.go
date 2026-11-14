@@ -806,8 +806,23 @@ func mapLeafPinned(
 	keys []condValue,
 	pinnedKeys map[int]condValue,
 ) bool {
+	// A list fan inside the entry puts the row at one entry per element even
+	// with the key pinned, so such a leaf is no ordering.
+	return len(fanLevels(comps[j].fields)) == 1 && mapFanPinned(comps, pinned, j, keys, pinnedKeys)
+}
+
+// mapFanPinned reports whether comps[j] fans out first over a map whose entry
+// key the equality prefix has already fixed to the key the path names. Fans
+// after the map — a list inside the entry — are allowed; what they mean is up
+// to the caller.
+func mapFanPinned(
+	comps []IndexComponent,
+	pinned, j int,
+	keys []condValue,
+	pinnedKeys map[int]condValue,
+) bool {
 	levels := fanLevels(comps[j].fields)
-	if len(levels) != 1 || !levels[0].isMap || len(keys) != 1 {
+	if len(levels) == 0 || !levels[0].isMap || len(keys) != 1 {
 		return false
 	}
 	for i := 0; i < pinned; i++ {

@@ -749,15 +749,18 @@ function planGroupAgainst(
 	// A map-fan value component holds one value per ENTRY, so partitioning on it
 	// without its key pinned would group `custom.priority` and `custom.severity`
 	// together under whatever value each happened to hold.
-	if (keys.length > 0 && !mapLeafPinned(comps, w.pinned, w.pinned, keys, w.pinnedKeys)) {
+	if (keys.length > 0 && !mapFanPinned(comps, w.pinned, w.pinned, keys, w.pinnedKeys)) {
 		return undefined;
 	}
 	// A row occupies one position of the partition component per group it belongs
 	// to. A LIST fan gives it one per element, which is exactly what a repeated
 	// grouping path asks for; a map fan whose key the prefix has pinned gives it
-	// one, like an ordinary field. Anything else and the positions are not the
-	// groups the definition assigns, so the two would disagree row for row.
-	if ((keys.length === 0 && part.fans.length > 0) !== multi) return undefined;
+	// one, like an ordinary field. So the pinned map fan drops out, and a list fan
+	// inside the entry (`custom.*.value.labels.values`) still counts as one. Any
+	// other mix and the positions are not the groups the definition assigns, so
+	// the two would disagree row for row.
+	const listFans = part.fans.length - keys.length;
+	if ((listFans > 0) !== multi) return undefined;
 
 	// The partition component may still take a range from an inequality, which
 	// bounds WHICH groups the walk visits. Every position of one group shares
@@ -857,8 +860,25 @@ function mapLeafPinned(
 	keys: Scalar[],
 	pinnedKeys: Map<number, Scalar>,
 ): boolean {
+	// A list fan inside the entry puts the row at one position per element even
+	// with the key pinned, so such a leaf is no ordering.
+	return comps[j]!.fans.length === 1 && mapFanPinned(comps, pinned, j, keys, pinnedKeys);
+}
+
+/**
+ * Whether comps[j] fans out first over a map whose entry key the equality
+ * prefix has already fixed to the key the path names. Fans after the map — a
+ * list inside the entry — are allowed; what they mean is up to the caller.
+ */
+function mapFanPinned(
+	comps: IndexComponent[],
+	pinned: number,
+	j: number,
+	keys: Scalar[],
+	pinnedKeys: Map<number, Scalar>,
+): boolean {
 	const c = comps[j]!;
-	if (c.fans.length !== 1 || !c.fans[0]!.isMap || keys.length !== 1) return false;
+	if (c.fans.length === 0 || !c.fans[0]!.isMap || keys.length !== 1) return false;
 	for (let i = 0; i < pinned; i++) {
 		if (!comps[i]!.keyComponent || !sameMapFan(comps[i]!, c)) continue;
 		const got = pinnedKeys.get(i);

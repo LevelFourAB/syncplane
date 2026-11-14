@@ -53,10 +53,11 @@ The execution cost is O(groups × work) instead of O(rows). For `distinct`, per-
 
 A skip-scan uses an index defined as `[eq-filter fields…, groupPath, …]`. This structure matches the index structure used for ordering by `[status, rank]`. Because the partition component stores values in order, the engine produces groups in sorted order. A query with a `limit` can stop after `limit + 1` groups instead of bucketing the entire entity.
 
-The index walk handles two conditions:
+The index walk handles three conditions:
 
 - **Descending components:** A descending component inverts the index payload, so a forward scan yields groups in descending order. The walk reverses direction to produce ascending groups. This behavior allows an index like `[status, rank desc]` to serve a grouping on `rank`.
 - **Row-to-entry cardinality:** An index entry corresponds to one row unless a component past the partition fans out over a list. When a fan-out occurs, a single row can appear at multiple positions within the same group. To prevent double counting, the engine reads full rows.
+- **Map entries:** A partition component on a map value, such as `custom.*.value.number`, serves a grouping on one entry, such as `custom.priority.number`, only when the predicate pins the entry key to the key the grouping path names (for example, `custom.priority` is set). Without a pinned key, the component holds the values of all entries, and rows without the entry are not in the range. When the entry holds a list, such as `custom.*.value.labels.values`, the pinned key leaves only the list fan-out. The partition then groups per element, as for a top-level repeated path. A row whose entry holds an empty list, or a different oneof member, joins the no-value group.
 
 If no suitable index exists, the query declines the skip-scan and falls back to bucketing a full scan. The scan represents the base definition, while the index serves as an optimization.
 

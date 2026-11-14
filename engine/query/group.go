@@ -319,7 +319,7 @@ func planGroupAgainst(idx Index, terms []node, group *Group, order *Order) (*Gro
 	if !ok {
 		return nil, 0
 	}
-	if len(keys) > 0 && !mapLeafPinned(comps, w.pinned, w.pinned, keys, w.pinnedKeys) {
+	if len(keys) > 0 && !mapFanPinned(comps, w.pinned, w.pinned, keys, w.pinnedKeys) {
 		// A map-fan value component holds one value per ENTRY, so partitioning on
 		// it without its key pinned would group `custom.priority` and
 		// `custom.severity` together under whatever value each happened to hold.
@@ -328,9 +328,11 @@ func planGroupAgainst(idx Index, terms []node, group *Group, order *Order) (*Gro
 	// A row occupies one entry of the partition component per group it belongs
 	// to. A LIST fan gives it one per element, which is exactly what a repeated
 	// grouping path asks for; a map fan whose key the prefix has pinned gives it
-	// one, like an ordinary field. Anything else and the entries are not the
-	// groups the definition assigns, so the two would disagree row for row.
-	if perElement := len(keys) == 0 && part.Multi(); perElement != group.multi {
+	// one, like an ordinary field. So the pinned map fan drops out, and a list
+	// fan inside the entry (`custom.*.value.labels.values`) still counts as one.
+	// Any other mix and the entries are not the groups the definition assigns,
+	// so the two would disagree row for row.
+	if perElement := len(fanLevels(part.fields)) > len(keys); perElement != group.multi {
 		return nil, 0
 	}
 

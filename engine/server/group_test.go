@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -19,6 +20,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
 )
 
 // A grouped read is served two ways — a skip-scan over an index, and a bucketed
@@ -84,6 +86,29 @@ var _ = Describe("Grouped queries", func() {
 				row.Custom["priority"] = &testdatav1.FieldValue{
 					Kind: &testdatav1.FieldValue_Number{Number: float64(rnd.Intn(4))},
 				}
+			}
+			// `tags` is a list inside a map entry: some rows hold none, one or
+			// several elements, some hold the key with another variant, and some
+			// hold elements under a different key only.
+			labelsOf := func() *testdatav1.FieldValue {
+				var values []string
+				for _, l := range []string{"ui", "bug", "perf"} {
+					if rnd.Intn(2) == 0 {
+						values = append(values, l)
+					}
+				}
+				return &testdatav1.FieldValue{
+					Kind: &testdatav1.FieldValue_Labels{Labels: &testdatav1.StringList{Values: values}},
+				}
+			}
+			switch i % 5 {
+			case 0, 1, 2:
+				row.Custom["tags"] = labelsOf()
+			case 3:
+				row.Custom["tags"] = &testdatav1.FieldValue{Kind: &testdatav1.FieldValue_Text{Text: "x"}}
+			}
+			if i%4 == 0 {
+				row.Custom["other"] = labelsOf()
 			}
 			rows = append(rows, row)
 		}
@@ -170,6 +195,56 @@ var _ = Describe("Grouped queries", func() {
 				GroupBy:   []string{"custom", "priority", "number"},
 				Aggregate: syncplanev1.AggregateOp_AGGREGATE_OP_COUNT,
 			})
+		})
+
+		It("counts a list inside a map entry addressed by key", func() {
+			got := agree(&syncplanev1.QueryRequest{
+				GroupBy:   []string{"custom", "tags", "labels", "values"},
+				Aggregate: syncplanev1.AggregateOp_AGGREGATE_OP_COUNT,
+				Predicate: query.IsSet("custom.tags"),
+			})
+			Expect(got).To(HaveLen(4), "three labels plus the rows that hold none")
+		})
+
+		It("names the distinct elements of a list inside a map entry", func() {
+			got := agree(&syncplanev1.QueryRequest{
+				GroupBy:   []string{"custom", "tags", "labels", "values"},
+				Aggregate: syncplanev1.AggregateOp_AGGREGATE_OP_DISTINCT,
+				Predicate: query.IsSet("custom.tags"),
+			})
+			Expect(got).To(HaveLen(4))
+		})
+
+		It("counts a list inside a map entry whose key nothing pins", func() {
+			agree(&syncplanev1.QueryRequest{
+				GroupBy:   []string{"custom", "tags", "labels", "values"},
+				Aggregate: syncplanev1.AggregateOp_AGGREGATE_OP_COUNT,
+			})
+		})
+
+		// The differential specs above pass just as well when the index arm
+		// declines and scans. This one pins that it walks the index instead.
+		It("walks the index for a list inside a map entry whose key the predicate pins", func() {
+			counting := &entityScanCountingStore{Adapter: newTestStore()}
+			srv := mustNewServer(counting, testEntities())
+			load(srv)
+			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			c := clientFor(srv)
+
+			counting.reset()
+			run(c, &syncplanev1.QueryRequest{
+				GroupBy:   []string{"custom", "tags", "labels", "values"},
+				Aggregate: syncplanev1.AggregateOp_AGGREGATE_OP_COUNT,
+				Predicate: query.IsSet("custom.tags"),
+			})
+			Expect(counting.count()).To(BeZero(), "a pinned key leaves the walk to cf_labels")
+
+			counting.reset()
+			run(c, &syncplanev1.QueryRequest{
+				GroupBy:   []string{"custom", "tags", "labels", "values"},
+				Aggregate: syncplanev1.AggregateOp_AGGREGATE_OP_COUNT,
+			})
+			Expect(counting.count()).To(Equal(len(rows)), "an unpinned key spans every entry, so the read scans")
 		})
 
 		It("counts by a path no index reaches", func() {
@@ -565,4 +640,36 @@ func firstErr(errs ...error) error {
 		}
 	}
 	return nil
+}
+
+// entityScanCountingStore counts the rows its read transactions visit with
+// ScanEntity: the walk a grouped read takes when no index serves it.
+type entityScanCountingStore struct {
+	storage.Adapter
+	scanned atomic.Int64
+}
+
+func (c *entityScanCountingStore) WithReadTx(ctx context.Context, ws string, fn func(storage.ReadTx) error) error {
+	return c.Adapter.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
+		return fn(&entityScanCountingTx{ReadTx: tx, store: c})
+	})
+}
+
+// Unwrap lets the server find the wrapped adapter's capabilities.
+func (c *entityScanCountingStore) Unwrap() storage.Adapter { return c.Adapter }
+
+func (c *entityScanCountingStore) count() int { return int(c.scanned.Load()) }
+
+func (c *entityScanCountingStore) reset() { c.scanned.Store(0) }
+
+type entityScanCountingTx struct {
+	storage.ReadTx
+	store *entityScanCountingStore
+}
+
+func (t *entityScanCountingTx) ScanEntity(entity string, fn func(storage.Row) error) error {
+	return t.ReadTx.ScanEntity(entity, func(row storage.Row) error {
+		t.store.scanned.Add(1)
+		return fn(row)
+	})
 }
