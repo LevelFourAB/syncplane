@@ -141,6 +141,74 @@ func (m *Model) ClearUnits(value []byte, units []string) ([]byte, error) {
 	return marshal(msg)
 }
 
+// SetUnits returns the units of units that the encoded row value sets, in the
+// order units names them: a top-level field by its name, or a oneof by its
+// name when one of its fields is set. A name that is neither is left out. It
+// returns an error when value does not decode.
+func (m *Model) SetUnits(value []byte, units []string) ([]string, error) {
+	if len(units) == 0 {
+		return nil, nil
+	}
+	msg, err := m.decode(value)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, name := range units {
+		if fd := m.unitField(msg, name); fd != nil && msg.Has(fd) {
+			out = append(out, name)
+		}
+	}
+	return out, nil
+}
+
+// CopyUnits returns the encoded row dst with each unit that units names
+// replaced by the value src holds for it, cleared where src leaves it unset.
+// A name that is neither a top-level field nor a oneof is ignored. It returns
+// dst unchanged when units is empty, and a deterministic encoding otherwise.
+// It returns an error when dst or src does not decode.
+func (m *Model) CopyUnits(dst, src []byte, units []string) ([]byte, error) {
+	if len(units) == 0 {
+		return dst, nil
+	}
+	to, err := m.decode(dst)
+	if err != nil {
+		return nil, err
+	}
+	from, err := m.decode(src)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range units {
+		if od := m.desc.Oneofs().ByName(protoreflect.Name(name)); od != nil {
+			if fd := to.WhichOneof(od); fd != nil {
+				to.Clear(fd)
+			}
+			if fd := from.WhichOneof(od); fd != nil {
+				to.Set(fd, from.Get(fd))
+			}
+			continue
+		}
+		if fd := m.desc.Fields().ByName(protoreflect.Name(name)); fd != nil {
+			to.Clear(fd)
+			if from.Has(fd) {
+				to.Set(fd, from.Get(fd))
+			}
+		}
+	}
+	return marshal(to)
+}
+
+// unitField returns the field of msg that the unit name stands for: the set
+// field of a oneof, or the top-level field. It returns nil for a oneof with
+// no field set and for a name that is neither.
+func (m *Model) unitField(msg protoreflect.Message, name string) protoreflect.FieldDescriptor {
+	if od := m.desc.Oneofs().ByName(protoreflect.Name(name)); od != nil {
+		return msg.WhichOneof(od)
+	}
+	return m.desc.Fields().ByName(protoreflect.Name(name))
+}
+
 // messageType prefers the generated type registered for md, which is faster
 // than a dynamic message, and falls back to dynamicpb for a descriptor no
 // generated type carries (a schema registered at runtime).

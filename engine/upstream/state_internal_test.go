@@ -29,6 +29,15 @@ var _ = Describe("Stored bootstrap state", func() {
 	})
 })
 
+var _ = Describe("Stored confirmed row", func() {
+	It("keeps the units that hold local values across a restart", func() {
+		c := confirmedRow{present: true, value: []byte{1}, version: 4, gen: 2, kept: []string{"owner", "state"}}
+		got, err := decodeConfirmed(c.encode())
+		Expect(err).NotTo(HaveOccurred())
+		Expect(got).To(Equal(c))
+	})
+})
+
 var _ = Describe("Status.Behind", func() {
 	It("is the head minus the confirmed position, and 0 when the head is unknown or not ahead", func() {
 		Expect(Status{OriginSeq: 7, OriginHeadSeq: 10}.Behind()).To(BeEquivalentTo(3))

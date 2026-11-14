@@ -68,14 +68,16 @@ The origin checks the size of each write it receives against its own limits. A w
 
 A field guard without an update rule leaves a field to trusted writes: the origin refuses every other `PATCH` whose mask names the field, and the refusal takes the whole mutation with it. The link is never trusted at the origin. The local engine, however, can compute such a field with trusted code of its own, for example links or a status derived from a document, so that the result shows at once and offline.
 
-So the link does not forward those fields. It reads them from the local schema (`server.EntityMeta.TrustedOnlyFields`) and removes their mask paths and values from each `PATCH` it pushes. The rest of the write reaches the origin as usual. A write that changes nothing but such fields is not pushed at all: it takes no origin mutation id, causes no rejection, and its `Receipt.Forwarded` is false. A `PUT` goes as it is, because the origin keeps its own value of a guarded field on a `PUT`.
+So the link does not forward those fields. It reads them from the local schema (`server.EntityMeta.TrustedOnlyFields`) and removes their mask paths and values from each `PATCH` it pushes. The rest of the write reaches the origin as usual. A write that changes nothing but such fields is not pushed at all: it takes no origin mutation id, causes no rejection, and its `Receipt.Forwarded` is false. A `PUT` goes as it is, because the origin keeps its own value of a guarded field on a `PUT`, and gives it its zero value on a create.
 
-The local value stays on the row until the origin sends its own row:
+The local value stays on the row until the origin sends a value of its own:
 
-- On a row with pending writes, the value goes with the newest of them. Replay keeps it on top of every origin change until that write settles. The row then holds what the origin confirmed.
-- On a row without pending writes, the value stays until the origin's next change of the row replaces it.
+- On a row with pending writes, the value goes with the newest of them. Replay keeps it on top of every origin change until that write settles.
+- When a write settles, each such field that the origin's row leaves unset keeps the write's local value. A field the origin set itself shows the origin's value.
+- Rows that the link's own later writes produce at the origin keep the local value too. Any other origin change of the row replaces it, also when that change leaves the field unset.
+- On a row without pending writes, a local write of only such fields stays until the origin's next change of the row replaces it.
 
-The origin's own trusted code usually computes the field after it applies the write, as a change of its own. Between the two changes the row can show the origin's earlier value of the field.
+The origin's own trusted code usually computes the field after it applies the write, as a change of its own. Until that change arrives, a field the origin leaves unset shows the local value, so a local query on the field finds the row all the time. A field the origin already holds a value for can show the origin's earlier value between the two changes.
 
 Only a guard that admits no update to any caller counts. A guard whose update rule needs a permission or checks the row decides per caller and per row, and the link forwards such a field. When the origin refuses it, the write is reverted as any other rejection. The local and the origin schema must declare the same guards: a field that only the local schema closes never reaches the origin.
 

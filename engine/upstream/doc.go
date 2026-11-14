@@ -27,7 +27,9 @@
 // write changes at the origin (server.EntityMeta.TrustedOnlyFields of the
 // local engine). The link leaves such fields out of each PATCH it forwards,
 // and does not forward a write that changes nothing else. The local value
-// stays on the row until the origin sends its own row.
+// stays on the row until the origin sends a value of its own: a settled
+// write keeps it where the origin's row leaves the field unset, until an
+// origin change the link did not make replaces the row.
 //
 // Workspace is a typed handle for a Go app that reads and writes the local
 // engine itself: Get, Query, Put, Patch, Delete, Invoke, Watch and Flush,

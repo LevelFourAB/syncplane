@@ -360,4 +360,41 @@ var _ = Describe("Model", func() {
 		_, err = model.ClearUnits([]byte{0xff}, []string{"owner"})
 		Expect(err).To(HaveOccurred())
 	})
+
+	It("lists the units a row sets", func() {
+		model := mustModel(&testdatav1.Guarded{})
+		value := deterministic(&testdatav1.Guarded{
+			Id: "g1", Owner: "o", State: &testdatav1.Guarded_StateCode{StateCode: 3},
+		})
+		set, err := model.SetUnits(value, []string{"state", "label", "owner", "audit", "not_a_field"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(set).To(Equal([]string{"state", "owner"}))
+
+		set, err = model.SetUnits(value, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(set).To(BeEmpty())
+		_, err = model.SetUnits([]byte{0xff}, []string{"owner"})
+		Expect(err).To(HaveOccurred())
+	})
+
+	It("copies top-level fields and oneofs by unit name", func() {
+		model := mustModel(&testdatav1.Guarded{})
+		dst := deterministic(&testdatav1.Guarded{
+			Id: "g1", Label: "dst", Owner: "dst", State: &testdatav1.Guarded_StateCode{StateCode: 3},
+		})
+		src := deterministic(&testdatav1.Guarded{
+			Id: "g2", Label: "src", Audit: &testdatav1.Settings{}, State: &testdatav1.Guarded_StateName{StateName: "src"},
+		})
+		out, err := model.CopyUnits(dst, src, []string{"owner", "audit", "state", "not_a_field"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(Equal(deterministic(&testdatav1.Guarded{
+			Id: "g1", Label: "dst", Audit: &testdatav1.Settings{}, State: &testdatav1.Guarded_StateName{StateName: "src"},
+		})))
+
+		same, err := model.CopyUnits(dst, src, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(same).To(Equal(dst))
+		_, err = model.CopyUnits(dst, []byte{0xff}, []string{"owner"})
+		Expect(err).To(HaveOccurred())
+	})
 })

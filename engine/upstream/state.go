@@ -132,7 +132,8 @@ func (b *bootState) progress() BootstrapProgress {
 	}
 }
 
-// confirmedRow is a row as the origin last sent it.
+// confirmedRow is a row as the origin last sent it, with the local values of
+// the units kept names in place of the origin's unset ones.
 type confirmedRow struct {
 	present bool
 	value   []byte
@@ -151,6 +152,10 @@ type confirmedRow struct {
 	// and value is that rewritten row. Every transaction that reads a stale
 	// record asks for a fresh snapshot, which replaces or retires it.
 	stale bool
+	// kept names the units, sorted, whose value in the row is a local value
+	// the origin did not take from the link, not the origin's (see
+	// trusted.go). The origin's row leaves each of them unset.
+	kept []string
 }
 
 // resultRecord is the origin's verdict on one pushed entry.
@@ -476,6 +481,9 @@ func (c *confirmedRow) encode() []byte {
 	e.bool(5, c.elided)
 	e.uint(6, c.localVersion)
 	e.bool(7, c.stale)
+	for _, u := range c.kept {
+		e.str(8, u)
+	}
 	return e.b
 }
 
@@ -501,6 +509,8 @@ func decodeConfirmed(b []byte) (confirmedRow, error) {
 			c.localVersion = v
 		case 7:
 			c.stale = v != 0
+		case 8:
+			c.kept = append(c.kept, string(bs))
 		}
 		return nil
 	})

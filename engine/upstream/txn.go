@@ -418,17 +418,46 @@ func (t *txn) applyChange(rc *syncplanev1.RowChange) error {
 		return nil
 	}
 	r := RowRef{Entity: rc.GetEntity(), Key: rc.GetKey()}
-	// Only text deltas fold onto the row before: any other change carries
-	// the whole row, and reading an elided record costs a local read and can
-	// find drift a snapshot is about to replace anyway.
-	var old rebase.Row
-	if len(rc.GetTextDeltas()) > 0 && !rc.GetTombstone() {
-		var err error
-		if old, _, err = t.confirmedRow(r); err != nil {
-			return err
+	// Only text deltas and values kept local read the row before: any other
+	// change carries the whole row, and reading an elided record costs a
+	// local read and can find drift a snapshot is about to replace anyway.
+	var (
+		old  rebase.Row
+		kept []string
+	)
+	if !rc.GetTombstone() {
+		need := len(rc.GetTextDeltas()) > 0
+		if !need && len(t.b.trustedOnly[r.Entity]) > 0 {
+			c, ok, err := t.st.confirmed(r.Entity, r.Key)
+			if err != nil {
+				return err
+			}
+			need = ok && len(c.kept) > 0
+		}
+		if need {
+			var (
+				rec confirmedRow
+				err error
+			)
+			if old, rec, err = t.confirmedRow(r); err != nil {
+				return err
+			}
+			if old.Present && !rec.stale {
+				kept = rec.kept
+			}
 		}
 	}
-	row, err := m.FoldTextDeltas(old, rc)
+	base := old
+	if len(kept) > 0 && len(rc.GetTextDeltas()) > 0 {
+		// The origin's text deltas build on its own row, which leaves the
+		// kept units unset.
+		v, err := m.ClearUnits(old.Value, kept)
+		if err != nil {
+			return err
+		}
+		base.Value = v
+	}
+	row, err := m.FoldTextDeltas(base, rc)
 	if err != nil {
 		return err
 	}
@@ -436,7 +465,13 @@ func (t *txn) applyChange(rc *syncplanev1.RowChange) error {
 	if !row.Present {
 		return t.st.del(r.Entity, r.Key)
 	}
-	return t.st.putConfirmed(r.Entity, r.Key, confirmedRow{present: true, value: row.Value, version: rc.GetVersion(), gen: t.meta.gen})
+	c := confirmedRow{present: true, value: row.Value, version: rc.GetVersion(), gen: t.meta.gen}
+	if len(kept) > 0 {
+		if err := t.carryKept(r, &c, old.Value, kept); err != nil {
+			return err
+		}
+	}
+	return t.st.putConfirmed(r.Entity, r.Key, c)
 }
 
 // dropEntityPage forgets the confirmed state of one page of entity's local
@@ -632,6 +667,12 @@ func (t *txn) drop(e *entry, rej *rejection) error {
 	t.q.unsettled = slices.DeleteFunc(t.q.unsettled, func(id uint64) bool { return id == e.id })
 	t.cache[e.id] = nil
 	t.touch(rows...)
+	if rej == nil && e.custom == nil && hasResult && r.seq != 0 &&
+		r.status != syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED {
+		if err := t.keepWithheld(e, r.seq); err != nil {
+			return err
+		}
+	}
 	ev := verdictEvent{ref: e.ref, localSeq: e.localSeq}
 	if rej != nil {
 		ev.err = &RejectedError{Rejection: rej.public(t.w.id)}

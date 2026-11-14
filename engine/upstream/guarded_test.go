@@ -212,6 +212,9 @@ var _ = Describe("Fields the origin lets the link only read", func() {
 		Expect(n.rejected()).To(BeEmpty())
 		Expect(label(o.srv, "g1")).To(Equal("second"))
 		Expect(guarded(o.srv, "g1").GetSummary()).To(BeEmpty())
+		Expect(guarded(n.srv, "g1").GetSummary()).NotTo(BeEmpty(), "the origin has no document of its own yet")
+
+		originCompute("g1", "computed")
 		Eventually(func() []byte { return guarded(n.srv, "g1").GetSummary() }).Should(BeEmpty())
 	})
 
@@ -233,6 +236,126 @@ var _ = Describe("Fields the origin lets the link only read", func() {
 		Expect(n.part.pushes.Load()).To(Equal(pushes))
 		Expect(owner(n.srv, "g1")).To(Equal("through"))
 		Expect(n.rejected()).To(BeEmpty())
+	})
+
+	// The origin leaves such a field empty until its own trusted code
+	// computes it, in a change of its own. The settled write must not show
+	// the field empty in between.
+	Context("when the origin has not computed such a field yet", func() {
+		createLocal := func(key string) upstream.Receipt {
+			GinkgoHelper()
+			return localApply(func(tx *server.ApplyTx) error {
+				return tx.Put(&testdatav1.Guarded{Id: key, Label: "new", Owner: "local",
+					State: &testdatav1.Guarded_StateName{StateName: "local"}})
+			})
+		}
+
+		settle := func(rcs ...upstream.Receipt) {
+			GinkgoHelper()
+			n.flush()
+			for _, rc := range rcs {
+				Expect(rc.Wait(ctx)).To(Succeed())
+			}
+			Expect(n.rejected()).To(BeEmpty())
+		}
+
+		keepsLocal := func(key, want string) {
+			GinkgoHelper()
+			Expect(owner(n.srv, key)).To(Equal(want))
+			Consistently(func() string { return owner(n.srv, key) }, "200ms").Should(Equal(want))
+		}
+
+		It("keeps the local values of a new row after the write settles", func() {
+			rc := createLocal("g2")
+			Expect(rc.Forwarded).To(BeTrue())
+			settle(rc)
+			Expect(label(o.srv, "g2")).To(Equal("new"))
+			Expect(owner(o.srv, "g2")).To(BeEmpty(), "the origin clears a field its guard keeps from the link on a create")
+			keepsLocal("g2", "local")
+			Expect(guarded(n.srv, "g2").GetStateName()).To(Equal("local"))
+			Expect(n.part.bootstraps.Load()).To(BeNumerically("==", 1), "a value kept local is no drift")
+		})
+
+		It("keeps the local value of a PATCH after the write settles", func() {
+			originCompute("g1", "")
+			Eventually(func() string { return owner(n.srv, "g1") }).Should(BeEmpty())
+			rc := localApply(func(tx *server.ApplyTx) error {
+				return tx.Patch(&testdatav1.Guarded{Id: "g1", Label: "second", Owner: "local"}, []string{"label", "owner"}, nil)
+			})
+			settle(rc)
+			Expect(label(o.srv, "g1")).To(Equal("second"))
+			keepsLocal("g1", "local")
+		})
+
+		It("keeps the local value across later writes of the row", func() {
+			rc1 := createLocal("g2")
+			rc2 := localApply(func(tx *server.ApplyTx) error {
+				return tx.Patch(&testdatav1.Guarded{Id: "g2", Label: "second"}, []string{"label"}, nil)
+			})
+			settle(rc1, rc2)
+			keepsLocal("g2", "local")
+
+			rc3 := localApply(func(tx *server.ApplyTx) error {
+				return tx.Patch(&testdatav1.Guarded{Id: "g2", Label: "third"}, []string{"label"}, nil)
+			})
+			settle(rc3)
+			Expect(label(o.srv, "g2")).To(Equal("third"))
+			keepsLocal("g2", "local")
+			Expect(label(n.srv, "g2")).To(Equal("third"))
+		})
+
+		It("shows a newer local value of the field", func() {
+			settle(createLocal("g2"))
+			rc := localApply(func(tx *server.ApplyTx) error {
+				if err := tx.Patch(&testdatav1.Guarded{Id: "g2", Label: "second"}, []string{"label"}, nil); err != nil {
+					return err
+				}
+				return tx.Patch(&testdatav1.Guarded{Id: "g2", Owner: "newer"}, []string{"owner"}, nil)
+			})
+			settle(rc)
+			keepsLocal("g2", "newer")
+
+			local := localApply(func(tx *server.ApplyTx) error {
+				return tx.Patch(&testdatav1.Guarded{Id: "g2", Owner: "newest"}, []string{"owner"}, nil)
+			})
+			Expect(local.Forwarded).To(BeFalse())
+			settle(localApply(func(tx *server.ApplyTx) error {
+				return tx.Patch(&testdatav1.Guarded{Id: "g2", Label: "third"}, []string{"label"}, nil)
+			}))
+			keepsLocal("g2", "newest")
+		})
+
+		It("replaces the local value with the value the origin computes", func() {
+			settle(createLocal("g2"))
+			keepsLocal("g2", "local")
+
+			originCompute("g2", "computed")
+			Eventually(func() string { return owner(n.srv, "g2") }).Should(Equal("computed"))
+			Expect(guarded(n.srv, "g2").GetState()).To(BeNil(), "the origin's change replaces every value kept local")
+		})
+
+		It("takes an empty value from a later origin write", func() {
+			settle(createLocal("g2"))
+			keepsLocal("g2", "local")
+
+			Expect(o.srv.Apply(trusted(), ws, func(tx *server.ApplyTx) error {
+				return tx.Patch(&testdatav1.Guarded{Id: "g2", Label: "origin"}, []string{"label", "owner"}, nil)
+			})).To(Succeed())
+			Eventually(func() string { return label(n.srv, "g2") }).Should(Equal("origin"))
+			Expect(owner(n.srv, "g2")).To(BeEmpty())
+		})
+
+		It("keeps the local value across a restart", func() {
+			settle(createLocal("g2"))
+			n.restart()
+			n.flush()
+			keepsLocal("g2", "local")
+
+			settle(localApply(func(tx *server.ApplyTx) error {
+				return tx.Patch(&testdatav1.Guarded{Id: "g2", Label: "second"}, []string{"label"}, nil)
+			}))
+			keepsLocal("g2", "local")
+		})
 	})
 
 	It("keeps such a value local across a restart", func() {
