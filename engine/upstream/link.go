@@ -104,6 +104,9 @@ type Link struct {
 type bound struct {
 	srv    *server.Server
 	models map[string]*rebase.Model
+	// trustedOnly holds each entity's server.EntityMeta.TrustedOnlyFields,
+	// for the entities that have some (see bound.sendable).
+	trustedOnly map[string][]string
 	// maxValue is the origin's MaxValueBytes (Config.OriginLimits).
 	maxValue int
 }
@@ -266,6 +269,12 @@ func (l *Link) Start(ctx context.Context, srv *server.Server) (err error) {
 			return fmt.Errorf("upstream: %w", err)
 		}
 		b.models[name] = m
+		if len(meta.TrustedOnlyFields) > 0 {
+			if b.trustedOnly == nil {
+				b.trustedOnly = map[string][]string{}
+			}
+			b.trustedOnly[name] = meta.TrustedOnlyFields
+		}
 	}
 	l.bind.Store(b)
 

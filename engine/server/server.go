@@ -1831,6 +1831,13 @@ type EntityMeta struct {
 	// Mergers holds the merge hooks WithMerger declared for the entity, keyed
 	// by field path, or nil when it declares none. The map is a copy.
 	Mergers map[string]MergeFunc
+	// TrustedOnlyFields names the units, top-level fields outside a oneof and
+	// oneofs, whose field guard admits no update to any caller. Only a trusted
+	// write changes them on a stored row: any other PATCH whose mask path
+	// starts with one is refused with CodeAccessDenied, and any other PUT
+	// that updates a row keeps their stored value. Sorted, and nil when no
+	// guard closes a field.
+	TrustedOnlyFields []string
 }
 
 // Entities returns metadata for every registered entity, sorted by name.
@@ -1863,6 +1870,8 @@ func entityMeta(info *entityInfo) EntityMeta {
 		KeyFields:  info.keyFields,
 		Managed:    info.name == historyEntityName,
 		Mergers:    declaredMergers(info.mergers),
+
+		TrustedOnlyFields: info.access.updateClosed(),
 	}
 }
 

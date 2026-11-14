@@ -89,6 +89,11 @@ func (l *Link) capture(ctx context.Context, cw *server.CapturedWrite) error {
 		return server.Reject(server.CodeWorkspaceAccessRevoked,
 			fmt.Sprintf("the origin revoked access to workspace %q", cw.Workspace))
 	}
+	if cw.Custom == nil && !slices.ContainsFunc(ops, func(op server.CapturedOp) bool {
+		return !b.localOnly(op.Entity, op.Op, op.Mask)
+	}) {
+		return keepLocal(b, st, cw.Seq, ops)
+	}
 
 	e := &entry{localSeq: cw.Seq}
 	if cw.Origin != nil {

@@ -64,6 +64,21 @@ A write that the origin keeps failing in the same way (`mutation_failed`, `inval
 
 The origin checks the size of each write it receives against its own limits. A write can fit the local engine's limits and not the origin's: an `Apply` has no per-value or per-push limit, the link forwards each local write as one origin mutation, and it forwards a collaborative-text edit as the full document or as a fragment. So the link checks the forwarded form of each local write against `Config.OriginLimits` before the write commits, and refuses a write that is too large with `invalid_argument`. Nothing commits locally, so no reader sees the write and then sees it reverted. Set `OriginLimits` to the limits the origin uses.
 
+## Fields only the origin's trusted code writes
+
+A field guard without an update rule leaves a field to trusted writes: the origin refuses every other `PATCH` whose mask names the field, and the refusal takes the whole mutation with it. The link is never trusted at the origin. The local engine, however, can compute such a field with trusted code of its own, for example links or a status derived from a document, so that the result shows at once and offline.
+
+So the link does not forward those fields. It reads them from the local schema (`server.EntityMeta.TrustedOnlyFields`) and removes their mask paths and values from each `PATCH` it pushes. The rest of the write reaches the origin as usual. A write that changes nothing but such fields is not pushed at all: it takes no origin mutation id, causes no rejection, and its `Receipt.Forwarded` is false. A `PUT` goes as it is, because the origin keeps its own value of a guarded field on a `PUT`.
+
+The local value stays on the row until the origin sends its own row:
+
+- On a row with pending writes, the value goes with the newest of them. Replay keeps it on top of every origin change until that write settles. The row then holds what the origin confirmed.
+- On a row without pending writes, the value stays until the origin's next change of the row replaces it.
+
+The origin's own trusted code usually computes the field after it applies the write, as a change of its own. Between the two changes the row can show the origin's earlier value of the field.
+
+Only a guard that admits no update to any caller counts. A guard whose update rule needs a permission or checks the row decides per caller and per row, and the link forwards such a field. When the origin refuses it, the write is reverted as any other rejection. The local and the origin schema must declare the same guards: a field that only the local schema closes never reaches the origin.
+
 ## Write-through trades availability for a final answer
 
 In **write-through** mode, a local write goes to the origin before it commits locally. The local write fails with the origin's rejection, or with an error that wraps `upstream.ErrOriginUnavailable` when the origin does not answer. Nothing commits locally in either case. A downstream client that pushed the write gets `REJECTED` with the origin's code, as if it had pushed to the origin. A Go caller gets the error from the write call.

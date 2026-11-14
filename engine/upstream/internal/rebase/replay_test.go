@@ -343,4 +343,21 @@ var _ = Describe("Model", func() {
 		Expect(model.Equal(rebase.Row{}, rebase.Row{Value: []byte("ignored")})).To(BeTrue())
 		Expect(model.Equal(a, rebase.Row{Present: true, Value: deterministic(&testdatav1.Widget{Id: "w2"})})).To(BeFalse())
 	})
+
+	It("clears top-level fields and oneofs by unit name", func() {
+		model := mustModel(&testdatav1.Guarded{})
+		value := deterministic(&testdatav1.Guarded{
+			Id: "g1", Label: "kept", Owner: "o", Audit: &testdatav1.Settings{},
+			State: &testdatav1.Guarded_StateCode{StateCode: 3},
+		})
+		out, err := model.ClearUnits(value, []string{"owner", "audit", "state", "not_a_field"})
+		Expect(err).NotTo(HaveOccurred())
+		Expect(out).To(Equal(deterministic(&testdatav1.Guarded{Id: "g1", Label: "kept"})))
+
+		same, err := model.ClearUnits(value, nil)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(same).To(Equal(value))
+		_, err = model.ClearUnits([]byte{0xff}, []string{"owner"})
+		Expect(err).To(HaveOccurred())
+	})
 })

@@ -43,7 +43,7 @@ func (l *Link) checkOriginLimits(b *bound, st stateTx, ws string, e *entry) erro
 	}
 	// The origin takes one CRUD entry as one batch mutation, and counts the
 	// batch's writes against its per-push limit.
-	if n := len(e.ops); n > lim.MaxMutationsPerPush {
+	if n := len(b.sendableOps(e.ops)); n > lim.MaxMutationsPerPush {
 		return server.Reject(server.CodeInvalidArgument,
 			fmt.Sprintf("a write of %d rows is over the origin's limit of %d rows per mutation", n, lim.MaxMutationsPerPush))
 	}

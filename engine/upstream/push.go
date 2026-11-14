@@ -85,8 +85,16 @@ func mutationOf(b *bound, st stateTx, e *entry, inBatch map[uint64]bool) (_ *syn
 		m.Payload = &syncplanev1.Mutation_Custom{Custom: e.custom}
 		return m, false, nil
 	}
-	cruds := make([]*syncplanev1.CrudMutation, 0, len(e.ops))
-	for _, op := range e.ops {
+	ops := b.sendableOps(e.ops)
+	if len(ops) == 0 {
+		// Only an entry stored under a schema that closed fewer fields gets
+		// here: a capture keeps a write with nothing to send out of the
+		// queue. Sent as captured, the origin decides it, and its id does
+		// not leave a gap.
+		ops = e.ops
+	}
+	cruds := make([]*syncplanev1.CrudMutation, 0, len(ops))
+	for _, op := range ops {
 		crud := &syncplanev1.CrudMutation{Entity: op.entity, Key: op.key, Op: op.kind}
 		if op.kind != syncplanev1.CrudOp_CRUD_OP_DELETE {
 			v, err := forwardedValue(b, st, op, b.maxValue)

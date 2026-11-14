@@ -390,6 +390,22 @@ func (a *entityAccess) maskClosed(paths []string) (string, bool) {
 	return "", false
 }
 
+// updateClosed returns the units whose guard admits no update to any caller,
+// the units maskClosed refuses, sorted. Nil for a nil a.
+func (a *entityAccess) updateClosed() []string {
+	if a == nil {
+		return nil
+	}
+	var out []string
+	for _, g := range a.guards {
+		if g.named&opUpdate == 0 {
+			out = append(out, g.units...)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // readers is who may read the rows of an entity: a caller that holds one of
 // perms where a row sits, every admitted caller when all is set, and the
 // callers that one of checked admits.

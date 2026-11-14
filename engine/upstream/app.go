@@ -49,7 +49,8 @@ type Receipt struct {
 	// Seq is the local sequence the write took, 0 when it wrote no row.
 	Seq uint64
 	// Forwarded reports that the write was queued for the origin. A write
-	// to local-only entities is not.
+	// to local-only entities is not, and neither is a write that changes
+	// only fields the origin leaves to trusted writes.
 	Forwarded bool
 
 	l   *Link

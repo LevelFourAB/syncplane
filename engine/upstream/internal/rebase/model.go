@@ -114,6 +114,33 @@ func (m *Model) Equal(a, b Row) bool {
 	return bytes.Equal(ab, bb)
 }
 
+// ClearUnits returns the encoded row value with each unit that units names
+// cleared: a top-level field by its name, or every field of a oneof by the
+// oneof's name. A name that is neither is ignored. It returns value unchanged
+// when units is empty, and a deterministic encoding otherwise. It returns an
+// error when value does not decode.
+func (m *Model) ClearUnits(value []byte, units []string) ([]byte, error) {
+	if len(units) == 0 {
+		return value, nil
+	}
+	msg, err := m.decode(value)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range units {
+		if od := m.desc.Oneofs().ByName(protoreflect.Name(name)); od != nil {
+			if fd := msg.WhichOneof(od); fd != nil {
+				msg.Clear(fd)
+			}
+			continue
+		}
+		if fd := m.desc.Fields().ByName(protoreflect.Name(name)); fd != nil {
+			msg.Clear(fd)
+		}
+	}
+	return marshal(msg)
+}
+
 // messageType prefers the generated type registered for md, which is faster
 // than a dynamic message, and falls back to dynamicpb for a descriptor no
 // generated type carries (a schema registered at runtime).

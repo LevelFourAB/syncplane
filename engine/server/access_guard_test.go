@@ -44,6 +44,19 @@ var _ = Describe("Access model registration of field guards", func() {
 		Expect(err).NotTo(HaveOccurred())
 	})
 
+	It("names the fields whose guard admits no update to any caller", func() {
+		_, err := srv.RegisterDescriptorSet(accessFileSet(nil))
+		Expect(err).NotTo(HaveOccurred())
+
+		meta, ok := srv.Entity("expense")
+		Expect(ok).To(BeTrue())
+		Expect(meta.TrustedOnlyFields).To(Equal([]string{"total"}),
+			"status, notes and estimate have update rules, which decide per caller and row")
+		project, ok := srv.Entity("project")
+		Expect(ok).To(BeTrue())
+		Expect(project.TrustedOnlyFields).To(BeNil())
+	})
+
 	DescribeTable("refuses a guard that cannot take effect as written",
 		func(change func(a *syncplanev1.AccessOptions), want string) {
 			_, err := srv.RegisterDescriptorSet(accessFileSet(func(file *descriptorpb.FileDescriptorProto) {

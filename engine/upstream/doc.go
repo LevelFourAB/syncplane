@@ -23,6 +23,12 @@
 // store, in the same transactions as the rows, so a restart resumes where the
 // process stopped.
 //
+// A field whose guard admits no update to any caller is one only a trusted
+// write changes at the origin (server.EntityMeta.TrustedOnlyFields of the
+// local engine). The link leaves such fields out of each PATCH it forwards,
+// and does not forward a write that changes nothing else. The local value
+// stays on the row until the origin sends its own row.
+//
 // Workspace is a typed handle for a Go app that reads and writes the local
 // engine itself: Get, Query, Put, Patch, Delete, Invoke, Watch and Flush,
 // with a Receipt per write to await the origin's verdict.
