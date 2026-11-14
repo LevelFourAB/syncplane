@@ -1,5 +1,6 @@
-# Everything here runs through mise and task, so a contributor reproduces a
-# failure with the same two commands the README gives them.
+# Each job runs one task from Taskfile.yml, so a contributor reproduces a failure
+# with mise and the task the failing job names. `task ci` runs all of them in
+# sequence on a local machine.
 name: CI
 
 on:
@@ -17,8 +18,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
-    name: task ci
+  protobuf:
+    name: protobuf lint and breaking
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -34,44 +35,67 @@ jobs:
         if: github.ref_name != 'main'
         run: git fetch --no-tags origin main:main
 
-      - uses: jdx/mise-action@v4
+      - uses: ./.github/actions/setup
 
-      - name: Cache the Go build and module caches
-        uses: actions/cache@v4
+      - run: task lint
+      - run: task breaking
+
+  vet:
+    name: task vet
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
         with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
-          restore-keys: go-${{ runner.os }}-
+          go: 'true'
+      - run: task vet
 
-      - name: Find the pnpm store
-        id: pnpm
-        working-directory: client
-        run: echo "store=$(pnpm store path)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache the pnpm store
-        uses: actions/cache@v4
+  typecheck:
+    name: task typecheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
         with:
-          path: ${{ steps.pnpm.outputs.store }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('client/pnpm-lock.yaml') }}
-          restore-keys: pnpm-${{ runner.os }}-
+          client: 'true'
+      - run: task typecheck
 
-      - name: Install the client dependencies
-        working-directory: client
-        run: pnpm install --frozen-lockfile
-
+  test-go:
+    name: task test:go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          go: 'true'
       # Docker is available on the runner, so the pgstore, pglisten, pgnotify and
       # pgpresence suites start their Postgres container and run for real instead
       # of skipping.
-      - run: task ci
+      - run: task test:go
+
+  test-ts:
+    name: task test:ts:${{ matrix.suite }}
+    runs-on: ubuntu-latest
+    strategy:
+      # One failing suite does not hide the result of the others.
+      fail-fast: false
+      matrix:
+        suite: [ unit, react, integration ]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup
+        with:
+          # The integration suite builds and spawns the Go testserver.
+          go: ${{ matrix.suite == 'integration' }}
+          client: 'true'
+      - run: task test:ts:${{ matrix.suite }}
 
   generated:
     name: generated code is current
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - uses: jdx/mise-action@v4
+      - uses: ./.github/actions/setup
 
       - run: task generate
 
@@ -81,3 +105,16 @@ jobs:
         run: |
           git add --intent-to-add --all
           git diff --exit-code
+
+  ci:
+    # Keeps the `task ci` check name that branch protection requires, so the
+    # split into parallel jobs needs no change to the repository settings. It
+    # also runs when a job it needs fails, and fails with it.
+    name: task ci
+    if: always()
+    needs: [ protobuf, vet, typecheck, test-go, test-ts ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail unless every check passed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: exit 1

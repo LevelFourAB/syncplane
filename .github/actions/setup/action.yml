@@ -1,0 +1,53 @@
+# Shared setup for the CI jobs: the mise toolchain, plus the Go caches and the
+# client dependencies for the jobs that ask for them.
+name: Set up the toolchain
+description: Install the mise tools and, on request, the Go caches and the client dependencies.
+
+inputs:
+  go:
+    description: Restore and save the Go build and module caches.
+    default: 'false'
+  client:
+    description: Install the client dependencies with pnpm.
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - uses: jdx/mise-action@v4
+
+    - name: Cache the Go build and module caches
+      if: inputs.go == 'true'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        # Each job compiles a different set of packages, so each keeps its own
+        # build cache. With one shared key, the first job to finish saves the
+        # cache and the other jobs get its packages instead of theirs.
+        key: go-${{ runner.os }}-${{ github.job }}-${{ hashFiles('go.sum') }}
+        restore-keys: |
+          go-${{ runner.os }}-${{ github.job }}-
+          go-${{ runner.os }}-
+
+    - name: Find the pnpm store
+      if: inputs.client == 'true'
+      id: pnpm
+      shell: bash
+      working-directory: client
+      run: echo "store=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache the pnpm store
+      if: inputs.client == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.pnpm.outputs.store }}
+        key: pnpm-${{ runner.os }}-${{ hashFiles('client/pnpm-lock.yaml') }}
+        restore-keys: pnpm-${{ runner.os }}-
+
+    - name: Install the client dependencies
+      if: inputs.client == 'true'
+      shell: bash
+      working-directory: client
+      run: pnpm install --frozen-lockfile
