@@ -337,11 +337,15 @@ describe('compaction stores what the separate writes store', () => {
 		await a.syncNow();
 
 		// And three offline text edits that add 450 KiB each (the server takes
-		// at most 1 MiB in one value)
+		// at most 1 MiB in one value). The limit counts UTF-8 bytes and the
+		// text CRDT keeps one item per code point, so 4-byte code points reach
+		// the limit with a quarter of the items 1-byte ones need, and keep the
+		// spec inside its timeout on a loaded machine.
+		const run = (i: number): string => String.fromCodePoint(0x1f600 + i).repeat(450 * 1024 / 4);
 		let text = '';
-		const afterTwo = 'a'.repeat(450 * 1024) + 'b'.repeat(450 * 1024);
+		const afterTwo = run(0) + run(1);
 		for (let i = 0; i < 3; i++) {
-			text += String.fromCharCode(97 + i).repeat(450 * 1024);
+			text += run(i);
 			await a.mutate.patch(WidgetSchema, 'w1', { body: text });
 		}
 
@@ -599,8 +603,10 @@ describe('compaction stores what the separate writes store', () => {
 		await a.syncNow();
 
 		// When two offline text edits add 450 KiB each, and the client syncs
-		const text = 'a'.repeat(450 * 1024) + 'b'.repeat(450 * 1024);
-		await a.mutate.patch(WidgetSchema, 'w1', { body: text.slice(0, 450 * 1024) });
+		// (4-byte code points for the same reason as the spec above)
+		const run = (i: number): string => String.fromCodePoint(0x1f600 + i).repeat(450 * 1024 / 4);
+		const text = run(0) + run(1);
+		await a.mutate.patch(WidgetSchema, 'w1', { body: run(0) });
 		await a.mutate.patch(WidgetSchema, 'w1', { body: text });
 		await a.syncNow();
 
