@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.2](https://github.com/LevelFourAB/syncplane/compare/v0.8.1...v0.8.2) (2026-11-14)
+
+
+### Bug Fixes
+
+* **engine:** Keep guarded fields local instead of reverting writes ([3b6e78f](https://github.com/LevelFourAB/syncplane/commit/3b6e78fd7ebd9693f0958b57a516d1e0301840ce))
+* **engine:** Stop logging client disconnects as subscribe errors ([c1df005](https://github.com/LevelFourAB/syncplane/commit/c1df005a777c92241a4ed62294c4d26dde691767))
+
 ## [0.8.1](https://github.com/LevelFourAB/syncplane/compare/v0.8.0...v0.8.1) (2026-11-13)
 
 
