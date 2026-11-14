@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.3](https://github.com/LevelFourAB/syncplane/compare/v0.8.2...v0.8.3) (2026-11-14)
+
+
+### Bug Fixes
+
+* **engine:** Stop guarded fields going empty after a push ([f08efbb](https://github.com/LevelFourAB/syncplane/commit/f08efbbf3b0dc7e8fe47bc0244b769df179ee96a))
+
 ## [0.8.2](https://github.com/LevelFourAB/syncplane/compare/v0.8.1...v0.8.2) (2026-11-14)
 
 
