@@ -147,7 +147,11 @@ async function checkedRows(tx: KVRead, base: string): Promise<PostedRow[]> {
 	expect(new Set(rows.map(([ , n ]) => n)).size, 'two rows share a number').toBe(rows.length);
 	expect(await postedRowCount(tx, base)).toBe(rows.length);
 	const named = await rowKeysOf(tx, base, rows.map(([ , n ]) => n));
-	for (const [ key, n ] of rows) expect(named.get(n), `row ${n}`).toBe(key);
+	// The per-row checks here and in checkedBase call expect only on a
+	// mismatch: an expect per row is most of the random-write test's run time.
+	for (const [ key, n ] of rows) {
+		if (named.get(n) !== key) expect(named.get(n), `row ${n}`).toBe(key);
+	}
 	let inBlocks = 0;
 	for await (const [ k, v ] of tx.scan(`${base}n`)) {
 		const live = decodeKeyList(v as string).filter((key) => key !== '');
@@ -183,7 +187,9 @@ async function checkedBase(tx: KVRead, base: string): Promise<Map<string, string
 		expect(rows).toEqual([ ...new Set(rows) ].sort((a, b) => a - b));
 		return sorted(rows.map((n) => {
 			const key = keyOf.get(n);
-			expect(key, `${JSON.stringify(entry)} names row ${n}, which is not posted`).toBeDefined();
+			if (key === undefined) {
+				expect(key, `${JSON.stringify(entry)} names row ${n}, which is not posted`).toBeDefined();
+			}
 			return key!;
 		}));
 	};
@@ -233,13 +239,19 @@ async function checkedBase(tx: KVRead, base: string): Promise<Map<string, string
 			expect(chunk.length).toBeGreaterThan(0);
 			expect(chunk.length).toBeLessThanOrEqual(CAP);
 			for (const n of chunk) {
-				if (low !== undefined) expect(n > low).toBe(true);
-				expect(n <= bound).toBe(true);
+				if (low !== undefined && !(n > low)) {
+					expect(n, 'a chunk row at or below the last bound').toBeGreaterThan(low);
+				}
+				if (!(n <= bound)) expect(n, 'a chunk row past its bound').toBeLessThanOrEqual(bound);
 			}
 			rows.push(...chunk);
 			low = bound;
 		}
-		for (const n of head.tail) if (low !== undefined) expect(n > low).toBe(true);
+		for (const n of head.tail) {
+			if (low !== undefined && !(n > low)) {
+				expect(n, 'a tail row at or below the last bound').toBeGreaterThan(low);
+			}
+		}
 		rows.push(...head.tail);
 		// A head that shrank to the demotion point went back into its page.
 		expect(head.bounds.length > 0 || rows.length > POSTINGS_INLINE_MAX / 2).toBe(true);
