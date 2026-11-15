@@ -379,7 +379,13 @@ func (c *Connector) ingestRefs(ctx context.Context, ws string, p *pass, rt *reco
 		}
 	}
 	var jobs []*ingestJob
+	// A new record listed twice would get two keys.
+	seen := make(map[string]bool, len(refs))
 	for _, ref := range refs {
+		if seen[ref.Locator] {
+			continue
+		}
+		seen[ref.Locator] = true
 		j, err := c.resolveRef(ctx, ws, rt, ref, gone)
 		if err != nil {
 			return err

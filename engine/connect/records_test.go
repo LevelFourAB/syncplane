@@ -137,8 +137,20 @@ var _ = Describe("Record mode", func() {
 			Expect(f.content(ws, "a.txt")).To(Equal("T\none!\ntwo?"))
 		})
 
-		It("keeps the engine value of a field the store does not hold", func() {
+		// Acceptance 6 with the raw Codec: the connector gives Merge the rows
+		// as the engine holds them, and keeping a field the store does not
+		// hold is the codec's part. RowCodec, which owns fields, covers the
+		// connector's part of it.
+		It("gives Merge the engine rows, with the fields the store does not hold", func() {
+			var flags []bool
 			f := newRecFixture()
+			f.conn = f.connector(withRecords(func(r *engineconnect.Records) {
+				r.Types[0].Codec = spyCodec{f.codec, func(in engineconnect.MergeInput) {
+					for _, m := range in.Members {
+						flags = append(flags, m.(*testdatav1.Widget).GetFlag())
+					}
+				}}
+			}))
 			f.store.put(ws, "a.txt", "T\none")
 			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
 			key := f.key(ctx, ws, "a.txt")
@@ -152,12 +164,66 @@ var _ = Describe("Record mode", func() {
 				return tx.Put(&row)
 			})
 
+			flags = nil
 			f.store.put(ws, "a.txt", "T\none more")
 			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(flags).To(Equal([]bool{true}))
 			_, widgets := f.rows(ctx, ws, key)
 			Expect(widgets).To(HaveLen(1))
 			Expect(bodyOf(widgets[0])).To(Equal("one more"))
 			Expect(widgets[0].GetFlag()).To(BeTrue())
+		})
+
+		It("reads and merges no record whose fingerprint is unchanged", func() {
+			f := newRecFixture()
+			f.store.put(ws, "a.txt", "A\none")
+			f.store.put(ws, "b.txt", "B\none")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			merges, renders := f.codec.calls()
+			reads := f.store.readCount()
+
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(f.store.readCount()).To(Equal(reads), "no content read")
+			m, r := f.codec.calls()
+			Expect(m).To(Equal(merges), "no Merge call")
+			Expect(r).To(Equal(renders))
+		})
+
+		It("marks no record dirty for the rows of its own merge", func() {
+			f := newRecFixture(withRecords(func(r *engineconnect.Records) { r.Quiet = time.Hour }))
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			f.store.put(ws, "a.txt", "A\none\ntwo")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			_, renders := f.codec.calls()
+
+			Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+			Expect(snapshotShadows(ctx, f, ws)["dirty:project"]).To(BeEmpty())
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			_, r := f.codec.calls()
+			Expect(r).To(Equal(renders), "no Render call")
+		})
+
+		It("merges no record whose store content an EngineWins first pass wrote after the list", func() {
+			f := newRecFixture(withRecords(func(r *engineconnect.Records) { r.FirstPass = engineconnect.EngineWins }))
+			f.addRecord(ctx, ws, "p1", "Engine", "x")
+			f.store.put(ws, "Engine.txt", "Store\ny")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(f.content(ws, "Engine.txt")).To(Equal("Engine\nx"))
+			merges, _ := f.codec.calls()
+			Expect(merges).To(BeZero(), "the list was older than the write; the read is not")
+		})
+
+		It("makes one record of a store record that List yields twice", func() {
+			f := newRecFixture()
+			f.store.listTwice = true
+			f.store.put(ws, "a.txt", "A\none")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(f.projects(ctx, ws)).To(HaveLen(1))
+
+			f.store.put(ws, "a.txt", "A\ntwo")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(f.projects(ctx, ws)).To(HaveLen(1))
+			Expect(f.lines(ctx, ws, f.key(ctx, ws, "a.txt"))).To(Equal("A\ntwo"))
 		})
 
 		It("writes no row and no shadow for a record the codec refuses", func() {

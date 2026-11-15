@@ -40,12 +40,16 @@ type memStore struct {
 	files     map[string]map[string]string // ws → locator → content
 	writes    int
 	deletes   int
+	reads     int
 	failRead  error
 	failWrite error
 	// beforeWrite, when set, runs at the start of each Write, outside the
 	// lock. A spec uses it to act at the moment between the connector's
 	// bookkeeping and the store write.
 	beforeWrite func(ctx context.Context, rec engineconnect.Record, from string) error
+	// listTwice makes List yield each record twice, as a paged listing that
+	// shifts between pages does.
+	listTwice bool
 }
 
 func newMemStore() *memStore { return &memStore{files: make(map[string]map[string]string)} }
@@ -100,6 +104,12 @@ func (s *memStore) setBeforeWrite(fn func(ctx context.Context, rec engineconnect
 	s.beforeWrite = fn
 }
 
+func (s *memStore) readCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads
+}
+
 func (s *memStore) writeCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -122,8 +132,12 @@ func (s *memStore) List(_ context.Context, ws string, fn func(engineconnect.Reco
 	for loc, c := range s.files[ws] {
 		refs = append(refs, engineconnect.RecordRef{Locator: loc, Fingerprint: hashOf(c)})
 	}
+	twice := s.listTwice
 	s.mu.Unlock()
 	sort.Slice(refs, func(i, j int) bool { return refs[i].Locator < refs[j].Locator })
+	if twice {
+		refs = append(refs, refs...)
+	}
 	for _, ref := range refs {
 		if err := fn(ref); err != nil {
 			return err
@@ -135,6 +149,7 @@ func (s *memStore) List(_ context.Context, ws string, fn func(engineconnect.Reco
 func (s *memStore) Read(_ context.Context, ws, loc string) (engineconnect.Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reads++
 	if s.failRead != nil {
 		return engineconnect.Record{}, s.failRead
 	}
@@ -672,6 +687,17 @@ func (f *recFixture) content(ws, loc string) string {
 	c, ok := f.store.get(ws, loc)
 	Expect(ok).To(BeTrue(), "store has no record at %q", loc)
 	return c
+}
+
+// spyCodec is a lineCodec that hands each MergeInput to seen first.
+type spyCodec struct {
+	*lineCodec
+	seen func(in engineconnect.MergeInput)
+}
+
+func (c spyCodec) Merge(tx *server.EntityTx, in engineconnect.MergeInput) (engineconnect.Merged, error) {
+	c.seen(in)
+	return c.lineCodec.Merge(tx, in)
 }
 
 // nameMatchCodec is a lineCodec that matches a store record new to the
