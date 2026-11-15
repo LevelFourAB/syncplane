@@ -80,7 +80,7 @@ Recycling is protected by the ordering around a lease. A handle leases an identi
 
 A slot retains a consistent meaning across tabs by using a Web Lock. When running in a browser without a lock manager that shares an IndexedDB database across tabs, each handle takes an unrecycled `<client_id>:u<id>` identity instead. This identity is unique without cross-tab coordination, at the cost of one peer-table entry per written document.
 
-Server-side writers maintain the same invariant and bound. A connector holds one identity for its lifetime (set `WriterID` to keep it across restarts), and the admin user interface (UI) uses one identity per handler. They can reuse identities because they diff against the stored document read inside the write transaction, which contains their earlier writes.
+Server-side writers maintain the same invariant and bound. A connector holds one identity for its lifetime: `TextPeer`, or `connector:<WriterID>` when `TextPeer` is empty. Set one of them to keep the identity across restarts. Connectors that can write the same rows at the same time, such as an origin connector and a replica connector, each need their own `TextPeer`. The admin user interface (UI) uses one identity per handler. They can reuse identities because they diff against the stored document read inside the write transaction, which contains their earlier writes.
 
 The merge operation rejects identity violations rather than converging on corrupted text.
 
