@@ -116,9 +116,10 @@ func (c *Connector) Kick(workspaceID string) {
 //
 // The locators are held in memory until a pass ingests them; Ingress ingests
 // them on a connector that is not started. A locator of no record type is
-// ignored. Report both locators of a rename, so that the new one is found by
-// the fingerprint of the old one. In row mode Touch is Kick and ignores the
-// locators.
+// ignored. A new locator whose fingerprint is that of a record the store no
+// longer holds is a rename of that record, in whatever order and in however
+// many calls the two locators arrive. In row mode Touch is Kick and ignores
+// the locators.
 func (c *Connector) Touch(workspaceID string, locators ...string) {
 	if c.rec == nil {
 		c.Kick(workspaceID)

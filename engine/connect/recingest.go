@@ -116,10 +116,49 @@ func (c *Connector) resolveRef(ctx context.Context, ws string, rt *recordType, r
 			}
 		}
 	}
+	if key == "" && ref.Fingerprint != "" && known == nil {
+		var err error
+		if key, err = c.renamedFrom(ctx, ws, rt, ref); err != nil {
+			return nil, err
+		}
+	}
 	if key == "" {
 		key = id.New()
 	}
 	return &ingestJob{rt: rt, key: key, ref: ref}, nil
+}
+
+// renamedFrom returns the key of the record a new locator was renamed from:
+// the first record whose agreed fingerprint is the ref's and whose locator
+// the store no longer holds. It returns "" when there is none, as for a copy.
+// A full list does not need it: it marks the missing records before it
+// resolves a new locator.
+func (c *Connector) renamedFrom(ctx context.Context, ws string, rt *recordType, ref RecordRef) (string, error) {
+	raw, err := c.readShadow(ctx, ws, fpEntity(rt), ref.Fingerprint)
+	if err != nil {
+		return "", err
+	}
+	keys, err := decodeKeys(raw)
+	if err != nil {
+		return "", err
+	}
+	for _, key := range keys {
+		sh, err := c.loadRecShadow(ctx, ws, rt, key)
+		if err != nil {
+			return "", err
+		}
+		if sh == nil || sh.Locator == ref.Locator || sh.Fingerprint != ref.Fingerprint {
+			continue
+		}
+		_, err = rt.store.Read(ctx, ws, sh.Locator)
+		if errors.Is(err, ErrRecordNotFound) {
+			return key, nil
+		}
+		if err != nil {
+			return "", fmt.Errorf("connect: read %s at %q: %w", rt.rootName, sh.Locator, err)
+		}
+	}
+	return "", nil
 }
 
 // readJob reads the content of a job, and reports false when there is

@@ -797,6 +797,42 @@ var _ = Describe("Record mode", func() {
 		})
 	})
 
+	Describe("renames that Touch reports in two passes", func() {
+		It("keeps the keys when the new locator comes first", func() {
+			f := newRecFixture()
+			f.store.put(ws, "a.txt", "T\none\ntwo")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			key := f.key(ctx, ws, "a.txt")
+			rows := f.widgetKeys(ctx, ws, key)
+
+			f.store.rename(ws, "a.txt", "b.txt")
+			f.conn.Touch(ws, "b.txt")
+			Expect(f.conn.Ingress(ctx, ws)).To(Succeed())
+			f.conn.Touch(ws, "a.txt")
+			Expect(f.conn.Ingress(ctx, ws)).To(Succeed())
+			f.clock.advance(5 * time.Second)
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+
+			Expect(f.key(ctx, ws, "b.txt")).To(Equal(key))
+			Expect(f.projects(ctx, ws)).To(HaveLen(1))
+			Expect(f.widgetKeys(ctx, ws, key)).To(Equal(rows))
+			Expect(f.store.locators(ws)).To(Equal([]string{"b.txt"}))
+		})
+
+		It("makes a new record of a copy", func() {
+			f := newRecFixture()
+			f.store.put(ws, "a.txt", "T\none")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			key := f.key(ctx, ws, "a.txt")
+
+			f.store.put(ws, "b.txt", "T\none")
+			f.conn.Touch(ws, "b.txt")
+			Expect(f.conn.Ingress(ctx, ws)).To(Succeed())
+			Expect(f.key(ctx, ws, "a.txt")).To(Equal(key))
+			Expect(f.key(ctx, ws, "b.txt")).NotTo(BeElementOf("", key))
+		})
+	})
+
 	Describe("restarts", func() {
 		It("keeps the edits both sides made while the connector did not run", func() {
 			f := newRecFixture()
@@ -1079,7 +1115,7 @@ var _ = Describe("Record mode", func() {
 func snapshotShadows(ctx context.Context, f *recFixture, ws string) map[string]map[string][]byte {
 	GinkgoHelper()
 	out := map[string]map[string][]byte{}
-	for _, entity := range []string{"rec:project", "loc:project", "idx:widget", "dirty:project", "gone:project", "pend:project"} {
+	for _, entity := range []string{"rec:project", "loc:project", "idx:widget", "dirty:project", "gone:project", "pend:project", "fp:project"} {
 		out[entity] = map[string][]byte{}
 		Expect(f.srv.ScanConsumerShadows(ctx, ws, "connect:"+recWriter, entity, func(key string, raw []byte) error {
 			out[entity][key] = raw

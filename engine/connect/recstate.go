@@ -34,12 +34,20 @@ import (
 //     that wait out Records.DeleteGrace.
 //   - pend:<root>  record key → pendingWrite, for a store write or delete
 //     whose outcome the agreed state does not hold yet.
+//   - fp:<root>    agreed fingerprint → JSON list of record keys, at most
+//     maxFingerprintKeys. It finds the record a touched new locator was
+//     renamed from when the old locator is not reported first.
 func recEntity(rt *recordType) string   { return "rec:" + rt.rootName }
 func locEntity(rt *recordType) string   { return "loc:" + rt.rootName }
 func dirtyEntity(rt *recordType) string { return "dirty:" + rt.rootName }
 func goneEntity(rt *recordType) string  { return "gone:" + rt.rootName }
 func pendEntity(rt *recordType) string  { return "pend:" + rt.rootName }
+func fpEntity(rt *recordType) string    { return "fp:" + rt.rootName }
 func idxEntity(member string) string    { return "idx:" + member }
+
+// maxFingerprintKeys bounds a fingerprint index entry. More records with one
+// content tell no rename apart, and each agreed state rewrites the entry.
+const maxFingerprintKeys = 16
 
 // recShadow is the agreed state of one record.
 type recShadow struct {
@@ -298,6 +306,16 @@ func (c *Connector) putAgreed(tx *server.EntityTx, rt *recordType, key string, o
 			}
 		}
 	}
+	if old == nil || old.Fingerprint != next.Fingerprint {
+		if old != nil {
+			if err := c.indexFingerprint(tx, rt, old.Fingerprint, key, false); err != nil {
+				return err
+			}
+		}
+		if err := c.indexFingerprint(tx, rt, next.Fingerprint, key, true); err != nil {
+			return err
+		}
+	}
 	if err := tx.DeleteConsumerShadow(c.consumer, goneEntity(rt), key); err != nil {
 		return err
 	}
@@ -334,9 +352,56 @@ func (c *Connector) dropIndex(tx *server.EntityTx, entity, rowKey, key string) e
 	return tx.DeleteConsumerShadow(c.consumer, idxEntity(entity), rowKey)
 }
 
+// indexFingerprint adds key to the fingerprint index entry of fp, or removes
+// it, in tx. An empty fingerprint is not indexed.
+func (c *Connector) indexFingerprint(tx *server.EntityTx, rt *recordType, fp, key string, add bool) error {
+	if fp == "" {
+		return nil
+	}
+	keys, err := c.txFingerprintKeys(tx, rt, fp)
+	if err != nil {
+		return err
+	}
+	i, found := slices.BinarySearch(keys, key)
+	switch {
+	case add && !found && len(keys) < maxFingerprintKeys:
+		keys = slices.Insert(keys, i, key)
+	case !add && found:
+		keys = slices.Delete(keys, i, i+1)
+	default:
+		return nil
+	}
+	if len(keys) == 0 {
+		return tx.DeleteConsumerShadow(c.consumer, fpEntity(rt), fp)
+	}
+	return tx.PutConsumerShadow(c.consumer, fpEntity(rt), fp, encodeJSON(keys))
+}
+
+func (c *Connector) txFingerprintKeys(tx *server.EntityTx, rt *recordType, fp string) ([]string, error) {
+	raw, err := tx.ConsumerShadow(c.consumer, fpEntity(rt), fp)
+	if err != nil {
+		return nil, err
+	}
+	return decodeKeys(raw)
+}
+
+func decodeKeys(raw []byte) ([]string, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	var keys []string
+	if err := json.Unmarshal(raw, &keys); err != nil {
+		return nil, fmt.Errorf("connect: decode fingerprint index: %w", err)
+	}
+	return keys, nil
+}
+
 // forgetRecord removes every shadow of a record, in tx.
 func (c *Connector) forgetRecord(tx *server.EntityTx, rt *recordType, key string, sh *recShadow) error {
 	if sh != nil {
+		if err := c.indexFingerprint(tx, rt, sh.Fingerprint, key, false); err != nil {
+			return err
+		}
 		owner, err := tx.ConsumerShadow(c.consumer, locEntity(rt), sh.Locator)
 		if err != nil {
 			return err
