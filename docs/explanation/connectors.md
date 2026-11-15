@@ -77,7 +77,7 @@ Row mode keeps its shadows in the connector's own `State`. Record mode keeps all
 - **Backup and restore with the rows.** A restored engine store has the bookkeeping that agrees with its rows. A separate state file could be older or newer than the rows, and every difference would look like an edit.
 - **No rerun of the first pass after garbage collection.** The consumer is retained (`server.ConsumerUpdate.Retain`), so garbage collection never removes it. The agreed states stay correct below the tombstone horizon. When the feed cannot resume from the stored position (`server.ErrCursorTooOld`), the connector marks every record for egress, renders each one, and writes only those that differ from the agreed content. A collected consumer would run the first pass again, and with `SourceWins` that deletes every row that clients created while the connector did not run.
 
-The cost is space in the engine store: an agreed state for each record, an index entry for each member row, and, with `RowCodec`, a copy of each row as the store holds it.
+The cost is space in the engine store: an agreed state for each record and an index entry for each member row. With `RowCodec`, the agreed state also holds a copy of each row as the store holds it, with its collaborative-text documents, and each ingest and each write of the record writes that copy again. A record then costs about the size of its rows in storage, and that much again in writes on each change.
 
 ### Echo detection
 
@@ -96,7 +96,7 @@ A user who never stops typing would keep the record waiting. `MaxDelay` sets a l
 
 ### Check before egress, and write-back
 
-Between two passes, the store can change a record that also waits for egress. A write of the render would replace that store edit. Before each write, the connector reads the store record. When its fingerprint moved since the agreed state, the connector ingests the record first. The merge keeps both edits, and the render after it holds both.
+Between two passes, the store can change a record that also waits for egress. A write of the render would replace that store edit. Before each write, the connector reads the store record. When its fingerprint or its content moved since the agreed state, the connector ingests the record first. The content check catches a store that keeps the fingerprint across an edit, such as one that stamps records coarsely. The merge keeps both edits, and the render after it holds both.
 
 An ingest can keep engine edits that the store does not have. After each merge of a `Bidirectional` record, the connector renders the record in the same transaction. When the render differs from the store content, the record is written back. The dirty mark that orders the write-back commits in the same transaction as the merge, so a crash before the write-back does not lose the engine edits: the next pass writes them.
 
@@ -118,7 +118,7 @@ Before each store write or delete, the connector commits a **pending write** tha
 
 - **The written content:** the write is done, and its agreed state is saved.
 - **The content that the write replaced, or nothing:** the write was not done. The dirty mark of the record makes a later pass write it.
-- **Other content:** the store changed the record after the crash, and the write may or may not be done. The old agreed state stays the base, moved to the written locator, so that the next ingest merges the store content with it. A record with no agreed state drops the write, and the next list ingests the store content as a new record.
+- **Other content:** the store changed the record after the crash, and the write may or may not be done. The store content continues one of two states: the old agreed state, or the state that the write would have agreed on. The next ingest gets both, as `MergeInput.Base` and `MergeInput.Alternate`. A merge against the old state alone would apply the engine edits of a write that was done a second time, and collaborative text would hold them twice. `RowCodec` uses both states: each text field merges against the state whose text is nearest the store's, and a scalar field counts as a store edit only when it differs from both. A record with no agreed state drops the write, and the next list ingests the store content as a new record.
 
 For a delete, a missing record completes the delete, and a present record drops it.
 
@@ -138,6 +138,8 @@ On a replica linked to an origin with `engine/upstream`, an ingest writes rows o
 
 `Connector.Refused` stops that. The host calls it from `upstream.Config.OnRejected` with the rows of the refused write. The connector marks their records. The next egress of a marked record gives the store content that it replaces to `Records.Overwrite` with `OverwriteRefused`, so the adopter can keep a copy or show it to the user.
 
+A revert can also remove text items that a client still holds. If the connector minted a new item with the same ID, the documents would collide. The connector therefore keeps, for each record, the highest text counter that its rows have held, also in reverted text, and gives it to the codec as `TextClock`. `RowCodec` writes text with counters above it. A raw `Codec` that writes text must observe it before each edit.
+
 The revert and the call do not arrive at the same time. The link reverts the rows before it calls `OnRejected`, and egress can run in between. Then the store content is already replaced when `Refused` marks the record. `Records.KeepReplaced` covers this case: the connector keeps the content that an egress write replaced when the record had an ingest a short time before. `Refused` then gives that kept content to `Overwrite`.
 
 ### TextPeer and WriterID
@@ -151,8 +153,9 @@ A connector has two identities, and they must follow opposite rules across an or
 
 ### Trade-offs and limits
 
-- **A moved part is a delete and a create.** `MatchKeys` matches parts by a longest common subsequence. A line that moves past others does not match, so it gets a new key: its old row is deleted and a new row is created. Fields that the record does not own, such as a client-only flag, do not move with it. A format that stores an ID for each part avoids this: `Decode` can then give each part the key that the content names.
-- **A replay with an old agreed state can double a text edit.** When the connector merges a record against an agreed state that is older than the rows, for example after a pending write with an unknown result, the merge applies the store's changes from that older state again. A collaborative-text field that both sides changed since then can hold the replayed edit twice. A field that only one side changed, or that both sides changed to the same text, is not affected.
+- **A part that moves inside a record is a delete and a create.** `MatchKeys` matches parts by a longest common subsequence. A line that moves past others does not match, so it gets a new key: its old row is deleted and a new row is created. Fields that the record does not own, such as a client-only flag, do not move with it. A format that stores an ID for each part avoids this: `Decode` can then give each part the key that the content names.
+- **A part that moves between records keeps its row only within one pass.** When `Decode` gives a row of one record to another record, and the store changed both records in the same pass, the row moves with its unowned fields and its text history. The connector deletes a row that a record left out only at the end of the merge transaction, and only when its record field still names the old record. A line removed from one file in one pass and added to another file in a later pass is a delete and a create.
+- **An unknown write outcome is resolved by nearness.** After a pending write with an unknown result, `RowCodec` picks the ancestor by edit distance. A large store edit made after that write can make the wrong ancestor look nearest. The merge then applies the text edits of the write a second time, or takes them for store deletions. A raw `Codec` that ignores `MergeInput.Alternate` always merges against the old state, and collaborative text then holds the edits of a done write twice.
 - **One instance for each workspace on each server.** Nothing leases a workspace to one connector. Two instances on one server share the bookkeeping, and both write the store. Run exactly one instance for each workspace on each server. An origin and a replica are different servers, so each runs its own instance over its own store.
 - **The whole record is rendered on each write.** A record with many rows costs a render and a store write of all of them for each egress, and the codec runs under the workspace write lock. Split a large document into several records when its size makes writes slow.
-- **The codec runs inside the transaction.** `Merge`, `Render`, `Decode` and `Encode` must do no I/O and must give the same result for the same input, because the transaction can be retried.
+- **The codec runs inside the transaction.** `Merge`, `Render`, `Decode` and `Encode` must do no I/O and must have no effect outside the transaction, because the transaction can roll back and run again. `Render` and `Encode` must give the same content for the same rows, because the connector writes each render whose content differs from the store's.
