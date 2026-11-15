@@ -15,6 +15,9 @@ type trigger int
 const (
 	triggerNone trigger = iota
 	triggerDrain
+	// triggerTouch also ingests the locators Touch reported. Only record mode
+	// schedules it.
+	triggerTouch
 	triggerSync
 )
 
@@ -74,6 +77,15 @@ type workspace struct {
 	// pass is in flight; hand-driven passes belong to their caller's context
 	// and are never cancelled from here.
 	cancel context.CancelFunc
+	// touched holds the locators Touch reported that no pass has ingested
+	// yet. Record mode only.
+	touched map[string]struct{}
+	// wakeAt is when a later drain-level pass is due, zero for none, and
+	// wakeIdx the workspace's place in Connector.wakes (-1 when absent).
+	// Record mode sets it for records that wait out a quiet period or a
+	// delete grace.
+	wakeAt  time.Time
+	wakeIdx int
 
 	// run serializes passes for this workspace. The state machine already
 	// keeps two workers off one workspace; this is what also excludes a
@@ -88,7 +100,7 @@ func (c *Connector) trackedLocked(workspaceID string) *workspace {
 	if w, ok := c.tracked[workspaceID]; ok {
 		return w
 	}
-	w := &workspace{id: workspaceID}
+	w := &workspace{id: workspaceID, wakeIdx: -1}
 	c.tracked[workspaceID] = w
 	return w
 }
@@ -235,6 +247,13 @@ func (c *Connector) retryWorkspace(w *workspace) {
 // failed writes into the same wall, and its shadows are the ones ingress would
 // have repaired.
 func (c *Connector) attempt(ctx context.Context, workspaceID string, t trigger) error {
+	if c.rec != nil {
+		err := c.converge(ctx, workspaceID, func(p *pass) error {
+			return c.recordsPass(ctx, workspaceID, p, passSteps{list: t >= triggerSync, touched: t >= triggerTouch, drain: true})
+		})
+		c.logPassFailure(ctx, workspaceID, "records", err)
+		return err
+	}
 	var err error
 	if t >= triggerSync {
 		if err = c.Ingress(ctx, workspaceID); err != nil {
@@ -288,11 +307,12 @@ func (c *Connector) release(w *workspace) {
 // outstanding for it, reporting whether it did. Caller holds mu.
 //
 // Everything durable about a workspace — its shadows, its cursors — lives in
-// State, so a record costs nothing to rebuild and the connector keeps one only
-// while it has a reason: work queued, a pass running, a failure being retried,
+// State or the engine's store, so a record costs nothing to rebuild and the
+// connector keeps one only while it has a reason: work queued, a pass running,
+// a failure being retried, a wake pending, touched locators not yet ingested,
 // or a caller holding it.
 func (c *Connector) evictLocked(w *workspace) bool {
-	if w.state != wsIdle || w.dirty != triggerNone || w.refs > 0 {
+	if w.state != wsIdle || w.dirty != triggerNone || w.refs > 0 || len(w.touched) > 0 || w.wakeIdx >= 0 {
 		return false
 	}
 	if c.tracked[w.id] == w {
@@ -311,6 +331,7 @@ func (c *Connector) dropLocked(workspaceID string) {
 	if !ok {
 		return
 	}
+	c.unwakeLocked(w)
 	delete(c.tracked, workspaceID)
 	if w.retry != nil {
 		w.retry.Stop()

@@ -19,9 +19,33 @@ import (
 //
 // Entities bound IngressOnly are skipped: their changes advance the cursor
 // like any other, they just never reach the source.
+//
+// In record mode Drain marks the records that the feed reports changed, and
+// writes those whose last change is at least Records.Quiet old. Before a
+// write it reads the store record, and when its fingerprint moved since the
+// last agreed state, it ingests the record first, so the store edit stays.
+// It also deletes the rows of records whose delete grace is over.
 func (c *Connector) Drain(ctx context.Context, workspaceID string) error {
+	if c.rec != nil {
+		return c.converge(ctx, workspaceID, func(p *pass) error {
+			return c.recordsPass(ctx, workspaceID, p, passSteps{drain: true})
+		})
+	}
 	return c.converge(ctx, workspaceID, func(p *pass) error {
 		return c.drain(ctx, workspaceID, p)
+	})
+}
+
+// Flush writes the pending egress of the workspace now. In record mode it
+// drains the feed and writes every record that waits for egress, also those
+// whose quiet period is not over. In row mode it is Drain. Close and Forget
+// flush in record mode.
+func (c *Connector) Flush(ctx context.Context, workspaceID string) error {
+	if c.rec == nil {
+		return c.Drain(ctx, workspaceID)
+	}
+	return c.converge(ctx, workspaceID, func(p *pass) error {
+		return c.recordsPass(ctx, workspaceID, p, passSteps{drain: true, flushAll: true})
 	})
 }
 

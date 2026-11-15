@@ -20,12 +20,22 @@
 // at once is the size of the pool — which is also what keeps a fleet of
 // workspaces from arriving at one rate-limited API together.
 //
+// # Record mode
+//
+// With Config.Records the connector runs in record mode instead: one external
+// record, such as a file, syncs with a root row and its member rows. The
+// adopter implements a RecordStore for the native I/O and a Codec that maps a
+// record to rows and back; the connector owns the scheduling, the
+// bookkeeping, the quiet period before a write, the delete grace, rename
+// detection and the first pass. See Records.
+//
 // # Single instance
 //
-// Nothing leases a workspace to one connector, and the bookkeeping that keeps
-// a write from echoing — cursors and shadows — lives in the connector's own
-// State rather than the engine's store, where a second instance would not see
-// it. Two processes converging the same workspace both egress to the source,
+// Nothing leases a workspace to one connector, and in row mode the bookkeeping
+// that keeps a write from echoing — cursors and shadows — lives in the
+// connector's own State rather than the engine's store, where a second
+// instance would not see it. In record mode it is in the engine's store, but
+// nothing keeps two instances from writing the same record. Two processes converging the same workspace both egress to the source,
 // so run exactly one instance. A rolling deploy counts: the outgoing process
 // converges while the incoming one starts, and Close waiting on in-flight
 // passes narrows that window without closing it.

@@ -17,7 +17,15 @@ import (
 // available for forcing the full enumeration.
 //
 // For a source that is not Incremental this is exactly Reconcile.
+//
+// In record mode Ingress ingests the locators Touch reported, and deletes the
+// rows of records whose delete grace is over. It does not list the store.
 func (c *Connector) Ingress(ctx context.Context, workspaceID string) error {
+	if c.rec != nil {
+		return c.converge(ctx, workspaceID, func(p *pass) error {
+			return c.recordsPass(ctx, workspaceID, p, passSteps{touched: true})
+		})
+	}
 	return c.converge(ctx, workspaceID, func(p *pass) error {
 		return c.ingress(ctx, workspaceID, p)
 	})

@@ -22,8 +22,16 @@ type Config struct {
 	// Server is the engine the connector ingresses into (server.Mutate) and
 	// egresses out of (server.Changes).
 	Server *server.Server
+	// Records switches the connector to record mode, where one external
+	// record syncs with a root row and its member rows; see Records. It
+	// cannot be used with Source, OpenSource, Entities or Bindings, and it
+	// requires WriterID. State is optional and unused in record mode, where
+	// all bookkeeping is in the engine's store; when set, Close still closes
+	// it.
+	Records *Records
 	// Source is the adopter's port over the external store, shared by every
-	// workspace. Exactly one of Source and OpenSource is required.
+	// workspace. Exactly one of Source and OpenSource is required, except in
+	// record mode.
 	Source Source
 	// OpenSource builds a Source for one workspace, so a per-user credentialed
 	// store has somewhere to keep its token, connection and rate-limit state.
@@ -160,7 +168,9 @@ type binding struct {
 }
 
 // Connector keeps the engine and one external source converged. Build one
-// with New, then drive it manually (Ingress, Reconcile, Drain) or via Start.
+// with New, then drive it manually (Ingress, Reconcile, Drain, Flush) or via
+// Start. Its methods are safe for concurrent use; passes for one workspace
+// never overlap.
 //
 // A started connector holds a fixed pool of workers, one activity
 // subscription, one sweep timer, and a small record per managed workspace —
@@ -199,8 +209,13 @@ type Connector struct {
 	// that changes per run tells a consumer nothing.
 	label string
 	// consumer is the engine consumer name the egress position is mirrored
-	// under, "" without Config.WriterID. See egressMirror.
+	// under, "" without Config.WriterID. See egressMirror. Record mode keeps
+	// all its bookkeeping under it.
 	consumer string
+	// rec is the record-mode configuration, nil in row mode.
+	rec *records
+	// now is the clock record mode reads for quiet periods and delete grace.
+	now func() time.Time
 
 	mu      sync.Mutex
 	ready   *sync.Cond
@@ -216,6 +231,13 @@ type Connector struct {
 	// guarantees that — so its length is bounded by the managed set.
 	queue []*workspace
 	wg    sync.WaitGroup
+	// wakes and wakeTimer schedule the later passes record mode asks for; see
+	// setWakeLocked.
+	wakes     wakeHeap
+	wakeTimer *time.Timer
+	// unflushed names the workspaces whose last record pass left records
+	// waiting for egress, which Close flushes.
+	unflushed map[string]struct{}
 
 	hmu    sync.Mutex
 	health map[string]Health
@@ -223,14 +245,25 @@ type Connector struct {
 
 // New validates cfg and builds a Connector.
 func New(cfg Config) (*Connector, error) {
-	if cfg.Server == nil || cfg.State == nil {
-		return nil, fmt.Errorf("connect: Server and State are required")
+	if cfg.Server == nil {
+		return nil, fmt.Errorf("connect: Server is required")
 	}
-	if (cfg.Source == nil) == (cfg.OpenSource == nil) {
-		return nil, fmt.Errorf("connect: exactly one of Source and OpenSource is required")
-	}
-	if len(cfg.Entities) == 0 && len(cfg.Bindings) == 0 {
-		return nil, fmt.Errorf("connect: at least one entity must be bound")
+	var rec *records
+	if cfg.Records != nil {
+		var err error
+		if rec, err = newRecords(cfg); err != nil {
+			return nil, err
+		}
+	} else {
+		if cfg.State == nil {
+			return nil, fmt.Errorf("connect: Server and State are required")
+		}
+		if (cfg.Source == nil) == (cfg.OpenSource == nil) {
+			return nil, fmt.Errorf("connect: exactly one of Source and OpenSource is required")
+		}
+		if len(cfg.Entities) == 0 && len(cfg.Bindings) == 0 {
+			return nil, fmt.Errorf("connect: at least one entity must be bound")
+		}
 	}
 	batch := cfg.BatchSize
 	if batch <= 0 {
@@ -307,6 +340,9 @@ func New(cfg Config) (*Connector, error) {
 		health:       make(map[string]Health),
 		peer:         peer,
 		label:        label,
+		rec:          rec,
+		now:          time.Now,
+		unflushed:    make(map[string]struct{}),
 	}
 	if cfg.WriterID != "" {
 		c.consumer = label
@@ -405,6 +441,9 @@ func (c *Connector) converge(ctx context.Context, workspaceID string, fn func(*p
 	if err == nil {
 		err = fn(p)
 		p.release()
+		if c.rec != nil {
+			c.afterRecordPass(w, p)
+		}
 	}
 	// A cancelled context is the caller (or Close) stopping the pass, not the
 	// source failing: leave health as it stands rather than reporting a
@@ -425,13 +464,34 @@ func (c *Connector) converge(ctx context.Context, workspaceID string, fn func(*p
 // Close stops the workers and the loops Start launched, waiting for in-flight
 // passes to finish, closes any per-workspace sources it opened, and releases
 // the connector's state store. Idempotent.
+//
+// In record mode Close first flushes each workspace whose records wait for
+// egress (see Flush), and returns the errors of those flushes with the rest.
 func (c *Connector) Close() error {
 	c.stop()
 	c.wg.Wait()
+	var errs []error
+	if c.rec != nil {
+		c.mu.Lock()
+		pending := make([]string, 0, len(c.unflushed))
+		for ws := range c.unflushed {
+			pending = append(pending, ws)
+		}
+		c.mu.Unlock()
+		for _, ws := range pending {
+			if err := c.Flush(context.Background(), ws); err != nil {
+				errs = append(errs, fmt.Errorf("connect: flush workspace %q: %w", ws, err))
+			}
+		}
+	}
 	// After the workers are done, so a sampling callback cannot run against a
 	// half-torn-down connector.
 	c.mx.close()
-	return errors.Join(c.srcs.closeAll(), c.state.Close())
+	errs = append(errs, c.srcs.closeAll())
+	if c.state != nil {
+		errs = append(errs, c.state.Close())
+	}
+	return errors.Join(errs...)
 }
 
 // decodeBase unmarshals a shadow's base bytes into a fresh message of the

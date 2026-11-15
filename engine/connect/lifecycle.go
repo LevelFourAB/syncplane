@@ -107,6 +107,48 @@ func (c *Connector) Kick(workspaceID string) {
 	}
 }
 
+// Touch reports that the store records at locators changed, and schedules a
+// near-immediate pass that ingests them, coalescing with one already pending.
+// Wire native change events here, such as fsnotify. A periodic pass still
+// lists the whole store (Config.ReconcileInterval), which catches what the
+// events miss. Like Kick, it brings a workspace the connector does not manage
+// into the managed set.
+//
+// The locators are held in memory until a pass ingests them; Ingress ingests
+// them on a connector that is not started. A locator of no record type is
+// ignored. Report both locators of a rename, so that the new one is found by
+// the fingerprint of the old one. In row mode Touch is Kick and ignores the
+// locators.
+func (c *Connector) Touch(workspaceID string, locators ...string) {
+	if c.rec == nil {
+		c.Kick(workspaceID)
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.stopped {
+		return
+	}
+	_, existed := c.tracked[workspaceID]
+	w := c.trackedLocked(workspaceID)
+	if w.touched == nil {
+		w.touched = make(map[string]struct{}, len(locators))
+	}
+	for _, l := range locators {
+		w.touched[l] = struct{}{}
+	}
+	if !c.started {
+		return
+	}
+	w.sticky = true
+	if existed {
+		c.scheduleLocked(w, triggerTouch)
+	} else {
+		// New to the connector: the initial sync, as admitLocked schedules.
+		c.scheduleLocked(w, triggerSync)
+	}
+}
+
 // Forget drops the workspace from the managed set and releases its source —
 // the teardown half of Config.OpenSource, for when a user disconnects an
 // account. A pass in flight for it is cancelled. Shadows and cursors are left
@@ -118,7 +160,18 @@ func (c *Connector) Kick(workspaceID string) {
 // revoking a credential too. Exclude it from Config.Workspaces to keep it
 // gone — a sweep drops what that list no longer names, so with the default
 // list a workspace that disappears from the engine needs no Forget at all.
+//
+// In record mode Forget first flushes the workspace (see Flush), so the edits
+// that wait out the quiet period reach the store; a flush error is logged.
 func (c *Connector) Forget(workspaceID string) {
+	if c.rec != nil {
+		if err := c.Flush(context.Background(), workspaceID); err != nil {
+			c.logPassFailure(context.Background(), workspaceID, "flush", err)
+		}
+		c.mu.Lock()
+		delete(c.unflushed, workspaceID)
+		c.mu.Unlock()
+	}
 	c.mu.Lock()
 	c.dropLocked(workspaceID)
 	c.mu.Unlock()
@@ -232,6 +285,9 @@ func (c *Connector) stop() {
 			w.retry.Stop()
 			w.retry = nil
 		}
+	}
+	if c.wakeTimer != nil {
+		c.wakeTimer.Stop()
 	}
 	c.queue = nil
 	c.ready.Broadcast()

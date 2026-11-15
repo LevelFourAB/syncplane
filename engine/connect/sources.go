@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/levelfourab/syncplane/engine/server"
 )
@@ -33,6 +34,12 @@ type pass struct {
 	// it was read.
 	egressed     *server.Cursor
 	egressedRead bool
+
+	// wake is when record mode wants the next pass of the workspace, zero for
+	// none, and unflushed whether records wait for egress. Set by
+	// recordsPass, applied by afterRecordPass.
+	wake      time.Time
+	unflushed bool
 }
 
 // writer returns the source's Writer half. Egress paths are gated on
@@ -98,6 +105,11 @@ func newSourceCache(static Source, open func(context.Context, string) (Source, e
 }
 
 func (sc *sourceCache) acquire(ctx context.Context, workspaceID string) (*pass, error) {
+	if sc.static == nil && sc.open == nil {
+		// Record mode: the record stores serve every workspace, and there is
+		// no per-workspace source to hold.
+		return &pass{}, nil
+	}
 	if sc.static != nil {
 		w, _ := sc.static.(Writer)
 		return &pass{src: sc.static, w: w}, nil

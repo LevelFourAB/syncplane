@@ -1,0 +1,624 @@
+package connect
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
+	"slices"
+	"time"
+
+	"google.golang.org/protobuf/proto"
+
+	"github.com/levelfourab/syncplane/engine/server"
+)
+
+// passSteps names the steps of one record-mode pass. Every pass also runs
+// the first pass when the workspace has none, and deletes the rows of the
+// records whose delete grace is over.
+type passSteps struct {
+	// list lists every record of every type (Reconcile).
+	list bool
+	// touched ingests the locators Touch reported (Ingress).
+	touched bool
+	// drain reads the feed and writes the records whose quiet period is over
+	// (Drain); flushAll also writes those whose quiet period is not over
+	// (Flush).
+	drain    bool
+	flushAll bool
+}
+
+// recordsPass runs one record-mode pass of a workspace.
+//
+// Ingest runs before the drain, so a record that changed on both sides is
+// merged before it is rendered.
+func (c *Connector) recordsPass(ctx context.Context, ws string, p *pass, steps passSteps) error {
+	pos, ok, err := c.srv.ConsumerPosition(ctx, ws, c.consumer)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		if err := c.firstPass(ctx, ws, p); err != nil {
+			return err
+		}
+		steps.list = false
+		if pos, _, err = c.srv.ConsumerPosition(ctx, ws, c.consumer); err != nil {
+			return err
+		}
+	}
+	if steps.list {
+		for _, rt := range c.rec.types {
+			if err := c.reconcileType(ctx, ws, p, rt); err != nil {
+				return err
+			}
+		}
+	}
+	if steps.touched {
+		if err := c.ingestTouched(ctx, ws, p); err != nil {
+			return err
+		}
+	}
+	if steps.drain {
+		if pos, err = c.drainRecords(ctx, ws, pos); err != nil {
+			return err
+		}
+		if err := c.flushRecords(ctx, ws, p, pos.Seq, steps.flushAll); err != nil {
+			return err
+		}
+	}
+	if err := c.applyDeletes(ctx, ws, p); err != nil {
+		return err
+	}
+	return c.planWake(ctx, ws, p)
+}
+
+// afterRecordPass hands the wake a pass asked for to the scheduler, and
+// remembers whether the workspace has records waiting for egress.
+func (c *Connector) afterRecordPass(w *workspace, p *pass) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.setWakeLocked(w, p.wake)
+	if p.unflushed {
+		c.unflushed[w.id] = struct{}{}
+	} else {
+		delete(c.unflushed, w.id)
+	}
+}
+
+// planWake finds when the workspace next has work: the end of the earliest
+// quiet period or delete grace. A dirty record with a missing mark waits for
+// the grace, not for its quiet period.
+func (c *Connector) planWake(ctx context.Context, ws string, p *pass) error {
+	var next time.Time
+	earlier := func(t time.Time) {
+		if next.IsZero() || t.Before(next) {
+			next = t
+		}
+	}
+	for _, rt := range c.rec.types {
+		gone, err := c.loadGone(ctx, ws, rt)
+		if err != nil {
+			return err
+		}
+		for _, g := range gone {
+			earlier(time.Unix(0, g.Since).Add(max(c.rec.grace, 0)))
+		}
+		if err := c.srv.ScanConsumerShadows(ctx, ws, c.consumer, dirtyEntity(rt), func(key string, raw []byte) error {
+			if gone[key] != nil {
+				return nil
+			}
+			since, err := decodeTime(raw)
+			if err != nil {
+				return err
+			}
+			p.unflushed = true
+			earlier(since.Add(max(c.rec.quiet, 0)))
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+	p.wake = next
+	return nil
+}
+
+// drainRecords reads the feed from pos and marks each record a change
+// reaches, unless the record's agreed content already reflects the change.
+// The marks and the new position commit together.
+//
+// A change maps to its record by the root key, by the RecordField of a
+// member row, and by the member index for the row's earlier record, which
+// is the only way for a deleted row, whose change has no message.
+func (c *Connector) drainRecords(ctx context.Context, ws string, pos server.Cursor) (server.Cursor, error) {
+	type recID struct {
+		rt  *recordType
+		key string
+	}
+	for {
+		var page []server.Change
+		next, more, err := c.srv.Changes(ctx, ws, pos, c.batch, func(ch server.Change) error {
+			if rt, ok := c.rec.byEntity[ch.Entity]; ok && rt.direction == Bidirectional {
+				page = append(page, ch)
+			}
+			return nil
+		})
+		if errors.Is(err, server.ErrCursorTooOld) {
+			// The feed cannot say what changed: every record is a candidate.
+			// Egress renders each and writes only those that differ.
+			c.logger.LogAttrs(ctx, slog.LevelWarn, "feed cursor cannot be resumed; marking every record for egress",
+				slog.String("workspace", ws), slog.Uint64("resume_seq", next.Seq))
+			marks, err := c.markAll(ctx, ws)
+			if err != nil {
+				return pos, err
+			}
+			if done, err := c.advance(ctx, ws, pos, next, marks); err != nil || done {
+				return pos, err
+			}
+			pos = next
+			continue
+		}
+		if err != nil {
+			return pos, err
+		}
+		now := c.now()
+		shadows := make(map[recID]*recShadow)
+		marked := make(map[recID]bool)
+		var marks []server.ConsumerShadowWrite
+		for _, ch := range page {
+			rt := c.rec.byEntity[ch.Entity]
+			keys, err := c.changeRecords(ctx, ws, rt, ch)
+			if err != nil {
+				return pos, err
+			}
+			for _, key := range keys {
+				id := recID{rt, key}
+				if marked[id] {
+					continue
+				}
+				sh, ok := shadows[id]
+				if !ok {
+					if sh, err = c.loadRecShadow(ctx, ws, rt, key); err != nil {
+						return pos, err
+					}
+					shadows[id] = sh
+				}
+				if sh != nil && ch.Seq <= sh.Version {
+					continue
+				}
+				if sh == nil && ch.Deleted && ch.Entity == rt.rootName {
+					// No store record to delete: the store never had it, or
+					// the connector removed it with its shadow.
+					continue
+				}
+				marked[id] = true
+				marks = append(marks, server.ConsumerShadowWrite{Entity: dirtyEntity(rt), Key: key, Snapshot: encodeTime(now)})
+			}
+		}
+		if done, err := c.advance(ctx, ws, pos, next, marks); err != nil || done {
+			return pos, err
+		}
+		pos = next
+		if !more {
+			return pos, nil
+		}
+	}
+}
+
+// advance commits the feed position next with the dirty marks of the page
+// read from pos. done reports that the workspace's history changed since the
+// page was read; the next pass meets that and heals.
+func (c *Connector) advance(ctx context.Context, ws string, pos, next server.Cursor, marks []server.ConsumerShadowWrite) (done bool, err error) {
+	from := server.Cursor{Seq: pos.Seq, Entity: pos.Entity, Key: pos.Key}
+	err = c.srv.AdvanceConsumer(ctx, ws, c.consumer, server.ConsumerUpdate{Cursor: next, Shadows: marks, From: &from})
+	if errors.Is(err, server.ErrCursorForeign) {
+		return true, nil
+	}
+	return false, err
+}
+
+// changeRecords returns the keys of the records one change reaches.
+func (c *Connector) changeRecords(ctx context.Context, ws string, rt *recordType, ch server.Change) ([]string, error) {
+	if ch.Entity == rt.rootName {
+		return []string{ch.Key}, nil
+	}
+	var keys []string
+	raw, err := c.readShadow(ctx, ws, idxEntity(ch.Entity), ch.Key)
+	if err != nil {
+		return nil, err
+	}
+	if raw != nil {
+		keys = append(keys, string(raw))
+	}
+	if !ch.Deleted && ch.Message != nil {
+		if key := c.rec.memberOf[ch.Entity].recordKeyOf(ch.Message); key != "" && (len(keys) == 0 || keys[0] != key) {
+			keys = append(keys, key)
+		}
+	}
+	return keys, nil
+}
+
+// markAll returns a dirty mark for every record of every bidirectional type:
+// each record with a shadow and each root row.
+func (c *Connector) markAll(ctx context.Context, ws string) ([]server.ConsumerShadowWrite, error) {
+	now := encodeTime(c.now())
+	var marks []server.ConsumerShadowWrite
+	for _, rt := range c.rec.types {
+		if rt.direction != Bidirectional {
+			continue
+		}
+		keys := make(map[string]bool)
+		if err := c.srv.ScanConsumerShadows(ctx, ws, c.consumer, recEntity(rt), func(key string, _ []byte) error {
+			keys[key] = true
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		roots, err := c.rootKeys(ctx, ws, rt)
+		if err != nil {
+			return nil, err
+		}
+		for _, k := range roots {
+			keys[k] = true
+		}
+		for _, key := range slices.Sorted(maps.Keys(keys)) {
+			marks = append(marks, server.ConsumerShadowWrite{Entity: dirtyEntity(rt), Key: key, Snapshot: now})
+		}
+	}
+	return marks, nil
+}
+
+// rootKeys returns the key of every root row of a type, in key order.
+func (c *Connector) rootKeys(ctx context.Context, ws string, rt *recordType) ([]string, error) {
+	var keys []string
+	err := c.srv.View(server.Trusted(ctx), ws, func(tx *server.ViewTx) error {
+		after := ""
+		for {
+			last, more, err := tx.ScanPage(rt.root, after, c.rec.batchRows, func(msg proto.Message, _ uint64) error {
+				_, key, err := c.srv.EntityKey(msg)
+				keys = append(keys, key)
+				return err
+			})
+			if err != nil || !more {
+				return err
+			}
+			after = last
+		}
+	})
+	return keys, err
+}
+
+// flushRecords writes the dirty records whose quiet period is over, or every
+// dirty record with all. A record with a missing mark waits: the store
+// deleted it, and that delete wins when the grace is over.
+func (c *Connector) flushRecords(ctx context.Context, ws string, p *pass, pos uint64, all bool) error {
+	now := c.now()
+	for _, rt := range c.rec.types {
+		if rt.direction != Bidirectional {
+			continue
+		}
+		var due []string
+		if err := c.srv.ScanConsumerShadows(ctx, ws, c.consumer, dirtyEntity(rt), func(key string, raw []byte) error {
+			since, err := decodeTime(raw)
+			if err != nil {
+				return err
+			}
+			if all || c.rec.quiet < 0 || !now.Before(since.Add(c.rec.quiet)) {
+				due = append(due, key)
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+		if len(due) == 0 {
+			continue
+		}
+		gone, err := c.loadGone(ctx, ws, rt)
+		if err != nil {
+			return err
+		}
+		for _, key := range due {
+			if gone[key] != nil {
+				continue
+			}
+			if err := c.egressRecord(ctx, ws, p, rt, key, pos); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// egressRecord writes one record from its rows to the store. pos is the feed
+// position the drain reached: the render reflects at least the changes up to
+// it.
+//
+// Before the write it reads the store record. When its fingerprint moved
+// since the agreed state, the store has an edit the engine has not seen, and
+// the record is ingested instead: the merge keeps both edits, and its
+// write-back takes the engine's edit to the store.
+func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *recordType, key string, pos uint64) error {
+	sh, err := c.loadRecShadow(ctx, ws, rt, key)
+	if err != nil {
+		return err
+	}
+	if sh != nil {
+		rec, err := rt.store.Read(ctx, ws, sh.Locator)
+		if errors.Is(err, ErrRecordNotFound) {
+			// The dirty mark stays: a record that comes back in the grace
+			// gets the engine's edit.
+			return c.markGone(ctx, ws, rt, key, nil)
+		}
+		if err != nil {
+			return fmt.Errorf("connect: read %s at %q: %w", rt.rootName, sh.Locator, err)
+		}
+		if rec.Fingerprint != sh.Fingerprint {
+			if rec.Locator == "" {
+				rec.Locator = sh.Locator
+			}
+			j := &ingestJob{rt: rt, key: key, ref: rec.RecordRef, rec: rec, read: true}
+			if err := c.ingestJobs(ctx, ws, p, []*ingestJob{j}); err != nil {
+				return err
+			}
+			if j.failed {
+				return c.deferDirty(ctx, ws, rt, key)
+			}
+			return nil
+		}
+	}
+
+	var (
+		del, agreed bool
+		out         Rendered
+		next        *recShadow
+	)
+	err = c.srv.Mutate(server.TrustedAs(ctx, c.label), ws, func(tx *server.EntityTx) error {
+		del, agreed, next = false, false, nil
+		root, members, err := c.loadRows(tx, rt, key)
+		if err != nil {
+			return err
+		}
+		if root == nil {
+			del = true
+			return nil
+		}
+		r, ok, err := rt.codec.Render(tx, RenderInput{Key: key, Base: sh.agreed(), Root: root, Members: members})
+		if err != nil {
+			return &codecError{err: fmt.Errorf("connect: render %s %q: %w", rt.rootName, key, err)}
+		}
+		if !ok {
+			del = true
+			return nil
+		}
+		if r.Locator == "" {
+			if sh == nil {
+				return &codecError{err: fmt.Errorf("connect: render %s %q: a new record needs a locator", rt.rootName, key)}
+			}
+			r.Locator = sh.Locator
+		}
+		if _, members, err = c.loadRows(tx, rt, key); err != nil {
+			return err
+		}
+		mk, err := c.memberKeys(members)
+		if err != nil {
+			return err
+		}
+		out = r
+		next = &recShadow{Locator: r.Locator, Hash: contentHash(r.Content), Version: max(pos, tx.Seq()), Payload: r.Payload, Members: mk}
+		if sh.sameContent(r.Locator, r.Content) {
+			agreed = true
+			next.Fingerprint = sh.Fingerprint
+			return c.putAgreed(tx, rt, key, sh, next, true)
+		}
+		return nil
+	})
+	var ce *codecError
+	if errors.As(err, &ce) {
+		c.logger.LogAttrs(ctx, slog.LevelError, "record skipped: codec failed",
+			slog.String("workspace", ws), slog.String("entity", rt.rootName),
+			slog.String("key", key), slog.Any("err", err))
+		return c.deferDirty(ctx, ws, rt, key)
+	}
+	if err != nil {
+		return err
+	}
+	if del {
+		if sh != nil {
+			if err := rt.store.Delete(ctx, ws, sh.Locator); err != nil {
+				return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, sh.Locator, err)
+			}
+		}
+		return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
+			return c.forgetRecord(tx, rt, key, sh)
+		})
+	}
+	if agreed {
+		return nil
+	}
+	from := ""
+	if sh != nil && out.Locator != sh.Locator {
+		from = sh.Locator
+	}
+	if sh == nil || from != "" {
+		// A locator new to this record: no shadow describes what the store
+		// holds there.
+		owner, err := c.readShadow(ctx, ws, locEntity(rt), out.Locator)
+		if err != nil {
+			return err
+		}
+		if owner != nil && string(owner) != key {
+			c.logger.LogAttrs(ctx, slog.LevelError, "record skipped: its locator belongs to another record",
+				slog.String("workspace", ws), slog.String("entity", rt.rootName), slog.String("key", key),
+				slog.String("locator", out.Locator), slog.String("owner", string(owner)))
+			return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
+				return tx.DeleteConsumerShadow(c.consumer, dirtyEntity(rt), key)
+			})
+		}
+		existing, err := rt.store.Read(ctx, ws, out.Locator)
+		switch {
+		case errors.Is(err, ErrRecordNotFound):
+		case err != nil:
+			return fmt.Errorf("connect: read %s at %q: %w", rt.rootName, out.Locator, err)
+		case bytes.Equal(existing.Content, out.Content):
+			if from != "" {
+				if err := rt.store.Delete(ctx, ws, from); err != nil {
+					return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, from, err)
+				}
+			}
+			next.Fingerprint = existing.Fingerprint
+			return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
+				return c.putAgreed(tx, rt, key, sh, next, true)
+			})
+		case c.rec.overwrite != nil:
+			if err := c.rec.overwrite(ctx, Overwrite{
+				WorkspaceID: ws, Entity: rt.rootName, Key: key, Locator: out.Locator,
+				Old: existing.Content, New: out.Content,
+			}); err != nil {
+				return fmt.Errorf("connect: overwrite %s %q at %q: %w", rt.rootName, key, out.Locator, err)
+			}
+		}
+	}
+	fp, err := rt.store.Write(ctx, ws, Record{RecordRef: RecordRef{Key: key, Locator: out.Locator}, Content: out.Content}, from)
+	if err != nil {
+		return fmt.Errorf("connect: write %s %q to %q: %w", rt.rootName, key, out.Locator, err)
+	}
+	next.Fingerprint = fp
+	return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
+		return c.putAgreed(tx, rt, key, sh, next, true)
+	})
+}
+
+// deferDirty moves a record the codec refused out of the next passes: its
+// dirty mark is due again after the retry delay, not at once, so a codec
+// that fails on every attempt does not spin the workspace.
+func (c *Connector) deferDirty(ctx context.Context, ws string, rt *recordType, key string) error {
+	since := c.now().Add(max(c.retryMin, 0))
+	return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
+		return tx.PutConsumerShadow(c.consumer, dirtyEntity(rt), key, encodeTime(since))
+	})
+}
+
+// firstPass runs the first pass of a workspace that has no record-mode
+// position, under Records.FirstPass, and then records the position the feed
+// had before it started. The changes the pass itself wrote are skipped by
+// the shadows' versions; client changes made during the pass are drained.
+//
+// A pass that fails leaves no position, so the next pass runs the first pass
+// again. The records it already agreed on have shadows and are skipped.
+func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
+	head, err := c.srv.CurrentSeq(ctx, ws)
+	if err != nil {
+		return err
+	}
+	for _, rt := range c.rec.types {
+		var refs []RecordRef
+		if err := rt.store.List(ctx, ws, func(ref RecordRef) error {
+			refs = append(refs, ref)
+			return nil
+		}); err != nil {
+			return fmt.Errorf("connect: list %s: %w", rt.rootName, err)
+		}
+		if rt.direction == IngressOnly || c.rec.firstPass == SourceWins {
+			if err := c.ingestRefs(ctx, ws, p, rt, refs, true); err != nil {
+				return err
+			}
+			if c.rec.firstPass == SourceWins {
+				if err := c.deleteUnrecorded(ctx, ws, p, rt); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		shadows, err := c.loadRecShadows(ctx, ws, rt)
+		if err != nil {
+			return err
+		}
+		roots, err := c.rootKeys(ctx, ws, rt)
+		if err != nil {
+			return err
+		}
+		for _, key := range roots {
+			if shadows[key] != nil {
+				continue
+			}
+			if err := c.egressRecord(ctx, ws, p, rt, key, head); err != nil {
+				return err
+			}
+		}
+		// What no root rendered to is new to the engine. The rest is agreed
+		// now, and ingest skips it by its fingerprint.
+		if err := c.ingestRefs(ctx, ws, p, rt, refs, false); err != nil {
+			return err
+		}
+	}
+	return c.srv.AdvanceConsumer(ctx, ws, c.consumer, server.ConsumerUpdate{Cursor: server.Cursor{Seq: head}})
+}
+
+// deleteUnrecorded deletes the root rows with no record shadow, and the
+// member rows whose record has none: the rows a SourceWins first pass found
+// in no store record.
+func (c *Connector) deleteUnrecorded(ctx context.Context, ws string, p *pass, rt *recordType) error {
+	shadows, err := c.loadRecShadows(ctx, ws, rt)
+	if err != nil {
+		return err
+	}
+	sweep := func(prototype proto.Message, recordOf func(msg proto.Message, key string) string) error {
+		after := ""
+		for {
+			var (
+				last string
+				more bool
+			)
+			wrote := false
+			if err := c.srv.Mutate(server.TrustedAs(ctx, c.label), ws, func(tx *server.EntityTx) error {
+				type row struct {
+					msg proto.Message
+					key string
+				}
+				var doomed []row
+				var err error
+				last, more, err = tx.ScanPage(prototype, after, c.rec.batchRows, func(msg proto.Message) error {
+					_, key, err := c.srv.EntityKey(msg)
+					if err != nil {
+						return err
+					}
+					if shadows[recordOf(msg, key)] == nil {
+						doomed = append(doomed, row{msg, key})
+					}
+					return nil
+				})
+				if err != nil {
+					return err
+				}
+				for _, r := range doomed {
+					if err := tx.Delete(r.msg, r.key); err != nil {
+						return err
+					}
+				}
+				wrote = len(doomed) > 0
+				return nil
+			}); err != nil {
+				return err
+			}
+			if wrote {
+				if err := c.pace(ctx, p); err != nil {
+					return err
+				}
+			}
+			if !more {
+				return nil
+			}
+			after = last
+		}
+	}
+	if err := sweep(rt.root, func(_ proto.Message, key string) string { return key }); err != nil {
+		return err
+	}
+	for _, m := range rt.members {
+		if err := sweep(m.prototype, func(msg proto.Message, _ string) string { return m.recordKeyOf(msg) }); err != nil {
+			return err
+		}
+	}
+	return nil
+}

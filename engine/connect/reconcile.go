@@ -30,7 +30,18 @@ import (
 // Calling it directly forces the enumeration but takes no checkpoint, so a
 // change racing the scan is caught by the next incremental pass rather than
 // stepped over.
+//
+// In record mode Reconcile lists every record of every type: it ingests the
+// records whose fingerprint changed and the new ones, marks the missing ones
+// for delete after Records.DeleteGrace, and deletes the rows of records whose
+// grace is over. A record whose content the engine also changed is written
+// back to the store when the merge kept engine edits.
 func (c *Connector) Reconcile(ctx context.Context, workspaceID string) error {
+	if c.rec != nil {
+		return c.converge(ctx, workspaceID, func(p *pass) error {
+			return c.recordsPass(ctx, workspaceID, p, passSteps{list: true})
+		})
+	}
 	return c.converge(ctx, workspaceID, func(p *pass) error {
 		return c.reconcile(ctx, workspaceID, p)
 	})
