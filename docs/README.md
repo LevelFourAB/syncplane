@@ -43,6 +43,8 @@ Task-oriented guides. Each guide assumes you already have a running app.
 - [React to changes (server-side effects)](how-to/react-to-changes.md)
 - [Follow committed changes (change feed)](how-to/change-feed.md)
 - [Sync an external store (connectors)](how-to/sync-an-external-store.md)
+- [Sync a folder of files as records](how-to/sync-a-folder-of-files-as-records.md)
+- [Run a record connector on a replica](how-to/run-a-record-connector-on-a-replica.md)
 - [Host multiple apps in one process](how-to/host-multiple-apps.md)
 - [Serve sync through a tunnel (desktop shells, sidecars, WebSockets)](how-to/serve-sync-through-a-tunnel.md)
 - [Embed sync in a Go desktop app](how-to/embed-sync-in-a-go-desktop-app.md)
@@ -88,7 +90,8 @@ Information-oriented. Use these pages to look up facts.
 - [Proto options](reference/proto-options.md) — `(syncplane.v1.entity)`,
   `(syncplane.v1.field_behavior)` and `syncplane.v1.BlobRef`.
 - [Connectors](reference/connectors.md) — the `Source` port and its optional
-  halves, every connector `Config` field, error sentinels, and `Health`.
+  halves, every connector `Config` field, record mode (`Records`, `RecordStore`,
+  `Codec`, `RowCodec`), error sentinels, and `Health`.
 - [Effects runtime](reference/effects.md) — the `Sink` seam, `Runtime.Register`,
   consumer names, and the fields a watched change carries.
 - [Naming rules](reference/naming.md) — what an entity may be called, which
@@ -127,7 +130,9 @@ Understanding-oriented. Read these when a behavior surprises you.
   why the feed reports state and not events, what the tombstone horizon costs a
   consumer that falls behind, and what a handler is promised.
 - [How connectors converge](explanation/connectors.md) — the per-row shadow as
-  echo breaker and three-way merge base, and text across the boundary.
+  echo breaker and three-way merge base, text across the boundary, and record
+  mode: keys and locators, the quiet period, rename detection, the first-pass
+  policy and refused writes on a replica.
 - [Multi-node architecture](explanation/multi-node-architecture.md) — which tier
   holds state, what each failure costs, and why leases stay advisory.
 - [Multi-tab behavior](explanation/multi-tab.md) — one store, one stream

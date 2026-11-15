@@ -201,6 +201,8 @@ of Markdown files, including `Note` rows as Markdown documents.
 
 ## Related
 
+- [Sync a folder of files as records](sync-a-folder-of-files-as-records.md) —
+  record mode, where one file holds many rows.
 - [How connectors converge](../explanation/connectors.md)
 - [Connectors reference](../reference/connectors.md) — every interface,
   `Config` field, sentinel and health value.
