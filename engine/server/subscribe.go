@@ -527,6 +527,7 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 			logReset(ctx, sc.logger, reason)
 			return s.dropScope(ctx, stream, sc, syncplanev1.WorkspaceDropped_REASON_RESET, fmt.Errorf("%s", reason))
 		}
+		s.issueCursor(ctx, sc.ws, page, &next)
 		sc.cur = next
 		sc.rawCursor = page.GetNextCursor()
 		last := !page.GetHasMore()

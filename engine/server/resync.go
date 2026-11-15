@@ -223,7 +223,6 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 			return cursorState{}, err
 		}
 		resp.CallerAccess, resp.CallerAccessDelta = newEm.callerAccessUpdate(cur, true, current)
-		resp.NextCursor = s.encodeCursor(newEm.ctx, newEm.ws, &st)
 	} else {
 		// Mid-resync the cursor keeps the access it was issued under, which
 		// is the old side the next page diffs from.
@@ -239,7 +238,6 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 			_, st.resync.ToAccessHash = newEm.boundReadAccess()
 			st.resync.ToMovesThrough = newEm.movesThrough
 		}
-		resp.NextCursor = s.encodeCursor(newEm.ctx, newEm.ws, &st)
 	}
 	// Either way the client must pull again: mid-resync to continue the
 	// diff, after completion to catch up from the original seq.

@@ -161,6 +161,9 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	// The store epoch the Begin cursor names. Every page reads rows of this
 	// incarnation only (see snapshotReadTx).
 	var beginEpoch uint64
+	// The Begin cursor of a snapshot that does not resume, encoded once the
+	// transaction below has ended.
+	var beginState *cursorState
 	// Anchored: the Begin cursor's seq becomes the client's resume point, so it
 	// must not sit behind writes the client has already been acked — and the
 	// anchor is at least any resume's own floor.
@@ -262,7 +265,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 				return err
 			}
 			emitter.stampAccess(&st, cursorState{})
-			begin.Cursor = s.encodeCursor(ctx, msg.GetWorkspaceId(), &st)
+			beginState = &st
 			begin.Seq = current
 		}
 		// The whole snapshot on a resumed one too. A count of only the rest
@@ -286,6 +289,11 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		return nil
 	}); err != nil {
 		return err
+	}
+	// After the transaction, because encoding writes the cursor-state entries
+	// the cursor names (see Server.issueCursor).
+	if beginState != nil {
+		begin.Cursor = s.encodeCursor(ctx, msg.GetWorkspaceId(), beginState)
 	}
 	if err := stream.Send(&syncplanev1.BootstrapResponse{
 		Body: &syncplanev1.BootstrapResponse_Begin_{Begin: begin},

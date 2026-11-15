@@ -596,12 +596,10 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 			return s.store.WithReadTx(ctx, msg.GetWorkspaceId(), fn)
 		}
 	}
+	var next cursorState
 	err = read(func(tx storage.ReadTx) error {
 		ackKey := watermarkKey(principal, msg.GetClientId())
-		var (
-			next cursorState
-			e    error
-		)
+		var e error
 		resp, next, resetSeen, e = s.servePullPage(ctx, tx, route, cur, emitter, wantHash, epoch, msg.GetSubscriptions(), ackKey, msg.GetCursor(), limit)
 		if e != nil {
 			return e
@@ -611,6 +609,7 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	if err != nil {
 		return nil, err
 	}
+	s.issueCursor(ctx, msg.GetWorkspaceId(), resp, &next)
 	// Advertised on every pull regardless of path (normal, resync, reset) so a
 	// client learns of skew even when the response carries no rows.
 	resp.SchemaRevision = s.catalogPtr().schemaRev
@@ -691,9 +690,25 @@ func (s *Server) routePull(ctx context.Context, ws string, cur cursorState, rawC
 	return pullRoute{}, nil
 }
 
+// issueCursor encodes next as the next_cursor of page, which servePullPage
+// served, and writes the cursor-state entries the cursor names. A reset page
+// keeps the cursor it carries. Call it after the page's read transaction has
+// ended: a cursor-state store backed by the adapter's database takes a
+// connection of its own for each write, and a write from inside the
+// transaction holds two connections at once, so enough concurrent pulls take
+// every connection of a bounded pool and wait for each other.
+func (s *Server) issueCursor(ctx context.Context, ws string, page *syncplanev1.PullResponse, next *cursorState) {
+	if page.GetReset_() {
+		return
+	}
+	page.NextCursor = s.encodeCursor(ctx, ws, next)
+}
+
 // servePullPage serves one page along route under tx: a forward page
 // (pullPage), a delta resync step, or a reset. The returned cursorState is the
 // position the page advanced to; Subscribe carries it forward across pages.
+// A page that is not a reset has no next_cursor yet: the caller issues it with
+// issueCursor once tx has ended.
 //
 // It binds the caller's access in the access model from tx first. A change of
 // that access since the cursor was issued also makes the page a resync step,
@@ -1090,7 +1105,6 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		}
 		emitter.stampAccess(&next, cur)
 		resp.CallerAccess, resp.CallerAccessDelta = emitter.callerAccessUpdate(cur, len(rawCursor) > 0, current)
-		resp.NextCursor = s.encodeCursor(emitter.ctx, emitter.ws, &next)
 		resp.Seq = next.seq
 		return resp, next, resetNone, nil
 	}
@@ -1387,7 +1401,6 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		return nil, cursorState{}, resetNone, err
 	}
 	resp.CallerAccess, resp.CallerAccessDelta = emitter.callerAccessUpdate(cur, len(rawCursor) > 0, current)
-	resp.NextCursor = s.encodeCursor(emitter.ctx, emitter.ws, &next)
 	resp.Seq = next.seq
 	return resp, next, resetNone, nil
 }

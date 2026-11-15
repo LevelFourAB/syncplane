@@ -12,23 +12,43 @@ import (
 
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/internal/pgtest"
+	"github.com/levelfourab/syncplane/engine/storage"
+	"github.com/levelfourab/syncplane/engine/storage/pgstore"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
 
-// A pull that reads a cursor-state entry while its read transaction holds a
-// connection needs two connections of the reader pool at once. Enough such
+// A pull that reads or writes a cursor-state entry while its read transaction
+// holds a connection needs two connections of the pool at once. Enough such
 // pulls at the same time hold every connection and wait for one more, until
-// their deadlines end them. With one reader connection, the first such read
-// waits forever, so these specs fail on the deadline instead of by chance.
-var _ = Describe("Access model sync on a store with one reader connection", func() {
-	var f *accessFixture
-
-	BeforeEach(func() {
+// their deadlines end them. With one connection, the first such call waits
+// forever, so these specs fail on the deadline instead of by chance. The
+// sqlitestore cursor-state store writes on the writer connection, so only
+// pgstore, with one pool for everything, shows a write.
+var _ = DescribeTableSubtree("Access model sync on a store with one connection to read with",
+	func(open func() storage.Adapter) { describeOneReadConnection(open) },
+	Entry("sqlitestore", func() storage.Adapter {
+		GinkgoHelper()
 		store, err := sqlitestore.Open(filepath.Join(GinkgoT().TempDir(), "test.db"),
 			sqlitestore.WithReadConnections(1))
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
-		f = newAccessFixtureOn(store)
+		return store
+	}),
+	Entry("pgstore", func() storage.Adapter {
+		GinkgoHelper()
+		store, err := pgstore.Open(GinkgoT().Context(), pgtest.DSN(), pgstore.WithMaxConns(1))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+		return store
+	}),
+)
+
+func describeOneReadConnection(open func() storage.Adapter) {
+	var f *accessFixture
+
+	BeforeEach(func() {
+		f = newAccessFixtureOn(open())
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		DeferCleanup(cancel)
 		f.ctx = ctx
@@ -97,4 +117,4 @@ var _ = Describe("Access model sync on a store with one reader connection", func
 		f.seed(&accessv1.ProjectMember{Id: "pm-writer2", Project: project("p2"), UserId: "writer", Role: "project_admin"})
 		Expect(writer.syncDelta()).NotTo(BeNil())
 	})
-})
+}
