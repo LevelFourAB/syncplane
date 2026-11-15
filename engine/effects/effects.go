@@ -277,6 +277,18 @@ type consumer struct {
 	// watch maps a wire entity name to the field paths whose before-state this
 	// consumer keeps a shadow of. Absent means no shadow, which costs nothing.
 	watch map[string][]string
+	// skip holds the Actor.System values whose changes never reach the sink.
+	skip map[string]struct{}
+}
+
+// skips reports whether a change by this actor is dropped before the runtime
+// builds its event.
+func (c *consumer) skips(actor storage.Actor) bool {
+	if len(c.skip) == 0 {
+		return false
+	}
+	_, ok := c.skip[actor.System]
+	return ok
 }
 
 // wants reports whether a change to this entity reaches the sink.
@@ -433,10 +445,10 @@ func New(cfg Config) (*Runtime, error) {
 // history. Register before Start; registering afterwards is an error, because
 // runners are built per consumer when they start.
 func (rt *Runtime) Register(name string, sink Sink, entities ...proto.Message) error {
-	return rt.register(name, sink, entities, nil)
+	return rt.register(name, sink, entities, nil, nil)
 }
 
-func (rt *Runtime) register(name string, sink Sink, entities []proto.Message, watch map[string][]string) error {
+func (rt *Runtime) register(name string, sink Sink, entities []proto.Message, watch map[string][]string, skip map[string]struct{}) error {
 	if sink == nil {
 		return fmt.Errorf("effects: consumer %q needs a sink", name)
 	}
@@ -451,7 +463,7 @@ func (rt *Runtime) register(name string, sink Sink, entities []proto.Message, wa
 	if _, dup := rt.consumers[name]; dup {
 		return fmt.Errorf("effects: consumer %q registered twice", name)
 	}
-	c := &consumer{name: name, sink: sink, entities: make(map[string]proto.Message, len(entities)), watch: watch}
+	c := &consumer{name: name, sink: sink, entities: make(map[string]proto.Message, len(entities)), watch: watch, skip: skip}
 	for _, prototype := range entities {
 		if prototype == nil {
 			return fmt.Errorf("effects: consumer %q registered with a nil entity", name)

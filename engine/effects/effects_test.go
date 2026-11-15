@@ -140,6 +140,72 @@ var _ = Describe("Effects runtime", func() {
 		})
 	})
 
+	Describe("skipping writers", func() {
+		const importer = "import"
+
+		It("keeps a skipped writer's changes from the handler and delivers other writers'", func() {
+			f := newFixture()
+			rec := newRecorder()
+			Expect(effects.On(f.rt, "widgets", rec.handle, effects.SkipWriters(importer))).To(Succeed())
+
+			f.put(server.TrustedAs(ctx, importer), ws, &testdatav1.Widget{Id: "imported"})
+			f.put(server.TrustedAs(ctx, "editor"), ws, &testdatav1.Widget{Id: "edited"})
+			Expect(f.rt.Drain(ctx, "widgets", ws)).To(Succeed())
+
+			Expect(rec.keys()).To(Equal([]string{"edited"}))
+			Expect(rec.events()[0].Actor.System).To(Equal("editor"))
+		})
+
+		It("advances the position past skipped changes", func() {
+			f := newFixture()
+			rec := newRecorder()
+			Expect(effects.On(f.rt, "widgets", rec.handle, effects.SkipWriters(importer))).To(Succeed())
+
+			f.put(server.TrustedAs(ctx, importer), ws, &testdatav1.Widget{Id: "imported"})
+			Expect(f.rt.Drain(ctx, "widgets", ws)).To(Succeed())
+			head, err := f.srv.CurrentSeq(ctx, ws)
+			Expect(err).NotTo(HaveOccurred())
+			cur, _, err := f.srv.ConsumerPosition(ctx, ws, "widgets")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(cur.Seq).To(Equal(head))
+			Expect(rec.events()).To(BeEmpty())
+		})
+
+		It("reports the next delivered change as a first sighting when a watched row was skipped", func() {
+			f := newFixture()
+			rec := newRecorder()
+			Expect(effects.On(f.rt, "widgets", rec.handle, effects.Watch("label"), effects.SkipWriters(importer))).To(Succeed())
+
+			f.put(server.TrustedAs(ctx, "editor"), ws, &testdatav1.Widget{Id: "w1", Label: "one"})
+			Expect(f.rt.Drain(ctx, "widgets", ws)).To(Succeed())
+			f.put(server.TrustedAs(ctx, importer), ws, &testdatav1.Widget{Id: "w1", Label: "two"})
+			Expect(f.rt.Drain(ctx, "widgets", ws)).To(Succeed())
+			f.put(server.TrustedAs(ctx, "editor"), ws, &testdatav1.Widget{Id: "w1", Label: "two", Count: 5})
+			Expect(f.rt.Drain(ctx, "widgets", ws)).To(Succeed())
+
+			Expect(rec.events()).To(HaveLen(2))
+			ev := rec.events()[1]
+			Expect(ev.FirstSeen).To(BeTrue())
+			Expect(ev.Changed).To(BeEmpty())
+			Expect(ev.Before).To(BeNil())
+		})
+
+		It("keeps comparing normally on rows the skipped writer never touched", func() {
+			f := newFixture()
+			rec := newRecorder()
+			Expect(effects.On(f.rt, "widgets", rec.handle, effects.Watch("label"), effects.SkipWriters(importer))).To(Succeed())
+
+			f.put(server.TrustedAs(ctx, "editor"), ws, &testdatav1.Widget{Id: "w1", Label: "one"})
+			f.put(server.TrustedAs(ctx, importer), ws, &testdatav1.Widget{Id: "w2", Label: "x"})
+			Expect(f.rt.Drain(ctx, "widgets", ws)).To(Succeed())
+			f.put(server.TrustedAs(ctx, "editor"), ws, &testdatav1.Widget{Id: "w1", Label: "two"})
+			Expect(f.rt.Drain(ctx, "widgets", ws)).To(Succeed())
+
+			ev := rec.events()[1]
+			Expect(ev.Changed).To(Equal([]string{"label"}))
+		})
+	})
+
 	Describe("failure handling", func() {
 		It("wedges the consumer at the failing change and commits the prefix", func() {
 			f := newFixture()

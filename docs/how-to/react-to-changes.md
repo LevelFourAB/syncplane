@@ -94,6 +94,7 @@ When writing handlers, account for the following conditions:
 - **Deletions (`ev.Deleted`)**: When a row is deleted, `ev.Deleted` is `true` and `ev.After` is zero. Always check `ev.Deleted` before dereferencing `ev.After`. If you configure `Watch`, `ev.Before` holds the watched fields as they stood when this consumer last acted on the row.
 - **First sightings (`ev.FirstSeen`)**: `ev.FirstSeen` is `true` when the consumer holds no shadow state for the row. This occurs when a row is created, when a row existed before consumer registration, or after a tombstone horizon reset. `ev.Changed` is empty and `ev.DidChange` returns `false`. Skip `ev.FirstSeen` events to react only to observed transitions, or check `ev.After` to process existing rows.
 - **Watched transitions**: `effects.Watch("field")` stores a shadow copy of only the declared fields. `ev.DidChange("field")` reports whether that field changed since the consumer last processed the row.
+- **Skipping bulk writers**: `effects.SkipWriters("import")` drops changes whose last writer has that `Actor.System` label (a `server.TrustedAs` name, or `connect:<WriterID>` for a connector) before the runtime builds an event. The handler never sees them. After a skipped change to a watched row, the next change the handler does see reports `ev.FirstSeen`, because the consumer's memory of that row is cleared.
 - **Errors and skipping**: Return `nil` to acknowledge and skip unneeded changes. Return an error to pause the consumer on that workspace and retry with backoff.
 
 ### 3. Write back idempotently from a handler

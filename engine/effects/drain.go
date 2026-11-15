@@ -209,6 +209,17 @@ func (rt *Runtime) drain(ctx context.Context, c *consumer, workspaceID string) (
 func (rt *Runtime) deliverPage(ctx context.Context, c *consumer, workspaceID string, page []server.Change, up *server.ConsumerUpdate) (int, error) {
 	delivered := 0
 	for _, ch := range page {
+		if c.skips(ch.Actor) {
+			// Nothing is built or delivered. A shadow that survived would be
+			// stale against the row, so the next delivered change would report
+			// this writer's edits as changes: drop it instead, which costs no
+			// read and no diff. The next delivery is a first sighting.
+			if _, paths := c.watches(ch.Entity); paths != nil {
+				up.Shadows = append(up.Shadows, server.ConsumerShadowWrite{Entity: ch.Entity, Key: ch.Key})
+			}
+			delivered++
+			continue
+		}
 		// The page was read in one transaction, so the epoch Changes stamped
 		// on its cursor is the epoch of every change in it.
 		out, shadow, err := rt.buildChange(ctx, c, workspaceID, up.Cursor.Epoch, ch)

@@ -65,6 +65,31 @@ type Option func(*registration)
 // registration accumulates what the options say before the consumer is built.
 type registration struct {
 	watch []string
+	skip  []string
+}
+
+// SkipWriters drops the changes whose last writer is one of the named systems,
+// before the handler runs. A name matches storage.Actor.System exactly: the
+// label a write made under server.TrustedAs carries, or "connect:<WriterID>"
+// for a connector's writes. An empty name matches the writes that carry no
+// system label.
+//
+// Use it when a bulk writer, such as an import, produces changes the handler
+// ignores anyway. A skipped change costs the runtime almost nothing: it builds
+// no event and records no after-state, and the consumer's position still moves
+// past it.
+//
+// The handler never sees a skipped change, so it cannot act on it. Matching is
+// on the row's last writer: when a skipped writer's change coalesces with a later
+// write by another system, the feed reports one change with the later actor and
+// the handler gets it.
+//
+// A skipped change also clears the consumer's Watch memory of that row. The
+// next change to the row that the handler does see reports FirstSeen, with an
+// empty Changed and no Before, instead of reporting the skipped writer's edits
+// as changes. Without Watch, skipping has no other effect.
+func SkipWriters(names ...string) Option {
+	return func(r *registration) { r.skip = append(r.skip, names...) }
 }
 
 // On registers an in-process handler for one entity's changes, under a durable
@@ -108,7 +133,14 @@ func On[T proto.Message](rt *Runtime, name string, fn func(context.Context, Even
 		}
 		watch = map[string][]string{entity: reg.watch}
 	}
-	return rt.register(name, handlerSink[T]{fn: fn}, []proto.Message{prototype}, watch)
+	var skip map[string]struct{}
+	if len(reg.skip) > 0 {
+		skip = make(map[string]struct{}, len(reg.skip))
+		for _, n := range reg.skip {
+			skip[n] = struct{}{}
+		}
+	}
+	return rt.register(name, handlerSink[T]{fn: fn}, []proto.Message{prototype}, watch, skip)
 }
 
 // handlerSink adapts a typed handler to the untyped Sink the runtime drives.
