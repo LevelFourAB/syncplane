@@ -191,7 +191,13 @@ func (c *Connector) loadRecShadow(ctx context.Context, ws string, rt *recordType
 	return decodeRecShadow(raw)
 }
 
-func (c *Connector) txRecShadow(tx *server.EntityTx, rt *recordType, key string) (*recShadow, error) {
+// shadowReader reads consumer shadows inside a transaction: a
+// *server.EntityTx or a *server.ViewTx.
+type shadowReader interface {
+	ConsumerShadow(consumer, entity, key string) ([]byte, error)
+}
+
+func (c *Connector) txRecShadow(tx shadowReader, rt *recordType, key string) (*recShadow, error) {
 	raw, err := tx.ConsumerShadow(c.consumer, recEntity(rt), key)
 	if err != nil {
 		return nil, err
@@ -356,22 +362,32 @@ func (c *Connector) putAgreed(tx *server.EntityTx, rt *recordType, key string, o
 // markDirty marks the record with key for egress, in tx. A mark it replaces
 // keeps its first change.
 func (c *Connector) markDirty(tx *server.EntityTx, rt *recordType, key string) error {
+	mark, err := c.nextDirty(tx, rt, key)
+	if err != nil {
+		return err
+	}
+	return tx.PutConsumerShadow(c.consumer, dirtyEntity(rt), key, mark)
+}
+
+// nextDirty returns the dirty mark of an engine change of the record with key
+// now: it keeps the first change of the mark the record has.
+func (c *Connector) nextDirty(tx shadowReader, rt *recordType, key string) ([]byte, error) {
 	now := c.now()
 	m := dirtyMark{last: now, first: now}
 	raw, err := tx.ConsumerShadow(c.consumer, dirtyEntity(rt), key)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if raw != nil {
 		old, err := decodeDirty(raw)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if old.first.Before(now) {
 			m.first = old.first
 		}
 	}
-	return tx.PutConsumerShadow(c.consumer, dirtyEntity(rt), key, encodeDirty(m))
+	return encodeDirty(m), nil
 }
 
 // commitPending agrees on next as putAgreed does, and drops the record's

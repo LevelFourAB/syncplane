@@ -312,6 +312,7 @@ func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	writes := tx.Writes()
 	merged, err := rt.codec.Merge(tx, MergeInput{
 		Key: key, Record: j.rec, Base: sh.agreed(), Root: root, Members: members, TextPeer: c.peer,
 	})
@@ -331,8 +332,11 @@ func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 		}
 		key, sh = merged.Key, other
 	}
-	if root, members, err = c.loadRows(tx, rt, key); err != nil {
-		return 0, err
+	// The rows of another key, or rows Merge wrote, are not the ones read.
+	if key != j.key || tx.Writes() != writes {
+		if root, members, err = c.loadRows(tx, rt, key); err != nil {
+			return 0, err
+		}
 	}
 	next := &recShadow{
 		Locator:     j.rec.Locator,
@@ -347,6 +351,7 @@ func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 			// egress removes it from the store.
 			dirty = true
 		} else {
+			writes := tx.Writes()
 			out, ok, err := rt.codec.Render(tx, RenderInput{Key: key, Base: next.agreed(), Root: root, Members: members})
 			if err != nil {
 				return 0, &codecError{err: fmt.Errorf("connect: render %s %q: %w", rt.rootName, key, err)}
@@ -365,8 +370,10 @@ func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 				clearDirty = true
 			}
 			// Render can write rows.
-			if _, members, err = c.loadRows(tx, rt, key); err != nil {
-				return 0, err
+			if tx.Writes() != writes {
+				if _, members, err = c.loadRows(tx, rt, key); err != nil {
+					return 0, err
+				}
 			}
 		}
 	}

@@ -188,11 +188,13 @@ func (c *Connector) drainRecords(ctx context.Context, ws string, pos server.Curs
 		if err != nil {
 			return pos, err
 		}
-		// The lookups and marks of a page share one transaction. It writes
-		// shadows only, so it takes no sequence, and a crash before the
+		// The lookups of a page share one read snapshot, and its marks
+		// commit with the position that passes it, so a crash before the
 		// position commits marks the page again.
+		var marks []server.ConsumerShadowWrite
 		if len(page) > 0 {
-			if err := c.srv.Mutate(server.TrustedAs(ctx, c.label), ws, func(tx *server.EntityTx) error {
+			if err := c.srv.View(server.Trusted(ctx), ws, func(tx *server.ViewTx) error {
+				marks = marks[:0]
 				shadows := make(map[recID]*recShadow)
 				marked := make(map[recID]bool)
 				for _, ch := range page {
@@ -222,9 +224,11 @@ func (c *Connector) drainRecords(ctx context.Context, ws string, pos server.Curs
 							continue
 						}
 						marked[id] = true
-						if err := c.markDirty(tx, rt, key); err != nil {
+						mark, err := c.nextDirty(tx, rt, key)
+						if err != nil {
 							return err
 						}
+						marks = append(marks, server.ConsumerShadowWrite{Entity: dirtyEntity(rt), Key: key, Snapshot: mark})
 					}
 				}
 				return nil
@@ -232,7 +236,7 @@ func (c *Connector) drainRecords(ctx context.Context, ws string, pos server.Curs
 				return pos, err
 			}
 		}
-		if done, err := c.advance(ctx, ws, pos, next, nil); err != nil || done {
+		if done, err := c.advance(ctx, ws, pos, next, marks); err != nil || done {
 			return pos, err
 		}
 		pos = next
@@ -255,7 +259,7 @@ func (c *Connector) advance(ctx context.Context, ws string, pos, next server.Cur
 }
 
 // changeRecords returns the keys of the records one change reaches.
-func (c *Connector) changeRecords(tx *server.EntityTx, rt *recordType, ch server.Change) ([]string, error) {
+func (c *Connector) changeRecords(tx shadowReader, rt *recordType, ch server.Change) ([]string, error) {
 	if ch.Entity == rt.rootName {
 		return []string{ch.Key}, nil
 	}
@@ -476,6 +480,7 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 			del = true
 			return nil
 		}
+		writes := tx.Writes()
 		r, ok, err := rt.codec.Render(tx, RenderInput{Key: key, Base: sh.agreed(), Root: root, Members: members})
 		if err != nil {
 			return &codecError{err: fmt.Errorf("connect: render %s %q: %w", rt.rootName, key, err)}
@@ -490,8 +495,10 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 			}
 			r.Locator = sh.Locator
 		}
-		if _, members, err = c.loadRows(tx, rt, key); err != nil {
-			return err
+		if tx.Writes() != writes {
+			if _, members, err = c.loadRows(tx, rt, key); err != nil {
+				return err
+			}
 		}
 		mk, err := c.memberKeys(members)
 		if err != nil {
