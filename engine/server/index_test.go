@@ -337,6 +337,18 @@ var _ = Describe("Secondary indexes", func() {
 			query.Spec{Where: query.Eq("state", "open")},
 			[]string{"i1", "i2", "i4"})
 
+		same("neq against the empty string, which reads the range above it",
+			query.Spec{Where: query.Neq("state", "")},
+			[]string{"i1", "i2", "i3", "i4", "i5"})
+
+		same("neq against another value, which scans",
+			query.Spec{Where: query.Neq("state", "open")},
+			[]string{"i3", "i5", "i6"})
+
+		same("neq against the empty string inside one custom field",
+			query.Spec{Where: query.Neq("custom.team.text", "")},
+			[]string{"i1"})
+
 		same("equality plus an ordering the composite index supplies",
 			query.Spec{
 				Where:   query.Eq("state", "open"),

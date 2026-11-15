@@ -42,6 +42,12 @@
 //   bounds them. Searching text is a match condition's job, served by the
 //   term-postings index (searchindex.ts) rather than by this planner.
 // - `not` and `match`. Both become residual.
+// - `neq`, except against the lowest value of its kind. The rows sit on both
+//   sides of the value, so the term would take two ranges that hold nearly
+//   every entry. `x != ""` on a string and `x != false` on a bool are the
+//   exception: no set value sorts below the literal, so they select exactly the
+//   rows `x > ""` and `x > false` select, and plan as that one range (see
+//   cmpBounds).
 //
 // Presence DOES plan, against a component whose path is exactly the term's and
 // that does not fan out: a dense encoder writes every row into the index, with a
@@ -1297,6 +1303,18 @@ function inequalityBoundsFor(
 }
 
 /**
+ * Whether `v` is a value no other value of the component's kind sorts below:
+ * the empty string for a string component, and false for a bool component.
+ * Numbers are left out: a NaN is not equal to the lowest float but is in no
+ * range above it, and an unsigned integer column, whose lowest value is 0,
+ * cannot be told from a signed one here. Mirrors isLowestOfKind in
+ * engine/query/plan.go.
+ */
+function isLowestOfKind(c: IndexComponent, v: Scalar): boolean {
+	return (c.kind === 'string' && v === '') || (c.kind === 'bool' && v === false);
+}
+
+/**
  * Encoded bounds for one inequality.
  *
  * Written against the ASCENDING encoding and then flipped for a desc
@@ -1310,6 +1328,12 @@ function cmpBounds(
 	op: string,
 	value: Scalar,
 ): { lo?: string; hi?: string } | undefined {
+	if (op === 'neq') {
+		// `!=` is true for a set value that is not the literal, and so is `>`
+		// when no set value sorts below the literal. Missing rows fail both.
+		if (!isLowestOfKind(idx.encoder.components[compIndex]!, value)) return undefined;
+		op = 'gt';
+	}
 	const v = encodeLiteral(idx, compIndex, value) ?? encodeNeighbour(idx, compIndex, op, value);
 	if (v === undefined) return undefined;
 	// Every real value carries the present tag, so the bounds stay inside the

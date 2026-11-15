@@ -55,6 +55,12 @@ import (
 //     bounds them. Searching text is a match condition's job, served by the
 //     term-postings index (searchindex.go) rather than by this planner.
 //   - `not` and `match`. Both become residual.
+//   - `neq`, except against the lowest value of its kind. The rows sit on both
+//     sides of the value, so the term would take two ranges that hold nearly
+//     every entry. `x != ""` on a string and `x != false` on a bool are the
+//     exception: no set value sorts below the literal, so they select exactly
+//     the rows `x > ""` and `x > false` select, and plan as that one range
+//     (see cmpBounds).
 //
 // Presence DOES plan, against a component whose path is exactly the term's and
 // that does not fan out: the encoder writes every row into every dense index,
@@ -1257,6 +1263,15 @@ func inequalityBoundsFor(c IndexComponent, terms []node, taken []bool, only int)
 // v ascending and the entries below it descending, and getting that backwards
 // silently returns the complement of the answer.
 func cmpBounds(c IndexComponent, n *cmpNode) (lo, hi []byte, ok bool) {
+	op := n.op
+	if op == syncplanev1.CmpOp_CMP_OP_NEQ {
+		// `!=` is true for a set value that is not the literal, and so is `>`
+		// when no set value sorts below the literal. Missing rows fail both.
+		if !isLowestOfKind(c, n.value) {
+			return nil, nil, false
+		}
+		op = syncplanev1.CmpOp_CMP_OP_GT
+	}
 	v, ok := literalBytes(c, n.value)
 	if !ok {
 		if v, ok = neighbourBytes(c, n); !ok {
@@ -1270,7 +1285,7 @@ func cmpBounds(c IndexComponent, n *cmpNode) (lo, hi []byte, ok bool) {
 	above := UpperBound(v)
 
 	var loA, hiA []byte
-	switch n.op {
+	switch op {
 	case syncplanev1.CmpOp_CMP_OP_GT:
 		loA, hiA = above, UpperBound(lowest)
 	case syncplanev1.CmpOp_CMP_OP_GTE:
@@ -1288,7 +1303,7 @@ func cmpBounds(c IndexComponent, n *cmpNode) (lo, hi []byte, ok bool) {
 	// Under desc the payload order is reversed, so "everything above v"
 	// ascending is "everything below v" descending. Re-derive rather than
 	// reversing the byte strings, which is not the same operation.
-	switch n.op {
+	switch op {
 	case syncplanev1.CmpOp_CMP_OP_GT:
 		return lowest, v, true
 	case syncplanev1.CmpOp_CMP_OP_GTE:
@@ -1299,6 +1314,21 @@ func cmpBounds(c IndexComponent, n *cmpNode) (lo, hi []byte, ok bool) {
 		return v, UpperBound(lowest), true
 	}
 	return nil, nil, false
+}
+
+// isLowestOfKind reports whether v is a value no other value of the
+// component's kind sorts below: the empty string for a string component, and
+// false for a bool component. Numbers are left out: a NaN is not equal to the
+// lowest float but is in no range above it, and the TS planner cannot tell an
+// unsigned integer column, whose lowest value is 0, from a signed one.
+func isLowestOfKind(c IndexComponent, v condValue) bool {
+	switch singularKind(c.leafField()) {
+	case rvString:
+		return v.kind == rvString && v.str == ""
+	case rvBool:
+		return v.kind == rvBool && !v.b
+	}
+	return false
 }
 
 // literalBytes encodes a query literal as this component's payload, or reports
