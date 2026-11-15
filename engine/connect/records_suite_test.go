@@ -47,6 +47,9 @@ type memStore struct {
 	// lock. A spec uses it to act at the moment between the connector's
 	// bookkeeping and the store write.
 	beforeWrite func(ctx context.Context, rec engineconnect.Record, from string) error
+	// beforeDelete, when set, runs at the start of each Delete, outside the
+	// lock, as beforeWrite does for Write.
+	beforeDelete func(ctx context.Context, loc string)
 	// listTwice makes List yield each record twice, as a paged listing that
 	// shifts between pages does.
 	listTwice bool
@@ -188,7 +191,13 @@ func (s *memStore) Write(ctx context.Context, ws string, rec engineconnect.Recor
 	return hashOf(string(rec.Content)), nil
 }
 
-func (s *memStore) Delete(_ context.Context, ws, loc string) error {
+func (s *memStore) Delete(ctx context.Context, ws, loc string) error {
+	s.mu.Lock()
+	hook := s.beforeDelete
+	s.mu.Unlock()
+	if hook != nil {
+		hook(ctx, loc)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.deletes++

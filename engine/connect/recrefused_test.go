@@ -197,6 +197,139 @@ var _ = Describe("Record mode, refused writes", func() {
 		Expect(log.all()).To(BeEmpty())
 	})
 
+	Describe("a refusal that comes while the connector uses an older one", func() {
+		refusedMark := func(f *recFixture, key string) []byte {
+			GinkgoHelper()
+			raw, err := f.srv.ConsumerShadow(ctx, ws, "connect:"+recWriter, "refused:project", key)
+			Expect(err).NotTo(HaveOccurred())
+			return raw
+		}
+
+		It("is kept when it comes during an egress write", func() {
+			var log overwriteLog
+			f := newRecFixture(refusals(&log, time.Hour))
+			key := ingestEdit(f)
+			revertName(f, key, "T")
+			Expect(f.conn.Refused(ctx, ws, []engineconnect.RowRef{{Entity: "project", Key: key}})).To(Succeed())
+
+			once := true
+			f.store.setBeforeWrite(func(context.Context, engineconnect.Record, string) error {
+				if once {
+					once = false
+					// The host reverts another write of the record and reports it.
+					Expect(f.srv.Mutate(server.TrustedAs(ctx, "upstream"), ws, func(tx *server.EntityTx) error {
+						return tx.Put(&testdatav1.Project{Id: "p2", Name: "Other"})
+					})).To(Succeed())
+					Expect(f.conn.Refused(ctx, ws, []engineconnect.RowRef{{Entity: "project", Key: key}})).To(Succeed())
+				}
+				return nil
+			})
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(log.all()).To(ConsistOf(refusedOf(key)))
+			Expect(refusedMark(f, key)).NotTo(BeNil(), "the second mark")
+
+			Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+			Expect(log.all()).To(ConsistOf(refusedOf(key), refusedOf(key)), "the second mark gets the content egress replaced")
+			Expect(refusedMark(f, key)).To(BeNil())
+		})
+
+		It("is kept when it comes during an egress delete", func() {
+			var log overwriteLog
+			f := newRecFixture(refusals(&log, time.Hour))
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			f.store.put(ws, "new.txt", "New\nline")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			key := f.key(ctx, ws, "new.txt")
+			line := f.widgetWith(ctx, ws, key, "line")
+			Expect(f.srv.Mutate(server.TrustedAs(ctx, "upstream"), ws, func(tx *server.EntityTx) error {
+				if err := tx.Delete(&testdatav1.Widget{}, line); err != nil {
+					return err
+				}
+				return tx.Delete(&testdatav1.Project{}, key)
+			})).To(Succeed())
+			Expect(f.conn.Refused(ctx, ws, []engineconnect.RowRef{{Entity: "project", Key: key}})).To(Succeed())
+
+			once := true
+			f.store.beforeDelete = func(context.Context, string) {
+				if once {
+					once = false
+					Expect(f.srv.Mutate(server.TrustedAs(ctx, "upstream"), ws, func(tx *server.EntityTx) error {
+						return tx.Put(&testdatav1.Project{Id: "p2", Name: "Other"})
+					})).To(Succeed())
+					Expect(f.conn.Refused(ctx, ws, []engineconnect.RowRef{{Entity: "project", Key: key}})).To(Succeed())
+				}
+			}
+			deleted := MatchFields(IgnoreExtras, Fields{
+				"Key": Equal(key), "Reason": Equal(engineconnect.OverwriteRefused),
+				"Old": Equal([]byte("New\nline")), "New": BeEmpty(),
+			})
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.store.locators(ws)).NotTo(ContainElement("new.txt"))
+			Expect(log.all()).To(ConsistOf(deleted))
+			Expect(refusedMark(f, key)).NotTo(BeNil(), "the second mark")
+
+			Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+			Expect(log.all()).To(ConsistOf(deleted, deleted))
+			Expect(refusedMark(f, key)).To(BeNil())
+		})
+
+		It("is kept when it comes while a pass settles the older one", func() {
+			var log overwriteLog
+			var f *recFixture
+			var key string
+			fired := false
+			hook := func(c context.Context, o engineconnect.Overwrite) error {
+				if !fired && key != "" {
+					fired = true
+					// The origin refuses the next ingest too, and the host
+					// reverts it and reports it.
+					w := f.widgetWith(ctx, ws, key, "X")
+					Expect(f.srv.Mutate(server.TrustedAs(ctx, "upstream"), ws, func(tx *server.EntityTx) error {
+						var cur testdatav1.Widget
+						if _, err := tx.Get(&cur, w); err != nil {
+							return err
+						}
+						next := proto.Clone(&cur).(*testdatav1.Widget)
+						if err := server.ApplyTextStrings(next, nil, &cur, map[string]string{"body": "one"}, "upstream"); err != nil {
+							return err
+						}
+						return tx.Put(next)
+					})).To(Succeed())
+					Expect(f.conn.Refused(ctx, ws, []engineconnect.RowRef{{Entity: "widget", Key: w}})).To(Succeed())
+				}
+				return log.record(c, o)
+			}
+			f = newRecFixture(withRecords(func(r *engineconnect.Records) {
+				r.Overwrite = hook
+				r.KeepReplaced = time.Hour
+			}))
+			k := ingestEdit(f)
+			revertName(f, k, "T")
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.conn.Refused(ctx, ws, []engineconnect.RowRef{{Entity: "project", Key: k}})).To(Succeed())
+
+			// A second store edit, ingested before the pass that settles the
+			// first refusal.
+			f.store.put(ws, "a.txt", "T\nX")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			key = k
+			Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+			Expect(fired).To(BeTrue())
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+
+			Expect(f.content(ws, "a.txt")).To(Equal("T\none"))
+			Expect(log.all()).To(ConsistOf(
+				MatchFields(IgnoreExtras, Fields{
+					"Reason": Equal(engineconnect.OverwriteRefused), "Old": Equal([]byte("Refused\none")),
+				}),
+				MatchFields(IgnoreExtras, Fields{
+					"Reason": Equal(engineconnect.OverwriteRefused),
+					"Old":    Equal([]byte("T\nX")), "New": Equal([]byte("T\none")),
+				}),
+			))
+		})
+	})
+
 	It("refuses Refused in row mode", func() {
 		f := newFixture()
 		Expect(f.conn.Refused(ctx, ws, nil)).To(MatchError(ContainSubstring("record mode")))

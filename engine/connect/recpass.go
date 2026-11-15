@@ -716,10 +716,22 @@ func (c *Connector) deleteRecord(ctx context.Context, ws string, p *pass, rt *re
 		return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, sh.Locator, err)
 	}
 	if err := c.bookkeep(ctx, ws, func(tx *server.EntityTx) error {
+		if err := c.afterReplace(tx, rt, key, sh, cur, rf); err != nil {
+			return err
+		}
+		// A mark that came during the delete outlives the record: settleRefused
+		// gives it the content kept above.
+		newer, err := tx.ConsumerShadow(c.consumer, refusedEntity(rt), key)
+		if err != nil {
+			return err
+		}
 		if err := c.forgetRecord(tx, rt, key, sh); err != nil {
 			return err
 		}
-		return c.afterReplace(tx, rt, key, sh, cur, rf)
+		if newer != nil {
+			return tx.PutConsumerShadow(c.consumer, refusedEntity(rt), key, newer)
+		}
+		return nil
 	}); err != nil {
 		return err
 	}

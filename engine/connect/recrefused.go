@@ -32,7 +32,9 @@ type RowRef struct {
 // instead, if Records.KeepReplaced kept it; else nothing is given. One
 // refusal can give two contents: the one egress replaced, when it was kept,
 // and the one the store holds. A mark is cleared after use, and after a pass
-// that finds its record written and no kept content.
+// that finds its record written and no kept content. A call that comes while
+// a pass uses an earlier mark of the record makes a mark of its own, which
+// the next pass uses.
 //
 // Rows of entities outside record mode, of types that are not
 // Bidirectional, and rows no record holds are ignored. Calling it more than
@@ -173,7 +175,21 @@ func decodeKept(raw []byte) (*keptContent, error) {
 // refusal is the refused mark and the kept content of one record.
 type refusal struct {
 	marked bool
-	kept   *keptContent
+	// mark is the refused mark as read.
+	mark []byte
+	kept *keptContent
+}
+
+// dropMark deletes the refused mark of a record in tx when it is still mark,
+// and reports whether it did. Refused can write a newer mark at any time, for
+// a refusal the connector has not used yet. Two marks with one Head are one
+// refusal: no row changed between them.
+func (c *Connector) dropMark(tx *server.EntityTx, rt *recordType, key string, mark []byte) (bool, error) {
+	now, err := tx.ConsumerShadow(c.consumer, refusedEntity(rt), key)
+	if err != nil || !bytes.Equal(now, mark) {
+		return false, err
+	}
+	return true, tx.DeleteConsumerShadow(c.consumer, refusedEntity(rt), key)
 }
 
 // loadRefusal reads the refusal state of a record; nil when it has no mark.
@@ -185,7 +201,7 @@ func (c *Connector) loadRefusal(ctx context.Context, ws string, rt *recordType, 
 	if err != nil || raw == nil {
 		return nil, err
 	}
-	rf := &refusal{marked: true}
+	rf := &refusal{marked: true, mark: raw}
 	raw, err = c.readShadow(ctx, ws, keptEntity(rt), key)
 	if err != nil {
 		return nil, err
@@ -220,16 +236,20 @@ func (c *Connector) handOverRefused(ctx context.Context, ws string, rt *recordTy
 // afterReplace updates the refusal state of a record in the transaction that
 // records an egress write or delete over cur: a mark was used and goes with
 // the kept content, and else cur is kept when the record had an ingest within
-// Records.KeepReplaced.
+// Records.KeepReplaced. A mark that came during the egress stays, and cur is
+// kept for it as for no mark.
 func (c *Connector) afterReplace(tx *server.EntityTx, rt *recordType, key string, sh *recShadow, cur *Record, rf *refusal) error {
 	if rt.direction != Bidirectional {
 		return nil
 	}
 	if rf != nil && rf.marked {
-		if err := tx.DeleteConsumerShadow(c.consumer, refusedEntity(rt), key); err != nil {
+		used, err := c.dropMark(tx, rt, key, rf.mark)
+		if err != nil {
 			return err
 		}
-		return tx.DeleteConsumerShadow(c.consumer, keptEntity(rt), key)
+		if used {
+			return tx.DeleteConsumerShadow(c.consumer, keptEntity(rt), key)
+		}
 	}
 	if c.rec.keep <= 0 || sh == nil || cur == nil || sh.Ingested == 0 {
 		return nil
@@ -269,12 +289,13 @@ func (c *Connector) settleRefused(ctx context.Context, ws string, p *pass, pos u
 			return err
 		}
 		marks := make(map[string]refusedMark)
+		raws := make(map[string][]byte)
 		if err := c.srv.ScanConsumerShadows(ctx, ws, c.consumer, refusedEntity(rt), func(key string, raw []byte) error {
 			var m refusedMark
 			if err := json.Unmarshal(raw, &m); err != nil {
 				return fmt.Errorf("connect: decode refused mark: %w", err)
 			}
-			marks[key] = m
+			marks[key], raws[key] = m, bytes.Clone(raw)
 			return nil
 		}); err != nil {
 			return err
@@ -283,7 +304,7 @@ func (c *Connector) settleRefused(ctx context.Context, ws string, p *pass, pos u
 			if marks[key].Head > pos {
 				continue
 			}
-			if err := c.settleRefusedOne(ctx, ws, p, rt, key); err != nil {
+			if err := c.settleRefusedOne(ctx, ws, p, rt, key, raws[key]); err != nil {
 				return err
 			}
 			stale = slices.DeleteFunc(stale, func(k string) bool { return k == key })
@@ -304,7 +325,8 @@ func (c *Connector) settleRefused(ctx context.Context, ws string, p *pass, pos u
 	return nil
 }
 
-func (c *Connector) settleRefusedOne(ctx context.Context, ws string, p *pass, rt *recordType, key string) error {
+// settleRefusedOne settles the refused mark of one record, mark as read.
+func (c *Connector) settleRefusedOne(ctx context.Context, ws string, p *pass, rt *recordType, key string, mark []byte) error {
 	dirty, err := c.readShadow(ctx, ws, dirtyEntity(rt), key)
 	if err != nil || dirty != nil {
 		// Egress uses the mark.
@@ -334,8 +356,9 @@ func (c *Connector) settleRefusedOne(ctx context.Context, ws string, p *pass, rt
 		c.logger.LogAttrs(ctx, slog.LevelWarn, "refused record was written before the refusal came, and no content was kept",
 			slog.String("workspace", ws), slog.String("entity", rt.rootName), slog.String("key", key))
 	}
+	// The kept content was given; a newer mark stays for the next pass.
 	return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
-		if err := tx.DeleteConsumerShadow(c.consumer, refusedEntity(rt), key); err != nil {
+		if _, err := c.dropMark(tx, rt, key, mark); err != nil {
 			return err
 		}
 		return tx.DeleteConsumerShadow(c.consumer, keptEntity(rt), key)
