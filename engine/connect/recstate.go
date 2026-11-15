@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -26,8 +27,7 @@ import (
 //   - idx:<member> member row key → record key, for the rows of the agreed
 //     state. It is what maps a deleted row, whose change carries no message,
 //     to its record.
-//   - dirty:<root> record key → time of the last engine change (Unix ns),
-//     for records that wait for egress. They commit with the feed position,
+//   - dirty:<root> record key → dirtyMark, for records that wait for egress. They commit with the feed position,
 //     so the position can move past a change while its record waits out
 //     Records.Quiet, and a crash does not lose it.
 //   - gone:<root>  record key → goneMark, for records missing from the store
@@ -140,14 +140,42 @@ func decodeGone(raw []byte) (*goneMark, error) {
 	return &g, nil
 }
 
-func encodeTime(t time.Time) []byte { return []byte(strconv.FormatInt(t.UnixNano(), 10)) }
+// dirtyMark is a record that waits for egress: last is its latest engine
+// change, and first the earliest one the store has not received.
+type dirtyMark struct{ last, first time.Time }
 
-func decodeTime(raw []byte) (time.Time, error) {
-	ns, err := strconv.ParseInt(string(raw), 10, 64)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("connect: decode dirty mark: %w", err)
+// encodeDirty writes a mark as "<last>,<first>" in Unix ns.
+func encodeDirty(m dirtyMark) []byte {
+	return fmt.Appendf(nil, "%d,%d", m.last.UnixNano(), m.first.UnixNano())
+}
+
+// decodeDirty reads a mark. A mark of one number has first equal to last.
+func decodeDirty(raw []byte) (dirtyMark, error) {
+	last, first, two := strings.Cut(string(raw), ",")
+	if !two {
+		first = last
 	}
-	return time.Unix(0, ns), nil
+	l, err := strconv.ParseInt(last, 10, 64)
+	if err != nil {
+		return dirtyMark{}, fmt.Errorf("connect: decode dirty mark: %w", err)
+	}
+	f, err := strconv.ParseInt(first, 10, 64)
+	if err != nil {
+		return dirtyMark{}, fmt.Errorf("connect: decode dirty mark: %w", err)
+	}
+	return dirtyMark{last: time.Unix(0, l), first: time.Unix(0, f)}, nil
+}
+
+// due returns when the record's egress is due: Records.Quiet after the last
+// change, but no later than Records.MaxDelay after the first.
+func (r *records) due(m dirtyMark) time.Time {
+	at := m.last.Add(max(r.quiet, 0))
+	if r.maxDelay >= 0 {
+		if limit := m.first.Add(r.maxDelay); limit.Before(at) {
+			at = limit
+		}
+	}
+	return at
 }
 
 // readShadow reads one shadow outside a transaction.
@@ -325,9 +353,25 @@ func (c *Connector) putAgreed(tx *server.EntityTx, rt *recordType, key string, o
 	return nil
 }
 
-// markDirty marks the record with key for egress, in tx.
+// markDirty marks the record with key for egress, in tx. A mark it replaces
+// keeps its first change.
 func (c *Connector) markDirty(tx *server.EntityTx, rt *recordType, key string) error {
-	return tx.PutConsumerShadow(c.consumer, dirtyEntity(rt), key, encodeTime(c.now()))
+	now := c.now()
+	m := dirtyMark{last: now, first: now}
+	raw, err := tx.ConsumerShadow(c.consumer, dirtyEntity(rt), key)
+	if err != nil {
+		return err
+	}
+	if raw != nil {
+		old, err := decodeDirty(raw)
+		if err != nil {
+			return err
+		}
+		if old.first.Before(now) {
+			m.first = old.first
+		}
+	}
+	return tx.PutConsumerShadow(c.consumer, dirtyEntity(rt), key, encodeDirty(m))
 }
 
 // commitPending agrees on next as putAgreed does, and drops the record's

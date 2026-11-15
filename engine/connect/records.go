@@ -47,6 +47,11 @@ type Records struct {
 	// writes it to the store, so that a run of edits makes one write. 0 means
 	// the default (1 second); negative writes at the next pass.
 	Quiet time.Duration
+	// MaxDelay bounds how long a record waits for egress after its first
+	// engine change the store has not received, also while changes keep
+	// coming faster than Quiet. 0 means the default (10 × Quiet); negative
+	// means no bound.
+	MaxDelay time.Duration
 	// DeleteGrace is how long a record must be missing from the store before
 	// its rows are deleted. A store record that comes back in this time keeps
 	// its rows, and a new record with the fingerprint of a missing one is a
@@ -299,6 +304,7 @@ type records struct {
 	firstPass FirstPass
 	choose    func(ctx context.Context, workspaceID string) (FirstPass, error)
 	quiet     time.Duration
+	maxDelay  time.Duration
 	grace     time.Duration
 	batchRows int
 	overwrite func(ctx context.Context, o Overwrite) error
@@ -325,12 +331,16 @@ func newRecords(cfg Config) (*records, error) {
 		firstPass: r.FirstPass,
 		choose:    r.ChooseFirstPass,
 		quiet:     r.Quiet,
+		maxDelay:  r.MaxDelay,
 		grace:     r.DeleteGrace,
 		batchRows: r.BatchRows,
 		overwrite: r.Overwrite,
 	}
 	if out.quiet == 0 {
 		out.quiet = time.Second
+	}
+	if out.maxDelay == 0 {
+		out.maxDelay = 10 * max(out.quiet, 0)
 	}
 	if out.grace == 0 {
 		out.grace = 2 * time.Second

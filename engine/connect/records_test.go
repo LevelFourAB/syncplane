@@ -404,6 +404,24 @@ var _ = Describe("Record mode", func() {
 			Expect(f.content(ws, "a.txt")).To(Equal("T\none!\ntwo!"))
 		})
 
+		It("writes a record under continuous edits after MaxDelay", func() {
+			f := newRecFixture(withRecords(func(r *engineconnect.Records) { r.MaxDelay = 3 * time.Second }))
+			f.store.put(ws, "a.txt", "T\none")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			one := f.widgetWith(ctx, ws, f.key(ctx, ws, "a.txt"), "one")
+
+			for i := range 6 {
+				f.editLine(ctx, ws, one, fmt.Sprintf("edit %d", i))
+				Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+				f.clock.advance(500 * time.Millisecond)
+			}
+			Expect(f.store.writeCount()).To(BeZero(), "each edit restarts the quiet period")
+			f.editLine(ctx, ws, one, "edit 6")
+			Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+			Expect(f.store.writeCount()).To(Equal(1))
+			Expect(f.content(ws, "a.txt")).To(Equal("T\nedit 6"))
+		})
+
 		It("ingests first when the store changed since the last pass", func() {
 			f := newRecFixture()
 			f.store.put(ws, "a.txt", "T\none\ntwo")

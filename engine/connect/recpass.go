@@ -135,12 +135,12 @@ func (c *Connector) planWake(ctx context.Context, ws string, p *pass) error {
 			if gone[key] != nil {
 				return nil
 			}
-			since, err := decodeTime(raw)
+			m, err := decodeDirty(raw)
 			if err != nil {
 				return err
 			}
 			p.unflushed = true
-			earlier(since.Add(max(c.rec.quiet, 0)))
+			earlier(c.rec.due(m))
 			return nil
 		}); err != nil {
 			return err
@@ -278,7 +278,8 @@ func (c *Connector) changeRecords(tx *server.EntityTx, rt *recordType, ch server
 // markAll returns a dirty mark for every record of every bidirectional type:
 // each record with a shadow and each root row.
 func (c *Connector) markAll(ctx context.Context, ws string) ([]server.ConsumerShadowWrite, error) {
-	now := encodeTime(c.now())
+	t := c.now()
+	now := encodeDirty(dirtyMark{last: t, first: t})
 	var marks []server.ConsumerShadowWrite
 	for _, rt := range c.rec.types {
 		if rt.direction != Bidirectional {
@@ -325,8 +326,8 @@ func (c *Connector) rootKeys(ctx context.Context, ws string, rt *recordType) ([]
 	return keys, err
 }
 
-// flushRecords writes the dirty records whose quiet period is over, or every
-// dirty record with all. A record with a missing mark waits: the store
+// flushRecords writes the dirty records whose egress is due (see
+// records.due), or every dirty record with all. A record with a missing mark waits: the store
 // deleted it, and that delete wins when the grace is over.
 func (c *Connector) flushRecords(ctx context.Context, ws string, p *pass, pos uint64, all bool) error {
 	now := c.now()
@@ -336,11 +337,11 @@ func (c *Connector) flushRecords(ctx context.Context, ws string, p *pass, pos ui
 		}
 		var due []string
 		if err := c.srv.ScanConsumerShadows(ctx, ws, c.consumer, dirtyEntity(rt), func(key string, raw []byte) error {
-			since, err := decodeTime(raw)
+			m, err := decodeDirty(raw)
 			if err != nil {
 				return err
 			}
-			if all || c.rec.quiet < 0 || !now.Before(since.Add(c.rec.quiet)) {
+			if all || c.rec.quiet < 0 || !now.Before(c.rec.due(m)) {
 				due = append(due, key)
 			}
 			return nil
@@ -731,9 +732,9 @@ func (c *Connector) settleOne(ctx context.Context, ws string, rt *recordType, ke
 // dirty mark is due again after the retry delay, not at once, so a codec
 // that fails on every attempt does not spin the workspace.
 func (c *Connector) deferDirty(ctx context.Context, ws string, rt *recordType, key string) error {
-	since := c.now().Add(max(c.retryMin, 0))
+	at := c.now().Add(max(c.retryMin, 0))
 	return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
-		return tx.PutConsumerShadow(c.consumer, dirtyEntity(rt), key, encodeTime(since))
+		return tx.PutConsumerShadow(c.consumer, dirtyEntity(rt), key, encodeDirty(dirtyMark{last: at, first: at}))
 	})
 }
 
