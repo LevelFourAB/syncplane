@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"slices"
 	"strings"
 	"time"
 
@@ -3143,6 +3144,145 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					shadow, err := tx.ConsumerShadow("webhook", "widget", "k1")
 					Expect(err).NotTo(HaveOccurred())
 					Expect(shadow).To(Equal([]byte("c")))
+				})
+			})
+
+			Describe("shadow scans", func() {
+				type shadow struct{ key, snapshot string }
+				scan := func(tx storage.ReadTx, consumer, entity, afterKey string, limit int) []shadow {
+					GinkgoHelper()
+					var out []shadow
+					Expect(tx.ScanConsumerShadows(consumer, entity, afterKey, limit, func(key string, snapshot []byte) error {
+						out = append(out, shadow{key, string(snapshot)})
+						return nil
+					})).To(Succeed())
+					return out
+				}
+
+				It("yields nothing for a consumer or entity with no shadows", func() {
+					read("ws1", func(tx storage.ReadTx) {
+						Expect(scan(tx, "indexer", "widget", "", 0)).To(BeEmpty(), "an unwritten workspace")
+					})
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.PutConsumerShadow("indexer", "widget", "k", []byte("a"))).To(Succeed())
+					})
+					read("ws1", func(tx storage.ReadTx) {
+						Expect(scan(tx, "indexer", "gadget", "", 0)).To(BeEmpty(), "another entity")
+						Expect(scan(tx, "webhook", "widget", "", 0)).To(BeEmpty(), "another consumer")
+					})
+					read("ws2", func(tx storage.ReadTx) {
+						Expect(scan(tx, "indexer", "widget", "", 0)).To(BeEmpty(), "another workspace")
+					})
+				})
+
+				It("yields one consumer's shadows of one entity in byte order", func() {
+					// The same keys the entity scan's byte-order spec uses: a
+					// locale collation orders them differently, and afterKey
+					// paging shares the engine's bytewise order.
+					byteOrder := []string{"A", "Z", "_", "a", "z", "é"}
+					write("ws1", func(tx storage.WriteTx) {
+						// Written in reverse, so a scan in write order fails.
+						for _, k := range slices.Backward(byteOrder) {
+							Expect(tx.PutConsumerShadow("indexer", "widget", k, []byte("s-"+k))).To(Succeed())
+						}
+						Expect(tx.PutConsumerShadow("indexer", "gadget", "a", []byte("other entity"))).To(Succeed())
+						Expect(tx.PutConsumerShadow("webhook", "widget", "a", []byte("other consumer"))).To(Succeed())
+					})
+					write("ws2", func(tx storage.WriteTx) {
+						Expect(tx.PutConsumerShadow("indexer", "widget", "b", []byte("other workspace"))).To(Succeed())
+					})
+					read("ws1", func(tx storage.ReadTx) {
+						var want []shadow
+						for _, k := range byteOrder {
+							want = append(want, shadow{k, "s-" + k})
+						}
+						Expect(scan(tx, "indexer", "widget", "", 0)).To(Equal(want))
+						Expect(scan(tx, "indexer", "widget", "Z", 0)).To(Equal(want[2:]),
+							"afterKey cuts the range at the same byte order")
+					})
+				})
+
+				It("pages by afterKey and limit", func() {
+					write("ws1", func(tx storage.WriteTx) {
+						for _, k := range []string{"k1", "k2", "k3", "k4", "k5"} {
+							Expect(tx.PutConsumerShadow("indexer", "widget", k, []byte(k))).To(Succeed())
+						}
+					})
+					read("ws1", func(tx storage.ReadTx) {
+						Expect(scan(tx, "indexer", "widget", "", 2)).To(Equal([]shadow{{"k1", "k1"}, {"k2", "k2"}}))
+						Expect(scan(tx, "indexer", "widget", "k2", 2)).To(Equal([]shadow{{"k3", "k3"}, {"k4", "k4"}}))
+						Expect(scan(tx, "indexer", "widget", "k4", 2)).To(Equal([]shadow{{"k5", "k5"}}))
+						Expect(scan(tx, "indexer", "widget", "k5", 2)).To(BeEmpty())
+						Expect(scan(tx, "indexer", "widget", "k3", -1)).To(HaveLen(2), "a negative limit is unlimited")
+					})
+				})
+
+				It("sees the transaction's own puts and deletes", func() {
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.PutConsumerShadow("indexer", "widget", "gone", []byte("a"))).To(Succeed())
+						Expect(tx.PutConsumerShadow("indexer", "widget", "kept", []byte("b"))).To(Succeed())
+					})
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.DeleteConsumerShadow("indexer", "widget", "gone")).To(Succeed())
+						Expect(tx.PutConsumerShadow("indexer", "widget", "kept", []byte("b2"))).To(Succeed())
+						Expect(tx.PutConsumerShadow("indexer", "widget", "new", []byte("c"))).To(Succeed())
+						Expect(scan(tx, "indexer", "widget", "", 0)).To(Equal([]shadow{{"kept", "b2"}, {"new", "c"}}))
+					})
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.PutConsumerShadow("fresh", "widget", "k", []byte("d"))).To(Succeed())
+						Expect(scan(tx, "fresh", "widget", "", 0)).To(Equal([]shadow{{"k", "d"}}),
+							"a consumer whose first shadow this transaction wrote")
+					})
+				})
+
+				It("stops at the first error the callback returns and returns it", func() {
+					write("ws1", func(tx storage.WriteTx) {
+						for _, k := range []string{"k1", "k2", "k3"} {
+							Expect(tx.PutConsumerShadow("indexer", "widget", k, []byte(k))).To(Succeed())
+						}
+					})
+					read("ws1", func(tx storage.ReadTx) {
+						stop := errors.New("stop")
+						var keys []string
+						err := tx.ScanConsumerShadows("indexer", "widget", "", 0, func(key string, _ []byte) error {
+							keys = append(keys, key)
+							if key == "k2" {
+								return stop
+							}
+							return nil
+						})
+						Expect(err).To(MatchError(stop))
+						Expect(keys).To(Equal([]string{"k1", "k2"}))
+					})
+				})
+
+				It("serves reads from inside its callback through more shadows than one internal batch", func() {
+					// See the re-entrant scan specs: a networked adapter pages
+					// its result, so the callback must be served between pages
+					// as well as within one.
+					const n = 600
+					write("ws1", func(tx storage.WriteTx) {
+						for i := range n {
+							key := fmt.Sprintf("k%04d", i)
+							Expect(tx.PutConsumerShadow("indexer", "widget", key, []byte(key))).To(Succeed())
+						}
+					})
+					check := func(tx storage.ReadTx) {
+						GinkgoHelper()
+						seen := 0
+						Expect(tx.ScanConsumerShadows("indexer", "widget", "", 0, func(key string, snapshot []byte) error {
+							seen++
+							again, err := tx.ConsumerShadow("indexer", "widget", key)
+							if err != nil {
+								return err
+							}
+							Expect(again).To(Equal(snapshot))
+							return nil
+						})).To(Succeed())
+						Expect(seen).To(Equal(n))
+					}
+					read("ws1", check)
+					write("ws1", func(tx storage.WriteTx) { check(tx) })
 				})
 			})
 

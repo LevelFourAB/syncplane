@@ -835,6 +835,41 @@ func (t *pgTx) ConsumerShadow(consumer, entity, key string) ([]byte, error) {
 	return snapshot, nil
 }
 
+// shadowEntry is one row of a ScanConsumerShadows result.
+type shadowEntry struct {
+	key      string
+	snapshot []byte
+}
+
+func (t *pgTx) ScanConsumerShadows(consumer, entity, afterKey string, limit int, fn func(key string, snapshot []byte) error) error {
+	wsn, ok, err := t.workspaceNumber()
+	if err != nil || !ok {
+		return err
+	}
+	// The primary key (sid, wsn, key) serves the range and the order. The id
+	// of the shadow set is read in the same statement when it is not known.
+	query := `SELECT key, snapshot FROM consumer_shadows
+	          WHERE wsn = $1 AND key > $2 AND sid = (
+	              SELECT id FROM shadow_sets WHERE workspace_id = $3 AND consumer = $4 AND entity = $5)
+	          ORDER BY key
+	          LIMIT $6`
+	args := []any{wsn, afterKey, t.ws, consumer, entity, limitArg(limit)}
+	if sid, ok := t.names[nameKey{shadowSet, consumer, entity}]; ok {
+		query = `SELECT key, snapshot FROM consumer_shadows
+		         WHERE wsn = $1 AND key > $2 AND sid = $3
+		         ORDER BY key
+		         LIMIT $4`
+		args = []any{wsn, afterKey, sid, limitArg(limit)}
+	}
+	return scanRows(t, query, args, limit,
+		func(rows pgx.Rows) (shadowEntry, error) {
+			var e shadowEntry
+			err := rows.Scan(&e.key, &e.snapshot)
+			return e, err
+		},
+		func(e shadowEntry) error { return fn(e.key, e.snapshot) })
+}
+
 func (t *pgTx) PutConsumerShadow(consumer, entity, key string, snapshot []byte) error {
 	if err := t.register(); err != nil {
 		return err

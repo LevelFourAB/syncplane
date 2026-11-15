@@ -99,9 +99,9 @@
 //     write indivisible; an adapter that answers the read from outside the
 //     transaction turns a retry into a double-apply.
 //   - Effect-consumer state (ConsumerPosition, SetConsumerPosition,
-//     ConsumerShadow, PutConsumerShadow, DeleteConsumer, CollectIdleConsumers)
-//     is the durable bookkeeping of whatever reacts to committed changes. Its
-//     one hard requirement is that a position and the shadows recorded with it
+//     ConsumerShadow, ScanConsumerShadows, PutConsumerShadow, DeleteConsumer,
+//     CollectIdleConsumers) is the durable bookkeeping of whatever reacts to
+//     committed changes. Its one hard requirement is that a position and the shadows recorded with it
 //     commit TOGETHER, which they do by sharing a transaction; an adapter that
 //     splits them turns a crash into a silently skipped effect rather than a
 //     redelivered one. ListPendingWorkspaceIDs reads the same state from
@@ -781,6 +781,18 @@ type ReadTx interface {
 	// subset of fields it declared an interest in) and is the only thing that
 	// decodes them.
 	ConsumerShadow(consumer, entity, key string) ([]byte, error)
+	// ScanConsumerShadows yields the shadows one consumer holds for one entity
+	// with key > afterKey, in key order, at most limit of them (limit <= 0
+	// means unlimited). Keys compare bytewise, as in ScanEntity, so afterKey
+	// paging resumes at the same place on every adapter. A consumer or entity
+	// with no shadows yields nothing. When fn returns an error, the scan stops
+	// and returns that error.
+	//
+	// The entity is the name the consumer gave PutConsumerShadow and need not
+	// be a registered entity: a consumer may keep shadows under names of its
+	// own. fn may issue reads on this transaction, as a ScanEntityAfter
+	// callback may; a write from inside fn is not required to work.
+	ScanConsumerShadows(consumer, entity, afterKey string, limit int, fn func(key string, snapshot []byte) error) error
 	// FieldDeltas returns the collaborative-text delta log for one field of one
 	// row: the fragments written at sequences strictly above afterSeq, OLDEST
 	// FIRST, so folding them in order reproduces the field's current state from

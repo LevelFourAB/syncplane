@@ -2222,6 +2222,29 @@ func (t *sqliteTx) ConsumerShadow(consumer, entity, key string) ([]byte, error) 
 	return snapshot, nil
 }
 
+func (t *sqliteTx) ScanConsumerShadows(consumer, entity, afterKey string, limit int, fn func(key string, snapshot []byte) error) error {
+	if limit <= 0 {
+		limit = -1 // SQLite: negative LIMIT means unlimited
+	}
+	// The primary key (scope, entity, key) serves the range and the order.
+	return t.scanRows(
+		`SELECT sh.key, sh.snapshot FROM consumer_scopes c
+		 JOIN consumer_shadows sh ON sh.scope = c.id AND sh.entity = ? AND sh.key > ?
+		 WHERE c.workspace_id = ? AND c.consumer = ?
+		 ORDER BY sh.key LIMIT ?`,
+		[]any{entity, afterKey, t.ws, consumer, limit},
+		func(rows *sql.Rows) error {
+			var (
+				key      string
+				snapshot []byte
+			)
+			if err := rows.Scan(&key, &snapshot); err != nil {
+				return err
+			}
+			return fn(key, snapshot)
+		})
+}
+
 func (t *sqliteTx) PutConsumerShadow(consumer, entity, key string, snapshot []byte) error {
 	if err := t.register(); err != nil {
 		return err
