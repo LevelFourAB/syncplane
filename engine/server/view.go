@@ -126,6 +126,21 @@ func (v *ViewTx) GetMeta(dst proto.Message, key string) (found bool, meta RowMet
 	return readRowMeta(v.tx, info, dst, key, v.visible, v.project)
 }
 
+// ConsumerShadow returns the snapshot a consumer recorded for one key of one
+// entity name, or nil if it holds none, as Server.ConsumerShadow does. It reads
+// the transaction's snapshot, so it agrees with the rows the transaction
+// reads. No read filter applies: a shadow is a consumer's bookkeeping, not a
+// row.
+//
+// It refuses a consumer name that is empty, longer than MaxConsumerNameBytes,
+// or starts with ReservedConsumerPrefix.
+func (v *ViewTx) ConsumerShadow(consumer, entity, key string) ([]byte, error) {
+	if err := validateConsumerName(consumer); err != nil {
+		return nil, err
+	}
+	return v.tx.ConsumerShadow(consumer, entity, key)
+}
+
 // ScanPage iterates up to limit live rows of the entity identified by prototype
 // with key > afterKey, in key order, decoding each into a fresh message and
 // passing it with its version. It returns the key of the last row visited and

@@ -457,6 +457,17 @@ func (e *EntityTx) Seq() uint64 {
 	return e.seq
 }
 
+// Writes returns a count of the row writes (Put, Patch and Delete) the
+// transaction began, through it or its AsCaller view. The count only grows,
+// so two values that are equal tell that no row was written between them. A
+// write that returned an error can count too. Shadow writes do not count.
+func (e *EntityTx) Writes() uint64 {
+	if e.root != nil {
+		return e.root.writes
+	}
+	return e.writes
+}
+
 // writeSeq returns the sequence for a write, allocating it on first use
 // when the tx was created without one (Server.Mutate).
 func (e *EntityTx) writeSeq() (uint64, error) {

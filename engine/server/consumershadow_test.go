@@ -119,6 +119,75 @@ var _ = Describe("Consumer shadows", func() {
 		})
 	})
 
+	Describe("ViewTx.ConsumerShadow", func() {
+		It("reads a shadow from the read snapshot", func() {
+			putShadows("indexer", "rec:widget", "a")
+			Expect(srv.View(ctx, ws, func(tx *server.ViewTx) error {
+				got, err := tx.ConsumerShadow("indexer", "rec:widget", "a")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got).To(Equal([]byte("s-a")))
+				got, err = tx.ConsumerShadow("indexer", "rec:widget", "none")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got).To(BeNil())
+				got, err = tx.ConsumerShadow("webhook", "rec:widget", "a")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got).To(BeNil(), "another consumer holds no shadow of the key")
+				return nil
+			})).To(Succeed())
+		})
+
+		It("reads a shadow for a caller who is not trusted", func() {
+			putShadows("indexer", "rec:widget", "a")
+			Expect(srv.View(context.Background(), ws, func(tx *server.ViewTx) error {
+				got, err := tx.ConsumerShadow("indexer", "rec:widget", "a")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(got).To(Equal([]byte("s-a")))
+				return nil
+			})).To(Succeed())
+		})
+
+		It("refuses a reserved, empty or oversized consumer name", func() {
+			long := strings.Repeat("c", server.MaxConsumerNameBytes+1)
+			Expect(srv.View(ctx, ws, func(tx *server.ViewTx) error {
+				for _, name := range []string{server.ReservedConsumerPrefix + "x", "", long} {
+					_, err := tx.ConsumerShadow(name, "e", "k")
+					Expect(err).To(HaveOccurred(), "ConsumerShadow(%q)", name)
+				}
+				return nil
+			})).To(Succeed())
+		})
+	})
+
+	Describe("EntityTx.Writes", func() {
+		It("counts the row writes of the transaction, not its reads or shadow writes", func() {
+			Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+				Expect(tx.Writes()).To(BeZero())
+				if _, err := tx.Get(&testdatav1.Widget{}, "w1"); err != nil {
+					return err
+				}
+				if err := tx.PutConsumerShadow("indexer", "rec:widget", "w1", []byte("x")); err != nil {
+					return err
+				}
+				Expect(tx.Writes()).To(BeZero(), "a read and a shadow write are no row writes")
+				if err := tx.Put(&testdatav1.Widget{Id: "w1", Label: "a"}); err != nil {
+					return err
+				}
+				first := tx.Writes()
+				Expect(first).To(BeNumerically(">", 0))
+				if err := tx.Put(&testdatav1.Widget{Id: "w2", Label: "b"}); err != nil {
+					return err
+				}
+				Expect(tx.Writes()).To(BeNumerically(">", first), "each write after the first one counts too")
+				before := tx.Writes()
+				if err := tx.Delete(&testdatav1.Widget{}, "w2"); err != nil {
+					return err
+				}
+				Expect(tx.Writes()).To(BeNumerically(">", before))
+				return nil
+			})).To(Succeed())
+		})
+	})
+
 	Describe("EntityTx", func() {
 		It("reads, replaces and deletes a shadow inside the transaction", func() {
 			Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
