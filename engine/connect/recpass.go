@@ -211,7 +211,7 @@ func (c *Connector) drainRecords(ctx context.Context, ws string, pos server.Curs
 // page was read; the next pass meets that and heals.
 func (c *Connector) advance(ctx context.Context, ws string, pos, next server.Cursor, marks []server.ConsumerShadowWrite) (done bool, err error) {
 	from := server.Cursor{Seq: pos.Seq, Entity: pos.Entity, Key: pos.Key}
-	err = c.srv.AdvanceConsumer(ctx, ws, c.consumer, server.ConsumerUpdate{Cursor: next, Shadows: marks, From: &from})
+	err = c.srv.AdvanceConsumer(ctx, ws, c.consumer, server.ConsumerUpdate{Cursor: next, Shadows: marks, From: &from, Retain: true})
 	if errors.Is(err, server.ErrCursorForeign) {
 		return true, nil
 	}
@@ -552,7 +552,11 @@ func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 			return err
 		}
 	}
-	return c.srv.AdvanceConsumer(ctx, ws, c.consumer, server.ConsumerUpdate{Cursor: server.Cursor{Seq: head}})
+	// Retained, because the shadows stay valid below the tombstone horizon
+	// and drainRecords heals a cursor that is too old. A garbage collection
+	// that removed them would run the first pass again, and SourceWins would
+	// delete the rows clients created while the connector did not run.
+	return c.srv.AdvanceConsumer(ctx, ws, c.consumer, server.ConsumerUpdate{Cursor: server.Cursor{Seq: head}, Retain: true})
 }
 
 // deleteUnrecorded deletes the root rows with no record shadow, and the

@@ -521,6 +521,38 @@ var _ = Describe("Record mode", func() {
 			Expect(f.lines(ctx, ws, key)).To(Equal("T\none!\ntwo?"))
 		})
 
+		It("keeps its bookkeeping through a garbage collection while it does not run", func() {
+			f := newRecFixtureFull([]server.Option{server.WithGC(50*time.Millisecond, 0)})
+			f.store.put(ws, "a.txt", "A\none\ntwo")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			a := f.key(ctx, ws, "a.txt")
+			Expect(f.conn.Close()).To(Succeed())
+			pos, _, err := f.srv.ConsumerPosition(ctx, ws, "connect:"+recWriter)
+			Expect(err).NotTo(HaveOccurred())
+
+			// A record a client created, which the store does not hold, and a
+			// deleted row, whose tombstone moves the horizon past the position.
+			f.addRecord(ctx, ws, "p9", "Client", "x")
+			two := f.widgetWith(ctx, ws, a, "two")
+			f.clientWrite(ctx, ws, func(tx *server.EntityTx) error { return tx.Delete(&testdatav1.Widget{}, two) })
+			time.Sleep(100 * time.Millisecond)
+			Expect(f.srv.CollectGarbage(ctx, ws)).To(Succeed())
+			_, _, err = f.srv.Changes(ctx, ws, pos, 10, func(server.Change) error { return nil })
+			Expect(err).To(MatchError(server.ErrCursorTooOld), "the spec reaches the horizon")
+			_, found, err := f.srv.ConsumerPosition(ctx, ws, "connect:"+recWriter)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue(), "the consumer is retained")
+			Expect(f.key(ctx, ws, "a.txt")).To(Equal(a), "the shadows are kept")
+
+			f.conn = f.connector()
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.lines(ctx, ws, "p9")).To(Equal("Client\nx"), "no first pass deletes the client's record")
+			Expect(f.content(ws, "Client.txt")).To(Equal("Client\nx"))
+			Expect(f.content(ws, "a.txt")).To(Equal("A\none"))
+			Expect(f.lines(ctx, ws, a)).To(Equal("A\none"))
+		})
+
 		It("rebuilds lost bookkeeping from the rows with EngineWins", func() {
 			f := newRecFixture()
 			f.store.put(ws, "T.txt", "T\none")

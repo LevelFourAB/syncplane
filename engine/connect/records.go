@@ -26,7 +26,8 @@ import (
 // "connect:<WriterID>": the feed position, one shadow for each record, an
 // index from member row to record, an index from locator to record, the
 // records that wait out Quiet, and the records that wait out DeleteGrace. It
-// is backed up and restored with the rows.
+// is backed up and restored with the rows. Garbage collection does not remove
+// it (see server.ConsumerUpdate.Retain); server.ResetConsumer does.
 type Records struct {
 	// Types are the record types. Each entity can be the root or a member of
 	// one type only.
@@ -61,10 +62,10 @@ type Records struct {
 // FirstPass is the policy of the first pass of a workspace in record mode.
 //
 // The first pass runs when the consumer "connect:<WriterID>" has no position
-// in the workspace: on the first sync, after server.ResetConsumer, and after
-// a garbage collection removed the consumer because it stayed below the
-// tombstone horizon for longer than the retention (see server.WithGC), which
-// happens to a connector that does not run for that long.
+// in the workspace: on the first sync, and after server.ResetConsumer. A
+// connector that did not run for longer than the tombstone retention (see
+// server.WithGC) keeps its position and marks every record for egress; it
+// does not run the first pass again.
 type FirstPass int
 
 const (
