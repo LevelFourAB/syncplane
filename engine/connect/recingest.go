@@ -326,30 +326,11 @@ func (c *Connector) afterMerge(ctx context.Context, ws string, p *pass, jobs []*
 		if j.back == nil || j.agreed == nil {
 			continue
 		}
-		if err := c.writeBack(ctx, ws, j); err != nil {
-			return err
+		if err := c.egressRecord(ctx, ws, p, j.rt, j.outKey, j.agreed.Version, egressOpts{noIngest: true}); err != nil {
+			return fmt.Errorf("connect: write back: %w", err)
 		}
 	}
 	return nil
-}
-
-// writeBack writes the render of a merged record to the store and agrees on
-// it.
-func (c *Connector) writeBack(ctx context.Context, ws string, j *ingestJob) error {
-	rt, back := j.rt, j.back
-	from := ""
-	if back.Locator != j.rec.Locator {
-		from = j.rec.Locator
-	}
-	fp, err := rt.store.Write(ctx, ws, Record{RecordRef: RecordRef{Key: j.outKey, Locator: back.Locator}, Content: back.Content}, from)
-	if err != nil {
-		return fmt.Errorf("connect: write back %s %q to %q: %w", rt.rootName, j.outKey, back.Locator, err)
-	}
-	next := *j.agreed
-	next.Locator, next.Fingerprint, next.Hash, next.Payload = back.Locator, fp, contentHash(back.Content), back.Payload
-	return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
-		return c.putAgreed(tx, rt, j.outKey, j.agreed, &next, true)
-	})
 }
 
 // ingestRefs ingests the listed records of one type. With markMissing, refs

@@ -505,6 +505,130 @@ var _ = Describe("Record mode", func() {
 		})
 	})
 
+	Describe("a crash around a store write", func() {
+		type writeCase struct {
+			name string
+			// prepare brings the fixture to the pass that writes and returns
+			// the record key and the locator the write goes to.
+			prepare func(f *recFixture) (key, target string)
+			// run runs the pass that writes.
+			run  func(f *recFixture) error
+			want string
+		}
+		renamed := func(f *recFixture) string {
+			f.codec.nameFiles = true
+			f.store.put(ws, "Old.txt", "Old\nx\ny")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			key := f.key(ctx, ws, "Old.txt")
+			f.clientWrite(ctx, ws, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.Project{Id: key, Name: "New"})
+			})
+			return key
+		}
+		cases := []writeCase{{
+			name: "a new engine record",
+			prepare: func(f *recFixture) (string, string) {
+				Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+				f.addRecord(ctx, ws, "p1", "New", "x", "y")
+				return "p1", "New.txt"
+			},
+			run:  func(f *recFixture) error { return f.conn.Flush(ctx, ws) },
+			want: "New\nx\ny",
+		}, {
+			name:    "an engine-side rename",
+			prepare: func(f *recFixture) (string, string) { return renamed(f), "New.txt" },
+			run:     func(f *recFixture) error { return f.conn.Flush(ctx, ws) },
+			want:    "New\nx\ny",
+		}, {
+			name: "a write-back to a new locator",
+			prepare: func(f *recFixture) (string, string) {
+				key := renamed(f)
+				f.store.put(ws, "Old.txt", "Old\nx\ny\nz")
+				return key, "New.txt"
+			},
+			run:  func(f *recFixture) error { return f.conn.Reconcile(ctx, ws) },
+			want: "New\nx\ny\nz",
+		}}
+		for _, tc := range cases {
+			for _, written := range []bool{false, true} {
+				when := "before"
+				if written {
+					when = "after"
+				}
+				It(fmt.Sprintf("keeps the keys and writes nothing extra for %s after a crash %s the store write", tc.name, when), func() {
+					f := newRecFixture()
+					key, target := tc.prepare(f)
+					var snap map[string]map[string][]byte
+					f.store.setBeforeWrite(func(context.Context, engineconnect.Record, string) error {
+						f.store.setBeforeWrite(nil)
+						snap = snapshotShadows(ctx, f, ws)
+						if !written {
+							return errors.New("crash")
+						}
+						return nil
+					})
+					_ = tc.run(f)
+					Expect(snap).NotTo(BeNil(), "the pass wrote to the store")
+					rows := f.widgetKeys(ctx, ws, key)
+					writes := f.store.writeCount()
+					// The shadows as the crash left them.
+					restoreShadows(ctx, f, ws, snap)
+					f.restart()
+
+					Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+					Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+					f.clock.advance(5 * time.Second)
+					Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+
+					Expect(f.projects(ctx, ws)).To(HaveLen(1))
+					Expect(f.key(ctx, ws, target)).To(Equal(key))
+					Expect(f.widgetKeys(ctx, ws, key)).To(Equal(rows))
+					Expect(f.lines(ctx, ws, key)).To(Equal(tc.want))
+					Expect(f.store.locators(ws)).To(Equal([]string{target}))
+					Expect(f.content(ws, target)).To(Equal(tc.want))
+					if written {
+						Expect(f.store.writeCount()).To(Equal(writes), "the write is not made again")
+					} else {
+						Expect(f.store.writeCount()).To(Equal(writes + 1))
+					}
+
+					seq, writes := f.seq(ctx, ws), f.store.writeCount()
+					Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+					Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+					Expect(f.seq(ctx, ws)).To(Equal(seq))
+					Expect(f.store.writeCount()).To(Equal(writes))
+				})
+			}
+		}
+
+		It("saves the bookkeeping of a store write that ends after Close cancelled the pass", func() {
+			f := newRecFixture(withRecords(func(r *engineconnect.Records) { r.Quiet = -1 }), func(cfg *engineconnect.Config) {
+				cfg.Workspaces = func(context.Context) ([]string, error) { return []string{ws}, nil }
+			})
+			f.clock = nil
+			f.conn = f.connector()
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			writing := make(chan struct{})
+			f.store.setBeforeWrite(func(ctx context.Context, _ engineconnect.Record, _ string) error {
+				f.store.setBeforeWrite(nil)
+				close(writing)
+				// A store that does not watch the context ends its write
+				// after the cancel.
+				<-ctx.Done()
+				return nil
+			})
+			Expect(f.conn.Start(ctx)).To(Succeed())
+			f.addRecord(ctx, ws, "p1", "New", "x")
+			Eventually(writing).Should(BeClosed())
+			Expect(f.conn.Close()).To(Succeed())
+
+			Expect(f.key(ctx, ws, "New.txt")).To(Equal("p1"))
+			f.conn = f.connector()
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(f.projects(ctx, ws)).To(Equal(map[string]string{"p1": "New"}))
+		})
+	})
+
 	Describe("restarts", func() {
 		It("keeps the edits both sides made while the connector did not run", func() {
 			f := newRecFixture()
@@ -787,7 +911,7 @@ var _ = Describe("Record mode", func() {
 func snapshotShadows(ctx context.Context, f *recFixture, ws string) map[string]map[string][]byte {
 	GinkgoHelper()
 	out := map[string]map[string][]byte{}
-	for _, entity := range []string{"rec:project", "loc:project", "idx:widget", "dirty:project", "gone:project"} {
+	for _, entity := range []string{"rec:project", "loc:project", "idx:widget", "dirty:project", "gone:project", "pend:project"} {
 		out[entity] = map[string][]byte{}
 		Expect(f.srv.ScanConsumerShadows(ctx, ws, "connect:"+recWriter, entity, func(key string, raw []byte) error {
 			out[entity][key] = raw

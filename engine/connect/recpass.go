@@ -35,6 +35,9 @@ type passSteps struct {
 // Ingest runs before the drain, so a record that changed on both sides is
 // merged before it is rendered.
 func (c *Connector) recordsPass(ctx context.Context, ws string, p *pass, steps passSteps) error {
+	if err := c.settlePending(ctx, ws); err != nil {
+		return err
+	}
 	pos, ok, err := c.srv.ConsumerPosition(ctx, ws, c.consumer)
 	if err != nil {
 		return err
@@ -322,12 +325,20 @@ func (c *Connector) flushRecords(ctx context.Context, ws string, p *pass, pos ui
 			if gone[key] != nil {
 				continue
 			}
-			if err := c.egressRecord(ctx, ws, p, rt, key, pos); err != nil {
+			if err := c.egressRecord(ctx, ws, p, rt, key, pos, egressOpts{}); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// egressOpts are the options of one egressRecord call.
+type egressOpts struct {
+	// noIngest leaves a record whose store content moved since the agreed
+	// state for a later pass, instead of ingesting it first. A write-back
+	// sets it, so that a store that keeps changing cannot recurse.
+	noIngest bool
 }
 
 // egressRecord writes one record from its rows to the store. pos is the feed
@@ -338,7 +349,7 @@ func (c *Connector) flushRecords(ctx context.Context, ws string, p *pass, pos ui
 // since the agreed state, the store has an edit the engine has not seen, and
 // the record is ingested instead: the merge keeps both edits, and its
 // write-back takes the engine's edit to the store.
-func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *recordType, key string, pos uint64) error {
+func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *recordType, key string, pos uint64, o egressOpts) error {
 	sh, err := c.loadRecShadow(ctx, ws, rt, key)
 	if err != nil {
 		return err
@@ -354,6 +365,9 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 			return fmt.Errorf("connect: read %s at %q: %w", rt.rootName, sh.Locator, err)
 		}
 		if rec.Fingerprint != sh.Fingerprint {
+			if o.noIngest {
+				return nil
+			}
 			if rec.Locator == "" {
 				rec.Locator = sh.Locator
 			}
@@ -424,24 +438,33 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 	if err != nil {
 		return err
 	}
-	if del {
-		if sh != nil {
-			if err := rt.store.Delete(ctx, ws, sh.Locator); err != nil {
-				return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, sh.Locator, err)
-			}
-		}
-		return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
-			return c.forgetRecord(tx, rt, key, sh)
-		})
-	}
-	if agreed {
+	switch {
+	case del:
+		return c.deleteRecord(ctx, ws, rt, key, sh)
+	case agreed:
 		return nil
 	}
-	from := ""
-	if sh != nil && out.Locator != sh.Locator {
-		from = sh.Locator
-	}
-	if sh == nil || from != "" {
+	return c.writeRecord(ctx, ws, rt, key, sh, out, next)
+}
+
+// writeRecord writes the render out of the record with key to the store, and
+// agrees on it as next. sh is the agreed state, nil for a record the store
+// does not hold yet.
+//
+// A pending write commits before the store write and names what the store
+// holds when the write is done, so that a pass that stops between the store
+// write and the agreed state is completed by the next one (see
+// settlePending) instead of taking the written record for a new one.
+func (c *Connector) writeRecord(ctx context.Context, ws string, rt *recordType, key string, sh *recShadow, out Rendered, next *recShadow) error {
+	pend := &pendingWrite{Next: next}
+	write := true
+	if sh != nil && out.Locator == sh.Locator {
+		// egressRecord found the agreed content at the locator.
+		pend.Replaces = sh.Hash
+	} else {
+		if sh != nil {
+			pend.From = sh.Locator
+		}
 		// A locator new to this record: no shadow describes what the store
 		// holds there.
 		owner, err := c.readShadow(ctx, ws, locEntity(rt), out.Locator)
@@ -462,31 +485,158 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 		case err != nil:
 			return fmt.Errorf("connect: read %s at %q: %w", rt.rootName, out.Locator, err)
 		case bytes.Equal(existing.Content, out.Content):
-			if from != "" {
-				if err := rt.store.Delete(ctx, ws, from); err != nil {
-					return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, from, err)
+			write = false
+			next.Fingerprint = existing.Fingerprint
+		default:
+			if c.rec.overwrite != nil {
+				if err := c.rec.overwrite(ctx, Overwrite{
+					WorkspaceID: ws, Entity: rt.rootName, Key: key, Locator: out.Locator,
+					Old: existing.Content, New: out.Content,
+				}); err != nil {
+					return fmt.Errorf("connect: overwrite %s %q at %q: %w", rt.rootName, key, out.Locator, err)
 				}
 			}
-			next.Fingerprint = existing.Fingerprint
-			return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
-				return c.putAgreed(tx, rt, key, sh, next, true)
-			})
-		case c.rec.overwrite != nil:
-			if err := c.rec.overwrite(ctx, Overwrite{
-				WorkspaceID: ws, Entity: rt.rootName, Key: key, Locator: out.Locator,
-				Old: existing.Content, New: out.Content,
-			}); err != nil {
-				return fmt.Errorf("connect: overwrite %s %q at %q: %w", rt.rootName, key, out.Locator, err)
+			pend.Replaces = contentHash(existing.Content)
+		}
+	}
+	if err := c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
+		return tx.PutConsumerShadow(c.consumer, pendEntity(rt), key, encodeJSON(pend))
+	}); err != nil {
+		return err
+	}
+	if write {
+		fp, err := rt.store.Write(ctx, ws, Record{RecordRef: RecordRef{Key: key, Locator: out.Locator}, Content: out.Content}, pend.From)
+		if err != nil {
+			// The pending write stays: the store can have written part of
+			// it, and the next pass reads what it holds.
+			return fmt.Errorf("connect: write %s %q to %q: %w", rt.rootName, key, out.Locator, err)
+		}
+		next.Fingerprint = fp
+	} else if pend.From != "" {
+		if err := rt.store.Delete(ctx, ws, pend.From); err != nil {
+			return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, pend.From, err)
+		}
+	}
+	return c.bookkeep(ctx, ws, func(tx *server.EntityTx) error {
+		return c.commitPending(tx, rt, key, sh, next, true)
+	})
+}
+
+// deleteRecord removes the record with key from the store and forgets it. sh
+// is its agreed state, nil for a record the store never held.
+func (c *Connector) deleteRecord(ctx context.Context, ws string, rt *recordType, key string, sh *recShadow) error {
+	if sh == nil {
+		return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
+			return c.forgetRecord(tx, rt, key, nil)
+		})
+	}
+	if err := c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
+		return tx.PutConsumerShadow(c.consumer, pendEntity(rt), key, encodeJSON(&pendingWrite{Delete: sh.Locator}))
+	}); err != nil {
+		return err
+	}
+	if err := rt.store.Delete(ctx, ws, sh.Locator); err != nil {
+		return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, sh.Locator, err)
+	}
+	return c.bookkeep(ctx, ws, func(tx *server.EntityTx) error {
+		return c.forgetRecord(tx, rt, key, sh)
+	})
+}
+
+// bookkeepTimeout bounds the shadow transaction that follows a store write.
+const bookkeepTimeout = 10 * time.Second
+
+// bookkeep runs a shadow transaction that records a store write that is
+// done. It does not stop when ctx is cancelled: Close and Forget cancel a
+// pass, and the write it records cannot be taken back. bookkeepTimeout
+// bounds it.
+func (c *Connector) bookkeep(ctx context.Context, ws string, fn func(tx *server.EntityTx) error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bookkeepTimeout)
+	defer cancel()
+	return c.shadowMutate(ctx, ws, fn)
+}
+
+// settlePending completes the pending writes and deletes a pass left behind
+// when it stopped between the bookkeeping and the store call, from what the
+// store holds now:
+//
+//   - The written content: the write is done, and is agreed on.
+//   - The content the write replaced, or nothing: the write was not done. The
+//     record's dirty mark makes a later pass write it.
+//   - Other content: the store changed it after the write. It is agreed on
+//     with no fingerprint, so that the next ingest merges the store's edit
+//     with the written content as base.
+//
+// For a delete, a missing record completes it and a present one drops it.
+// It runs first in each pass, so that no other step meets a written record
+// whose agreed state is not saved.
+func (c *Connector) settlePending(ctx context.Context, ws string) error {
+	for _, rt := range c.rec.types {
+		pends := make(map[string]*pendingWrite)
+		if err := c.srv.ScanConsumerShadows(ctx, ws, c.consumer, pendEntity(rt), func(key string, raw []byte) error {
+			pw, err := decodePending(raw)
+			pends[key] = pw
+			return err
+		}); err != nil {
+			return err
+		}
+		for _, key := range slices.Sorted(maps.Keys(pends)) {
+			if err := c.settleOne(ctx, ws, rt, key, pends[key]); err != nil {
+				return err
 			}
 		}
 	}
-	fp, err := rt.store.Write(ctx, ws, Record{RecordRef: RecordRef{Key: key, Locator: out.Locator}, Content: out.Content}, from)
+	return nil
+}
+
+func (c *Connector) settleOne(ctx context.Context, ws string, rt *recordType, key string, pw *pendingWrite) error {
+	sh, err := c.loadRecShadow(ctx, ws, rt, key)
 	if err != nil {
-		return fmt.Errorf("connect: write %s %q to %q: %w", rt.rootName, key, out.Locator, err)
+		return err
 	}
-	next.Fingerprint = fp
+	drop := func(tx *server.EntityTx) error { return tx.DeleteConsumerShadow(c.consumer, pendEntity(rt), key) }
+	if pw.Next == nil {
+		_, err := rt.store.Read(ctx, ws, pw.Delete)
+		switch {
+		case errors.Is(err, ErrRecordNotFound):
+			return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error { return c.forgetRecord(tx, rt, key, sh) })
+		case err != nil:
+			return fmt.Errorf("connect: read %s at %q: %w", rt.rootName, pw.Delete, err)
+		}
+		return c.shadowMutate(ctx, ws, drop)
+	}
+	rec, err := rt.store.Read(ctx, ws, pw.Next.Locator)
+	if errors.Is(err, ErrRecordNotFound) {
+		return c.shadowMutate(ctx, ws, drop)
+	}
+	if err != nil {
+		return fmt.Errorf("connect: read %s at %q: %w", rt.rootName, pw.Next.Locator, err)
+	}
+	next := *pw.Next
+	switch hash := contentHash(rec.Content); {
+	case bytes.Equal(hash, next.Hash):
+		next.Fingerprint = rec.Fingerprint
+	case pw.Replaces != nil && bytes.Equal(hash, pw.Replaces):
+		return c.shadowMutate(ctx, ws, drop)
+	default:
+		next.Fingerprint = ""
+	}
+	if pw.From != "" && sh != nil {
+		// A store that moves a record in two steps can hold the old copy.
+		old, err := rt.store.Read(ctx, ws, pw.From)
+		switch {
+		case err == nil && old.Fingerprint == sh.Fingerprint:
+			if err := rt.store.Delete(ctx, ws, pw.From); err != nil {
+				return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, pw.From, err)
+			}
+		case err != nil && !errors.Is(err, ErrRecordNotFound):
+			return fmt.Errorf("connect: read %s at %q: %w", rt.rootName, pw.From, err)
+		}
+	}
+	// The dirty mark stays: a change drained after the render is in it too,
+	// and the next egress finds the render agreed when there is none.
 	return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
-		return c.putAgreed(tx, rt, key, sh, next, true)
+		return c.commitPending(tx, rt, key, sh, &next, false)
 	})
 }
 
@@ -556,7 +706,7 @@ func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 			if shadows[key] != nil {
 				continue
 			}
-			if err := c.egressRecord(ctx, ws, p, rt, key, head); err != nil {
+			if err := c.egressRecord(ctx, ws, p, rt, key, head, egressOpts{}); err != nil {
 				return err
 			}
 		}

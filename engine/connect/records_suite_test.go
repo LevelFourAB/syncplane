@@ -94,6 +94,12 @@ func (s *memStore) locators(ws string) []string {
 	return out
 }
 
+func (s *memStore) setBeforeWrite(fn func(ctx context.Context, rec engineconnect.Record, from string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.beforeWrite = fn
+}
+
 func (s *memStore) writeCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -188,6 +194,9 @@ type lineCodec struct {
 	failRender string
 	// merges and renders count the calls.
 	merges, renders int
+	// nameFiles names every record after its title, not only a new one, so
+	// that an engine edit of the title moves the record.
+	nameFiles bool
 }
 
 type linePayload struct {
@@ -402,7 +411,7 @@ func (c *lineCodec) Render(_ *server.EntityTx, in engineconnect.RenderInput) (en
 	root := in.Root.(*testdatav1.Project)
 	c.mu.Lock()
 	c.renders++
-	failRender := c.failRender
+	failRender, nameFiles := c.failRender, c.nameFiles
 	c.mu.Unlock()
 	if failRender != "" && strings.Contains(root.GetName(), failRender) {
 		return engineconnect.Rendered{}, false, errors.New("codec cannot render " + root.GetName())
@@ -428,7 +437,7 @@ func (c *lineCodec) Render(_ *server.EntityTx, in engineconnect.RenderInput) (en
 		return engineconnect.Rendered{}, false, err
 	}
 	out := engineconnect.Rendered{Content: []byte(strings.Join(parts, "\n")), Payload: raw}
-	if in.Base == nil {
+	if in.Base == nil || nameFiles {
 		// A new record is named after its title, so a rebuild finds the
 		// file a title already has.
 		name := root.GetName()

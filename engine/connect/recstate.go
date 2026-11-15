@@ -32,10 +32,13 @@ import (
 //     Records.Quiet, and a crash does not lose it.
 //   - gone:<root>  record key → goneMark, for records missing from the store
 //     that wait out Records.DeleteGrace.
+//   - pend:<root>  record key → pendingWrite, for a store write or delete
+//     whose outcome the agreed state does not hold yet.
 func recEntity(rt *recordType) string   { return "rec:" + rt.rootName }
 func locEntity(rt *recordType) string   { return "loc:" + rt.rootName }
 func dirtyEntity(rt *recordType) string { return "dirty:" + rt.rootName }
 func goneEntity(rt *recordType) string  { return "gone:" + rt.rootName }
+func pendEntity(rt *recordType) string  { return "pend:" + rt.rootName }
 func idxEntity(member string) string    { return "idx:" + member }
 
 // recShadow is the agreed state of one record.
@@ -67,6 +70,29 @@ type goneMark struct {
 	Fingerprint string `json:"f"`
 	// Since is when the record was found missing, in Unix ns.
 	Since int64 `json:"s"`
+}
+
+// pendingWrite is a store write or delete that commits before the store
+// call, so that the next pass can tell from the store whether it was done.
+type pendingWrite struct {
+	// Next is the agreed state after the write, with no fingerprint; nil for
+	// a delete.
+	Next *recShadow `json:"n,omitempty"`
+	// From is the locator a write moves the record from.
+	From string `json:"f,omitempty"`
+	// Replaces is the hash of the content the store held at Next.Locator
+	// before the write; nil when it held none.
+	Replaces []byte `json:"r,omitempty"`
+	// Delete is the locator a delete removes.
+	Delete string `json:"d,omitempty"`
+}
+
+func decodePending(raw []byte) (*pendingWrite, error) {
+	var pw pendingWrite
+	if err := json.Unmarshal(raw, &pw); err != nil {
+		return nil, fmt.Errorf("connect: decode pending write: %w", err)
+	}
+	return &pw, nil
 }
 
 func contentHash(content []byte) []byte {
@@ -266,6 +292,15 @@ func (c *Connector) putAgreed(tx *server.EntityTx, rt *recordType, key string, o
 	return nil
 }
 
+// commitPending agrees on next as putAgreed does, and drops the record's
+// pending write.
+func (c *Connector) commitPending(tx *server.EntityTx, rt *recordType, key string, old, next *recShadow, clearDirty bool) error {
+	if err := c.putAgreed(tx, rt, key, old, next, clearDirty); err != nil {
+		return err
+	}
+	return tx.DeleteConsumerShadow(c.consumer, pendEntity(rt), key)
+}
+
 // dropIndex removes a member row's index entry when it still names key: the
 // row can have moved to another record, whose agreed state now owns it.
 func (c *Connector) dropIndex(tx *server.EntityTx, entity, rowKey, key string) error {
@@ -299,7 +334,7 @@ func (c *Connector) forgetRecord(tx *server.EntityTx, rt *recordType, key string
 			}
 		}
 	}
-	for _, entity := range []string{recEntity(rt), dirtyEntity(rt), goneEntity(rt)} {
+	for _, entity := range []string{recEntity(rt), dirtyEntity(rt), goneEntity(rt), pendEntity(rt)} {
 		if err := tx.DeleteConsumerShadow(c.consumer, entity, key); err != nil {
 			return err
 		}
