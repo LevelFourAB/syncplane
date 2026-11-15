@@ -40,6 +40,11 @@ import (
 // Fields the record does not own, see Fields, always keep their engine
 // value.
 //
+// The agreed state of each record holds a copy of its rows, with their
+// collaborative-text documents, and each ingest and each write of the record
+// writes that copy again: a record's bookkeeping costs about the size of its
+// rows in storage, and that much again in writes on each change.
+//
 // Use a RowCodec as RecordType.Codec. New validates it against the record
 // type; its Merge and Render methods return an error when called directly.
 // Decode and Encode run inside the merge transaction, under the workspace

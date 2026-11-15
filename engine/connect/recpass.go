@@ -433,10 +433,9 @@ type egressOpts struct {
 //
 // Before the write it reads the store record. When its fingerprint or its
 // content moved since the agreed state, the store has an edit the engine has
-// not seen, and
-// the record is ingested instead: the merge keeps both edits, and its
-// write-back takes the engine's edit to the store. An EgressOnly record is
-// written over the edit instead.
+// not seen, and the record is ingested instead: the merge keeps both edits,
+// and its write-back takes the engine's edit to the store. An EgressOnly
+// record is written over the edit instead.
 func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *recordType, key string, pos uint64, o egressOpts) error {
 	sh, err := c.loadRecShadow(ctx, ws, rt, key)
 	if err != nil {

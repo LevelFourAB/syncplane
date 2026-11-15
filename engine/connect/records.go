@@ -134,8 +134,9 @@ const (
 	// content changed since the connector wrote it.
 	OverwriteEgressOnly
 	// OverwriteRefused is a record of rows that Connector.Refused reported.
-	// Old can be content an earlier egress replaced, and New the content
-	// that replaced it.
+	// Old can be content an earlier egress replaced; New is then the content
+	// the store holds now, which can hold store edits made after that
+	// egress, and is nil when the store holds no record there.
 	OverwriteRefused
 )
 
@@ -217,8 +218,9 @@ var ErrRecordNotFound = errors.New("connect: record not found")
 // connector delivers at least once, so each method must be idempotent.
 // Every method takes the workspace id, so one store set as RecordType.Store
 // serves all workspaces; a store RecordType.OpenStore returns gets only the
-// id of its own workspace. The connector calls the methods of one workspace from one goroutine at a
-// time, but calls for different workspaces can run at the same time.
+// id of its own workspace. The connector calls the methods of one workspace
+// from one goroutine at a time, but calls for different workspaces can run at
+// the same time.
 type RecordStore interface {
 	// List yields each record of the type in the workspace, in any order. It
 	// must be cheap: the connector reads the content only of the records
@@ -267,7 +269,7 @@ type Codec interface {
 }
 
 // MergeInput is the input of Codec.Merge. The messages are rows read in the
-// transaction; Merge can change them.
+// transaction; Merge must not change them.
 type MergeInput struct {
 	// Key is the record key: the key of the root row the record merges into.
 	Key    string
