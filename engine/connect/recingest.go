@@ -303,7 +303,7 @@ func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 		return 0, err
 	}
 	if dirty {
-		if err := tx.PutConsumerShadow(c.consumer, dirtyEntity(rt), key, encodeTime(c.now())); err != nil {
+		if err := c.markDirty(tx, rt, key); err != nil {
 			return 0, err
 		}
 	}

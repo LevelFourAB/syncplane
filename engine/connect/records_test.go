@@ -436,6 +436,31 @@ var _ = Describe("Record mode", func() {
 			Expect(f.content(ws, "X.txt")).To(Equal("X\nb"))
 		})
 
+		It("writes both records of a row a client moved while the target record was ingested", func() {
+			f := newRecFixture()
+			f.store.put(ws, "a.txt", "A\nmover\nstay")
+			f.store.put(ws, "b.txt", "B\nb1")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			a, b := f.key(ctx, ws, "a.txt"), f.key(ctx, ws, "b.txt")
+			mover := f.widgetWith(ctx, ws, a, "mover")
+			f.clientWrite(ctx, ws, func(tx *server.EntityTx) error {
+				var w testdatav1.Widget
+				if _, err := tx.Get(&w, mover); err != nil {
+					return err
+				}
+				w.Label, w.Count = b, 5
+				return tx.Put(&w)
+			})
+
+			// The ingest of b takes the row before a drain sees the move.
+			f.store.put(ws, "b.txt", "B\nb1\nb2")
+			f.conn.Touch(ws, "b.txt")
+			Expect(f.conn.Ingress(ctx, ws)).To(Succeed())
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.content(ws, "b.txt")).To(Equal("B\nb1\nb2\nmover"))
+			Expect(f.content(ws, "a.txt")).To(Equal("A\nstay"))
+		})
+
 		It("never writes an IngressOnly type to the store", func() {
 			f := newRecFixture(withRecords(func(r *engineconnect.Records) { r.Types[0].Direction = engineconnect.IngressOnly }))
 			f.store.put(ws, "a.txt", "T\none")

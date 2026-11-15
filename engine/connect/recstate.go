@@ -239,7 +239,8 @@ func (c *Connector) memberKeys(members []proto.Message) (map[string][]string, er
 
 // putAgreed records next as the agreed state of the record with key, in tx,
 // and moves the indexes from old (nil when there was none) to it. It clears
-// the record's missing mark, and its dirty mark when clearDirty is set.
+// the record's missing mark, and its dirty mark when clearDirty is set. A
+// member row that moves here from another record marks that record dirty.
 func (c *Connector) putAgreed(tx *server.EntityTx, rt *recordType, key string, old, next *recShadow, clearDirty bool) error {
 	if err := tx.PutConsumerShadow(c.consumer, recEntity(rt), key, encodeJSON(next)); err != nil {
 		return err
@@ -276,10 +277,23 @@ func (c *Connector) putAgreed(tx *server.EntityTx, rt *recordType, key string, o
 			}
 		}
 		for _, k := range after {
-			if _, ok := slices.BinarySearch(before, k); !ok {
-				if err := tx.PutConsumerShadow(c.consumer, idxEntity(m.entity), k, []byte(key)); err != nil {
+			if _, ok := slices.BinarySearch(before, k); ok {
+				continue
+			}
+			// A row that moves here from another record leaves that record's
+			// agreed content stale. The drain cannot see it: the row's change
+			// maps to this record now, whose agreed state reflects it.
+			owner, err := tx.ConsumerShadow(c.consumer, idxEntity(m.entity), k)
+			if err != nil {
+				return err
+			}
+			if owner != nil && string(owner) != key {
+				if err := c.markDirty(tx, rt, string(owner)); err != nil {
 					return err
 				}
+			}
+			if err := tx.PutConsumerShadow(c.consumer, idxEntity(m.entity), k, []byte(key)); err != nil {
+				return err
 			}
 		}
 	}
@@ -290,6 +304,11 @@ func (c *Connector) putAgreed(tx *server.EntityTx, rt *recordType, key string, o
 		return tx.DeleteConsumerShadow(c.consumer, dirtyEntity(rt), key)
 	}
 	return nil
+}
+
+// markDirty marks the record with key for egress, in tx.
+func (c *Connector) markDirty(tx *server.EntityTx, rt *recordType, key string) error {
+	return tx.PutConsumerShadow(c.consumer, dirtyEntity(rt), key, encodeTime(c.now()))
 }
 
 // commitPending agrees on next as putAgreed does, and drops the record's
