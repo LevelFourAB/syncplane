@@ -33,6 +33,14 @@ Rules for consumer names and durability:
 - Renaming a consumer resets its progress.
 - In a workspace with collected tombstones, a renamed consumer resumes at the current sequence number instead of replaying historical events.
 
+## Handler options
+
+Pass options to `effects.On`. `effects.Watch` is described in [Change event fields](#change-event-fields).
+
+| Option                          | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `effects.SkipWriters(names...)` | Drops the changes whose last writer is one of the named systems before the handler runs. A name matches `storage.Actor.System` exactly: the label of a `server.TrustedAs` write, or `connect:<WriterID>` for a connector. An empty name matches writes with no system label. A skipped change builds no event, and the consumer position moves past it. When a skipped writer's change coalesces with a later write by another system, the feed reports the later actor and the handler gets the change. A skipped change clears the `Watch` memory of its row, so the next change of that row reports `FirstSeen`. |
+
 ## Change event fields
 
 `Watch` declares the fields for which a consumer requires before-state. The runtime stores a shadow copy of only those watched fields. Each watched consumer stores one shadow row for every processed row. Declaring no watched fields stores no shadows and uses no additional storage.

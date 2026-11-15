@@ -299,7 +299,9 @@ func (s *Server) InvokeIdempotent(...) (WriteOutcome, error)
 
 `ApplyTx` provides `Get`, `GetMeta`, `Query`, `ScanPage`, `Put`, `Patch`, and `Delete`. Reads query the initial snapshot and do not observe uncommitted writes from the same closure. Reading a key already written within the transaction returns an error.
 
-`EntityTx` provides `Get`, `GetMeta`, `Put`, `Patch`, `Delete`, `Scan`, `Query`, `Seq`, and `ScanPage(prototype, afterKey, limit, fn)`. It also reads and writes [consumer shadows](#effect-consumer-state) in the same transaction as its rows.
+`EntityTx` provides `Get`, `GetMeta`, `Put`, `Patch`, `Delete`, `Scan`, `Query`, `Seq`, `Writes`, and `ScanPage(prototype, afterKey, limit, fn)`. It also reads and writes [consumer shadows](#effect-consumer-state) in the same transaction as its rows.
+
+`Writes` returns a count of the row writes (`Put`, `Patch` and `Delete`) that the transaction began, through it or its `AsCaller` view. The count only grows, so two equal values tell that no row was written between them. A write that returned an error can count too. Shadow writes do not count.
 
 Write options for `ApplyTx` and `EntityTx`:
 
@@ -359,7 +361,7 @@ Execute read-only transactions with `View`:
 func (s *Server) View(ctx, workspaceID string, fn func(tx *ViewTx) error) error
 ```
 
-`ViewTx` provides `Get`, `GetMeta`, `Query`, and `ScanPage`. Each method returns the entity `version` alongside the message. The caller's `ReadFilter` is evaluated for each row; filtered rows return as absent. In-process reads are not constrained by request row limits. See [Query from server-side code](../how-to/server-side-queries.md).
+`ViewTx` provides `Get`, `GetMeta`, `Query`, `ScanPage`, and `ConsumerShadow`. Each method returns the entity `version` alongside the message. The caller's `ReadFilter` is evaluated for each row; filtered rows return as absent. In-process reads are not constrained by request row limits. See [Query from server-side code](../how-to/server-side-queries.md).
 
 `GetMeta` returns `RowMeta{Version, Actor}`. `Actor` contains the `storage.Actor` recorded during the row's most recent write. `GetMeta` is also available on `ApplyTx` and `EntityTx`. See [Check ownership in a mutator](../how-to/authentication-and-permissions.md#check-ownership-in-a-mutator).
 
@@ -557,6 +559,8 @@ Set `ConsumerUpdate.From` to the position that `ConsumerPosition` returned befor
 Set `ConsumerUpdate.Retain` to mark the consumer as retained. Garbage collection never removes a retained consumer, also when its position stays below the tombstone horizon. The mark is sticky: a later update with `Retain` false keeps it. `ConsumerPositions` reports it as `storage.ConsumerPosition.Retain`. Use it for a consumer whose shadows stay valid below the horizon and that heals by itself when `Changes` returns `ErrCursorTooOld`, such as a connector in record mode.
 
 `ScanConsumerShadows` calls `fn` for every shadow of one consumer and one entity name, in bytewise key order, in one read transaction. `fn` sees one snapshot and must not start a write.
+
+`ViewTx.ConsumerShadow(consumer, entity, key)` reads one shadow in the snapshot of a `View`, so it agrees with the rows that the same `View` reads. No read filter applies to it.
 
 `EntityTx` has the same shadow operations inside a write transaction:
 
