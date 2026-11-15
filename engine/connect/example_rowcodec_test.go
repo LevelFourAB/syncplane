@@ -18,29 +18,40 @@ import (
 
 // A text file is a record: its first line is the name of a Project, and each
 // further line is a Widget of that project, with the line in the
-// collaborative-text field body and its place in count. The file cannot hold
-// the other Widget fields, so the codec owns body and count only.
+// collaborative-text field body and its place in count, an order key that
+// clients can also write. The file cannot hold the other Widget fields, so
+// the codec owns body and count only.
 func ExampleRowCodec() {
 	codec := engineconnect.RowCodec{
 		Decode: func(in engineconnect.DecodeInput) (engineconnect.Decoded, error) {
 			lines := strings.Split(string(in.Record.Content), "\n")
 			// A line that stays, also when edited, keeps the key of its row.
 			var prev, keys []string
+			place := make(map[string]int32)
 			for _, w := range byPlace(in.Base.Members) {
 				body, err := engineconnect.PlainTextField(w, "body")
 				if err != nil {
 					return engineconnect.Decoded{}, err
 				}
 				prev, keys = append(prev, body), append(keys, w.GetId())
+				place[w.GetId()] = w.GetCount()
 			}
 			matched := engineconnect.MatchKeys(prev, keys, lines[1:])
 			out := engineconnect.Decoded{Root: &testdatav1.Project{Name: lines[0]}}
+			last := int32(-1)
 			for i, line := range lines[1:] {
 				key := matched[i]
 				if key == "" {
 					key = id.New()
 				}
-				w := &testdatav1.Widget{Id: key, Count: int32(i)}
+				// A row keeps its place while it still sorts after the line
+				// before it, so that the file gives back the places Encode got.
+				count, ok := place[key]
+				if !ok || count <= last {
+					count = last + 1
+				}
+				last = count
+				w := &testdatav1.Widget{Id: key, Count: count}
 				out.Members = append(out.Members, w)
 				out.SetText(w, "body", line)
 			}
