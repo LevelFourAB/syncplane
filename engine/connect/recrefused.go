@@ -249,7 +249,7 @@ func (c *Connector) afterReplace(tx *server.EntityTx, rt *recordType, key string
 // mark goes. A mark newer than the drained position pos waits, because the
 // drain has not seen its revert yet. It also drops kept content older than
 // Records.KeepReplaced.
-func (c *Connector) settleRefused(ctx context.Context, ws string, pos uint64) error {
+func (c *Connector) settleRefused(ctx context.Context, ws string, p *pass, pos uint64) error {
 	now := c.now()
 	for _, rt := range c.rec.types {
 		if rt.direction != Bidirectional {
@@ -283,7 +283,7 @@ func (c *Connector) settleRefused(ctx context.Context, ws string, pos uint64) er
 			if marks[key].Head > pos {
 				continue
 			}
-			if err := c.settleRefusedOne(ctx, ws, rt, key); err != nil {
+			if err := c.settleRefusedOne(ctx, ws, p, rt, key); err != nil {
 				return err
 			}
 			stale = slices.DeleteFunc(stale, func(k string) bool { return k == key })
@@ -304,7 +304,7 @@ func (c *Connector) settleRefused(ctx context.Context, ws string, pos uint64) er
 	return nil
 }
 
-func (c *Connector) settleRefusedOne(ctx context.Context, ws string, rt *recordType, key string) error {
+func (c *Connector) settleRefusedOne(ctx context.Context, ws string, p *pass, rt *recordType, key string) error {
 	dirty, err := c.readShadow(ctx, ws, dirtyEntity(rt), key)
 	if err != nil || dirty != nil {
 		// Egress uses the mark.
@@ -320,7 +320,7 @@ func (c *Connector) settleRefusedOne(ctx context.Context, ws string, rt *recordT
 	}
 	if k != nil {
 		var now []byte
-		rec, err := rt.store.Read(ctx, ws, k.Locator)
+		rec, err := p.store(rt).Read(ctx, ws, k.Locator)
 		switch {
 		case err == nil:
 			now = rec.Content

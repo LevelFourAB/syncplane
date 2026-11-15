@@ -35,7 +35,7 @@ type passSteps struct {
 // Ingest runs before the drain, so a record that changed on both sides is
 // merged before it is rendered.
 func (c *Connector) recordsPass(ctx context.Context, ws string, p *pass, steps passSteps) error {
-	if err := c.settlePending(ctx, ws); err != nil {
+	if err := c.settlePending(ctx, ws, p); err != nil {
 		return err
 	}
 	pos, ok, err := c.srv.ConsumerPosition(ctx, ws, c.consumer)
@@ -75,7 +75,7 @@ func (c *Connector) recordsPass(ctx context.Context, ws string, p *pass, steps p
 		if err := c.flushRecords(ctx, ws, p, pos.Seq, steps.flushAll); err != nil {
 			return err
 		}
-		if err := c.settleRefused(ctx, ws, pos.Seq); err != nil {
+		if err := c.settleRefused(ctx, ws, p, pos.Seq); err != nil {
 			return err
 		}
 	}
@@ -448,7 +448,7 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 	// cur is the store record at the agreed locator; nil when there is none.
 	var cur *Record
 	if sh != nil {
-		rec, err := rt.store.Read(ctx, ws, sh.Locator)
+		rec, err := p.store(rt).Read(ctx, ws, sh.Locator)
 		switch {
 		case errors.Is(err, ErrRecordNotFound) && rt.direction == EgressOnly:
 			// Written again below: the engine is the only source of the record.
@@ -546,7 +546,7 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 	}
 	switch {
 	case del:
-		return c.deleteRecord(ctx, ws, rt, key, sh, cur, rf)
+		return c.deleteRecord(ctx, ws, p, rt, key, sh, cur, rf)
 	case agreed:
 		c.clearFailure(ws, rt.rootName, key, "")
 		return nil
@@ -618,7 +618,7 @@ func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *rec
 		if owner != nil && string(owner) != key {
 			return &locatorTaken{locator: out.Locator, owner: string(owner)}
 		}
-		existing, err := rt.store.Read(ctx, ws, out.Locator)
+		existing, err := p.store(rt).Read(ctx, ws, out.Locator)
 		switch {
 		case errors.Is(err, ErrRecordNotFound):
 		case err != nil:
@@ -658,7 +658,7 @@ func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *rec
 		return err
 	}
 	if write {
-		fp, err := rt.store.Write(ctx, ws, Record{RecordRef: RecordRef{Key: key, Locator: out.Locator}, Content: out.Content}, pend.From)
+		fp, err := p.store(rt).Write(ctx, ws, Record{RecordRef: RecordRef{Key: key, Locator: out.Locator}, Content: out.Content}, pend.From)
 		if err != nil {
 			// The pending write stays: the store can have written part of
 			// it, and the next pass reads what it holds.
@@ -666,7 +666,7 @@ func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *rec
 		}
 		next.Fingerprint = fp
 	} else if pend.From != "" {
-		if err := rt.store.Delete(ctx, ws, pend.From); err != nil {
+		if err := p.store(rt).Delete(ctx, ws, pend.From); err != nil {
 			return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, pend.From, err)
 		}
 	}
@@ -686,7 +686,7 @@ func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *rec
 // is its agreed state, nil for a record the store never held, and cur the
 // store record at its locator, nil when there is none, and rf its refusal
 // state.
-func (c *Connector) deleteRecord(ctx context.Context, ws string, rt *recordType, key string, sh *recShadow, cur *Record, rf *refusal) error {
+func (c *Connector) deleteRecord(ctx context.Context, ws string, p *pass, rt *recordType, key string, sh *recShadow, cur *Record, rf *refusal) error {
 	if sh != nil && cur == nil && rt.direction == EgressOnly {
 		// The store deleted it too.
 		return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
@@ -712,7 +712,7 @@ func (c *Connector) deleteRecord(ctx context.Context, ws string, rt *recordType,
 	}); err != nil {
 		return err
 	}
-	if err := rt.store.Delete(ctx, ws, sh.Locator); err != nil {
+	if err := p.store(rt).Delete(ctx, ws, sh.Locator); err != nil {
 		return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, sh.Locator, err)
 	}
 	if err := c.bookkeep(ctx, ws, func(tx *server.EntityTx) error {
@@ -756,7 +756,7 @@ func (c *Connector) bookkeep(ctx context.Context, ws string, fn func(tx *server.
 // For a delete, a missing record completes it and a present one drops it.
 // It runs first in each pass, so that no other step meets a written record
 // whose agreed state is not saved.
-func (c *Connector) settlePending(ctx context.Context, ws string) error {
+func (c *Connector) settlePending(ctx context.Context, ws string, p *pass) error {
 	for _, rt := range c.rec.types {
 		pends := make(map[string]*pendingWrite)
 		if err := c.srv.ScanConsumerShadows(ctx, ws, c.consumer, pendEntity(rt), func(key string, raw []byte) error {
@@ -767,7 +767,7 @@ func (c *Connector) settlePending(ctx context.Context, ws string) error {
 			return err
 		}
 		for _, key := range slices.Sorted(maps.Keys(pends)) {
-			if err := c.settleOne(ctx, ws, rt, key, pends[key]); err != nil {
+			if err := c.settleOne(ctx, ws, p, rt, key, pends[key]); err != nil {
 				return err
 			}
 		}
@@ -775,14 +775,14 @@ func (c *Connector) settlePending(ctx context.Context, ws string) error {
 	return nil
 }
 
-func (c *Connector) settleOne(ctx context.Context, ws string, rt *recordType, key string, pw *pendingWrite) error {
+func (c *Connector) settleOne(ctx context.Context, ws string, p *pass, rt *recordType, key string, pw *pendingWrite) error {
 	sh, err := c.loadRecShadow(ctx, ws, rt, key)
 	if err != nil {
 		return err
 	}
 	drop := func(tx *server.EntityTx) error { return tx.DeleteConsumerShadow(c.consumer, pendEntity(rt), key) }
 	if pw.Next == nil {
-		_, err := rt.store.Read(ctx, ws, pw.Delete)
+		_, err := p.store(rt).Read(ctx, ws, pw.Delete)
 		switch {
 		case errors.Is(err, ErrRecordNotFound):
 			return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error { return c.forgetRecord(tx, rt, key, sh) })
@@ -791,7 +791,7 @@ func (c *Connector) settleOne(ctx context.Context, ws string, rt *recordType, ke
 		}
 		return c.shadowMutate(ctx, ws, drop)
 	}
-	rec, err := rt.store.Read(ctx, ws, pw.Next.Locator)
+	rec, err := p.store(rt).Read(ctx, ws, pw.Next.Locator)
 	if errors.Is(err, ErrRecordNotFound) {
 		return c.shadowMutate(ctx, ws, drop)
 	}
@@ -814,10 +814,10 @@ func (c *Connector) settleOne(ctx context.Context, ws string, rt *recordType, ke
 	}
 	if pw.From != "" && sh != nil {
 		// A store that moves a record in two steps can hold the old copy.
-		old, err := rt.store.Read(ctx, ws, pw.From)
+		old, err := p.store(rt).Read(ctx, ws, pw.From)
 		switch {
 		case err == nil && old.Fingerprint == sh.Fingerprint:
-			if err := rt.store.Delete(ctx, ws, pw.From); err != nil {
+			if err := p.store(rt).Delete(ctx, ws, pw.From); err != nil {
 				return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, pw.From, err)
 			}
 		case err != nil && !errors.Is(err, ErrRecordNotFound):
@@ -868,7 +868,7 @@ func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 			continue
 		}
 		var refs []RecordRef
-		if err := rt.store.List(ctx, ws, func(ref RecordRef) error {
+		if err := p.store(rt).List(ctx, ws, func(ref RecordRef) error {
 			refs = append(refs, ref)
 			return nil
 		}); err != nil {

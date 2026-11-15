@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -146,8 +147,17 @@ type RecordType struct {
 	// Members are the entities whose rows belong to a record. A type with no
 	// members syncs one row as one record.
 	Members []Member
-	// Store reads and writes the records of every workspace.
+	// Store reads and writes the records of every workspace. Exactly one of
+	// Store and OpenStore is required.
 	Store RecordStore
+	// OpenStore builds the store of one workspace, such as one that watches
+	// a folder for each workspace. It is called on the workspace's first
+	// pass, and the store is reused by the passes after it. When the store
+	// implements io.Closer, it is closed once the connector is done with it:
+	// on Close, on Forget, and after a pass that fails with
+	// ErrNeedsUserAction. An error fails the pass, and the next pass calls
+	// OpenStore again.
+	OpenStore func(ctx context.Context, workspaceID string) (RecordStore, error)
 	// Codec maps records to rows and rows to records.
 	Codec Codec
 	// Direction is Bidirectional (the default), IngressOnly or EgressOnly.
@@ -205,8 +215,9 @@ var ErrRecordNotFound = errors.New("connect: record not found")
 
 // RecordStore is the adopter's port over the records of one record type. The
 // connector delivers at least once, so each method must be idempotent.
-// Every method takes the workspace id, so one store serves all workspaces.
-// The connector calls the methods of one workspace from one goroutine at a
+// Every method takes the workspace id, so one store set as RecordType.Store
+// serves all workspaces; a store RecordType.OpenStore returns gets only the
+// id of its own workspace. The connector calls the methods of one workspace from one goroutine at a
 // time, but calls for different workspaces can run at the same time.
 type RecordStore interface {
 	// List yields each record of the type in the workspace, in any order. It
@@ -324,6 +335,7 @@ type recordType struct {
 	rootName  string
 	members   []*recordMember
 	store     RecordStore
+	open      func(ctx context.Context, workspaceID string) (RecordStore, error)
 	codec     Codec
 	direction Direction
 }
@@ -349,6 +361,54 @@ type records struct {
 	batchRows int
 	overwrite func(ctx context.Context, o Overwrite) error
 	keep      time.Duration
+	// perWorkspace is set when a type opens a store for each workspace.
+	perWorkspace bool
+}
+
+// recordStores are the stores of one workspace that record types opened
+// with OpenStore.
+type recordStores struct {
+	byType map[*recordType]RecordStore
+}
+
+// openStores opens the store of each type with OpenStore for one workspace.
+// When one fails, those already opened are closed.
+func (r *records) openStores(ctx context.Context, ws string) (*recordStores, error) {
+	out := &recordStores{byType: make(map[*recordType]RecordStore)}
+	for _, rt := range r.types {
+		if rt.open == nil {
+			continue
+		}
+		st, err := rt.open(ctx, ws)
+		if err == nil && st == nil {
+			err = errors.New("OpenStore returned a nil RecordStore")
+		}
+		if err != nil {
+			_ = out.Close()
+			return nil, fmt.Errorf("connect: open %s store for workspace %q: %w", rt.rootName, ws, err)
+		}
+		out.byType[rt] = st
+	}
+	return out, nil
+}
+
+// Close closes each store that implements io.Closer.
+func (s *recordStores) Close() error {
+	var errs []error
+	for _, st := range s.byType {
+		if c, ok := st.(io.Closer); ok {
+			errs = append(errs, c.Close())
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// store returns the store of a record type in this pass.
+func (p *pass) store(rt *recordType) RecordStore {
+	if rt.open != nil {
+		return p.stores.byType[rt]
+	}
+	return rt.store
 }
 
 // newRecords validates cfg.Records against cfg.
@@ -405,13 +465,19 @@ func newRecords(cfg Config) (*records, error) {
 		return entity, nil
 	}
 	for i, t := range r.Types {
-		if t.Root == nil || t.Store == nil || t.Codec == nil {
-			return nil, fmt.Errorf("connect: record type %d needs Root, Store and Codec", i)
+		if t.Root == nil || t.Codec == nil || (t.Store == nil && t.OpenStore == nil) {
+			return nil, fmt.Errorf("connect: record type %d needs Root, Store or OpenStore, and Codec", i)
+		}
+		if t.Store != nil && t.OpenStore != nil {
+			return nil, fmt.Errorf("connect: record type %d has both Store and OpenStore", i)
 		}
 		if t.Direction != Bidirectional && t.Direction != IngressOnly && t.Direction != EgressOnly {
 			return nil, fmt.Errorf("connect: record type %d: unknown Direction %d", i, t.Direction)
 		}
-		rt := &recordType{root: t.Root, store: t.Store, codec: t.Codec, direction: t.Direction}
+		rt := &recordType{root: t.Root, store: t.Store, open: t.OpenStore, codec: t.Codec, direction: t.Direction}
+		if rt.open != nil {
+			out.perWorkspace = true
+		}
 		name, err := claim(t.Root, rt)
 		if err != nil {
 			return nil, err

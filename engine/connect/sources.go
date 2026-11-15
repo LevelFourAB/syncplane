@@ -23,6 +23,10 @@ type pass struct {
 	// which New only permits when every binding is IngressOnly.
 	w Writer
 
+	// stores holds the record stores of the workspace when a record type
+	// opens one for each workspace (RecordType.OpenStore); nil otherwise.
+	stores *recordStores
+
 	cache *sourceCache
 	entry *sourceEntry
 
@@ -63,8 +67,9 @@ func (p *pass) release() {
 }
 
 // sourceEntry is one workspace's cached source and its in-flight ref count.
+// src is a Source in row mode and a *recordStores in record mode.
 type sourceEntry struct {
-	src  Source
+	src  any
 	refs int
 	// dead marks an entry that has been evicted: it is no longer handed out,
 	// and closes as soon as the last in-flight pass releases it.
@@ -85,10 +90,11 @@ type sourceEntry struct {
 // up without restarting the process.
 type sourceCache struct {
 	static Source
-	open   func(ctx context.Context, workspaceID string) (Source, error)
+	// open builds the value of one workspace: a Source, or a *recordStores.
+	open func(ctx context.Context, workspaceID string) (any, error)
 	// check validates a freshly opened source against the bindings (a
 	// bidirectional binding needs a Writer). Run once per open, not per pass.
-	check  func(Source) error
+	check  func(any) error
 	logger *slog.Logger
 
 	mu      sync.Mutex
@@ -97,10 +103,36 @@ type sourceCache struct {
 }
 
 func newSourceCache(static Source, open func(context.Context, string) (Source, error), check func(Source) error, logger *slog.Logger) *sourceCache {
-	return &sourceCache{
+	sc := &sourceCache{
 		static:  static,
-		open:    open,
-		check:   check,
+		check:   func(v any) error { return check(v.(Source)) },
+		logger:  logger,
+		entries: make(map[string]*sourceEntry),
+	}
+	if open != nil {
+		sc.open = func(ctx context.Context, workspaceID string) (any, error) {
+			src, err := open(ctx, workspaceID)
+			if err != nil || src == nil {
+				return nil, err
+			}
+			return src, nil
+		}
+	}
+	return sc
+}
+
+// newStoreCache is the cache of record mode when a record type opens a store
+// for each workspace.
+func newStoreCache(open func(context.Context, string) (*recordStores, error), logger *slog.Logger) *sourceCache {
+	return &sourceCache{
+		open: func(ctx context.Context, workspaceID string) (any, error) {
+			s, err := open(ctx, workspaceID)
+			if err != nil {
+				return nil, err
+			}
+			return s, nil
+		},
+		check:   func(any) error { return nil },
 		logger:  logger,
 		entries: make(map[string]*sourceEntry),
 	}
@@ -108,8 +140,8 @@ func newSourceCache(static Source, open func(context.Context, string) (Source, e
 
 func (sc *sourceCache) acquire(ctx context.Context, workspaceID string) (*pass, error) {
 	if sc.static == nil && sc.open == nil {
-		// Record mode: the record stores serve every workspace, and there is
-		// no per-workspace source to hold.
+		// Record mode with no OpenStore: the record stores serve every
+		// workspace, and there is no per-workspace source to hold.
 		return &pass{}, nil
 	}
 	if sc.static != nil {
@@ -163,8 +195,15 @@ func (sc *sourceCache) acquire(ctx context.Context, workspaceID string) (*pass, 
 }
 
 func (sc *sourceCache) handle(workspaceID string, e *sourceEntry) *pass {
-	w, _ := e.src.(Writer)
-	return &pass{src: e.src, w: w, cache: sc, entry: e}
+	p := &pass{cache: sc, entry: e}
+	switch v := e.src.(type) {
+	case *recordStores:
+		p.stores = v
+	case Source:
+		p.src = v
+		p.w, _ = v.(Writer)
+	}
+	return p
 }
 
 func (sc *sourceCache) release(e *sourceEntry) {
@@ -204,7 +243,7 @@ func (sc *sourceCache) invalidate(workspaceID string) {
 func (sc *sourceCache) closeAll() error {
 	sc.mu.Lock()
 	sc.closed = true
-	idle := make([]Source, 0, len(sc.entries))
+	idle := make([]any, 0, len(sc.entries))
 	for id, e := range sc.entries {
 		delete(sc.entries, id)
 		e.dead = true
@@ -226,7 +265,7 @@ func (sc *sourceCache) closeAll() error {
 // not propagated: every caller is on a path (release, eviction) whose own
 // result is about something else, and a source that will not close is not a
 // reason to fail a convergence pass.
-func (sc *sourceCache) closeSource(src Source) {
+func (sc *sourceCache) closeSource(src any) {
 	closer, ok := src.(io.Closer)
 	if !ok {
 		return

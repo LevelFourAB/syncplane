@@ -71,7 +71,7 @@ func (c *Connector) loadKnown(ctx context.Context, ws string, rt *recordType) (*
 // marks: a new locator with the fingerprint of a missing record is a rename,
 // and takes that record's key and mark. known, when not nil, is read instead
 // of the store.
-func (c *Connector) resolveRef(ctx context.Context, ws string, rt *recordType, ref RecordRef, gone map[string]*goneMark, known *knownRecords) (*ingestJob, error) {
+func (c *Connector) resolveRef(ctx context.Context, ws string, p *pass, rt *recordType, ref RecordRef, gone map[string]*goneMark, known *knownRecords) (*ingestJob, error) {
 	var key string
 	if known != nil {
 		key = known.byLoc[ref.Locator]
@@ -120,7 +120,7 @@ func (c *Connector) resolveRef(ctx context.Context, ws string, rt *recordType, r
 	}
 	if key == "" && ref.Fingerprint != "" && known == nil {
 		var err error
-		if key, err = c.renamedFrom(ctx, ws, rt, ref); err != nil {
+		if key, err = c.renamedFrom(ctx, ws, p, rt, ref); err != nil {
 			return nil, err
 		}
 	}
@@ -135,7 +135,7 @@ func (c *Connector) resolveRef(ctx context.Context, ws string, rt *recordType, r
 // the store no longer holds. It returns "" when there is none, as for a copy.
 // A full list does not need it: it marks the missing records before it
 // resolves a new locator.
-func (c *Connector) renamedFrom(ctx context.Context, ws string, rt *recordType, ref RecordRef) (string, error) {
+func (c *Connector) renamedFrom(ctx context.Context, ws string, p *pass, rt *recordType, ref RecordRef) (string, error) {
 	raw, err := c.readShadow(ctx, ws, fpEntity(rt), ref.Fingerprint)
 	if err != nil {
 		return "", err
@@ -152,7 +152,7 @@ func (c *Connector) renamedFrom(ctx context.Context, ws string, rt *recordType, 
 		if sh == nil || sh.Locator == ref.Locator || sh.Fingerprint != ref.Fingerprint {
 			continue
 		}
-		_, err = rt.store.Read(ctx, ws, sh.Locator)
+		_, err = p.store(rt).Read(ctx, ws, sh.Locator)
 		if errors.Is(err, ErrRecordNotFound) {
 			return key, nil
 		}
@@ -165,9 +165,9 @@ func (c *Connector) renamedFrom(ctx context.Context, ws string, rt *recordType, 
 
 // readJob reads the content of a job, and reports false when there is
 // nothing to ingest: the record is gone, or its shadow agrees with it.
-func (c *Connector) readJob(ctx context.Context, ws string, j *ingestJob) (bool, error) {
+func (c *Connector) readJob(ctx context.Context, ws string, p *pass, j *ingestJob) (bool, error) {
 	if !j.read {
-		rec, err := j.rt.store.Read(ctx, ws, j.ref.Locator)
+		rec, err := p.store(j.rt).Read(ctx, ws, j.ref.Locator)
 		if errors.Is(err, ErrRecordNotFound) {
 			// Gone since it was listed; the next list marks it missing.
 			return false, nil
@@ -193,7 +193,7 @@ func (c *Connector) ingestJobs(ctx context.Context, ws string, p *pass, jobs []*
 		n := min(window, len(jobs))
 		batch := make([]*ingestJob, 0, n)
 		for _, j := range jobs[:n] {
-			ok, err := c.readJob(ctx, ws, j)
+			ok, err := c.readJob(ctx, ws, p, j)
 			if err != nil {
 				return err
 			}
@@ -482,7 +482,7 @@ func (c *Connector) ingestRefs(ctx context.Context, ws string, p *pass, rt *reco
 			continue
 		}
 		seen[ref.Locator] = true
-		j, err := c.resolveRef(ctx, ws, rt, ref, gone, known)
+		j, err := c.resolveRef(ctx, ws, p, rt, ref, gone, known)
 		if err != nil {
 			return err
 		}
@@ -496,7 +496,7 @@ func (c *Connector) ingestRefs(ctx context.Context, ws string, p *pass, rt *reco
 // reconcileType lists every record of one type and ingests what changed.
 func (c *Connector) reconcileType(ctx context.Context, ws string, p *pass, rt *recordType) error {
 	var refs []RecordRef
-	if err := rt.store.List(ctx, ws, func(ref RecordRef) error {
+	if err := p.store(rt).List(ctx, ws, func(ref RecordRef) error {
 		refs = append(refs, ref)
 		return nil
 	}); err != nil {
@@ -632,7 +632,7 @@ func (c *Connector) ingestLocators(ctx context.Context, ws string, p *pass, locs
 				// No store record becomes rows of an EgressOnly type.
 				continue
 			}
-			rec, err := rt.store.Read(ctx, ws, loc)
+			rec, err := p.store(rt).Read(ctx, ws, loc)
 			if errors.Is(err, ErrRecordNotFound) {
 				continue
 			}
@@ -663,7 +663,7 @@ func (c *Connector) ingestLocators(ctx context.Context, ws string, p *pass, locs
 		if err != nil {
 			return err
 		}
-		j, err := c.resolveRef(ctx, ws, f.rt, f.rec.RecordRef, g, nil)
+		j, err := c.resolveRef(ctx, ws, p, f.rt, f.rec.RecordRef, g, nil)
 		if err != nil {
 			return err
 		}
@@ -689,7 +689,7 @@ func (c *Connector) ingestUnknown(ctx context.Context, ws string, p *pass, rt *r
 	if err != nil {
 		return err
 	}
-	j, err := c.resolveRef(ctx, ws, rt, rec.RecordRef, gone, nil)
+	j, err := c.resolveRef(ctx, ws, p, rt, rec.RecordRef, gone, nil)
 	if err != nil || j == nil {
 		return err
 	}
@@ -738,7 +738,7 @@ func (c *Connector) applyDeletes(ctx context.Context, ws string, p *pass) error 
 			if c.rec.grace >= 0 && now.Before(time.Unix(0, g.Since).Add(c.rec.grace)) {
 				continue
 			}
-			rec, err := rt.store.Read(ctx, ws, g.Locator)
+			rec, err := p.store(rt).Read(ctx, ws, g.Locator)
 			if err == nil {
 				if err := c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
 					return tx.DeleteConsumerShadow(c.consumer, goneEntity(rt), key)
@@ -748,7 +748,7 @@ func (c *Connector) applyDeletes(ctx context.Context, ws string, p *pass) error 
 				if rec.Locator == "" {
 					rec.Locator = g.Locator
 				}
-				j, err := c.resolveRef(ctx, ws, rt, rec.RecordRef, nil, nil)
+				j, err := c.resolveRef(ctx, ws, p, rt, rec.RecordRef, nil, nil)
 				if err != nil {
 					return err
 				}

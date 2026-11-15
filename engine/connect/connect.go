@@ -406,7 +406,11 @@ func New(cfg Config) (*Connector, error) {
 			return nil, err
 		}
 	}
-	c.srcs = newSourceCache(cfg.Source, cfg.OpenSource, check, logger)
+	if rec != nil && rec.perWorkspace {
+		c.srcs = newStoreCache(rec.openStores, logger)
+	} else {
+		c.srcs = newSourceCache(cfg.Source, cfg.OpenSource, check, logger)
+	}
 	// Registered after the Connector exists, because the callback samples it.
 	// Close unregisters, so a connector that is built and closed leaves
 	// nothing behind in the meter provider.
