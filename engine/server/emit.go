@@ -166,6 +166,9 @@ type rowEmitter struct {
 	accessUsedAt time.Time
 	accessKeyRef cursorstate.Ref
 	accessKey    []byte
+	// entries holds the cursor-state entries loadAccessEntries read for the
+	// cursor the emitter serves, by ref. loadAccessEntry reads only these.
+	entries map[cursorstate.Ref]heldEntry
 	// callerAccess, callerAccessHash and callerAccessSize render access for
 	// the client, once per binding (see boundCallerAccess).
 	callerAccess     *syncplanev1.CallerAccess

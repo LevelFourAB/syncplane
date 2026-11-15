@@ -37,10 +37,11 @@ type Ref struct {
 }
 
 // Store holds cursor state entries. Implementations must be safe for
-// concurrent use; calls may arrive while the server holds an open read
-// snapshot on its storage adapter, so an implementation backed by the same
-// database must use its own connection rather than the adapter's transaction
-// API.
+// concurrent use. The server calls Get while no read transaction of the
+// request is open on its storage adapter. A Put can arrive while the server
+// holds an open read snapshot on the adapter, so an implementation backed by
+// the same database must use its own connection rather than the adapter's
+// transaction API.
 type Store interface {
 	// Get returns the entry stored under (workspaceID, ref), or ErrNotFound.
 	// Any other error is treated as transient and fails the request it served,

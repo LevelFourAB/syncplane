@@ -500,6 +500,11 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		if err := s.refreshEpoch(ctx, sc); err != nil {
 			return s.dropScope(ctx, stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)
 		}
+		// The page reads the cursor's access entries inside its snapshot, and
+		// only loadAccessEntries reads them from the store.
+		if err := sc.emitter.loadAccessEntries(sc.cur); err != nil {
+			return s.dropScope(ctx, stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)
+		}
 		route, err := s.routePull(ctx, sc.ws, sc.cur, sc.rawCursor, sc.wantHash, sc.epoch, sc.emitter)
 		if err != nil {
 			return s.dropScope(ctx, stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)

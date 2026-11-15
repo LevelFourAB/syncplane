@@ -553,6 +553,12 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 		}
 	}
 
+	// The page reads the cursor's access entries inside its snapshot, and
+	// only loadAccessEntries reads them from the store.
+	if err := emitter.loadAccessEntries(cur); err != nil {
+		return nil, err
+	}
+
 	// Route the page from the cursor alone (no tx needed). A delta resync
 	// reconstructs the cursor's old visibility here, which calls
 	// ReadFilter/ReadFilterAt (resync.go) and so must also run outside the

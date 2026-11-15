@@ -137,6 +137,13 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	if resume != nil && !resume.acceptable(wantHash, epoch) {
 		resume = nil
 	}
+	// The resume check reads the cursor's access entry inside the snapshot,
+	// and only loadAccessEntries reads it from the store.
+	if resume != nil {
+		if err := emitter.loadAccessEntries(resume.cur); err != nil {
+			return err
+		}
+	}
 
 	// The order rows go out in, announced on Begin so the client can tell an
 	// entity that has not started from one that shipped nothing (see

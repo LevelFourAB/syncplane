@@ -153,12 +153,13 @@ func (e *rowEmitter) stampAccess(st *cursorState, cur cursorState) {
 // as a stream's, reads the access entry it reissues.
 const accessEntryUseEvery = time.Hour
 
-// heldAccessKey reads the access entry cur names, which a cursor about to be
-// issued names again, and returns its seq key. It returns nil when there is
-// no store, the store no longer holds the entry, the read fails, or the entry
-// has no key. The read tells the store the entry is in use (see
+// heldAccessKey decodes the access entry cur names, which a cursor about to
+// be issued names again, and returns its seq key. It returns nil when there
+// is no store, loadAccessEntries did not read the entry, the store no longer
+// holds it, the read failed, or the entry has no key. The read in
+// loadAccessEntries tells the store the entry is in use (see
 // cursorstate.Store.Get), so a client that keeps syncing under the same
-// access keeps its entry. An emitter reads one entry at most once per
+// access keeps its entry. An emitter decodes one entry at most once per
 // accessEntryUseEvery and keeps its key in between.
 func (e *rowEmitter) heldAccessKey(cur cursorState) []byte {
 	ref := cursorstate.Ref{ID: cur.accessID, Gen: cur.accessGen}
@@ -683,19 +684,78 @@ func (e *rowEmitter) loadReadAccess(cur cursorState) (*syncplanecursorv1.ReadAcc
 	return ra, nil
 }
 
-// loadAccessEntry reads the cursor-state entry (id, gen) into m. It reports
-// false when gen is 0, there is no store, or the entry is damaged, and
-// returns cursorstate.ErrNotFound when the store does not hold the entry.
+// loadAccessEntry decodes the cursor-state entry (id, gen) into m, as
+// loadAccessEntries read it. It reports false when gen is 0, there is no
+// store, loadAccessEntries did not read the entry, or the entry is damaged,
+// and returns the error the store answered the read with, such as
+// cursorstate.ErrNotFound when the store does not hold the entry.
 func (e *rowEmitter) loadAccessEntry(id, gen uint64, m proto.Message) (bool, error) {
-	s := e.srv
-	if s.cursorState == nil || gen == 0 {
+	if e.srv.cursorState == nil || gen == 0 {
 		return false, nil
 	}
-	blob, err := s.cursorState.Get(e.ctx, e.ws, cursorstate.Ref{ID: id, Gen: gen})
-	if err != nil {
-		return false, err
+	// No read of the store here: this runs inside the read transaction (see
+	// loadAccessEntries). An entry it did not read counts as one the store
+	// cannot give, which every caller answers correctly, at some cost.
+	h, ok := e.entries[cursorstate.Ref{ID: id, Gen: gen}]
+	if !ok {
+		return false, nil
 	}
-	return proto.Unmarshal(blob, m) == nil, nil
+	if h.err != nil {
+		return false, h.err
+	}
+	return proto.Unmarshal(h.blob, m) == nil, nil
+}
+
+// heldEntry is a cursor-state entry loadAccessEntries read: its bytes, or the
+// error the store answered with, and when it read them.
+type heldEntry struct {
+	blob []byte
+	err  error
+	at   time.Time
+}
+
+// loadAccessEntries reads the cursor-state entries that the next read
+// transaction can decode through loadAccessEntry: the ReadAccess entry cur
+// names, and the CallerAccess entry cur names when the client applies deltas
+// to the version that entry holds. Call it before the transaction opens.
+//
+// A verdict that is not reached yet is reached first, because the reads are
+// storage work in the workspace, which a caller the gate refuses must not
+// cause; the gate's error is returned. A failed read is not returned: it is
+// kept, and loadAccessEntry returns it.
+//
+// An entry read less than accessEntryUseEvery ago is kept without a new read,
+// so an emitter that serves many pages reads each entry once per
+// accessEntryUseEvery.
+func (e *rowEmitter) loadAccessEntries(cur cursorState) error {
+	held := make(map[cursorstate.Ref]heldEntry, 2)
+	defer func() { e.entries = held }()
+	if e.srv.cursorState == nil || e.caller == nil {
+		return nil
+	}
+	refs := make([]cursorstate.Ref, 0, 2)
+	if cur.accessGen != 0 {
+		refs = append(refs, cursorstate.Ref{ID: cur.accessID, Gen: cur.accessGen})
+	}
+	// The condition storedCallerAccess reads the entry under. Whether the
+	// version differs from the one bound now is not known yet: the access is
+	// bound inside the transaction.
+	if e.callerAccessDeltas && cur.callerAccessGen != 0 && e.heldCallerAccess != 0 &&
+		cur.callerAccessHash == e.heldCallerAccess {
+		refs = append(refs, cursorstate.Ref{ID: cur.callerAccessID, Gen: cur.callerAccessGen})
+	}
+	for _, ref := range refs {
+		if h, ok := e.entries[ref]; ok && h.err == nil && time.Since(h.at) < accessEntryUseEvery {
+			held[ref] = h
+			continue
+		}
+		if err := e.verdict.reachApart(e.ctx); err != nil {
+			return err
+		}
+		blob, err := e.srv.cursorState.Get(e.ctx, e.ws, ref)
+		held[ref] = heldEntry{blob: blob, err: err, at: time.Now()}
+	}
+	return nil
 }
 
 // sameAnchors reports whether x and y hold their permissions at the same
