@@ -75,6 +75,23 @@ type recShadow struct {
 	// Ingested is when the record's last ingest wrote rows, in Unix ns; 0
 	// for none.
 	Ingested int64 `json:"i,omitempty"`
+	// Alt is the state of a store write that the connector cannot tell was
+	// done (see settleOne); nil for none. The next agreed state drops it.
+	Alt *recAlt `json:"a,omitempty"`
+}
+
+// recAlt is the agreed state a store write would have made.
+type recAlt struct {
+	Payload []byte `json:"p,omitempty"`
+}
+
+// alternate returns the state of a write the connector cannot tell was done,
+// as MergeInput.Alternate; nil for none.
+func (sh *recShadow) alternate() *Agreed {
+	if sh == nil || sh.Alt == nil {
+		return nil
+	}
+	return &Agreed{Locator: sh.Locator, Payload: sh.Alt.Payload}
 }
 
 func (sh *recShadow) ingested() int64 {

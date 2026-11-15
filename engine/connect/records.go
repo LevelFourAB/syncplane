@@ -275,6 +275,14 @@ type MergeInput struct {
 	// Base is the state the store and the engine last agreed on; nil when the
 	// connector has no shadow of the record.
 	Base *Agreed
+	// Alternate is set when the connector wrote the record to the store
+	// after Base, and cannot tell whether the write was done before the
+	// store changed the record again: it is the state that write would have
+	// agreed on. The store's content continues Base or Alternate. A Merge
+	// that ignores it merges against Base, and then applies the engine edits
+	// of a write that was done a second time; collaborative text holds them
+	// twice. Nil when there is no such write.
+	Alternate *Agreed
 	// Root is the root row; nil when there is none.
 	Root proto.Message
 	// Members are the member rows of the record, of each member entity in

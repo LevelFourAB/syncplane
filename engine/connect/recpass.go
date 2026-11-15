@@ -762,8 +762,10 @@ func (c *Connector) bookkeep(ctx context.Context, ws string, fn func(tx *server.
 //   - Other content: the store changed it, and the write may or may not have
 //     been done. The old agreed state stays the base, moved to the written
 //     locator, with no fingerprint, so that the next ingest merges the
-//     store's content with it. A record with no agreed state drops the
-//     write, and the next list ingests what the store holds as a new record.
+//     store's content with it; the state of the write goes with it as the
+//     alternate base (MergeInput.Alternate). A record with no agreed state
+//     drops the write, and the next list ingests what the store holds as a
+//     new record.
 //
 // For a delete, a missing record completes it and a present one drops it.
 // It runs first in each pass, so that no other step meets a written record
@@ -819,10 +821,13 @@ func (c *Connector) settleOne(ctx context.Context, ws string, p *pass, rt *recor
 	case sh == nil:
 		return c.shadowMutate(ctx, ws, drop)
 	default:
-		// The written state as base would take an engine edit it holds and
-		// the store lacks for a store deletion when the write was not done.
+		// Either state alone as the base loses: the written state takes an
+		// engine edit the store lacks for a store deletion when the write was
+		// not done, and the old state applies the written edits again when
+		// it was. The codec picks from the content.
 		next = *sh
 		next.Locator, next.Fingerprint = pw.Next.Locator, ""
+		next.Alt = &recAlt{Payload: pw.Next.Payload}
 	}
 	if pw.From != "" && sh != nil {
 		// A store that moves a record in two steps can hold the old copy.

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -93,7 +95,10 @@ type DecodeInput struct {
 	// Base holds the rows as the store held them when the store and the
 	// engine last agreed. Base.Root is nil when there is no agreed state.
 	// Match the parts of the content to these rows to give each part the key
-	// of its row; see MatchKeys.
+	// of its row; see MatchKeys. When the connector cannot tell whether its
+	// last store write was done (see MergeInput.Alternate), Base holds the
+	// rows before or after that write, whichever Encode makes into content
+	// nearer Record.Content.
 	Base RecordRows
 	// Rows holds the rows of the record in the engine now. A member row here
 	// that Base does not hold is a row a client added, or a row an earlier
@@ -184,6 +189,8 @@ type rowEntity struct {
 	name string
 	// member is nil for the root entity.
 	member *recordMember
+	// order is the place of a member entity in RecordType.Members.
+	order int
 	// keyField is the key field of a root entity with one string key field,
 	// which an empty root key is filled into; else nil.
 	keyField protoreflect.FieldDescriptor
@@ -224,6 +231,7 @@ func (c RowCodec) bindCodec(srv *server.Server, rt *recordType) (Codec, error) {
 			binding: binding{prototype: prototype, owned: owned, ownedUnits: units},
 			name:    name,
 			member:  m,
+			order:   len(b.byName),
 		}
 		if m != nil && owned != nil {
 			// The record field says which record a row is in, which only
@@ -357,12 +365,27 @@ func (c *rowCodec) Merge(tx *server.EntityTx, in MergeInput) (Merged, error) {
 	if err != nil {
 		return Merged{}, err
 	}
+	var alt *agreedRows
+	if in.Alternate != nil && base.rows.Root != nil {
+		if alt, err = c.readPayload(in.Alternate); err != nil {
+			return Merged{}, err
+		}
+		if alt.rows.Root == nil {
+			alt = nil
+		}
+	}
+	from := base
+	if alt != nil {
+		if from, err = c.nearer(in, base, alt); err != nil {
+			return Merged{}, err
+		}
+	}
 	dec, err := c.decode(DecodeInput{
 		Key:     in.Key,
 		Record:  in.Record,
-		Base:    base.rows,
+		Base:    from.rows,
 		Rows:    RecordRows{Root: in.Root, Members: in.Members},
-		Payload: base.app,
+		Payload: from.app,
 	})
 	if err != nil {
 		return Merged{}, err
@@ -408,7 +431,11 @@ func (c *rowCodec) Merge(tx *server.EntityTx, in MergeInput) (Merged, error) {
 				}
 			}
 		}
-		merged, view, err := c.mergeRow(r, base.byID[id], now, in.TextPeer)
+		var altRow proto.Message
+		if alt != nil {
+			altRow = alt.byID[id]
+		}
+		merged, view, err := c.mergeRow(r, base.byID[id], altRow, now, in.TextPeer)
 		if err != nil {
 			return Merged{}, fmt.Errorf("%s %q: %w", r.ent.name, r.key, err)
 		}
@@ -564,15 +591,28 @@ func (m *recordMember) setRecordKey(msg proto.Message, key string) {
 }
 
 // mergeRow merges one decoded row into the engine row now, against base,
-// the row as the store held it in the agreed state; base and now can be nil.
-// It returns the row to write, nil to leave the row as it is, and the row as
-// the store holds it now, for the next agreed state.
-func (c *rowCodec) mergeRow(r decodedRow, base, now proto.Message, peer string) (proto.Message, proto.Message, error) {
+// the row as the store held it in the agreed state, and alt, the row as an
+// alternate agreed state holds it; base, alt and now can be nil. It returns
+// the row to write, nil to leave the row as it is, and the row as the store
+// holds it now, for the next agreed state.
+//
+// With two ancestors, a field the store holds as in either of them is not a
+// store edit, and a text field merges against the one whose text is nearest
+// the store's.
+func (c *rowCodec) mergeRow(r decodedRow, base, alt, now proto.Message, peer string) (proto.Message, proto.Message, error) {
 	e := r.ent
 	view := proto.Clone(r.msg)
+	held := base != nil || alt != nil
 	var paths []string
 	if base != nil {
 		paths = e.ownedPaths(fieldDiff(base, r.msg))
+	}
+	if alt != nil {
+		changed := e.ownedPaths(fieldDiff(alt, r.msg))
+		if base != nil {
+			changed = slices.DeleteFunc(changed, func(p string) bool { return !slices.Contains(paths, p) })
+		}
+		paths = changed
 	}
 	type textEdit struct {
 		fd             protoreflect.FieldDescriptor
@@ -584,13 +624,12 @@ func (c *rowCodec) mergeRow(r decodedRow, base, now proto.Message, peer string) 
 	changed := len(paths) > 0
 	for _, fd := range e.texts {
 		t := textEdit{fd: fd, value: r.texts[string(fd.Name())], changed: true}
-		if base != nil {
-			t.base = base.ProtoReflect().Get(fd).Bytes()
-			was, err := text.PlainText(t.base)
+		if held {
+			doc, was, err := nearestText(fd, t.value, base, alt)
 			if err != nil {
 				return nil, nil, err
 			}
-			t.changed = was != t.value
+			t.base, t.changed = doc, was != t.value
 		}
 		if now != nil {
 			t.now = now.ProtoReflect().Get(fd).Bytes()
@@ -607,7 +646,7 @@ func (c *rowCodec) mergeRow(r decodedRow, base, now proto.Message, peer string) 
 		changed = changed || t.changed
 		edits = append(edits, t)
 	}
-	if now == nil && base != nil && !changed {
+	if now == nil && held && !changed {
 		// A client deleted the row, and the store did not change it since.
 		for _, t := range edits {
 			setBytes(view, t.fd, t.base)
@@ -616,7 +655,7 @@ func (c *rowCodec) mergeRow(r decodedRow, base, now proto.Message, peer string) 
 	}
 	var merged proto.Message
 	switch {
-	case now != nil && base != nil:
+	case now != nil && held:
 		merged = proto.Clone(now)
 		applyFields(merged, r.msg, paths)
 	case e.owned != nil:
@@ -642,7 +681,7 @@ func (c *rowCodec) mergeRow(r decodedRow, base, now proto.Message, peer string) 
 			setBytes(view, t.fd, t.now)
 			setBytes(merged, t.fd, t.now)
 		default:
-			src, out, err := mergeText(t.base, t.now, base != nil, t.value, peer)
+			src, out, err := mergeText(t.base, t.now, held, t.value, peer)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -651,6 +690,90 @@ func (c *rowCodec) mergeRow(r decodedRow, base, now proto.Message, peer string) 
 		}
 	}
 	return merged, view, nil
+}
+
+// nearestText returns the document of the text field fd in base or alt,
+// whichever is not nil and has the plain text nearest value, and that text.
+// A tie goes to base.
+func nearestText(fd protoreflect.FieldDescriptor, value string, base, alt proto.Message) ([]byte, string, error) {
+	var (
+		doc  []byte
+		was  string
+		dist = -1
+	)
+	for _, row := range []proto.Message{base, alt} {
+		if row == nil {
+			continue
+		}
+		b := row.ProtoReflect().Get(fd).Bytes()
+		s, err := text.PlainText(b)
+		if err != nil {
+			return nil, "", err
+		}
+		limit := len(s) + len(value)
+		if dist >= 0 {
+			limit = dist - 1
+		}
+		if d := editDistance([]byte(s), []byte(value), limit); dist < 0 || d < dist {
+			doc, was, dist = b, s, d
+		}
+	}
+	return doc, was, nil
+}
+
+// nearer returns base or alt, whichever Encode makes into content nearer
+// in.Record.Content. A tie goes to base.
+func (c *rowCodec) nearer(in MergeInput, base, alt *agreedRows) (*agreedRows, error) {
+	if c.encode == nil {
+		return base, nil
+	}
+	content := func(a *agreedRows) ([]byte, error) {
+		out, err := c.encode(EncodeInput{Key: in.Key, Locator: in.Base.Locator, Payload: a.app, Rows: c.sorted(a.rows)})
+		return out.Content, err
+	}
+	b, err := content(base)
+	if err != nil {
+		return nil, err
+	}
+	a, err := content(alt)
+	if err != nil {
+		return nil, err
+	}
+	db := editDistance(b, in.Record.Content, len(b)+len(in.Record.Content))
+	if editDistance(a, in.Record.Content, db-1) < db {
+		return alt, nil
+	}
+	return base, nil
+}
+
+// sorted returns rows with the members in the order of RecordType.Members,
+// and in key order within one entity, as Encode gets them.
+func (c *rowCodec) sorted(rows RecordRows) RecordRows {
+	type keyed struct {
+		order int
+		key   string
+		msg   proto.Message
+	}
+	all := make([]keyed, 0, len(rows.Members))
+	for _, msg := range rows.Members {
+		entity, key, _ := c.srv.EntityKey(msg)
+		order := 0
+		if e := c.byName[entity]; e != nil {
+			order = e.order
+		}
+		all = append(all, keyed{order, key, msg})
+	}
+	slices.SortFunc(all, func(a, b keyed) int {
+		if a.order != b.order {
+			return a.order - b.order
+		}
+		return strings.Compare(a.key, b.key)
+	})
+	out := RecordRows{Root: rows.Root, Members: make([]proto.Message, len(all))}
+	for i, k := range all {
+		out.Members[i] = k.msg
+	}
+	return out
 }
 
 // mergeText applies the store's text value to a document. With an agreed

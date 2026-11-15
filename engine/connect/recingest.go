@@ -356,7 +356,7 @@ func (c *Connector) mergeOne(tx *server.EntityTx, p *pass, j *ingestJob) (int, e
 	}
 	writes := tx.Writes()
 	merged, err := rt.codec.Merge(tx, MergeInput{
-		Key: key, Record: j.rec, Base: sh.agreed(), Root: root, Members: members, TextPeer: c.peer,
+		Key: key, Record: j.rec, Base: sh.agreed(), Alternate: sh.alternate(), Root: root, Members: members, TextPeer: c.peer,
 		dropped: func(id rowID) proto.Message { return p.dropped[id] },
 	})
 	if err != nil {

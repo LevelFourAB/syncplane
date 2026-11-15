@@ -380,6 +380,68 @@ var _ = Describe("RowCodec", func() {
 			Expect(f.content(ws, "a.txt")).To(Equal("T\nhello brave world!?"))
 		})
 
+		// lostReply makes the next store write land, then the store change the
+		// record with edit, and then the write fail, as a reply that is lost
+		// after a store edit does. With landed false, the write does not land.
+		lostReply := func(f *recFixture, landed bool, edit func(string) string) {
+			once := true
+			f.store.setBeforeWrite(func(_ context.Context, rec engineconnect.Record, _ string) error {
+				if !once {
+					return nil
+				}
+				once = false
+				was := string(rec.Content)
+				if !landed {
+					was = f.content(ws, rec.Locator)
+				}
+				f.store.put(ws, rec.Locator, edit(was))
+				return errors.New("lost reply")
+			})
+		}
+
+		It("keeps an engine edit once when its write was done and the store changed the line before the bookkeeping", func() {
+			f, _ := newRowFixture()
+			f.store.put(ws, "a.txt", "T\nhello world")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			key := f.key(ctx, ws, "a.txt")
+			w := f.widgetWith(ctx, ws, key, "hello world")
+			f.editLine(ctx, ws, w, "hello brave world")
+
+			lostReply(f, true, func(s string) string { return s + "!" })
+			Expect(f.conn.Flush(ctx, ws)).NotTo(Succeed())
+			Expect(f.content(ws, "a.txt")).To(Equal("T\nhello brave world!"))
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.lines(ctx, ws, key)).To(Equal("T\nhello brave world!"))
+			Expect(f.content(ws, "a.txt")).To(Equal("T\nhello brave world!"))
+		})
+
+		DescribeTable("keeps a line the engine added once when its write may have failed and the store changed the record",
+			func(landed bool, want string) {
+				f, _ := newRowFixture()
+				f.store.put(ws, "a.txt", "T\none")
+				Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+				key := f.key(ctx, ws, "a.txt")
+				f.clientWrite(ctx, ws, func(tx *server.EntityTx) error {
+					w := &testdatav1.Widget{Id: "c1", Label: key, Count: 1}
+					if err := server.ApplyTextStrings(w, nil, nil, map[string]string{"body": "new"}, "client-1"); err != nil {
+						return err
+					}
+					return tx.Put(w)
+				})
+
+				lostReply(f, landed, func(s string) string { return strings.ReplaceAll(s, "e", "E") })
+				Expect(f.conn.Flush(ctx, ws)).NotTo(Succeed())
+				Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+				Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+				Expect(f.lines(ctx, ws, key)).To(Equal(want))
+				Expect(f.content(ws, "a.txt")).To(Equal(want))
+				Expect(f.widgetKeys(ctx, ws, key)).To(ContainElement("c1"), "the added line keeps its row")
+			},
+			Entry("when the write was done", true, "T\nonE\nnEw"),
+			Entry("when the write was not done", false, "T\nonE\nnew"),
+		)
+
 		It("keeps an engine edit an IngressOnly store never receives when the store changes again", func() {
 			f, _ := newRowFixture(withRecords(func(r *engineconnect.Records) { r.Types[0].Direction = engineconnect.IngressOnly }))
 			f.store.put(ws, "a.txt", "T\nhello world")
@@ -595,3 +657,16 @@ var _ = DescribeTable("MatchKeys",
 var _ = It("MatchKeys panics when the parts and the keys differ in length", func() {
 	Expect(func() { engineconnect.MatchKeys([]string{"a"}, nil, []string{"a"}) }).To(Panic())
 })
+
+var _ = DescribeTable("editDistance",
+	func(a, b string, limit, want int) {
+		Expect(engineconnect.EditDistance(a, b, limit)).To(Equal(want))
+	},
+	Entry("equal", "abc", "abc", 10, 0),
+	Entry("from nothing", "", "abc", 10, 3),
+	Entry("an insert", "hello world", "hello brave world", 100, 6),
+	Entry("a change is a delete and an insert", "abc", "aXc", 10, 2),
+	Entry("over the limit", "abc", "xyz", 3, 4),
+	Entry("at the limit", "abc", "xyz", 6, 6),
+	Entry("a negative limit gives limit+1", "a", "b", -1, 0),
+)

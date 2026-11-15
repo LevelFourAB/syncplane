@@ -79,3 +79,43 @@ func MatchKeys[P comparable](prev []P, prevKeys []string, next []P) []string {
 	pairGap()
 	return keys
 }
+
+// editDistance returns the number of inserts and deletes that turn a into b,
+// or limit+1 when it is more than limit. It takes time in proportion to
+// (len(a)+len(b)) × the distance, and memory in proportion to the smaller of
+// limit and len(a)+len(b) (Myers' greedy algorithm).
+func editDistance[T comparable](a, b []T, limit int) int {
+	for len(a) > 0 && len(b) > 0 && a[0] == b[0] {
+		a, b = a[1:], b[1:]
+	}
+	for len(a) > 0 && len(b) > 0 && a[len(a)-1] == b[len(b)-1] {
+		a, b = a[:len(a)-1], b[:len(b)-1]
+	}
+	n, m := len(a), len(b)
+	bound := min(n+m, limit)
+	if bound < 0 {
+		return limit + 1
+	}
+	// v[off+k] is the furthest x reached on diagonal k = x - y.
+	off := bound + 1
+	v := make([]int, 2*bound+3)
+	for d := 0; d <= bound; d++ {
+		for k := -d; k <= d; k += 2 {
+			var x int
+			if k == -d || (k != d && v[off+k-1] < v[off+k+1]) {
+				x = v[off+k+1]
+			} else {
+				x = v[off+k-1] + 1
+			}
+			y := x - k
+			for x < n && y < m && a[x] == b[y] {
+				x, y = x+1, y+1
+			}
+			v[off+k] = x
+			if x >= n && y >= m {
+				return d
+			}
+		}
+	}
+	return limit + 1
+}
