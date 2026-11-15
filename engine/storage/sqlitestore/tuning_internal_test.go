@@ -31,7 +31,8 @@ var _ = Describe("SQLite tuning", func() {
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
 
-		Expect(pragma(store.write, "cache_size")).To(Equal("-4096"))
+		// The writer keeps the larger default writer cache.
+		Expect(pragma(store.write, "cache_size")).To(Equal("-32768"))
 		Expect(pragma(store.write, "temp_store")).To(Equal("2"), "MEMORY")
 		Expect(pragma(store.write, "journal_size_limit")).To(Equal("1048576"))
 		Expect(pragma(store.write, "analysis_limit")).To(Equal("400"))
@@ -43,6 +44,47 @@ var _ = Describe("SQLite tuning", func() {
 		Expect(pragma(store.read, "cache_size")).To(Equal("-4096"))
 		Expect(pragma(store.read, "temp_store")).To(Equal("2"), "MEMORY")
 		Expect(pragma(store.read, "query_only")).To(Equal("1"))
+	})
+
+	It("gives the writer a larger page cache than a reader by default", func() {
+		store, err := Open(filepath.Join(GinkgoT().TempDir(), "default.db"))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+
+		Expect(pragma(store.write, "cache_size")).To(Equal("-32768"))
+		Expect(pragma(store.read, "cache_size")).To(Equal("-8192"))
+	})
+
+	It("sets the writer cache with WithWriteCacheSize", func() {
+		store, err := Open(filepath.Join(GinkgoT().TempDir(), "write.db"),
+			WithWriteCacheSize(64<<20))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+
+		Expect(pragma(store.write, "cache_size")).To(Equal("-65536"))
+		Expect(pragma(store.read, "cache_size")).To(Equal("-8192"))
+	})
+
+	It("never gives the writer a smaller cache than WithCacheSize", func() {
+		// A caller who raised WithCacheSize before WithWriteCacheSize existed
+		// must keep that cache on the writer.
+		store, err := Open(filepath.Join(GinkgoT().TempDir(), "big.db"),
+			WithCacheSize(128<<20), WithWriteCacheSize(16<<20))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+
+		Expect(pragma(store.write, "cache_size")).To(Equal("-131072"))
+		Expect(pragma(store.read, "cache_size")).To(Equal("-131072"))
+	})
+
+	It("gives the writer the reader cache when WithWriteCacheSize is zero", func() {
+		store, err := Open(filepath.Join(GinkgoT().TempDir(), "same.db"),
+			WithCacheSize(4<<20), WithWriteCacheSize(0))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+
+		Expect(pragma(store.write, "cache_size")).To(Equal("-4096"))
+		Expect(pragma(store.read, "cache_size")).To(Equal("-4096"))
 	})
 
 	It("maps the database file on both pools", func() {
@@ -57,7 +99,7 @@ var _ = Describe("SQLite tuning", func() {
 
 	It("leaves SQLite's own defaults in place when a tunable is zero", func() {
 		store, err := Open(filepath.Join(GinkgoT().TempDir(), "plain.db"),
-			WithCacheSize(0), WithWALSizeLimit(0), WithMmapSize(0))
+			WithCacheSize(0), WithWriteCacheSize(0), WithWALSizeLimit(0), WithMmapSize(0))
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
 

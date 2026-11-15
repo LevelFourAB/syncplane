@@ -43,6 +43,7 @@
 //
 // Tuning: the defaults suit a server rather than an embedded library, and each
 // has an Option to move it — WithCacheSize (page cache, charged per
+// connection), WithWriteCacheSize (a larger page cache for the one writer
 // connection), WithMmapSize (how much of the file is read through a shared
 // memory mapping instead of a syscall), WithReadConnections (reader pool
 // ceiling, and with it the store's memory ceiling), WithWALSizeLimit (how large
@@ -723,6 +724,7 @@ type Option func(*config)
 
 type config struct {
 	cacheSize        int64
+	writeCacheSize   int64
 	mmapSize         int64
 	readConns        int
 	walSizeLimit     int64
@@ -730,12 +732,21 @@ type config struct {
 }
 
 const (
-	// defaultCacheSize is the page cache SQLite keeps per CONNECTION, so the
-	// store's ceiling is (1 + readConns) times this — the number to move if the
-	// process has a memory budget to hit. SQLite's own default is 2 MiB, which
-	// is sized for an embedded library rather than a server that keeps a hot
-	// working set of rows and index entries.
+	// defaultCacheSize is the page cache SQLite keeps per reader CONNECTION, so
+	// the store's ceiling is readConns times this plus the writer's cache — the
+	// number to move if the process has a memory budget to hit. SQLite's own
+	// default is 2 MiB, which is sized for an embedded library rather than a
+	// server that keeps a hot working set of rows and index entries.
 	defaultCacheSize = 8 << 20
+	// defaultWriteCacheSize is the page cache of the one writer connection
+	// (see WithWriteCacheSize). A write transaction keeps every page it
+	// changes in this cache until it commits. When the cache is full, SQLite
+	// writes dirty pages to the WAL before the commit, and a page that it
+	// changes again after that goes to the WAL one more time. A large
+	// transaction with secondary index entries and search postings fills a
+	// reader-sized cache, so the writer gets more. There is only one writer,
+	// so this adds to the memory ceiling one time, not once per reader.
+	defaultWriteCacheSize = 32 << 20
 	// defaultMmapSize is how much of the database file SQLite may read through a
 	// memory mapping rather than a read syscall (see WithMmapSize). A gibibyte
 	// covers a database far larger than the page cache does, because it costs
@@ -770,6 +781,7 @@ const (
 func defaultConfig() config {
 	return config{
 		cacheSize:        defaultCacheSize,
+		writeCacheSize:   defaultWriteCacheSize,
 		mmapSize:         defaultMmapSize,
 		readConns:        max(4, min(runtime.GOMAXPROCS(0), 8)),
 		walSizeLimit:     defaultWALSizeLimit,
@@ -778,11 +790,24 @@ func defaultConfig() config {
 }
 
 // WithCacheSize sets SQLite's page cache in bytes. It is charged per
-// connection, so the store's worst case is this times one writer plus every
-// reader connection — raise it together with, not independently of,
-// WithReadConnections. Zero leaves SQLite's own default.
+// connection, so the store's worst case is this times every reader connection,
+// plus the writer cache — raise it together with, not independently of,
+// WithReadConnections. Zero leaves SQLite's own default. The writer
+// connection gets the larger of this and WithWriteCacheSize.
 func WithCacheSize(bytes int64) Option {
 	return func(c *config) { c.cacheSize = bytes }
+}
+
+// WithWriteCacheSize sets the page cache of the one writer connection, in
+// bytes. The default is 32 MiB. The writer gets the larger of this and
+// WithCacheSize, so this option can make the writer cache larger than a reader
+// cache but never smaller. Zero gives the writer the same cache as a reader.
+// A larger writer cache lets a large write transaction keep its changed pages
+// in memory until it commits, instead of writing some of them to the WAL more
+// than one time. The store's worst case is this plus WithCacheSize times
+// every reader connection.
+func WithWriteCacheSize(bytes int64) Option {
+	return func(c *config) { c.writeCacheSize = bytes }
 }
 
 // WithMmapSize caps how much of the database file each connection may read
@@ -848,7 +873,7 @@ func Open(path string, opts ...Option) (*Store, error) {
 	//
 	// analysis_limit caps how many rows per index ANALYZE samples, which is
 	// what keeps the maintenance pass bounded on a large database.
-	writeParams := append(cfg.commonParams(),
+	writeParams := append(cfg.commonParams(max(cfg.cacheSize, cfg.writeCacheSize)),
 		"_txlock=immediate",
 		"_pragma=journal_mode(WAL)",
 		"_pragma=synchronous(NORMAL)",
@@ -878,7 +903,7 @@ func Open(path string, opts ...Option) (*Store, error) {
 	// private to its connection, so reads fall back to the writer pool.
 	read := write
 	if !isMemory(path) {
-		readParams := append(cfg.commonParams(), "_pragma=query_only(true)")
+		readParams := append(cfg.commonParams(cfg.cacheSize), "_pragma=query_only(true)")
 		read, err = sql.Open("sqlite", dsn(path, readParams...))
 		if err != nil {
 			write.Close()
@@ -918,11 +943,12 @@ func Open(path string, opts ...Option) (*Store, error) {
 	return s, nil
 }
 
-// commonParams returns the DSN parameters both pools share. Every one of them
-// is per-connection state, so the reader pool has to repeat what the writer
-// sets rather than inherit it — journal_mode is the exception that makes the
-// rest look inheritable, being a property of the file.
-func (c config) commonParams() []string {
+// commonParams returns the DSN parameters both pools share, with a page cache
+// of cacheSize bytes (zero leaves SQLite's default). Every one of them is
+// per-connection state, so the reader pool has to repeat what the writer sets
+// rather than inherit it — journal_mode is the exception that makes the rest
+// look inheritable, being a property of the file.
+func (c config) commonParams(cacheSize int64) []string {
 	params := []string{
 		"_pragma=busy_timeout(5000)",
 		"_pragma=foreign_keys(1)",
@@ -930,8 +956,8 @@ func (c config) commonParams() []string {
 		// spilling into files next to the database.
 		"_pragma=temp_store(MEMORY)",
 	}
-	if c.cacheSize > 0 {
-		params = append(params, cacheSizePragma(c.cacheSize))
+	if cacheSize > 0 {
+		params = append(params, cacheSizePragma(cacheSize))
 	}
 	if c.mmapSize > 0 {
 		params = append(params, fmt.Sprintf("_pragma=mmap_size(%d)", c.mmapSize))
