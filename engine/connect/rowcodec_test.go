@@ -204,6 +204,25 @@ var _ = Describe("RowCodec", func() {
 			return err
 		}
 
+		It("takes a RowCodec with no Decode for an EgressOnly type, and no Encode for an IngressOnly type", func() {
+			l := &rowLines{}
+			egress, _ := newRowFixture(withRecords(func(r *engineconnect.Records) {
+				r.Types[0].Direction = engineconnect.EgressOnly
+				r.Types[0].Codec = engineconnect.RowCodec{Encode: l.encode}
+			}))
+			egress.addRecord(ctx, ws, "p1", "One", "x")
+			Expect(egress.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(egress.content(ws, "One.txt")).To(Equal("One\nx"))
+
+			ingress, _ := newRowFixture(withRecords(func(r *engineconnect.Records) {
+				r.Types[0].Direction = engineconnect.IngressOnly
+				r.Types[0].Codec = engineconnect.RowCodec{Decode: l.decode}
+			}))
+			ingress.store.put(ws, "a.txt", "A\ny")
+			Expect(ingress.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(ingress.lines(ctx, ws, ingress.key(ctx, ws, "a.txt"))).To(Equal("A\ny"))
+		})
+
 		It("refuses a RowCodec with no Decode or no Encode", func() {
 			l := &rowLines{}
 			Expect(build(engineconnect.RowCodec{Encode: l.encode})).To(MatchError(ContainSubstring("Decode")))

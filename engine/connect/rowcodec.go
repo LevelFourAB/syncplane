@@ -42,7 +42,8 @@ import (
 // one change, and concurrently for different records, so they must give the
 // same result for the same input and be safe for concurrent use.
 type RowCodec struct {
-	// Decode returns the rows a record holds. It is required.
+	// Decode returns the rows a record holds. It is required, except for an
+	// EgressOnly record type.
 	//
 	// An error refuses the record: no row changes, and the connector skips
 	// the record as for any Codec error.
@@ -188,7 +189,7 @@ type rowEntity struct {
 }
 
 func (c RowCodec) bindCodec(srv *server.Server, rt *recordType) (Codec, error) {
-	if c.Decode == nil {
+	if c.Decode == nil && rt.direction != EgressOnly {
 		return nil, fmt.Errorf("RowCodec needs Decode")
 	}
 	if c.Encode == nil && rt.direction != IngressOnly {
@@ -345,6 +346,10 @@ func (c *rowCodec) writePayload(app []byte, rows []proto.Message) ([]byte, error
 }
 
 func (c *rowCodec) Merge(tx *server.EntityTx, in MergeInput) (Merged, error) {
+	if c.decode == nil {
+		// An EgressOnly type never merges.
+		return Merged{}, errors.New("connect: RowCodec has no Decode")
+	}
 	base, err := c.readPayload(in.Base)
 	if err != nil {
 		return Merged{}, err
