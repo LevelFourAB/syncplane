@@ -35,10 +35,11 @@
 // that keeps a write from echoing — cursors and shadows — lives in the
 // connector's own State rather than the engine's store, where a second
 // instance would not see it. In record mode it is in the engine's store, but
-// nothing keeps two instances from writing the same record. Two processes converging the same workspace both egress to the source,
-// so run exactly one instance. A rolling deploy counts: the outgoing process
-// converges while the incoming one starts, and Close waiting on in-flight
-// passes narrows that window without closing it.
+// nothing keeps two instances from writing the same record. Two processes
+// converging the same workspace both egress to the source, so run exactly one
+// instance. A rolling deploy counts: the outgoing process converges while the
+// incoming one starts, and Close waiting on in-flight passes narrows that
+// window without closing it.
 package connect
 
 import (

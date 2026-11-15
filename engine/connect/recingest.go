@@ -496,12 +496,14 @@ func (c *Connector) ingestTouched(ctx context.Context, ws string, p *pass) error
 	err := c.ingestLocators(ctx, ws, p, locs)
 	if err != nil {
 		c.mu.Lock()
-		w := c.trackedLocked(ws)
-		if w.touched == nil {
-			w.touched = make(map[string]struct{}, len(locs))
-		}
-		for _, l := range locs {
-			w.touched[l] = struct{}{}
+		// A workspace that Forget dropped meanwhile stays dropped.
+		if w, ok := c.tracked[ws]; ok {
+			if w.touched == nil {
+				w.touched = make(map[string]struct{}, len(locs))
+			}
+			for _, l := range locs {
+				w.touched[l] = struct{}{}
+			}
 		}
 		c.mu.Unlock()
 	}

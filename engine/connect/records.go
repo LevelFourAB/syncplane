@@ -139,9 +139,11 @@ type Member struct {
 
 // RecordRef addresses one record in a store.
 type RecordRef struct {
-	// Key is the record key, when the store knows it. Empty lets the
-	// connector find the key by Locator, or by Fingerprint for a renamed
-	// record, or give a new record a new key.
+	// Key is the record key, when the store knows it, such as an id the
+	// content holds. The connector uses it for a locator it does not know
+	// yet, so that a record the store moved keeps its key; a locator it
+	// knows keeps the key of its record. Empty finds the key of a renamed
+	// record by Fingerprint, or gives a new record a new key.
 	Key     string
 	Locator string
 	// Fingerprint is a stamp of the content, such as a content hash. Equal
@@ -310,6 +312,9 @@ func newRecords(cfg Config) (*records, error) {
 	}
 	if cfg.WriterID == "" {
 		return nil, fmt.Errorf("connect: Records requires a WriterID")
+	}
+	if cfg.State != nil {
+		return nil, fmt.Errorf("connect: Records keeps its bookkeeping in the engine's store and takes no State")
 	}
 	if len(r.Types) == 0 {
 		return nil, fmt.Errorf("connect: Records needs at least one type")

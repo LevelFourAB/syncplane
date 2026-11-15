@@ -38,6 +38,14 @@ var _ = Describe("Record mode", func() {
 			Expect(err).To(HaveOccurred())
 		})
 
+		It("refuses a State", func() {
+			f := newRecFixture()
+			_, err := engineconnect.New(engineconnect.Config{Server: f.srv, WriterID: "x", State: keptState{}, Records: &engineconnect.Records{
+				Types: []engineconnect.RecordType{{Root: &testdatav1.Project{}, Store: f.store, Codec: f.codec}},
+			}})
+			Expect(err).To(MatchError(ContainSubstring("State")))
+		})
+
 		It("refuses a RecordField that is not a string field", func() {
 			f := newRecFixture()
 			_, err := engineconnect.New(engineconnect.Config{Server: f.srv, WriterID: "x", Records: &engineconnect.Records{

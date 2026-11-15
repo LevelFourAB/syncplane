@@ -24,10 +24,8 @@ type Config struct {
 	Server *server.Server
 	// Records switches the connector to record mode, where one external
 	// record syncs with a root row and its member rows; see Records. It
-	// cannot be used with Source, OpenSource, Entities or Bindings, and it
-	// requires WriterID. State is optional and unused in record mode, where
-	// all bookkeeping is in the engine's store; when set, Close still closes
-	// it.
+	// cannot be used with Source, OpenSource, Entities, Bindings or State,
+	// and it requires WriterID: all its bookkeeping is in the engine's store.
 	Records *Records
 	// Source is the adopter's port over the external store, shared by every
 	// workspace. Exactly one of Source and OpenSource is required, except in
