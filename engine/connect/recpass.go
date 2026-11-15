@@ -75,6 +75,9 @@ func (c *Connector) recordsPass(ctx context.Context, ws string, p *pass, steps p
 		if err := c.flushRecords(ctx, ws, p, pos.Seq, steps.flushAll); err != nil {
 			return err
 		}
+		if err := c.settleRefused(ctx, ws, pos.Seq); err != nil {
+			return err
+		}
 	}
 	if err := c.applyDeletes(ctx, ws, p); err != nil {
 		return err
@@ -438,6 +441,10 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 	if err != nil {
 		return err
 	}
+	rf, err := c.loadRefusal(ctx, ws, rt, key)
+	if err != nil {
+		return err
+	}
 	// cur is the store record at the agreed locator; nil when there is none.
 	var cur *Record
 	if sh != nil {
@@ -513,7 +520,7 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 			return err
 		}
 		out = r
-		next = &recShadow{Locator: r.Locator, Hash: contentHash(r.Content), Version: max(pos, tx.Seq()), Payload: r.Payload, Members: mk}
+		next = &recShadow{Locator: r.Locator, Hash: contentHash(r.Content), Version: max(pos, tx.Seq()), Payload: r.Payload, Members: mk, Ingested: sh.ingested()}
 		if cur != nil && r.Locator == sh.Locator && bytes.Equal(cur.Content, r.Content) {
 			agreed = true
 			next.Fingerprint = cur.Fingerprint
@@ -539,12 +546,12 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 	}
 	switch {
 	case del:
-		return c.deleteRecord(ctx, ws, rt, key, sh, cur)
+		return c.deleteRecord(ctx, ws, rt, key, sh, cur, rf)
 	case agreed:
 		c.clearFailure(ws, rt.rootName, key, "")
 		return nil
 	}
-	return c.writeRecord(ctx, ws, p, rt, key, pos, sh, cur, out, next, o)
+	return c.writeRecord(ctx, ws, p, rt, key, pos, sh, cur, rf, out, next, o)
 }
 
 // overwrite calls Records.Overwrite, when set, before egress replaces old at
@@ -569,14 +576,17 @@ func changedInStore(sh *recShadow, cur *Record) bool {
 
 // writeRecord writes the render out of the record with key to the store, and
 // agrees on it as next. sh is the agreed state, nil for a record the store
-// does not hold yet, and cur the store record at its locator, nil when there
-// is none.
+// does not hold yet, cur the store record at its locator, nil when there is
+// none, and rf its refusal state.
 //
 // A pending write commits before the store write and names what the store
 // holds when the write is done, so that a pass that stops between the store
 // write and the agreed state is completed by the next one (see
 // settlePending) instead of taking the written record for a new one.
-func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *recordType, key string, pos uint64, sh *recShadow, cur *Record, out Rendered, next *recShadow, o egressOpts) error {
+func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *recordType, key string, pos uint64, sh *recShadow, cur *Record, rf *refusal, out Rendered, next *recShadow, o egressOpts) error {
+	if err := c.handOverRefused(ctx, ws, rt, key, sh, cur, out.Content, rf); err != nil {
+		return err
+	}
 	pend := &pendingWrite{Next: next}
 	write := true
 	if sh != nil && out.Locator == sh.Locator {
@@ -661,7 +671,10 @@ func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *rec
 		}
 	}
 	if err := c.bookkeep(ctx, ws, func(tx *server.EntityTx) error {
-		return c.commitPending(tx, rt, key, sh, next, true)
+		if err := c.commitPending(tx, rt, key, sh, next, true); err != nil {
+			return err
+		}
+		return c.afterReplace(tx, rt, key, sh, cur, rf)
 	}); err != nil {
 		return err
 	}
@@ -671,8 +684,9 @@ func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *rec
 
 // deleteRecord removes the record with key from the store and forgets it. sh
 // is its agreed state, nil for a record the store never held, and cur the
-// store record at its locator, nil when there is none.
-func (c *Connector) deleteRecord(ctx context.Context, ws string, rt *recordType, key string, sh *recShadow, cur *Record) error {
+// store record at its locator, nil when there is none, and rf its refusal
+// state.
+func (c *Connector) deleteRecord(ctx context.Context, ws string, rt *recordType, key string, sh *recShadow, cur *Record, rf *refusal) error {
 	if sh != nil && cur == nil && rt.direction == EgressOnly {
 		// The store deleted it too.
 		return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
@@ -683,6 +697,9 @@ func (c *Connector) deleteRecord(ctx context.Context, ws string, rt *recordType,
 		if err := c.overwrite(ctx, ws, rt, key, sh.Locator, OverwriteEgressOnly, cur.Content, nil); err != nil {
 			return err
 		}
+	}
+	if err := c.handOverRefused(ctx, ws, rt, key, sh, cur, nil, rf); err != nil {
+		return err
 	}
 	if sh == nil {
 		c.clearFailure(ws, rt.rootName, key, "")
@@ -699,7 +716,10 @@ func (c *Connector) deleteRecord(ctx context.Context, ws string, rt *recordType,
 		return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, sh.Locator, err)
 	}
 	if err := c.bookkeep(ctx, ws, func(tx *server.EntityTx) error {
-		return c.forgetRecord(tx, rt, key, sh)
+		if err := c.forgetRecord(tx, rt, key, sh); err != nil {
+			return err
+		}
+		return c.afterReplace(tx, rt, key, sh, cur, rf)
 	}); err != nil {
 		return err
 	}

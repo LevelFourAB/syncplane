@@ -73,6 +73,13 @@ type Records struct {
 	// connector does not know: it ingests it as a new record, and the engine
 	// record whose locator it holds waits until the locator is free.
 	Overwrite func(ctx context.Context, o Overwrite) error
+	// KeepReplaced is how long the connector keeps the store content that an
+	// egress write or delete replaced, when the record had an ingest within
+	// this time before. It lets a Connector.Refused call that comes after the
+	// egress still give the refused content to Overwrite. The content is kept
+	// in the engine's store, one copy for each record at most. 0 keeps
+	// nothing.
+	KeepReplaced time.Duration
 }
 
 // FirstPass is the policy of the first pass of a workspace in record mode.
@@ -125,6 +132,10 @@ const (
 	// OverwriteEgressOnly is a record of an EgressOnly type whose store
 	// content changed since the connector wrote it.
 	OverwriteEgressOnly
+	// OverwriteRefused is a record of rows that Connector.Refused reported.
+	// Old can be content an earlier egress replaced, and New the content
+	// that replaced it.
+	OverwriteRefused
 )
 
 // RecordType binds one root entity and its member entities to a store and a
@@ -334,6 +345,7 @@ type records struct {
 	grace     time.Duration
 	batchRows int
 	overwrite func(ctx context.Context, o Overwrite) error
+	keep      time.Duration
 }
 
 // newRecords validates cfg.Records against cfg.
@@ -361,6 +373,7 @@ func newRecords(cfg Config) (*records, error) {
 		grace:     r.DeleteGrace,
 		batchRows: r.BatchRows,
 		overwrite: r.Overwrite,
+		keep:      r.KeepReplaced,
 	}
 	if out.quiet == 0 {
 		out.quiet = time.Second

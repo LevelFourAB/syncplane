@@ -37,13 +37,21 @@ import (
 //   - fp:<root>    agreed fingerprint → JSON list of record keys, at most
 //     maxFingerprintKeys. It finds the record a touched new locator was
 //     renamed from when the old locator is not reported first.
+//   - refused:<root> record key → refusedMark, for records Connector.Refused
+//     reported.
+//   - kept:<root>  record key → keptContent, the store content the last
+//     egress write or delete replaced (see Records.KeepReplaced).
 func recEntity(rt *recordType) string   { return "rec:" + rt.rootName }
 func locEntity(rt *recordType) string   { return "loc:" + rt.rootName }
 func dirtyEntity(rt *recordType) string { return "dirty:" + rt.rootName }
 func goneEntity(rt *recordType) string  { return "gone:" + rt.rootName }
 func pendEntity(rt *recordType) string  { return "pend:" + rt.rootName }
 func fpEntity(rt *recordType) string    { return "fp:" + rt.rootName }
-func idxEntity(member string) string    { return "idx:" + member }
+func refusedEntity(rt *recordType) string {
+	return "refused:" + rt.rootName
+}
+func keptEntity(rt *recordType) string { return "kept:" + rt.rootName }
+func idxEntity(member string) string   { return "idx:" + member }
 
 // maxFingerprintKeys bounds a fingerprint index entry. More records with one
 // content tell no rename apart, and each agreed state rewrites the entry.
@@ -64,6 +72,16 @@ type recShadow struct {
 	// Members are the member row keys of the agreed state, by entity. The
 	// shadow is written whole, so each agreed state costs O(members).
 	Members map[string][]string `json:"m,omitempty"`
+	// Ingested is when the record's last ingest wrote rows, in Unix ns; 0
+	// for none.
+	Ingested int64 `json:"i,omitempty"`
+}
+
+func (sh *recShadow) ingested() int64 {
+	if sh == nil {
+		return 0
+	}
+	return sh.Ingested
 }
 
 func (sh *recShadow) agreed() *Agreed {
@@ -479,7 +497,9 @@ func (c *Connector) forgetRecord(tx *server.EntityTx, rt *recordType, key string
 			}
 		}
 	}
-	for _, entity := range []string{recEntity(rt), dirtyEntity(rt), goneEntity(rt), pendEntity(rt)} {
+	// The kept content stays: a refusal can come after egress deleted the
+	// record.
+	for _, entity := range []string{recEntity(rt), dirtyEntity(rt), goneEntity(rt), pendEntity(rt), refusedEntity(rt)} {
 		if err := tx.DeleteConsumerShadow(c.consumer, entity, key); err != nil {
 			return err
 		}

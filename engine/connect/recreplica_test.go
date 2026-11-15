@@ -11,9 +11,12 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "github.com/onsi/gomega/gstruct"
+	"google.golang.org/protobuf/proto"
 
 	engineconnect "github.com/levelfourab/syncplane/engine/connect"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
+	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 	"github.com/levelfourab/syncplane/engine/upstream"
@@ -28,7 +31,7 @@ type replicaPair struct {
 
 	mu       sync.Mutex
 	rejected []upstream.Rejection
-	// onRejected, when set, runs for each rejection after it is recorded.
+	// onRejected, when set, runs for each rejection before it is recorded.
 	onRejected func(upstream.Rejection)
 }
 
@@ -66,12 +69,14 @@ func newReplicaPair(ws string, originOpts ...server.Option) *replicaPair {
 		RetryMax:   100 * time.Millisecond,
 		OnRejected: func(r upstream.Rejection) {
 			pr.mu.Lock()
-			pr.rejected = append(pr.rejected, r)
 			fn := pr.onRejected
 			pr.mu.Unlock()
 			if fn != nil {
 				fn(r)
 			}
+			pr.mu.Lock()
+			pr.rejected = append(pr.rejected, r)
+			pr.mu.Unlock()
 		},
 	})
 	Expect(err).NotTo(HaveOccurred())
@@ -117,11 +122,57 @@ func recFixtureOn(srv *server.Server, opts ...func(*engineconnect.Config)) *recF
 	return f
 }
 
+// denyForbidden refuses every write of a project named "forbidden".
+type denyForbidden struct{ server.AllowAll }
+
+func (denyForbidden) CanMutate(_ context.Context, _ server.Principal, _ string, w server.Write) error {
+	if c := w.Crud; c != nil && c.GetEntity() == "project" && c.GetOp() != syncplanev1.CrudOp_CRUD_OP_DELETE {
+		var p testdatav1.Project
+		if err := proto.Unmarshal(c.GetValue(), &p); err == nil && p.GetName() == "forbidden" {
+			return server.Reject(server.CodePermissionDenied, "forbidden name")
+		}
+	}
+	return nil
+}
+
 var _ = Describe("Record mode on a replica", func() {
 	const ws = "ws1"
 	var ctx context.Context
 
 	BeforeEach(func() { ctx = context.Background() })
+
+	It("shows the engine content in the store and gives the refused content to the adopter when the origin refuses an ingest (acceptance 17)", func() {
+		pr := newReplicaPair(ws, server.WithPermissions(denyForbidden{}))
+		var log overwriteLog
+		f := recFixtureOn(pr.replica, refusals(&log, 0))
+		pr.onRejected = func(r upstream.Rejection) {
+			rows := make([]engineconnect.RowRef, len(r.Rows))
+			for i, row := range r.Rows {
+				rows[i] = engineconnect.RowRef(row)
+			}
+			Expect(f.conn.Refused(ctx, r.Workspace, rows)).To(Succeed())
+		}
+		f.store.put(ws, "a.txt", "T\none")
+		Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+		pr.flush(ws)
+		key := f.key(ctx, ws, "a.txt")
+		origin := recFixtureOn(pr.origin)
+		Expect(origin.lines(ctx, ws, key)).To(Equal("T\none"))
+
+		f.store.put(ws, "a.txt", "forbidden\none")
+		Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+		Eventually(pr.rejections).WithTimeout(10 * time.Second).Should(HaveLen(1))
+		Expect(f.lines(ctx, ws, key)).To(Equal("T\none"), "the link reverted the rows")
+		Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+
+		Expect(f.content(ws, "a.txt")).To(Equal("T\none"))
+		Expect(log.all()).To(ConsistOf(MatchFields(IgnoreExtras, Fields{
+			"Key": Equal(key), "Reason": Equal(engineconnect.OverwriteRefused),
+			"Old": Equal([]byte("forbidden\none")), "New": Equal([]byte("T\none")),
+		})))
+		pr.flush(ws)
+		Expect(origin.lines(ctx, ws, key)).To(Equal("T\none"))
+	})
 
 	It("writes no row from an ingest of an EgressOnly type (acceptance 18)", func() {
 		pr := newReplicaPair(ws)

@@ -380,6 +380,10 @@ func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 	if next.Members, err = c.memberKeys(members); err != nil {
 		return 0, err
 	}
+	next.Ingested = sh.ingested()
+	if tx.Writes() != writes {
+		next.Ingested = c.now().UnixNano()
+	}
 	next.Version = tx.Seq()
 	if next.Version == 0 && sh != nil {
 		next.Version = sh.Version
