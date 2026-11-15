@@ -45,8 +45,10 @@ import (
 //
 // Entries exist for LIVE rows only. A delete clears them, which is what keeps
 // a range scan from having to re-check whether each hit is a tombstone. A
-// declared index holds every live row; a reference index is sparse and holds
-// only the rows that point somewhere (see buildRefIndexes).
+// declared index holds every live row, except one whose leading component fans
+// out over a map, which leaves out the rows and map entries whose leading
+// component is missing (see query.NewDeclaredIndexEncoder). A reference index
+// is sparse and holds only the rows that point somewhere (see buildRefIndexes).
 
 // buildRefIndexes derives one index per reference field of the entity, keyed
 // by the target key the row stores.
@@ -130,14 +132,14 @@ func buildDeclaredIndexes(info *entityInfo, eo *syncplanev1.EntityOptions) error
 		if seen[name] {
 			return fmt.Errorf("index %q is declared twice", name)
 		}
-		enc, err := query.NewIndexEncoder(comps)
+		enc, err := query.NewDeclaredIndexEncoder(comps)
 		if err != nil {
 			return fmt.Errorf("index %q: %w", name, err)
 		}
 		seen[name] = true
 		info.indexes = append(info.indexes, compiledIndex{
 			name:     name,
-			specHash: query.SpecHash(comps),
+			specHash: enc.SpecHash(),
 			encoder:  enc,
 		})
 		return nil

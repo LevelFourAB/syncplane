@@ -1276,6 +1276,8 @@ Indexing properties:
 - A `*` component can be followed by a repeated field inside an entry (`custom.*.value.labels.values`), generating one index entry per `(key, element)` pair.
 - When an entry key is fixed by an equality predicate, the value component can serve as an index sort key.
 - When a predicate fixes the entry key, a grouped read (`distinct`, `groupCount`, `groupRows`) on that entry can partition on the value component. For a repeated field inside the entry, such as `custom.tags.labels.values` on the `cf_labels` index, the read groups per element. See [Grouped reads](../explanation/grouped-reads.md).
+- An index whose first component is a `*` path is sparse. A row with an empty map has no entry in it. In a `[value, key]` index, an entry that holds a different variant has no entry either. Only queries that scan in all cases read the rows that such an index leaves out: presence checks on a map entry, and sorting or grouping on a custom field whose key no predicate fixes. A `[key, value]` index keeps an entry that holds a different variant, under its key.
+- An index of this type that an earlier version stored with an entry for each row is rebuilt once, on the server and on the client. Until the rebuild is complete, queries scan.
 - Unconstrained sort operations on custom fields fall back to table scans because rows missing the key must sort last.
 - A value component declared without a preceding key component supports cross-key `any()` queries, but single-key equality checks remain in the residual predicate filter.
 - Setting `indexed: true` on a map field is rejected; use composite `*` index definitions instead.

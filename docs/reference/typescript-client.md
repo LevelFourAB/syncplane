@@ -1488,7 +1488,7 @@ Index constraints:
 - Index names must not start with `__` (reserved for internal engine indexes).
 - `.indexed()` throws an error when used on message lists, references, maps, or collaborative text fields.
 - Paths can traverse nested fields (`'settings.size'`) and repeated message fields (`'lineItems.sku'`).
-- Map indexes must use `*` notation (`custom.*.key` or `custom.*.value.number`).
+- Map indexes must use `*` notation (`custom.*.key` or `custom.*.value.number`). An index whose first component is a `*` path has no entry for a row with an empty map; see [Proto options](proto-options.md#indexing-every-entry-).
 - See [limits and trade-offs](../explanation/limits-and-trade-offs.md) and [Telemetry](telemetry.md#local-reads).
 
 ### Full-text search

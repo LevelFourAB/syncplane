@@ -112,6 +112,10 @@ An index over a repeated field or map entry causes index entry counts to scale w
 
 An Entity-Attribute-Value (EAV) index over `custom.*` stores one entry per map entry, so write costs scale with the number of custom fields a row uses, not the total defined in the application schema. A schema that defines 200 custom fields adds no overhead to a row that populates only three.
 
+An index that starts with a `*` component stores no entry for a row that populates no custom field. Most indexes store an entry for each row, also for a row whose indexed value is missing, so that a query for missing values (`isNotSet`) and a sort with no filter can read the index. Neither query can use an index that starts with a map fan-out: presence checks on a map entry do not use indexes, and a sort or a grouping on a custom field needs a predicate that fixes the key. So these entries would only cost space and writes. In an entity where most rows populate no custom field, such as blocks of a notes graph where few blocks have properties, that is most of the index.
+
+An index that starts with a repeated field keeps an entry for a row with an empty list, because a grouping on that field (`groupCount` by tag) reads those rows as the group of rows with no value.
+
 Write costs grow linearly with the number of entries per row and require deleting and re-inserting the complete entry set of the row. Three factors determine this impact:
 
 - **Entries per row:** Each repeated or multi-select entry multiplies index entries. `MaxIndexEntriesPerRow` caps this total; exceeding it causes the write to fail.

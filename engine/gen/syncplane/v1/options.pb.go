@@ -1610,6 +1610,11 @@ type IndexSpec struct {
 	//
 	// A query can use this index when its equality filters match a prefix of
 	// these components and its sort order matches the subsequent components.
+	//
+	// When the first component fans out over a map (a path with `*`), the
+	// index holds no entry for a row whose first component is missing, for
+	// example a row with an empty map. Every other index holds an entry for
+	// each row.
 	Key           []*IndexKey `protobuf:"bytes,2,rep,name=key,proto3" json:"key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

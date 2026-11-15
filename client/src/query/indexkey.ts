@@ -308,6 +308,16 @@ export class IndexEncoder {
 	private readonly fan: FanLevel[] = [];
 
 	/**
+	 * True when {@link encode} leaves out every entry whose leading component is
+	 * missing: a row with that component unset, or a position of an empty
+	 * collection. Every entry a sparse encoder keeps is the entry the dense
+	 * encoder writes. A sparse index holds fewer rows than its entity, so the
+	 * planner uses one only for ranges inside the present ranks of the leading
+	 * component.
+	 */
+	readonly sparse: boolean;
+
+	/**
 	 * Throws when two components fan out over different chains. Their cross
 	 * product would be the only way to store both, and a cross product pairs
 	 * values that never belonged to the same element — so such an index is
@@ -315,8 +325,15 @@ export class IndexEncoder {
 	 * read time. A SHORTER chain is fine, and is the normal case: the entry-key
 	 * component of a `custom.*.labels.values` index stops at the map, and its
 	 * value simply repeats across the positions below it.
+	 *
+	 * Also throws for a sparse encoder with no components, which has no leading
+	 * component to leave rows out by.
 	 */
-	constructor(readonly components: IndexComponent[]) {
+	constructor(readonly components: IndexComponent[], options?: { sparse?: boolean }) {
+		this.sparse = options?.sparse ?? false;
+		if (this.sparse && components.length === 0) {
+			throw new Error('a sparse index needs at least one component');
+		}
 		for (const c of components) {
 			const levels = fanLevelsOf(c);
 			if (levels.length === 0) continue;
@@ -345,15 +362,18 @@ export class IndexEncoder {
 	 * KV key, which terminates every entry so entries are unique and tie exactly
 	 * the way compareRows does.
 	 *
-	 * Never empty: a row whose collection is empty or unset still takes one
-	 * position, with the missing tag at each fan-out component, so every live row
-	 * is reachable through every index.
+	 * For a dense encoder the result is never empty: a row whose collection is
+	 * empty or unset still takes one position, with the missing tag at each
+	 * fan-out component, so every live row is reachable through the index. A
+	 * sparse encoder leaves out each entry whose leading component is missing,
+	 * and returns no entries when that is all of them.
 	 */
 	encode(row: unknown, rowKey: string, schema?: DescMessage): string[] {
 		const out: string[] = [];
 		const seen = new Set<string>();
 		for (const pos of this.positions(row, schema)) {
 			const entry = this.encodeAt(row, rowKey, schema, pos);
+			if (this.sparse && entry.charCodeAt(0) === TAG_MISSING) continue;
 			// Two positions can encode identically — duplicate list elements, or
 			// two map entries no component distinguishes. An entry is a position,
 			// not a count, so the second one would just overwrite the first.
@@ -465,6 +485,17 @@ export class IndexEncoder {
 	}
 
 	/**
+	 * Fingerprints what the stored entries of this index depend on. For a dense
+	 * encoder it equals {@link specHash} over the same components; a sparse
+	 * encoder fingerprints differently, so entries stored under one form are
+	 * stale under the other and rebuild. Mirrors the Go `IndexEncoder.SpecHash`.
+	 */
+	specHash(): string {
+		const h = specHash(this.components);
+		return this.sparse ? fingerprint(`${h}:sparse`) : h;
+	}
+
+	/**
 	 * The first `values.length` components encoded from explicit values — the
 	 * leading equality terms of a probe — giving the inclusive lower bound of
 	 * the range holding every row that agrees with them. Pair it with
@@ -532,6 +563,29 @@ export class IndexEncoder {
 		}
 		return entry.slice(0, at);
 	}
+}
+
+/**
+ * The encoder for an index that a schema declares. When the leading component
+ * fans out over a map (a `*` path, for example `custom.*.key` or
+ * `custom.*.value.number`), the encoder is sparse: a row with an empty or unset
+ * map has no entry, and neither has a map entry whose leading component is
+ * missing, such as an entry that holds another variant than a
+ * `custom.*.value.number` component reads. Otherwise the encoder is dense.
+ * Mirrors the Go
+ * `NewDeclaredIndexEncoder`, and must decide the same way: the decision is part
+ * of the fingerprint.
+ *
+ * Throws as the {@link IndexEncoder} constructor does.
+ */
+export function declaredIndexEncoder(comps: IndexComponent[]): IndexEncoder {
+	// No plan reads the missing rank of a map-fan component: presence terms do
+	// not plan on a fan-out component, an ordering or a grouping by a map fan
+	// needs its entry key pinned, and nothing can be pinned ahead of the leading
+	// component. A LIST fan is different: a grouping by a repeated field reads
+	// the missing rank as its no-value group, so a leading list fan stays dense.
+	const sparse = comps.length > 0 && comps[0]!.fans.some((f) => f.isMap);
+	return new IndexEncoder(comps, { sparse });
 }
 
 /**

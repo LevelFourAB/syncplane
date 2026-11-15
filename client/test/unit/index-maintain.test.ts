@@ -30,12 +30,13 @@ import type { KVRead, KVStore } from '../../src/kv/store.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { ChainMutex } from '../../src/mutex.js';
 import { BUILD_BATCH, buildIndexes } from '../../src/optimistic/index-build.js';
-import { compileIndexes, IndexCache } from '../../src/optimistic/index-maintain.js';
+import { compileIndexes, IndexCache, rowPositions } from '../../src/optimistic/index-maintain.js';
 import {
 	applyServerChanges,
 	dropConfirmedEntities,
 	wipeConfirmedState,
 } from '../../src/optimistic/rebase.js';
+import { specHash } from '../../src/query/indexkey.js';
 import { TouchSet } from '../../src/touch.js';
 
 const ws = 'ws1';
@@ -260,6 +261,36 @@ describe('client index maintenance', () => {
 				{ name: 'ab', key: [ label, count ] },
 				{ name: 'abc', key: [ label, count, countDesc ] },
 			)).toEqual([ 'abc' ]);
+		});
+	});
+
+	describe('an index led by a map fan', () => {
+		const entryKey = { path: [ 'attrs', '*', 'key' ], desc: false };
+		const entryValue = { path: [ 'attrs', '*', 'value' ], desc: false };
+		const indexes = compileIndexes(WidgetSchema, [
+			{ name: 'byAttr', key: [ entryKey, entryValue ] },
+			{ name: 'byLabelAttr', key: [ { path: [ 'label' ], desc: false }, entryKey ] },
+		]);
+		const positions = (value: unknown, name: string): string[] =>
+			rowPositions(indexes.filter((i) => i.name === name), 'widget', ws, 'w1', value, WidgetSchema);
+
+		it('is sparse, and stored under the sparse fingerprint', () => {
+			const [ byAttr, byLabelAttr ] = indexes;
+			expect(byAttr!.encoder!.sparse).toBe(true);
+			expect(byAttr!.specHash).toBe(byAttr!.encoder!.specHash());
+			expect(byAttr!.specHash).not.toBe(specHash(byAttr!.encoder!.components));
+			expect(byLabelAttr!.encoder!.sparse).toBe(false);
+			expect(byLabelAttr!.specHash).toBe(specHash(byLabelAttr!.encoder!.components));
+		});
+
+		it('gives a row with an empty map no position', () => {
+			expect(positions(create(WidgetSchema, { id: 'w1' }), 'byAttr')).toEqual([]);
+			expect(positions(create(WidgetSchema, { id: 'w1' }), 'byLabelAttr')).toHaveLength(1);
+		});
+
+		it('gives a row one position per map entry', () => {
+			const row = create(WidgetSchema, { id: 'w1', attrs: { a: 'x', b: 'y' } });
+			expect(positions(row, 'byAttr')).toHaveLength(2);
 		});
 	});
 

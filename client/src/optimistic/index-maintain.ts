@@ -101,9 +101,9 @@ import type { KVWrite } from '../kv/store.js';
 import type { EntityRegistry } from '../mutations.js';
 import {
 	compileIndexComponent,
+	declaredIndexEncoder,
 	type IndexComponent,
-	IndexEncoder,
-	specHash,
+	type IndexEncoder,
 } from '../query/indexkey.js';
 import { type SearchDecl, searchDeclOf } from '../query/match.js';
 import type { SearchPostingsWriter } from '../query/postings.js';
@@ -160,11 +160,8 @@ export function compileIndexes(schema: DescMessage, defs: {
 			// side of the entry it stores (`custom.*.key`, `custom.*.value.number`),
 			// so the layout is declared rather than derived here.
 			const comps = def.key.map((k) => compileIndexComponent(schema, k.path, k.desc));
-			compiled.push({
-				name: def.name,
-				specHash: specHash(comps),
-				encoder: new IndexEncoder(comps),
-			});
+			const encoder = declaredIndexEncoder(comps);
+			compiled.push({ name: def.name, specHash: encoder.specHash(), encoder });
 		} catch (err) {
 			// Unusable, not fatal: queries scan, which is always correct.
 			reportError(
@@ -215,6 +212,10 @@ export function compileIndexes(schema: DescMessage, defs: {
  * resolve to the same path, and reading one index's entries as the other's would
  * answer with keys where values were asked for.
  *
+ * Whether an index is sparse follows from its leading component alone (see
+ * declaredIndexEncoder), so a list and every list it is a prefix of are sparse
+ * or dense together, and the longer one holds the rows the shorter one does.
+ *
  * Two lists that are EQUAL subsume each other, so the tie-break keeps the first
  * — otherwise a duplicated declaration would drop both and leave the queries
  * over it scanning. The rule stays transitive under that tie-break: of a chain
@@ -242,10 +243,12 @@ function subsumedBy(lists: IndexComponent[][]): boolean[] {
  * produce and not a sorted order. Nothing depends on it: the store's index sorts
  * the positions itself, and the list on the record is a set.
  *
- * A row is never absent from an index it is subject to. An index that fans out
- * over a repeated field still yields one position for an empty list, which is
- * what lets a range that does not constrain the fan-out component see every row
- * (see query/indexkey.ts).
+ * A row is absent from an index only when the index is sparse and the row's
+ * leading component is missing: an index whose leading component fans out over
+ * a map has no position for a row with an empty map. Any other index that fans
+ * out over a repeated field still yields one position for an empty list, which
+ * is what lets a range that does not constrain the fan-out component see every
+ * row (see query/indexkey.ts).
  */
 export function rowPositions(
 	indexes: CompiledIndex[],

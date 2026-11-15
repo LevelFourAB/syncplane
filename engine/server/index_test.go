@@ -1007,6 +1007,61 @@ var _ = Describe("Secondary indexes", func() {
 			Expect(entriesOf(store, "issue", "by_label_rank")).To(Equal([]string{"i1"}))
 		})
 
+		It("ignores a map index stored dense until the rebuild replaces its entries", func() {
+			// A store written before a map-led declared index was sparse holds
+			// the dense entries and a ready state under the dense fingerprint.
+			// The planted entry claims that i1 holds priority 5, which it does
+			// not, so a read that used the stale index would return i1.
+			push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{Id: "i1", State: "open"}))
+			desc := (&testdatav1.Issue{}).ProtoReflect().Descriptor()
+			comps := make([]query.IndexComponent, 0, 2)
+			for _, p := range [][]string{{"custom", "*", "key"}, {"custom", "*", "value", "number"}} {
+				c, err := query.CompileIndexComponent(desc, p, false)
+				Expect(err).NotTo(HaveOccurred())
+				comps = append(comps, c)
+			}
+			dense, err := query.NewIndexEncoder(comps)
+			Expect(err).NotTo(HaveOccurred())
+			planted := dense.Encode((&testdatav1.Issue{Id: "i1", Custom: map[string]*testdatav1.FieldValue{
+				"priority": {Kind: &testdatav1.FieldValue_Number{Number: 5}},
+			}}).ProtoReflect(), "i1")
+			Expect(planted).To(HaveLen(1))
+			Expect(store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
+				if err := tx.PutIndexEntries("issue", "i1", []storage.IndexEntry{
+					{Index: "cf_number", Key: planted[0]},
+				}); err != nil {
+					return err
+				}
+				return tx.SetIndexState("issue", "cf_number", dense.SpecHash(), true)
+			})).To(Succeed())
+
+			read := func() []string {
+				GinkgoHelper()
+				var keys []string
+				Expect(srv.View(server.Trusted(ctx), ws, func(tx *server.ViewTx) error {
+					return tx.Query(&testdatav1.Issue{}, query.Spec{Where: query.Eq("custom.priority.number", 5.0)},
+						func(msg proto.Message, _ uint64) error {
+							keys = append(keys, msg.(*testdatav1.Issue).GetId())
+							return nil
+						})
+				})).To(Succeed())
+				return keys
+			}
+			Expect(read()).To(BeEmpty(), "a fingerprint mismatch makes the read scan")
+
+			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			Expect(entriesOf(store, "issue", "cf_number")).To(BeEmpty(),
+				"the rebuild replaces the row's entries, and an empty map has none")
+			Expect(store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
+				hash, ready, err := tx.IndexState("issue", "cf_number")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(ready).To(BeTrue())
+				Expect(hash).NotTo(Equal(dense.SpecHash()), "the index is stored under its sparse fingerprint")
+				return nil
+			})).To(Succeed())
+			Expect(read()).To(BeEmpty())
+		})
+
 		It("marks an index ready only once the build has walked the entity", func() {
 			push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{
 				Id: "i1", Project: &testdatav1.Project{Id: "p1"},
@@ -1117,26 +1172,36 @@ var _ = Describe("Secondary indexes", func() {
 				Expect(indexKeysOf(store, "issue", "__field_state")).NotTo(ContainElement(planted))
 			})
 
-			// The two map layouts occupy one entry per ENTRY of the map, and the
-			// entry counts below are the whole reason the "one declared path is
-			// one component" change is entry-count-neutral: swapping the
-			// components around reorders bytes and changes nothing else.
-			It("writes one entry per map entry under either layout", func() {
+			// The map layouts occupy one entry per ENTRY of the map. Each of them
+			// leads with a map-fan component, so each is sparse: an entry whose
+			// leading component is missing has no position.
+			It("writes one entry per map entry whose leading component is set", func() {
 				push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{
 					Id: "i1", Title: "t", State: "open",
 					Custom: map[string]*testdatav1.FieldValue{
 						"priority": {Kind: &testdatav1.FieldValue_Number{Number: 5}},
 						"size":     {Kind: &testdatav1.FieldValue_Number{Number: 9}},
-						// A different variant, so this entry takes the missing tag
-						// rather than dropping out — every entry is a position.
+						// A different variant: the key-leading layout keeps the
+						// entry with the missing tag after the key, and the two
+						// value-leading layouts leave it out.
 						"team": {Kind: &testdatav1.FieldValue_Text{Text: "platform"}},
 					},
 				}))
-				for _, name := range []string{"cf_number", "cf_by_number", "cf_number_only"} {
-					Expect(indexKeysOf(store, "issue", name)).To(HaveLen(3), name)
-					Expect(entriesOf(store, "issue", name)).To(
-						Equal([]string{"i1", "i1", "i1"}), name)
+				Expect(entriesOf(store, "issue", "cf_number")).To(Equal([]string{"i1", "i1", "i1"}))
+				for _, name := range []string{"cf_by_number", "cf_number_only"} {
+					Expect(entriesOf(store, "issue", name)).To(Equal([]string{"i1", "i1"}), name)
 				}
+			})
+
+			It("writes no map-index entry for a row with an empty map", func() {
+				push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{
+					Id: "i1", Title: "t", State: "open",
+				}))
+				for _, name := range []string{"cf_number", "cf_by_number", "cf_number_only", "cf_labels"} {
+					Expect(entriesOf(store, "issue", name)).To(BeEmpty(), name)
+				}
+				Expect(entriesOf(store, "issue", "__field_state")).To(Equal([]string{"i1"}),
+					"an index that does not lead with a map fan stays dense")
 			})
 
 			It("collapses two entries a value-only index cannot tell apart", func() {
@@ -1162,7 +1227,7 @@ var _ = Describe("Secondary indexes", func() {
 						"team":     {Kind: &testdatav1.FieldValue_Text{Text: "platform"}},
 					},
 				}))
-				Expect(indexKeysOf(store, "issue", "cf_by_number")).To(HaveLen(2))
+				Expect(indexKeysOf(store, "issue", "cf_number")).To(HaveLen(2))
 				// One entry added by key, so the set is rewritten and grows by
 				// exactly one position.
 				patch(2, &testdatav1.Issue{
@@ -1171,7 +1236,7 @@ var _ = Describe("Secondary indexes", func() {
 						"size": {Kind: &testdatav1.FieldValue_Number{Number: 9}},
 					},
 				}, "custom.size")
-				Expect(indexKeysOf(store, "issue", "cf_by_number")).To(HaveLen(3))
+				Expect(indexKeysOf(store, "issue", "cf_number")).To(HaveLen(3))
 			})
 
 			It("leaves the map indexes alone when the mask reaches none of them", func() {

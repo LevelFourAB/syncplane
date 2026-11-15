@@ -19,7 +19,11 @@ import { ConditionSchema, OrderKeySchema } from '../../src/gen/syncplane/v1/quer
 import type { Cond, OrderKey, Path } from '../../src/query/ast.js';
 import { cursorToBytes, OrderCursors } from '../../src/query/cursor.js';
 import { compareRows, evalCond } from '../../src/query/evaluate.js';
-import { compileIndexComponent, IndexEncoder } from '../../src/query/indexkey.js';
+import {
+	compileIndexComponent,
+	declaredIndexEncoder,
+	IndexEncoder,
+} from '../../src/query/indexkey.js';
 import {
 	type GroupPlan,
 	type IndexRange,
@@ -41,6 +45,9 @@ interface VectorRow {
 interface SpecVector {
 	name: string;
 	key: { path: Path; desc: boolean }[];
+	/** Builds a sparse index. Without it the index is a declared one, which
+	 * declaredIndexEncoder builds. */
+	sparse?: boolean;
 }
 
 interface EncodeCase {
@@ -50,6 +57,8 @@ interface EncodeCase {
 	rowKey: string;
 	spec: SpecVector;
 	want: string[];
+	/** When set, pins the fingerprint of the spec's encoder. */
+	specHash?: string;
 }
 
 interface OrderCase {
@@ -94,8 +103,10 @@ const vectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as {
 const schemaFor = (type?: string): DescMessage =>
 	type === 'issue' ? IssueSchema : type === 'field_history' ? FieldHistorySchema : WidgetSchema;
 
-const encoderFor = (spec: SpecVector, schema: DescMessage): IndexEncoder =>
-	new IndexEncoder(spec.key.map((k) => compileIndexComponent(schema, k.path, k.desc)));
+const encoderFor = (spec: SpecVector, schema: DescMessage): IndexEncoder => {
+	const comps = spec.key.map((k) => compileIndexComponent(schema, k.path, k.desc));
+	return spec.sparse ? new IndexEncoder(comps, { sparse: true }) : declaredIndexEncoder(comps);
+};
 
 /** The same spec expressed as an ordering, which is what the encoding has to
  * agree with. */
@@ -123,8 +134,9 @@ describe('indexkey conformance vectors', () => {
 			it(tc.name, () => {
 				const schema = schemaFor(tc.type);
 				const row = fromJson(schema, tc.row);
-				const entries = encoderFor(tc.spec, schema).encode(row, tc.rowKey, schema);
-				expect(entries.map(toHex)).toEqual(tc.want);
+				const encoder = encoderFor(tc.spec, schema);
+				expect(encoder.encode(row, tc.rowKey, schema).map(toHex)).toEqual(tc.want);
+				if (tc.specHash !== undefined) expect(encoder.specHash()).toBe(tc.specHash);
 			});
 		}
 	});

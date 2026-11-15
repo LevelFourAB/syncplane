@@ -1166,6 +1166,11 @@ export type IndexSpec = Message<"syncplane.v1.IndexSpec"> & {
    * A query can use this index when its equality filters match a prefix of
    * these components and its sort order matches the subsequent components.
    *
+   * When the first component fans out over a map (a path with `*`), the
+   * index holds no entry for a row whose first component is missing, for
+   * example a row with an empty map. Every other index holds an entry for
+   * each row.
+   *
    * @generated from field: repeated syncplane.v1.IndexKey key = 2;
    */
   key: IndexKey[];

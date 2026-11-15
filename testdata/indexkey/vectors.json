@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the index-entry encoding: engine/query/indexkey.go and client/src/query/indexkey.ts must produce byte-identical entries. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; spec.key paths use proto field names (Widget's localNames coincide). encodeCases pin the bytes themselves, as testdata/text does, so a change to either encoder that is not mirrored in the other fails here rather than silently corrupting stored indexes. orderCases pin the property that actually matters: sorting rows by their encoded entry must give the SAME order as the row comparator (Order.Compare / compareRows) over an ordering with the same keys, which both loaders assert against each other rather than only against `want`. probeCases pin the PLANNER's decisions — which index it picks, how many ranges it produces, whether it claims the ordering, whether it reads its ranges backward to supply it, and whether anything is left to re-check. A reversed plan reads each range from its high end, the ranges in the order listed: the component's real values backward, then its NaN rank, then its missing rank, because those two sort last in either direction while their tags do not invert. A probeCase with `walk` pins that order: the row keys a walk of the plan's ranges yields, each row at its first position. Both planners must agree: a planner that chose differently would still return the right rows, just at a different cost, so nothing else in either suite would notice the divergence. `want` is \"scan\" when the query must fall back. A probeCase with `rows` also pins what the plan READS: the rows whose entries fall in its ranges, re-checked by the residual where there is one, must be `matches`, and a scan with the condition must give the same keys. The shape alone cannot see a range that selects the wrong rows, and a bug both planners share passes every shape assertion. groupCases pin the GROUP planner in the same way: which index partitions the match set, whether anything is left to re-check, whether the partition component is stored descending (so the walk reads the range backward to yield groups in ascending value order), and whether one entry inside a group is one row (so a count can be read off entries with no row read). groupBy is a row path, not an index path, so it names a map entry by key where a component writes `*`. Ranges are not compared byte-for-byte here — encodeCases already pin the encoding, and the bounds are derived from it. A component whose path runs through a repeated field fans out: the row takes one entry per element, an empty list still takes one entry tagged missing so every live row stays reachable, and duplicate elements collapse. Components sharing a list fan out TOGETHER, element by element — the cross-product pairing is what a co-referring query would silently get wrong, so \"two components on one list stay paired per element\" is the case that pins it. A `*` segment in a spec path means FAN OUT over every entry of that map, and expands to TWO components: the entry key ascending, then the leaf in the declared direction. That is what makes a probe on one user-defined field a contiguous range. A row's entries come out in KEY order on both sides — Go randomizes map iteration and JS orders integer-like properties first, so both sort explicitly, and the encodeCases pin the result. A `*` may be followed by a repeated field inside one entry (multi-select), which yields one entry per (key, element) and is not a cross product: the second fan lives inside ONE position of the first. There are no orderCases for a `*` spec: an orderCase asserts that sorting by the encoded entry equals sorting by the COMPARATOR over the same paths, and a comparator path cannot contain a `*` — an ordering within one custom field is only meaningful once the entry key is pinned, which is a planner question. The differential index-vs-scan suites on both sides cover it instead. The field_history cases pin the one shape the engine itself depends on: a history row key renders `seq` as unpadded decimal, so the keyspace sorts \"10\" < \"100\" < \"9\" and a bare scan does not give sequence order. Only the declared by_source index does: the descending read walks it forward and the ascending one walks it backward. cursorCases pin the QUERY CURSOR, which is the same entry encoding with the query's order keys as its components, framed as 0x01 ++ a 16-hex shape fingerprint ++ the entry. Unlike an index entry a cursor CROSSES THE WIRE — minted on one side and replayed on the other — so its bytes and its shape are pinned here for the same reason encodeCases pin theirs, and both loaders additionally assert the property the feature rests on: sorting rows by cursor equals sorting them by the comparator, and filtering by after or before (a byte comparison against one row's cursor) selects exactly the rows the comparator ranks after or before that row. Two shapes exist only here and cannot appear in encodeCases: an order key over a COLLABORATIVE TEXT field, which an index refuses because a keystroke would rewrite the stored entry, and an order key naming ONE ENTRY of a map by key (custom.priority.number), where an index path fans out over every entry instead — which is why the shape folds the entry key in, so a cursor for one custom field is not accepted for another.",
+	"comment": "Shared conformance vectors for the index-entry encoding: engine/query/indexkey.go and client/src/query/indexkey.ts must produce byte-identical entries. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; spec.key paths use proto field names (Widget's localNames coincide). encodeCases pin the bytes themselves, as testdata/text does, so a change to either encoder that is not mirrored in the other fails here rather than silently corrupting stored indexes. orderCases pin the property that actually matters: sorting rows by their encoded entry must give the SAME order as the row comparator (Order.Compare / compareRows) over an ordering with the same keys, which both loaders assert against each other rather than only against `want`. probeCases pin the PLANNER's decisions — which index it picks, how many ranges it produces, whether it claims the ordering, whether it reads its ranges backward to supply it, and whether anything is left to re-check. A reversed plan reads each range from its high end, the ranges in the order listed: the component's real values backward, then its NaN rank, then its missing rank, because those two sort last in either direction while their tags do not invert. A probeCase with `walk` pins that order: the row keys a walk of the plan's ranges yields, each row at its first position. Both planners must agree: a planner that chose differently would still return the right rows, just at a different cost, so nothing else in either suite would notice the divergence. `want` is \"scan\" when the query must fall back. A probeCase with `rows` also pins what the plan READS: the rows whose entries fall in its ranges, re-checked by the residual where there is one, must be `matches`, and a scan with the condition must give the same keys. The shape alone cannot see a range that selects the wrong rows, and a bug both planners share passes every shape assertion. groupCases pin the GROUP planner in the same way: which index partitions the match set, whether anything is left to re-check, whether the partition component is stored descending (so the walk reads the range backward to yield groups in ascending value order), and whether one entry inside a group is one row (so a count can be read off entries with no row read). groupBy is a row path, not an index path, so it names a map entry by key where a component writes `*`. Ranges are not compared byte-for-byte here — encodeCases already pin the encoding, and the bounds are derived from it. A component whose path runs through a repeated field fans out: the row takes one entry per element, an empty list still takes one entry tagged missing so every live row stays reachable, and duplicate elements collapse. Components sharing a list fan out TOGETHER, element by element — the cross-product pairing is what a co-referring query would silently get wrong, so \"two components on one list stay paired per element\" is the case that pins it. A `*` segment in a spec path means FAN OUT over every entry of that map, and expands to TWO components: the entry key ascending, then the leaf in the declared direction. That is what makes a probe on one user-defined field a contiguous range. A row's entries come out in KEY order on both sides — Go randomizes map iteration and JS orders integer-like properties first, so both sort explicitly, and the encodeCases pin the result. A `*` may be followed by a repeated field inside one entry (multi-select), which yields one entry per (key, element) and is not a cross product: the second fan lives inside ONE position of the first. There are no orderCases for a `*` spec: an orderCase asserts that sorting by the encoded entry equals sorting by the COMPARATOR over the same paths, and a comparator path cannot contain a `*` — an ordering within one custom field is only meaningful once the entry key is pinned, which is a planner question. The differential index-vs-scan suites on both sides cover it instead. The field_history cases pin the one shape the engine itself depends on: a history row key renders `seq` as unpadded decimal, so the keyspace sorts \"10\" < \"100\" < \"9\" and a bare scan does not give sequence order. Only the declared by_source index does: the descending read walks it forward and the ascending one walks it backward. cursorCases pin the QUERY CURSOR, which is the same entry encoding with the query's order keys as its components, framed as 0x01 ++ a 16-hex shape fingerprint ++ the entry. Unlike an index entry a cursor CROSSES THE WIRE — minted on one side and replayed on the other — so its bytes and its shape are pinned here for the same reason encodeCases pin theirs, and both loaders additionally assert the property the feature rests on: sorting rows by cursor equals sorting them by the comparator, and filtering by after or before (a byte comparison against one row's cursor) selects exactly the rows the comparator ranks after or before that row. Two shapes exist only here and cannot appear in encodeCases: an order key over a COLLABORATIVE TEXT field, which an index refuses because a keystroke would rewrite the stored entry, and an order key naming ONE ENTRY of a map by key (custom.priority.number), where an index path fans out over every entry instead — which is why the shape folds the entry key in, so a cursor for one custom field is not accepted for another. A spec with `sparse: true` is built as a sparse index, which leaves out every entry whose leading component is missing; every other spec is built as a DECLARED index, which is sparse exactly when its leading component fans out over a map and dense otherwise. A sparse index is a candidate only for a plan whose every range lies inside the present ranks of its leading component, so isNotSet on it, an ordering with no bound on it, a union branch outside those ranks and a grouping over its missing group all fall back. An encodeCase with `specHash` pins the fingerprint of its spec, which differs between the sparse and the dense form of the same components so that entries stored under one are never read as the other.",
 	"encodeCases": [
 		{
 			"name": "ascending string",
@@ -877,7 +877,8 @@
 			"want": [
 				"0161000001bff000000000000077310000",
 				"0162000001c00000000000000077310000"
-			]
+			],
+			"specHash": "a566b635bdfd7414"
 		},
 		{
 			"name": "map fan-out: an entry holding another variant still occupies a position",
@@ -920,7 +921,7 @@
 			]
 		},
 		{
-			"name": "map fan-out: an empty map still writes one entry",
+			"name": "map fan-out: an empty map writes no entry, because a map-led index is sparse",
 			"row": {
 				"id": "w1"
 			},
@@ -947,9 +948,109 @@
 					}
 				]
 			},
+			"want": []
+		},
+		{
+			"name": "map fan-out led by the value: an entry holding another variant has no entry",
+			"row": {
+				"custom": {
+					"a": {
+						"number": 1
+					},
+					"b": {
+						"text": "x"
+					}
+				}
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "cf_by_number",
+				"key": [
+					{
+						"path": [
+							"custom",
+							"*",
+							"value",
+							"number"
+						],
+						"desc": false
+					},
+					{
+						"path": [
+							"custom",
+							"*",
+							"key"
+						],
+						"desc": false
+					}
+				]
+			},
 			"want": [
-				"ffff77310000"
-			]
+				"01bff00000000000000161000077310000"
+			],
+			"specHash": "d50b921ed5b2a668"
+		},
+		{
+			"name": "a declared index on a singular field stays dense: a missing value takes the missing tag",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_maybe",
+				"key": [
+					{
+						"path": [
+							"maybe"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"ff77310000"
+			],
+			"specHash": "3aeb1946f7f05c9d"
+		},
+		{
+			"name": "a sparse index leaves out a row whose leading component is missing",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_maybe",
+				"key": [
+					{
+						"path": [
+							"maybe"
+						],
+						"desc": false
+					}
+				],
+				"sparse": true
+			},
+			"want": [],
+			"specHash": "07f136a4ace76374"
+		},
+		{
+			"name": "a sparse index keeps a set value, byte for byte as the dense index writes it",
+			"row": {
+				"maybe": "m"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_maybe",
+				"key": [
+					{
+						"path": [
+							"maybe"
+						],
+						"desc": false
+					}
+				],
+				"sparse": true
+			},
+			"want": [
+				"016d000077310000"
+			],
+			"specHash": "07f136a4ace76374"
 		},
 		{
 			"name": "map fan-out with a second sort key",
@@ -1584,7 +1685,7 @@
 				{
 					"key": "r2",
 					"row": {
-						"label": "\ufffd"
+						"label": "�"
 					}
 				},
 				{
@@ -7143,6 +7244,529 @@
 				"reverse": false,
 				"residual": false
 			}
+		},
+		{
+			"name": "a sparse index serves an equality on its leading component",
+			"indexes": [
+				{
+					"name": "by_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					],
+					"sparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"maybe"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "b"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"maybe": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"maybe": "b"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"maybe": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"maybe": "c"
+					}
+				}
+			],
+			"matches": [
+				"r2"
+			],
+			"want": {
+				"index": "by_maybe",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse index serves an in on its leading component",
+			"indexes": [
+				{
+					"name": "by_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					],
+					"sparse": true
+				}
+			],
+			"cond": {
+				"in": {
+					"path": [
+						"maybe"
+					],
+					"values": [
+						{
+							"stringValue": "a"
+						},
+						{
+							"stringValue": "c"
+						}
+					]
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"maybe": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"maybe": "b"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"maybe": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"maybe": "c"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r5"
+			],
+			"want": {
+				"index": "by_maybe",
+				"ranges": 2,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse index serves a range on its leading component",
+			"indexes": [
+				{
+					"name": "by_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					],
+					"sparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"maybe"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"stringValue": "a"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"maybe": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"maybe": "b"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"maybe": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"maybe": "c"
+					}
+				}
+			],
+			"matches": [
+				"r2",
+				"r5"
+			],
+			"want": {
+				"index": "by_maybe",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse index declines isNotSet, whose rows it leaves out",
+			"indexes": [
+				{
+					"name": "by_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					],
+					"sparse": true
+				}
+			],
+			"cond": {
+				"present": {
+					"path": [
+						"maybe"
+					],
+					"op": "PRESENT_OP_IS_NOT_SET"
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"maybe": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"maybe": "b"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"maybe": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"maybe": "c"
+					}
+				}
+			],
+			"matches": [
+				"r3"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse index declines an ordering with no predicate",
+			"indexes": [
+				{
+					"name": "by_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					],
+					"sparse": true
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"maybe"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse index declines a union whose branch reads the missing rank",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				},
+				{
+					"name": "by_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					],
+					"sparse": true
+				}
+			],
+			"cond": {
+				"or": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "a"
+								}
+							}
+						},
+						{
+							"present": {
+								"path": [
+									"maybe"
+								],
+								"op": "PRESENT_OP_IS_NOT_SET"
+							}
+						}
+					]
+				}
+			},
+			"want": "scan"
+		},
+		{
+			"name": "a map-led index serves one named custom field next to a row with no custom fields",
+			"indexes": [
+				{
+					"name": "cf_number",
+					"key": [
+						{
+							"path": [
+								"custom",
+								"*",
+								"key"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"custom",
+								"*",
+								"value",
+								"number"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"custom",
+						"a",
+						"number"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": 1
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"custom": {
+							"a": {
+								"number": 1
+							}
+						}
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"custom": {
+							"b": {
+								"number": 1
+							}
+						}
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"custom": {
+							"a": {
+								"text": "x"
+							}
+						}
+					}
+				}
+			],
+			"matches": [
+				"r1"
+			],
+			"want": {
+				"index": "cf_number",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a value-led map index answers which custom field holds a value, next to an entry holding another variant",
+			"indexes": [
+				{
+					"name": "cf_by_number",
+					"key": [
+						{
+							"path": [
+								"custom",
+								"*",
+								"value",
+								"number"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"custom",
+								"*",
+								"key"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"value",
+								"number"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"doubleValue": 1
+							}
+						}
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"custom": {
+							"a": {
+								"number": 1
+							}
+						}
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"custom": {
+							"b": {
+								"number": 1
+							}
+						}
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"custom": {
+							"a": {
+								"text": "x"
+							}
+						}
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r3"
+			],
+			"want": {
+				"index": "cf_by_number",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
 		}
 	],
 	"groupCases": [
@@ -8287,6 +8911,98 @@
 			"want": {
 				"index": "cf_labels",
 				"residual": true,
+				"desc": false,
+				"entriesAreRows": true
+			}
+		},
+		{
+			"name": "a sparse index declines a grouping that would count its missing group",
+			"indexes": [
+				{
+					"name": "by_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					],
+					"sparse": true
+				}
+			],
+			"groupBy": [
+				"maybe"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse index partitions when the predicate bounds the groups to set values",
+			"indexes": [
+				{
+					"name": "by_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					],
+					"sparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"maybe"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"stringValue": "a"
+					}
+				}
+			},
+			"groupBy": [
+				"maybe"
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"maybe": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"maybe": "b"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"maybe": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"maybe": "c"
+					}
+				}
+			],
+			"matches": [
+				"r2",
+				"r5"
+			],
+			"want": {
+				"index": "by_maybe",
+				"residual": false,
 				"desc": false,
 				"entriesAreRows": true
 			}

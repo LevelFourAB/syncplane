@@ -44,7 +44,7 @@
 // - `not` and `match`. Both become residual.
 //
 // Presence DOES plan, against a component whose path is exactly the term's and
-// that does not fan out: the encoder writes every row into every index, with a
+// that does not fan out: a dense encoder writes every row into the index, with a
 // rank tag ahead of the payload (real < NaN < missing), and both the encoder's
 // "missing" and the evaluator's isNotSet come from the same resolution rule.
 // So isNotSet pins the component to the missing rank — an equality in all but
@@ -53,6 +53,12 @@
 // excluded from both: an empty collection encodes as missing while presence
 // on the collection itself reads as set, so the ranks and the evaluator
 // disagree exactly there.
+//
+// A SPARSE index holds no entry whose leading component is missing, so it is a
+// candidate only for a plan whose every range lies inside the present ranks of
+// that component (see insidePresentRanks). isNotSet on it, and any walk that
+// does not bound the leading component, decline to the next candidate or to
+// the scan.
 //
 // Repeated fields DO plan, through the multi-entry indexes indexkey.ts
 // describes: `has` over a repeated scalar and `any` over a repeated message
@@ -601,6 +607,7 @@ function planAgainst(
 		reverse = false;
 	}
 	if (reverse) ranges = splitRanks(ranges[0]!, w.prefixes[0]!);
+	if (idx.encoder.sparse && !insidePresentRanks(ranges)) return undefined;
 
 	return {
 		plan: {
@@ -778,6 +785,9 @@ function planGroupAgainst(
 			hi: bounds.hi === undefined ? upperBound(prefix) : prefix + bounds.hi,
 		};
 	}
+	// The walk would visit the groups the sparse index leaves out — the missing
+	// one first among them — as if they were empty.
+	if (idx.encoder.sparse && !insidePresentRanks([ range ])) return undefined;
 
 	const residual = residualOf(terms, usedTerms(w));
 	const positionsAreRows = comps.every((c, ci) => c.fans.length === 0 || ci <= w.pinned);
@@ -1367,6 +1377,22 @@ function splitRanks(r: IndexRange, p: string): IndexRange[] {
 		out.push(hi === undefined ? { lo } : { lo, hi });
 	}
 	return out;
+}
+
+/**
+ * Whether every range lies in [TAG_PRESENT, TAG_MISSING) on the leading
+ * component. A sparse index leaves out exactly the entries that start with
+ * TAG_MISSING, so inside that region it holds the same entries as the dense
+ * index, and outside it a range would miss rows. The check runs on the keys the
+ * plan reads rather than on the terms that built them, so it holds for every
+ * way the planner reaches a range — isNotSet, an unbounded ordering walk, a
+ * union branch — without a rule per term. Mirrors insidePresentRanks in
+ * engine/query/plan.go.
+ */
+function insidePresentRanks(ranges: IndexRange[]): boolean {
+	return ranges.every((r) =>
+		r.lo !== undefined && r.lo >= TAG_PRESENT && r.hi !== undefined && r.hi <= TAG_MISSING
+	);
 }
 
 /** The NaN tag, as a one-character key — the rank between the real values and

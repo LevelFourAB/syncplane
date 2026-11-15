@@ -556,7 +556,32 @@ func NewSparseIndexEncoder(comps []IndexComponent) (*IndexEncoder, error) {
 	return e, nil
 }
 
-// Sparse reports whether the encoder was built by NewSparseIndexEncoder.
+// NewDeclaredIndexEncoder builds the encoder for an index that a schema
+// declares. When the leading component fans out over a map (a `*` path, for
+// example `custom.*.key` or `custom.*.value.number`), the encoder is sparse
+// as NewSparseIndexEncoder builds it: a row with an empty or unset map has no
+// entry, and neither has a map entry whose leading component is missing, such
+// as an entry that holds another variant than a `custom.*.value.number`
+// component reads. Otherwise the encoder is dense as NewIndexEncoder builds it.
+//
+// Because a sparse encoder has a different SpecHash, a stored index whose
+// leading component fans out over a map rebuilds once when it was built by a
+// version that kept it dense. It fails as NewIndexEncoder does.
+func NewDeclaredIndexEncoder(comps []IndexComponent) (*IndexEncoder, error) {
+	// No plan reads the missing rank of a map-fan component: presence terms
+	// do not plan on a fan-out component, an ordering or a grouping by a map
+	// fan needs its entry key pinned, and nothing can be pinned ahead of the
+	// leading component. So the missing entries only cost space and writes.
+	// A LIST fan is different: a grouping by a repeated field reads the
+	// missing rank as its no-value group, so a leading list fan stays dense.
+	if len(comps) > 0 && hasMapFan(comps[0]) {
+		return NewSparseIndexEncoder(comps)
+	}
+	return NewIndexEncoder(comps)
+}
+
+// Sparse reports whether the encoder leaves out the entries whose leading
+// component is missing, as one built by NewSparseIndexEncoder does.
 func (e *IndexEncoder) Sparse() bool { return e.sparse }
 
 // SpecHash fingerprints what the stored entries of this index depend on. For

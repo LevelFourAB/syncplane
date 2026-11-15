@@ -7,6 +7,7 @@ import (
 	"os"
 	"slices"
 	"sort"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -31,6 +32,9 @@ type indexSpecVector struct {
 		Path []string `json:"path"`
 		Desc bool     `json:"desc"`
 	} `json:"key"`
+	// Sparse builds the index with NewSparseIndexEncoder. Without it the index
+	// is a declared one, which NewDeclaredIndexEncoder builds.
+	Sparse bool `json:"sparse"`
 }
 
 type encodeCase struct {
@@ -40,6 +44,8 @@ type encodeCase struct {
 	RowKey string          `json:"rowKey"`
 	Spec   indexSpecVector `json:"spec"`
 	Want   []string        `json:"want"`
+	// SpecHash, when set, pins the fingerprint of the spec's encoder.
+	SpecHash string `json:"specHash"`
 }
 
 type indexOrderCase struct {
@@ -97,7 +103,11 @@ func encoderFor(spec indexSpecVector, typ string) *query.IndexEncoder {
 		Expect(err).NotTo(HaveOccurred())
 		comps = append(comps, c)
 	}
-	enc, err := query.NewIndexEncoder(comps)
+	newEncoder := query.NewDeclaredIndexEncoder
+	if spec.Sparse {
+		newEncoder = query.NewSparseIndexEncoder
+	}
+	enc, err := newEncoder(comps)
 	Expect(err).NotTo(HaveOccurred())
 	return enc
 }
@@ -140,8 +150,11 @@ var _ = Describe("Index key conformance vectors", func() {
 			It(tc.Name, func() {
 				msg := msgForType(tc.Type)
 				Expect(protojson.Unmarshal(tc.Row, msg)).To(Succeed())
-				got := encoderFor(tc.Spec, tc.Type).Encode(msg.ProtoReflect(), tc.RowKey)
-				Expect(hexEntries(got)).To(Equal(tc.Want))
+				enc := encoderFor(tc.Spec, tc.Type)
+				Expect(hexEntries(enc.Encode(msg.ProtoReflect(), tc.RowKey))).To(Equal(tc.Want))
+				if tc.SpecHash != "" {
+					Expect(enc.SpecHash()).To(Equal(tc.SpecHash))
+				}
 			})
 		}
 	})
@@ -625,6 +638,58 @@ var _ = Describe("Encoding a row into a sparse index", func() {
 			"a dense index keeps the fingerprint it already stores under")
 		Expect(sparse.SpecHash()).NotTo(Equal(dense.SpecHash()),
 			"entries stored dense must not be read as sparse, or the other way round")
+	})
+})
+
+var _ = Describe("Encoding a row into a declared index", func() {
+	widget := (&testdatav1.Widget{}).ProtoReflect().Descriptor()
+
+	encoders := func(paths ...string) (declared, dense *query.IndexEncoder) {
+		GinkgoHelper()
+		comps := make([]query.IndexComponent, 0, len(paths))
+		for _, p := range paths {
+			c, err := query.CompileIndexComponent(widget, strings.Split(p, "."), false)
+			Expect(err).NotTo(HaveOccurred())
+			comps = append(comps, c)
+		}
+		declared, err := query.NewDeclaredIndexEncoder(comps)
+		Expect(err).NotTo(HaveOccurred())
+		dense, err = query.NewIndexEncoder(comps)
+		Expect(err).NotTo(HaveOccurred())
+		return declared, dense
+	}
+
+	DescribeTable("is sparse exactly when the leading component fans out over a map",
+		func(sparse bool, paths ...string) {
+			declared, dense := encoders(paths...)
+			Expect(declared.Sparse()).To(Equal(sparse))
+			if sparse {
+				Expect(declared.SpecHash()).NotTo(Equal(dense.SpecHash()))
+			} else {
+				Expect(declared.SpecHash()).To(Equal(dense.SpecHash()),
+					"a dense declared index keeps the fingerprint it already stores under")
+			}
+		},
+		Entry("a singular field", false, "maybe"),
+		Entry("a repeated field", false, "tags"),
+		Entry("a map fan behind a singular field", false, "label", "custom.*.key"),
+		Entry("the entry key of a map", true, "custom.*.key", "custom.*.value.number"),
+		Entry("a value inside a map entry", true, "custom.*.value.number", "custom.*.key"),
+		Entry("a list inside a map entry", true, "custom.*.key", "custom.*.value.labels.values"),
+		Entry("a scalar map", true, "attrs.*.key", "attrs.*.value"),
+	)
+
+	It("writes no entry for a row with an empty map, and the dense entries for one with entries", func() {
+		declared, dense := encoders("custom.*.key", "custom.*.value.number")
+		Expect(declared.Encode((&testdatav1.Widget{}).ProtoReflect(), "w1")).To(BeEmpty())
+
+		msg := (&testdatav1.Widget{Custom: map[string]*testdatav1.FieldValue{
+			"a": {Kind: &testdatav1.FieldValue_Number{Number: 1}},
+			"b": {Kind: &testdatav1.FieldValue_Text{Text: "x"}},
+		}}).ProtoReflect()
+		Expect(declared.Encode(msg, "w1")).To(Equal(dense.Encode(msg, "w1")))
+		Expect(declared.Encode(msg, "w1")).To(HaveLen(2),
+			"an entry without the value variant keeps its position, because its key is set")
 	})
 })
 
