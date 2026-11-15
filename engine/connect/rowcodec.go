@@ -435,7 +435,7 @@ func (c *rowCodec) Merge(tx *server.EntityTx, in MergeInput) (Merged, error) {
 		if alt != nil {
 			altRow = alt.byID[id]
 		}
-		merged, view, err := c.mergeRow(r, base.byID[id], altRow, now, in.TextPeer)
+		merged, view, err := c.mergeRow(r, base.byID[id], altRow, now, in.TextPeer, in.TextClock)
 		if err != nil {
 			return Merged{}, fmt.Errorf("%s %q: %w", r.ent.name, r.key, err)
 		}
@@ -599,7 +599,7 @@ func (m *recordMember) setRecordKey(msg proto.Message, key string) {
 // With two ancestors, a field the store holds as in either of them is not a
 // store edit, and a text field merges against the one whose text is nearest
 // the store's.
-func (c *rowCodec) mergeRow(r decodedRow, base, alt, now proto.Message, peer string) (proto.Message, proto.Message, error) {
+func (c *rowCodec) mergeRow(r decodedRow, base, alt, now proto.Message, peer string, clock uint64) (proto.Message, proto.Message, error) {
 	e := r.ent
 	view := proto.Clone(r.msg)
 	held := base != nil || alt != nil
@@ -681,7 +681,7 @@ func (c *rowCodec) mergeRow(r decodedRow, base, alt, now proto.Message, peer str
 			setBytes(view, t.fd, t.now)
 			setBytes(merged, t.fd, t.now)
 		default:
-			src, out, err := mergeText(t.base, t.now, held, t.value, peer)
+			src, out, err := mergeText(t.base, t.now, held, t.value, peer, clock)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -780,13 +780,14 @@ func (c *rowCodec) sorted(rows RecordRows) RecordRows {
 // state (held), the value is diffed against the agreed document base; else
 // against the engine's document now, so the store wins the characters it
 // differs in. It returns the document the store holds now and that document
-// unioned with now, the engine's next document.
+// unioned with now, the engine's next document. The edit takes counters
+// above clock (see MergeInput.TextClock).
 //
 // server.ApplyTextStrings does the same and returns the union alone. The
 // document before the union is the next merge's ancestor: its text is the
 // store's, and the union holds all its items, so an engine edit the store
 // has not received yet is not taken for a deletion by the store.
-func mergeText(base, now []byte, held bool, value, peer string) (src, merged []byte, err error) {
+func mergeText(base, now []byte, held bool, value, peer string, clock uint64) (src, merged []byte, err error) {
 	if peer == "" {
 		return nil, nil, fmt.Errorf("connect: text strings require a writer peer")
 	}
@@ -811,6 +812,7 @@ func mergeText(base, now []byte, held bool, value, peer string) (src, merged []b
 		doc.ObserveVersion(nowDoc.VersionVector())
 	}
 	if doc.PlainText() != value {
+		doc.ObserveVersion(map[string]uint64{peer: clock})
 		if err := doc.SetString(value); err != nil {
 			return nil, nil, err
 		}

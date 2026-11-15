@@ -17,6 +17,7 @@ import (
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	"github.com/levelfourab/syncplane/engine/id"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/text"
 )
 
 // rowLines is the record-mode test adapter of lineCodec rebuilt on
@@ -441,6 +442,42 @@ var _ = Describe("RowCodec", func() {
 			Entry("when the write was done", true, "T\nonE\nnEw"),
 			Entry("when the write was not done", false, "T\nonE\nnew"),
 		)
+
+		It("mints no text item id a second time after the host reverts a refused ingest", func() {
+			f, _ := newRowFixture(func(cfg *engineconnect.Config) { cfg.TextPeer = "files-peer" })
+			f.store.put(ws, "a.txt", "T\nhello")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			key := f.key(ctx, ws, "a.txt")
+			w := f.widgetWith(ctx, ws, key, "hello")
+			before := widget(f, w).GetBody()
+
+			f.store.put(ws, "a.txt", "T\nhello world")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			refused := widget(f, w).GetBody()
+			// The host reverts the row, as a link replicates the origin's
+			// row, and reports it.
+			row := widget(f, w)
+			row.Body = before
+			raw, err := proto.Marshal(row)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(f.srv.Replicate(ctx, ws, func(tx *server.ReplicaTx) error {
+				return tx.Put("widget", w, raw)
+			})).To(Succeed())
+			Expect(widget(f, w).GetBody()).To(Equal(before))
+			Expect(f.conn.Refused(ctx, ws, []engineconnect.RowRef{{Entity: "widget", Key: w}})).To(Succeed())
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.content(ws, "a.txt")).To(Equal("T\nhello"))
+
+			f.store.put(ws, "a.txt", "T\nhello there")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			// A client that holds the refused document writes it back: the
+			// union keeps both edits only when their items have distinct ids.
+			union, err := text.Merge(widget(f, w).GetBody(), refused)
+			Expect(err).NotTo(HaveOccurred())
+			s, err := text.PlainText(union)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(s).To(HaveLen(len("hello there world")), "text %q", s)
+		})
 
 		It("keeps an engine edit an IngressOnly store never receives when the store changes again", func() {
 			f, _ := newRowFixture(withRecords(func(r *engineconnect.Records) { r.Types[0].Direction = engineconnect.IngressOnly }))

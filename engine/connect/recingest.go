@@ -356,7 +356,8 @@ func (c *Connector) mergeOne(tx *server.EntityTx, p *pass, j *ingestJob) (int, e
 	}
 	writes := tx.Writes()
 	merged, err := rt.codec.Merge(tx, MergeInput{
-		Key: key, Record: j.rec, Base: sh.agreed(), Alternate: sh.alternate(), Root: root, Members: members, TextPeer: c.peer,
+		Key: key, Record: j.rec, Base: sh.agreed(), Alternate: sh.alternate(), Root: root, Members: members,
+		TextPeer: c.peer, TextClock: sh.clock(),
 		dropped: func(id rowID) proto.Message { return p.dropped[id] },
 	})
 	if err != nil {
@@ -399,7 +400,7 @@ func (c *Connector) mergeOne(tx *server.EntityTx, p *pass, j *ingestJob) (int, e
 			dirty = true
 		} else {
 			writes := tx.Writes()
-			out, ok, err := rt.codec.Render(tx, RenderInput{Key: key, Base: next.agreed(), Root: root, Members: members, TextPeer: c.peer})
+			out, ok, err := rt.codec.Render(tx, RenderInput{Key: key, Base: next.agreed(), Root: root, Members: members, TextPeer: c.peer, TextClock: sh.clock()})
 			if err != nil {
 				return 0, &codecError{err: fmt.Errorf("connect: render %s %q: %w", rt.rootName, key, err)}
 			}
@@ -428,6 +429,9 @@ func (c *Connector) mergeOne(tx *server.EntityTx, p *pass, j *ingestJob) (int, e
 		}
 	}
 	if next.Members, err = c.memberKeys(members); err != nil {
+		return 0, err
+	}
+	if next.Clock, err = textClock(sh.clock(), append([]proto.Message{root}, members...)...); err != nil {
 		return 0, err
 	}
 	next.Ingested = sh.ingested()

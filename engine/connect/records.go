@@ -291,6 +291,14 @@ type MergeInput struct {
 	// TextPeer is the collaborative-text peer to write text under, for
 	// example with server.ApplyTextStrings. See Config.TextPeer.
 	TextPeer string
+	// TextClock is the highest text counter the record's rows have held,
+	// also in text the host reverted since (see Connector.Refused); 0 for
+	// none. Text written under TextPeer must take counters above it, or an
+	// item can get the id of a reverted item that a client still holds:
+	// decode the document with text.Decode under TextPeer and call
+	// ObserveVersion(map[string]uint64{TextPeer: TextClock}) before the
+	// edit. server.ApplyTextStrings observes only the documents it is given.
+	TextClock uint64
 
 	// dropped returns a member row an earlier merge of the pass deleted, as
 	// it was; nil when there is none. A RowCodec reads it.
@@ -331,9 +339,9 @@ type RenderInput struct {
 	Root proto.Message
 	// Members are the member rows, as in MergeInput.
 	Members []proto.Message
-	// TextPeer is the collaborative-text peer to write text under, as in
-	// MergeInput.
-	TextPeer string
+	// TextPeer and TextClock are as in MergeInput.
+	TextPeer  string
+	TextClock uint64
 }
 
 // Rendered is the native form of a record.

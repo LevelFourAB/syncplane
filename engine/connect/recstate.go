@@ -12,9 +12,12 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/levelfourab/syncplane/engine/internal/lww"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/text"
 )
 
 // Record mode keeps all its bookkeeping as shadows of the consumer
@@ -75,9 +78,61 @@ type recShadow struct {
 	// Ingested is when the record's last ingest wrote rows, in Unix ns; 0
 	// for none.
 	Ingested int64 `json:"i,omitempty"`
+	// Clock is the highest text counter the record's rows have held, also
+	// in text the host reverted since; see MergeInput.TextClock.
+	Clock uint64 `json:"tc,omitempty"`
 	// Alt is the state of a store write that the connector cannot tell was
 	// done (see settleOne); nil for none. The next agreed state drops it.
 	Alt *recAlt `json:"a,omitempty"`
+}
+
+func (sh *recShadow) clock() uint64 {
+	if sh == nil {
+		return 0
+	}
+	return sh.Clock
+}
+
+// textClock returns the highest counter of the collaborative-text documents
+// in rows, at any depth, and at least floor. It reads only the header of each
+// document.
+func textClock(floor uint64, rows ...proto.Message) (uint64, error) {
+	var walk func(m protoreflect.Message) error
+	walk = func(m protoreflect.Message) error {
+		var err error
+		m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+			switch {
+			case lww.IsText(fd) && fd.Kind() == protoreflect.BytesKind && !fd.IsList() && !fd.IsMap():
+				var c uint64
+				if c, err = text.MaxCounter(v.Bytes()); err == nil {
+					floor = max(floor, c)
+				}
+			case fd.IsMap() && fd.MapValue().Kind() == protoreflect.MessageKind:
+				v.Map().Range(func(_ protoreflect.MapKey, e protoreflect.Value) bool {
+					err = walk(e.Message())
+					return err == nil
+				})
+			case fd.IsList() && fd.Kind() == protoreflect.MessageKind:
+				l := v.List()
+				for i := 0; i < l.Len() && err == nil; i++ {
+					err = walk(l.Get(i).Message())
+				}
+			case !fd.IsList() && !fd.IsMap() && fd.Kind() == protoreflect.MessageKind:
+				err = walk(v.Message())
+			}
+			return err == nil
+		})
+		return err
+	}
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		if err := walk(row.ProtoReflect()); err != nil {
+			return 0, fmt.Errorf("connect: text clock: %w", err)
+		}
+	}
+	return floor, nil
 }
 
 // recAlt is the agreed state a store write would have made.

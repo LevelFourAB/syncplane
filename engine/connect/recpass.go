@@ -496,7 +496,7 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 			return nil
 		}
 		writes := tx.Writes()
-		r, ok, err := rt.codec.Render(tx, RenderInput{Key: key, Base: sh.agreed(), Root: root, Members: members, TextPeer: c.peer})
+		r, ok, err := rt.codec.Render(tx, RenderInput{Key: key, Base: sh.agreed(), Root: root, Members: members, TextPeer: c.peer, TextClock: sh.clock()})
 		if err != nil {
 			return &codecError{err: fmt.Errorf("connect: render %s %q: %w", rt.rootName, key, err)}
 		}
@@ -519,8 +519,12 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 		if err != nil {
 			return err
 		}
+		clock, err := textClock(sh.clock(), append([]proto.Message{root}, members...)...)
+		if err != nil {
+			return err
+		}
 		out = r
-		next = &recShadow{Locator: r.Locator, Hash: contentHash(r.Content), Version: max(pos, tx.Seq()), Payload: r.Payload, Members: mk, Ingested: sh.ingested()}
+		next = &recShadow{Locator: r.Locator, Hash: contentHash(r.Content), Version: max(pos, tx.Seq()), Payload: r.Payload, Members: mk, Ingested: sh.ingested(), Clock: clock}
 		if cur != nil && r.Locator == sh.Locator && bytes.Equal(cur.Content, r.Content) {
 			agreed = true
 			next.Fingerprint = cur.Fingerprint
@@ -828,6 +832,7 @@ func (c *Connector) settleOne(ctx context.Context, ws string, p *pass, rt *recor
 		next = *sh
 		next.Locator, next.Fingerprint = pw.Next.Locator, ""
 		next.Alt = &recAlt{Payload: pw.Next.Payload}
+		next.Clock = max(sh.Clock, pw.Next.Clock)
 	}
 	if pw.From != "" && sh != nil {
 		// A store that moves a record in two steps can hold the old copy.
