@@ -216,6 +216,66 @@ var _ = Describe("Record mode on a replica", func() {
 		Expect(doc.VersionVector()).NotTo(HaveKey("connector:files"))
 	})
 
+	It("mints the text of a RowCodec under each connector's TextPeer, with no item id on both", func() {
+		pr := newReplicaPair(ws)
+		with := func(p string) func(*engineconnect.Config) {
+			return func(cfg *engineconnect.Config) {
+				cfg.TextPeer = p
+				cfg.Records.Types[0].Codec = (&rowLines{}).codec()
+			}
+		}
+		o := recFixtureOn(pr.origin, with("files@origin"))
+		r := recFixtureOn(pr.replica, with("files@replica"), withRecords(func(rs *engineconnect.Records) {
+			rs.FirstPass = engineconnect.EngineWins
+		}))
+		o.store.put(ws, "T.txt", "T\nhello world")
+		Expect(o.conn.Reconcile(ctx, ws)).To(Succeed())
+		key := o.key(ctx, ws, "T.txt")
+		Eventually(func() string { return r.lines(ctx, ws, key) }).WithTimeout(10 * time.Second).Should(Equal("T\nhello world"))
+		Expect(r.conn.Reconcile(ctx, ws)).To(Succeed())
+		w := o.widgetWith(ctx, ws, key, "hello world")
+
+		// Both stores edit the line at once, more than once, so each peer
+		// mints items before it sees the other's.
+		for _, edit := range [][2]string{{"hello brave world", "hello world!"}, {"hello brave new world", "hello world!?"}} {
+			o.store.put(ws, "T.txt", "T\n"+edit[0])
+			r.store.put(ws, "T.txt", "T\n"+edit[1])
+			Expect(o.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(r.conn.Reconcile(ctx, ws)).To(Succeed())
+			pr.flush(ws)
+			Expect(o.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(r.conn.Reconcile(ctx, ws)).To(Succeed())
+			pr.flush(ws)
+		}
+		want := "T\nhello brave new world!?"
+		Eventually(func() string { return r.lines(ctx, ws, key) }).WithTimeout(10 * time.Second).Should(Equal(want))
+		Expect(o.lines(ctx, ws, key)).To(Equal(want))
+		Expect(o.conn.Flush(ctx, ws)).To(Succeed())
+		Expect(r.conn.Flush(ctx, ws)).To(Succeed())
+		Expect(o.content(ws, "T.txt")).To(Equal(want))
+		Expect(r.content(ws, "T.txt")).To(Equal(want))
+		Expect(pr.rejections()).To(BeEmpty())
+
+		var docs [][]byte
+		for _, srv := range []*server.Server{pr.origin, pr.replica} {
+			var row testdatav1.Widget
+			Expect(srv.View(server.Trusted(ctx), ws, func(tx *server.ViewTx) error {
+				_, _, err := tx.Get(&row, w)
+				return err
+			})).To(Succeed())
+			docs = append(docs, row.GetBody())
+		}
+		doc, err := text.Decode(docs[0], "check")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(doc.VersionVector()).To(HaveKey("files@origin"))
+		Expect(doc.VersionVector()).To(HaveKey("files@replica"))
+		Expect(doc.VersionVector()).NotTo(HaveKey("connector:files"))
+		// An item id on two sides with different content fails the union.
+		union, err := text.Merge(docs[0], docs[1])
+		Expect(err).NotTo(HaveOccurred())
+		Expect(text.PlainText(union)).To(Equal("hello brave new world!?"))
+	})
+
 	It("writes no row from an ingest of an EgressOnly type (acceptance 18)", func() {
 		pr := newReplicaPair(ws)
 		origin := recFixtureOn(pr.origin)
