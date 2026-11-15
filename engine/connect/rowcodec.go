@@ -28,6 +28,9 @@ import (
 //   - A member row that the record held and no longer holds is deleted. A
 //     member row that a client added and that the record never held stays,
 //     and the next write puts it in the store.
+//   - A member row that Decode gives to another record by its key moves to
+//     that record, with the fields that record does not own and with its
+//     text history, when the store changes both records in one pass.
 //   - With no agreed state, as on the first sync of a record, the rows take
 //     the record's values for the fields in Fields, and the member rows the
 //     record does not hold are deleted.
@@ -386,6 +389,7 @@ func (c *rowCodec) Merge(tx *server.EntityTx, in MergeInput) (Merged, error) {
 		id := rowID{r.ent.name, r.key}
 		decoded[id] = true
 		now, ok := cur[id]
+		absent := false
 		if !ok && r.ent.member != nil {
 			// A row of another record that this record now holds.
 			msg := r.ent.prototype.ProtoReflect().New().Interface()
@@ -393,8 +397,15 @@ func (c *rowCodec) Merge(tx *server.EntityTx, in MergeInput) (Merged, error) {
 			if err != nil {
 				return Merged{}, err
 			}
-			if found {
+			switch {
+			case found:
 				now = msg
+			case in.dropped != nil:
+				// An earlier transaction of the pass deleted it from the
+				// record that held it: the store moved it.
+				if was := in.dropped(id); was != nil {
+					now, absent = proto.Clone(was), true
+				}
 			}
 		}
 		merged, view, err := c.mergeRow(r, base.byID[id], now, in.TextPeer)
@@ -402,7 +413,7 @@ func (c *rowCodec) Merge(tx *server.EntityTx, in MergeInput) (Merged, error) {
 			return Merged{}, fmt.Errorf("%s %q: %w", r.ent.name, r.key, err)
 		}
 		views = append(views, view)
-		if merged != nil && (now == nil || !proto.Equal(merged, now)) {
+		if merged != nil && (now == nil || absent || !proto.Equal(merged, now)) {
 			if err := tx.Put(merged); err != nil {
 				return Merged{}, err
 			}
@@ -423,20 +434,18 @@ func (c *rowCodec) Merge(tx *server.EntityTx, in MergeInput) (Merged, error) {
 			gone = append(gone, rowID{entity, key})
 		}
 	}
+	var drops []rowDrop
 	for _, id := range gone {
-		msg, ok := cur[id]
-		if !ok || decoded[id] {
+		if _, ok := cur[id]; !ok || decoded[id] {
 			continue
 		}
-		if err := tx.Delete(msg, id.key); err != nil {
-			return Merged{}, err
-		}
+		drops = append(drops, rowDrop{id: id, record: in.Key})
 	}
 	payload, err := c.writePayload(dec.Payload, views)
 	if err != nil {
 		return Merged{}, err
 	}
-	return Merged{Payload: payload}, nil
+	return Merged{Payload: payload, drops: drops}, nil
 }
 
 // check validates the rows of dec, fills in the root key and the record

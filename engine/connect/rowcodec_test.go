@@ -487,26 +487,36 @@ var _ = Describe("RowCodec", func() {
 			Expect(widget(f, two).GetLabel()).To(Equal(b))
 		})
 
-		It("moves a row whose key the store names to the record that holds it", func() {
-			f, l := newRowFixture()
-			f.store.put(ws, "a.txt", "A\none\ntwo")
-			f.store.put(ws, "b.txt", "B\nthree")
-			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
-			a, b := f.key(ctx, ws, "a.txt"), f.key(ctx, ws, "b.txt")
-			one := f.widgetWith(ctx, ws, a, "one")
-			setFlag(f, one)
+		DescribeTable("moves a row whose key the store names to the record that holds it, with its unowned fields and text",
+			func(from, to string, opts ...func(*engineconnect.Config)) {
+				f, l := newRowFixture(opts...)
+				f.store.put(ws, from, "From\none\ntwo")
+				f.store.put(ws, to, "To\nthree")
+				Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+				a, b := f.key(ctx, ws, from), f.key(ctx, ws, to)
+				one := f.widgetWith(ctx, ws, a, "one")
+				setFlag(f, one)
+				body := widget(f, one).GetBody()
 
-			l.set(func(l *rowLines) { l.pin = map[string]string{"one": one} })
-			f.store.put(ws, "b.txt", "B\nthree\none")
-			f.store.put(ws, "a.txt", "A\ntwo")
-			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
-			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
-			Expect(f.lines(ctx, ws, a)).To(Equal("A\ntwo"))
-			Expect(f.lines(ctx, ws, b)).To(Equal("B\nthree\none"))
-			Expect(widget(f, one).GetLabel()).To(Equal(b))
-			Expect(f.content(ws, "a.txt")).To(Equal("A\ntwo"))
-			Expect(f.content(ws, "b.txt")).To(Equal("B\nthree\none"))
-		})
+				l.set(func(l *rowLines) { l.pin = map[string]string{"one": one} })
+				f.store.put(ws, to, "To\nthree\none")
+				f.store.put(ws, from, "From\ntwo")
+				Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+				Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+				Expect(f.lines(ctx, ws, a)).To(Equal("From\ntwo"))
+				Expect(f.lines(ctx, ws, b)).To(Equal("To\nthree\none"))
+				w := widget(f, one)
+				Expect(w.GetLabel()).To(Equal(b))
+				Expect(w.GetFlag()).To(BeTrue(), "the field the record does not own")
+				Expect(w.GetBody()).To(Equal(body), "the text document")
+				Expect(f.content(ws, from)).To(Equal("From\ntwo"))
+				Expect(f.content(ws, to)).To(Equal("To\nthree\none"))
+			},
+			Entry("when the record that gives it merges first", "a.txt", "b.txt"),
+			Entry("when the record that takes it merges first", "b.txt", "a.txt"),
+			Entry("when each record merges in its own transaction", "a.txt", "b.txt",
+				withRecords(func(r *engineconnect.Records) { r.BatchRows = 1 })),
+		)
 	})
 
 	It("refuses a record whose row names another record", func() {

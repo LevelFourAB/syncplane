@@ -283,6 +283,10 @@ type MergeInput struct {
 	// TextPeer is the collaborative-text peer to write text under, for
 	// example with server.ApplyTextStrings. See Config.TextPeer.
 	TextPeer string
+
+	// dropped returns a member row an earlier merge of the pass deleted, as
+	// it was; nil when there is none. A RowCodec reads it.
+	dropped func(id rowID) proto.Message
 }
 
 // Merged is the result of Codec.Merge.
@@ -295,6 +299,19 @@ type Merged struct {
 	// of each part of the record. The connector stores it with the shadow and
 	// gives it back as Agreed.Payload.
 	Payload []byte
+
+	// drops are the member rows a RowCodec merge leaves out of the record.
+	drops []rowDrop
+}
+
+// rowDrop is a member row that a merge left out of its record. The merge
+// does not delete it: the connector deletes it at the end of the merge
+// transaction, and only when no later merge of the transaction took it into
+// its own record. A store that moves a line from one record to another
+// changes both records, and the record that loses the line can merge first.
+type rowDrop struct {
+	id     rowID
+	record string
 }
 
 // RenderInput is the input of Codec.Render.

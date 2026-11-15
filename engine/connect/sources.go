@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/levelfourab/syncplane/engine/server"
 )
 
@@ -46,6 +48,10 @@ type pass struct {
 	unflushed bool
 	// refused counts the records the codec refused in this pass.
 	refused int
+	// dropped holds the member rows that a RowCodec merge of this pass
+	// deleted, as they were, so that a later merge of the pass that takes
+	// one into its record restores it whole (see rowDrop).
+	dropped map[rowID]proto.Message
 }
 
 // writer returns the source's Writer half. Egress paths are gated on

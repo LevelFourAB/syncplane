@@ -10,6 +10,8 @@ import (
 	"slices"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/levelfourab/syncplane/engine/id"
 	"github.com/levelfourab/syncplane/engine/server"
 )
@@ -41,6 +43,7 @@ type ingestJob struct {
 	agreed *recShadow
 	back   *Rendered
 	wrote  bool
+	drops  []rowDrop
 	// failed is set when the codec refused the record.
 	failed bool
 }
@@ -203,7 +206,7 @@ func (c *Connector) ingestJobs(ctx context.Context, ws string, p *pass, jobs []*
 		}
 		jobs = jobs[n:]
 		for len(batch) > 0 {
-			done, err := c.mergeBatch(ctx, ws, batch)
+			done, err := c.mergeBatch(ctx, ws, p, batch)
 			var ce *codecError
 			if errors.As(err, &ce) {
 				upto := ce.index + 1
@@ -232,7 +235,7 @@ func (c *Connector) ingestJobs(ctx context.Context, ws string, p *pass, jobs []*
 func (c *Connector) ingestEach(ctx context.Context, ws string, p *pass, jobs []*ingestJob) error {
 	for _, j := range jobs {
 		one := []*ingestJob{j}
-		_, err := c.mergeBatch(ctx, ws, one)
+		_, err := c.mergeBatch(ctx, ws, p, one)
 		var ce *codecError
 		if errors.As(err, &ce) {
 			c.skipRecord(ctx, ws, p, j, err)
@@ -263,13 +266,16 @@ func (c *Connector) skipRecord(ctx context.Context, ws string, p *pass, j *inges
 
 // mergeBatch merges a prefix of batch in one transaction, and returns its
 // length: it stops after the record that brings the rows past BatchRows.
-func (c *Connector) mergeBatch(ctx context.Context, ws string, batch []*ingestJob) (int, error) {
-	var done int
+func (c *Connector) mergeBatch(ctx context.Context, ws string, p *pass, batch []*ingestJob) (int, error) {
+	var (
+		done    int
+		deleted map[rowID]proto.Message
+	)
 	err := c.srv.Mutate(server.TrustedAs(ctx, c.label), ws, func(tx *server.EntityTx) error {
 		done = 0
 		rows := 0
 		for i, j := range batch {
-			n, err := c.mergeOne(tx, j)
+			n, err := c.mergeOne(tx, p, j)
 			if err != nil {
 				var ce *codecError
 				if errors.As(err, &ce) {
@@ -283,9 +289,45 @@ func (c *Connector) mergeBatch(ctx context.Context, ws string, batch []*ingestJo
 				break
 			}
 		}
-		return nil
+		var err error
+		deleted, err = c.applyDrops(tx, batch[:done])
+		return err
 	})
+	if err == nil && len(deleted) > 0 {
+		if p.dropped == nil {
+			p.dropped = make(map[rowID]proto.Message, len(deleted))
+		}
+		maps.Copy(p.dropped, deleted)
+	}
 	return done, err
+}
+
+// applyDrops deletes the member rows the merges of jobs left out of their
+// records, unless a later merge took one into another record. It returns the
+// deleted rows as they were.
+func (c *Connector) applyDrops(tx *server.EntityTx, jobs []*ingestJob) (map[rowID]proto.Message, error) {
+	var deleted map[rowID]proto.Message
+	for _, j := range jobs {
+		for _, d := range j.drops {
+			m := c.rec.memberOf[d.id.entity]
+			msg := m.prototype.ProtoReflect().New().Interface()
+			found, err := tx.Get(msg, d.id.key)
+			if err != nil {
+				return nil, err
+			}
+			if !found || m.recordKeyOf(msg) != d.record {
+				continue
+			}
+			if err := tx.Delete(msg, d.id.key); err != nil {
+				return nil, err
+			}
+			if deleted == nil {
+				deleted = make(map[rowID]proto.Message)
+			}
+			deleted[d.id] = msg
+		}
+	}
+	return deleted, nil
 }
 
 // mergeOne merges one record in tx and records its new agreed state with the
@@ -297,9 +339,9 @@ func (c *Connector) mergeBatch(ctx context.Context, ws string, batch []*ingestJo
 // record must be written back: the shadow then still describes the store's
 // content, and a dirty mark in the same transaction makes sure a crash before
 // the write-back does not lose those edits.
-func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
+func (c *Connector) mergeOne(tx *server.EntityTx, p *pass, j *ingestJob) (int, error) {
 	rt := j.rt
-	j.outKey, j.agreed, j.back, j.wrote = "", nil, nil, false
+	j.outKey, j.agreed, j.back, j.wrote, j.drops = "", nil, nil, false, nil
 	key := j.key
 	sh, err := c.txRecShadow(tx, rt, key)
 	if err != nil {
@@ -315,6 +357,7 @@ func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 	writes := tx.Writes()
 	merged, err := rt.codec.Merge(tx, MergeInput{
 		Key: key, Record: j.rec, Base: sh.agreed(), Root: root, Members: members, TextPeer: c.peer,
+		dropped: func(id rowID) proto.Message { return p.dropped[id] },
 	})
 	if err != nil {
 		return 0, &codecError{err: fmt.Errorf("connect: merge %s %q: %w", rt.rootName, key, err)}
@@ -337,6 +380,10 @@ func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 		if root, members, err = c.loadRows(tx, rt, key); err != nil {
 			return 0, err
 		}
+	}
+	j.drops = merged.drops
+	if members, err = c.withoutDrops(members, merged.drops); err != nil {
+		return 0, err
 	}
 	next := &recShadow{
 		Locator:     j.rec.Locator,
@@ -374,6 +421,9 @@ func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 				if _, members, err = c.loadRows(tx, rt, key); err != nil {
 					return 0, err
 				}
+				if members, err = c.withoutDrops(members, merged.drops); err != nil {
+					return 0, err
+				}
 			}
 		}
 	}
@@ -398,6 +448,25 @@ func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 	}
 	j.outKey, j.agreed, j.wrote = key, next, tx.Seq() != 0
 	return 1 + len(members), nil
+}
+
+// withoutDrops returns members less the rows of drops. A dropped row is out
+// of its record, though the transaction deletes it only at its end.
+func (c *Connector) withoutDrops(members []proto.Message, drops []rowDrop) ([]proto.Message, error) {
+	if len(drops) == 0 {
+		return members, nil
+	}
+	out := make([]proto.Message, 0, len(members))
+	for _, msg := range members {
+		entity, key, err := c.srv.EntityKey(msg)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.ContainsFunc(drops, func(d rowDrop) bool { return d.id == rowID{entity, key} }) {
+			out = append(out, msg)
+		}
+	}
+	return out, nil
 }
 
 // afterMerge paces the import and writes back the records whose merge kept
