@@ -126,12 +126,12 @@ backup := func(ctx context.Context, o connect.Overwrite) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	name := fmt.Sprintf("%s.%d.bak", o.Locator, time.Now().UnixNano())
+	name := fmt.Sprintf("%s.%s.%d.bak", o.Locator, o.Reason, time.Now().UnixNano())
 	return os.WriteFile(filepath.Join(dir, name), o.Old, 0o644)
 }
 ```
 
-`o.Old` is the content that the file holds, and `o.New` the content that replaces it (`nil` for a delete). Copy them if you keep them after the call. An error from `Overwrite` stops the write and fails the pass, and the next pass tries again. Use `o.Reason` to tell the user why the file changed.
+`o.Old` is the content to keep: what the file holds, or for `OverwriteRefused`, possibly the content that an earlier egress replaced. `o.New` is the content that replaces it, and `nil` for a delete. When `o.Old` is content that an earlier egress replaced, `o.New` is what the file holds now, which can hold later edits, and `nil` when there is no file. Copy them if you keep them after the call. An error from `Overwrite` stops the write and fails the pass, and the next pass tries again. `o.Reason` prints as `first_pass`, `egress_only` or `refused`: the backup name above uses it, and you can use it to tell the user why the file changed.
 
 ## Confirming the setup
 
