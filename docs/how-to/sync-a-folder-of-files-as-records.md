@@ -219,11 +219,18 @@ func decode(in connect.DecodeInput) (connect.Decoded, error) {
 		return connect.Decoded{}, err
 	}
 	matched := connect.MatchKeys(prevTexts, prevKeys, lines)
+	place := make(map[string]int32)
+	for _, rows := range [][]proto.Message{in.Rows.Members, prev.Members} {
+		for _, l := range byPosition(rows) {
+			place[l.GetId()] = l.GetPosition()
+		}
+	}
 	used := make(map[string]bool, len(matched))
 	for _, k := range matched {
 		used[k] = true
 	}
 	out := connect.Decoded{Root: &pagesv1.Page{Title: title}}
+	last := int32(-1)
 	for i, text := range lines {
 		key := matched[i]
 		if key == "" {
@@ -240,7 +247,14 @@ func decode(in connect.DecodeInput) (connect.Decoded, error) {
 			key = id.New()
 		}
 		used[key] = true
-		l := &pagesv1.Line{Id: key, Position: int32(i)}
+		// A row keeps its position while it still sorts after the line
+		// before it, so that the file gives back the positions Encode got.
+		pos, ok := place[key]
+		if !ok || pos <= last {
+			pos = last + 1
+		}
+		last = pos
+		l := &pagesv1.Line{Id: key, Position: pos}
 		out.Members = append(out.Members, l)
 		out.SetText(l, "body", text)
 	}
@@ -249,6 +263,8 @@ func decode(in connect.DecodeInput) (connect.Decoded, error) {
 ```
 
 `Decode` leaves the keys of the page and `page_id` empty: the connector fills in the record key. It gives each text value with `SetText` and leaves the `body` bytes unset, so the connector merges the value into the engine's document. An error refuses the file: the connector changes no row, lists the file in `Health.Refused`, and tries it again when the file next changes.
+
+`Decode` and `Encode` run inside the merge transaction, under the workspace write lock. They must do no I/O and have no effect outside the call, because the transaction can roll back and run again. A new key from `id.New()` is allowed. `Encode` must give the same content for the same rows.
 
 `Encode` writes the rows back. When the store does not hold the page yet, `EncodeInput.Locator` is empty and `Encode` must give a file name:
 
@@ -270,7 +286,7 @@ func encode(in connect.EncodeInput) (connect.Rendered, error) {
 
 With an empty `Locator` in the result, the file keeps its name when the title changes. To rename the file with the title, return the new name each time: the connector then writes the new file and passes the old name as `from`. Two pages that want the same file name cannot both have it: the second one waits and is listed in `Health.Refused`. Add the page key to the name when titles can repeat.
 
-`Decode` must read back what `Encode` wrote, in the fields the file owns. This pair does so for the title and the line texts. The positions are an exception: `Decode` numbers the lines 0, 1, 2, and so on. When clients write other positions, such as gaps, the next store edit of the file renumbers them.
+`Decode` must read back what `Encode` wrote, in the fields the file owns. The file holds the order of the lines but not their positions, so `Decode` keeps the position of a matched row while it still sorts after the line before it, and gives any other line the position after the line before it. A file that `Encode` wrote then gives back the positions that clients wrote, gaps included.
 
 Name the fields that the file owns. The file holds the text and the order of a line, but not its `done` flag:
 
