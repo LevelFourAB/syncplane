@@ -29,7 +29,9 @@ func (e *codecError) Unwrap() error { return e.err }
 type ingestJob struct {
 	rt  *recordType
 	key string
-	ref RecordRef
+	// minted marks a key made for a store record new to the connector.
+	minted bool
+	ref    RecordRef
 	// rec is the content, valid when read is set.
 	rec  Record
 	read bool
@@ -123,7 +125,7 @@ func (c *Connector) resolveRef(ctx context.Context, ws string, rt *recordType, r
 		}
 	}
 	if key == "" {
-		key = id.New()
+		return &ingestJob{rt: rt, key: id.New(), ref: ref, minted: true}, nil
 	}
 	return &ingestJob{rt: rt, key: key, ref: ref}, nil
 }
@@ -249,6 +251,11 @@ func (c *Connector) ingestEach(ctx context.Context, ws string, p *pass, jobs []*
 func (c *Connector) skipRecord(ctx context.Context, ws string, p *pass, j *ingestJob, err error) {
 	j.failed = true
 	p.refused++
+	f := RecordFailure{Entity: j.rt.rootName, Locator: j.ref.Locator, Err: err}
+	if !j.minted {
+		f.Key = j.key
+	}
+	c.noteFailure(ws, f)
 	c.logger.LogAttrs(ctx, slog.LevelError, "record skipped: codec failed",
 		slog.String("workspace", ws), slog.String("entity", j.rt.rootName),
 		slog.String("key", j.key), slog.String("locator", j.ref.Locator), slog.Any("err", err))
@@ -394,6 +401,13 @@ func (c *Connector) afterMerge(ctx context.Context, ws string, p *pass, jobs []*
 		}
 	}
 	for _, j := range jobs {
+		key := j.outKey
+		if key == "" && !j.minted {
+			key = j.key
+		}
+		c.clearFailure(ws, j.rt.rootName, key, j.rec.Locator)
+	}
+	for _, j := range jobs {
 		if j.back == nil || j.agreed == nil {
 			continue
 		}
@@ -477,6 +491,11 @@ func (c *Connector) reconcileType(ctx context.Context, ws string, p *pass, rt *r
 	}); err != nil {
 		return fmt.Errorf("connect: list %s: %w", rt.rootName, err)
 	}
+	listed := make(map[string]bool, len(refs))
+	for _, ref := range refs {
+		listed[ref.Locator] = true
+	}
+	c.pruneFailures(ws, rt.rootName, listed)
 	return c.ingestRefs(ctx, ws, p, rt, refs, true)
 }
 
@@ -687,6 +706,7 @@ func (c *Connector) applyDeletes(ctx context.Context, ws string, p *pass) error 
 // deleteRecordRows deletes the root row and the member rows of a record that
 // left the store, with its shadows, in one transaction.
 func (c *Connector) deleteRecordRows(ctx context.Context, ws string, rt *recordType, key string) error {
+	defer c.clearFailure(ws, rt.rootName, key, "")
 	return c.srv.Mutate(server.TrustedAs(ctx, c.label), ws, func(tx *server.EntityTx) error {
 		sh, err := c.txRecShadow(tx, rt, key)
 		if err != nil {

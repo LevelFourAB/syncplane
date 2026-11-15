@@ -199,8 +199,10 @@ type RecordStore interface {
 // workspaces and must be safe for concurrent use.
 //
 // An error from Merge or Render rolls back the transaction: no row and no
-// shadow of the record changes. The connector logs the error, skips the
-// record, and tries it again when it next sees a change of it.
+// shadow of the record changes. The connector logs the error, lists the
+// record in Health.Refused, skips it, and tries it again when it next sees a
+// change of it. In a first pass, a refused record can fail the pass instead;
+// see FirstPass.
 type Codec interface {
 	// Merge applies a store record to the rows of the record with key
 	// in.Key, through tx. With a base, it applies the changes from the base

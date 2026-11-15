@@ -242,6 +242,8 @@ type Connector struct {
 
 	hmu    sync.Mutex
 	health map[string]Health
+	// failures holds the records each workspace's Health.Refused lists.
+	failures map[string]map[failureID]RecordFailure
 }
 
 // New validates cfg and builds a Connector.
@@ -340,6 +342,7 @@ func New(cfg Config) (*Connector, error) {
 		tracked:      make(map[string]*workspace),
 		runs:         make(map[string]*runLock),
 		health:       make(map[string]Health),
+		failures:     make(map[string]map[failureID]RecordFailure),
 		peer:         peer,
 		label:        label,
 		rec:          rec,

@@ -8,6 +8,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	. "github.com/onsi/gomega/gstruct"
 	"google.golang.org/protobuf/proto"
 
 	engineconnect "github.com/levelfourab/syncplane/engine/connect"
@@ -820,6 +821,64 @@ var _ = Describe("Record mode", func() {
 			f.conn = f.connector()
 			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
 			Expect(f.projects(ctx, ws)).To(Equal(map[string]string{"p1": "New"}))
+		})
+	})
+
+	Describe("Health", func() {
+		refused := func(f *recFixture) []engineconnect.RecordFailure {
+			h, ok := f.conn.Health(ws)
+			Expect(ok).To(BeTrue())
+			return h.Refused
+		}
+
+		It("lists a store record the codec keeps refusing until it syncs or leaves the store", func() {
+			f := newRecFixture()
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			f.codec.setFailOn("boom")
+			f.store.put(ws, "a.txt", "A\nboom")
+			f.store.put(ws, "b.txt", "B\nboom")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+
+			got := refused(f)
+			Expect(got).To(HaveLen(2))
+			Expect(got[0]).To(MatchFields(IgnoreExtras, Fields{
+				"Entity": Equal("project"), "Key": BeEmpty(), "Locator": Equal("a.txt"),
+				"Err": MatchError(ContainSubstring("codec refuses boom")), "Failures": Equal(2),
+			}))
+			Expect(got[1].Locator).To(Equal("b.txt"))
+
+			f.store.remove(ws, "b.txt")
+			f.codec.setFailOn("")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(refused(f)).To(BeEmpty())
+		})
+
+		It("lists an engine record the codec cannot render until it syncs", func() {
+			f := newRecFixture()
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			f.codec.setFailRender("Broken")
+			f.addRecord(ctx, ws, "p1", "Broken", "x")
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(refused(f)).To(ConsistOf(MatchFields(IgnoreExtras, Fields{
+				"Entity": Equal("project"), "Key": Equal("p1"), "Locator": BeEmpty(), "Failures": Equal(1),
+			})))
+
+			f.codec.setFailRender("")
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(refused(f)).To(BeEmpty())
+			Expect(f.content(ws, "Broken.txt")).To(Equal("Broken\nx"))
+		})
+
+		It("lists a record whose locator another record holds", func() {
+			f := newRecFixture()
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			f.addRecord(ctx, ws, "p1", "X", "a")
+			f.addRecord(ctx, ws, "p2", "X", "b")
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(refused(f)).To(ConsistOf(MatchFields(IgnoreExtras, Fields{
+				"Key": Equal("p2"), "Err": MatchError(ContainSubstring("belongs to record \"p1\"")),
+			})))
 		})
 	})
 

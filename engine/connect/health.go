@@ -60,6 +60,95 @@ type Health struct {
 	// disabled (Config.RetryMin < 0). Direct calls to Ingress, Reconcile and
 	// Drain ignore it: the caller asked.
 	NextAttempt time.Time
+	// Refused lists, in record mode, the records the connector skips and
+	// tries again: the codec refused them, or their locator belongs to
+	// another record. A skipped record does not fail the pass. Ordered by
+	// Entity, Locator and Key. A record leaves the list when it syncs, when
+	// a full list no longer finds it in the store, or when it is deleted. A
+	// new Connector starts with an empty list.
+	Refused []RecordFailure
+}
+
+// RecordFailure is one record in Health.Refused.
+type RecordFailure struct {
+	// Entity is the root entity of the record type.
+	Entity string
+	// Key is the record key; empty for a store record new to the connector.
+	Key string
+	// Locator is where the store holds the record; empty for an engine
+	// record the store does not hold yet.
+	Locator string
+	// Err is the error of the latest attempt.
+	Err error
+	// Failures counts the attempts that failed since the record last
+	// synced.
+	Failures int
+}
+
+// failureID names one record in Connector.failures: by key when the
+// connector knows it, else by locator.
+type failureID struct{ entity, key, locator string }
+
+// noteFailure adds a failed attempt of a record to the workspace's Refused.
+func (c *Connector) noteFailure(ws string, f RecordFailure) {
+	id := failureID{entity: f.Entity, key: f.Key}
+	if f.Key == "" {
+		id.locator = f.Locator
+	}
+	c.hmu.Lock()
+	defer c.hmu.Unlock()
+	m := c.failures[ws]
+	if m == nil {
+		m = make(map[failureID]RecordFailure)
+		c.failures[ws] = m
+	}
+	f.Failures = m[id].Failures + 1
+	m[id] = f
+}
+
+// clearFailure removes the record with key, and the new store record at
+// locator, from the workspace's Refused. Empty values match nothing.
+func (c *Connector) clearFailure(ws, entity, key, locator string) {
+	c.hmu.Lock()
+	defer c.hmu.Unlock()
+	m := c.failures[ws]
+	if len(m) == 0 {
+		return
+	}
+	if key != "" {
+		delete(m, failureID{entity: entity, key: key})
+	}
+	if locator != "" {
+		delete(m, failureID{entity: entity, locator: locator})
+	}
+}
+
+// pruneFailures removes the new store records of entity that a full list
+// did not find from the workspace's Refused.
+func (c *Connector) pruneFailures(ws, entity string, listed map[string]bool) {
+	c.hmu.Lock()
+	defer c.hmu.Unlock()
+	for id := range c.failures[ws] {
+		if id.entity == entity && id.key == "" && !listed[id.locator] {
+			delete(c.failures[ws], id)
+		}
+	}
+}
+
+// failuresLocked returns the workspace's Refused in order. Caller holds hmu.
+func (c *Connector) failuresLocked(ws string) []RecordFailure {
+	m := c.failures[ws]
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]RecordFailure, 0, len(m))
+	for _, f := range m {
+		out = append(out, f)
+	}
+	slices.SortFunc(out, func(a, b RecordFailure) int {
+		return cmp.Or(cmp.Compare(a.Entity, b.Entity), cmp.Compare(a.Locator, b.Locator), cmp.Compare(a.Key, b.Key))
+	})
+	return out
 }
 
 // Health returns the workspace's last known status. The bool is false when
@@ -111,6 +200,9 @@ func (c *Connector) recordPass(workspaceID string, err error) Health {
 			h.NextAttempt = time.Time{}
 		}
 	}
+	if c.rec != nil {
+		h.Refused = c.failuresLocked(workspaceID)
+	}
 	c.health[workspaceID] = h
 	c.hmu.Unlock()
 	if c.onHealth != nil {
@@ -127,6 +219,7 @@ func (c *Connector) forgetHealth(workspaceID string) {
 	c.hmu.Lock()
 	defer c.hmu.Unlock()
 	delete(c.health, workspaceID)
+	delete(c.failures, workspaceID)
 }
 
 // backoff returns how long to wait before retrying a workspace whose pass

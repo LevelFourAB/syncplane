@@ -401,7 +401,8 @@ func (c *Connector) egressOrDefer(ctx context.Context, ws string, p *pass, rt *r
 	if !errors.As(err, &lt) {
 		return err
 	}
-	c.logger.LogAttrs(ctx, slog.LevelError, "record skipped: its locator belongs to another record",
+	c.noteFailure(ws, RecordFailure{Entity: rt.rootName, Key: key, Err: err})
+	c.logger.LogAttrs(ctx, slog.LevelError, "record skipped: its locator is taken",
 		slog.String("workspace", ws), slog.String("entity", rt.rootName), slog.String("key", key),
 		slog.String("locator", lt.locator), slog.String("owner", lt.owner))
 	return c.deferDirty(ctx, ws, rt, key)
@@ -508,6 +509,11 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 	var ce *codecError
 	if errors.As(err, &ce) {
 		p.refused++
+		f := RecordFailure{Entity: rt.rootName, Key: key, Err: err}
+		if sh != nil {
+			f.Locator = sh.Locator
+		}
+		c.noteFailure(ws, f)
 		c.logger.LogAttrs(ctx, slog.LevelError, "record skipped: codec failed",
 			slog.String("workspace", ws), slog.String("entity", rt.rootName),
 			slog.String("key", key), slog.Any("err", err))
@@ -520,6 +526,7 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 	case del:
 		return c.deleteRecord(ctx, ws, rt, key, sh)
 	case agreed:
+		c.clearFailure(ws, rt.rootName, key, "")
 		return nil
 	}
 	return c.writeRecord(ctx, ws, p, rt, key, pos, sh, out, next, o)
@@ -605,15 +612,20 @@ func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *rec
 			return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, pend.From, err)
 		}
 	}
-	return c.bookkeep(ctx, ws, func(tx *server.EntityTx) error {
+	if err := c.bookkeep(ctx, ws, func(tx *server.EntityTx) error {
 		return c.commitPending(tx, rt, key, sh, next, true)
-	})
+	}); err != nil {
+		return err
+	}
+	c.clearFailure(ws, rt.rootName, key, "")
+	return nil
 }
 
 // deleteRecord removes the record with key from the store and forgets it. sh
 // is its agreed state, nil for a record the store never held.
 func (c *Connector) deleteRecord(ctx context.Context, ws string, rt *recordType, key string, sh *recShadow) error {
 	if sh == nil {
+		c.clearFailure(ws, rt.rootName, key, "")
 		return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
 			return c.forgetRecord(tx, rt, key, nil)
 		})
@@ -626,9 +638,13 @@ func (c *Connector) deleteRecord(ctx context.Context, ws string, rt *recordType,
 	if err := rt.store.Delete(ctx, ws, sh.Locator); err != nil {
 		return fmt.Errorf("connect: delete %s at %q: %w", rt.rootName, sh.Locator, err)
 	}
-	return c.bookkeep(ctx, ws, func(tx *server.EntityTx) error {
+	if err := c.bookkeep(ctx, ws, func(tx *server.EntityTx) error {
 		return c.forgetRecord(tx, rt, key, sh)
-	})
+	}); err != nil {
+		return err
+	}
+	c.clearFailure(ws, rt.rootName, key, "")
+	return nil
 }
 
 // bookkeepTimeout bounds the shadow transaction that follows a store write.
