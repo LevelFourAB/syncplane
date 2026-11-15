@@ -1,5 +1,67 @@
 # Changelog
 
+## [0.9.0](https://github.com/LevelFourAB/syncplane/compare/v0.8.2...v0.9.0) (2026-11-15)
+
+
+### Features
+
+* **engine:** Back up store edits of writes an origin refused ([fc4fb47](https://github.com/LevelFourAB/syncplane/commit/fc4fb47af8f0de76bc43d6fc1eb5b012f7855d11))
+* **engine:** Give record codecs the text peer when they render ([65b3e37](https://github.com/LevelFourAB/syncplane/commit/65b3e37c6cbcb936656fea6131f7259311272a0e))
+* **engine:** Let a connector binding own only some fields ([eb249b4](https://github.com/LevelFourAB/syncplane/commit/eb249b42122d5763c6758ca0d2c8234b4b30d661))
+* **engine:** Let a consumer opt out of garbage collection ([2173b48](https://github.com/LevelFourAB/syncplane/commit/2173b48455511dc57adfec2b9b8590c14b1ac86a))
+* **engine:** Let a host choose the first-pass policy per workspace ([a0c83d8](https://github.com/LevelFourAB/syncplane/commit/a0c83d820ff1ed331bf7d049211b6ffdf35d019b))
+* **engine:** Let a host make a record type egress-only ([20ed9a7](https://github.com/LevelFourAB/syncplane/commit/20ed9a7a21bd1f22ac4ecf9366234d7f2adb7363))
+* **engine:** Let a record type open a store for each workspace ([54bcc66](https://github.com/LevelFourAB/syncplane/commit/54bcc661909ae66ad7c87e18549b1bda60eafcd3))
+* **engine:** Let connectors set the text peer apart from WriterID ([c0109a6](https://github.com/LevelFourAB/syncplane/commit/c0109a68e3239b139f823578876775e759337c9a))
+* **engine:** Let connectors sync a record with a group of rows ([89e3911](https://github.com/LevelFourAB/syncplane/commit/89e3911e4c6ab70c152af004c71827ec8b7ca4d5))
+* **engine:** Let storage adapters scan a consumer's shadows ([4d7f093](https://github.com/LevelFourAB/syncplane/commit/4d7f0937885b79e9dd40cfcffad70e88d758d1fa))
+* **engine:** Merge record rows field by field with RowCodec ([91c57c5](https://github.com/LevelFourAB/syncplane/commit/91c57c51c7870a2ab1e99d9701be66bb9f6b7cd4))
+* **engine:** Name each Overwrite reason when it is printed ([dd7026a](https://github.com/LevelFourAB/syncplane/commit/dd7026a7f2c379167c6e838c9ad0be9b5050e9fe))
+* **engine:** Read consumer shadows in View and count row writes ([111d9a0](https://github.com/LevelFourAB/syncplane/commit/111d9a09f6c79dd63a5367ed73d6bd993f8d29f6))
+* **engine:** Report records the connector keeps skipping in Health ([5fd4c91](https://github.com/LevelFourAB/syncplane/commit/5fd4c91691c7206a8e9886993be2982a9b136144))
+* **engine:** Write a record under continuous edits after MaxDelay ([5411555](https://github.com/LevelFourAB/syncplane/commit/5411555f9937f6c5bb87a07776105381195a493e))
+* **engine:** Write consumer shadows in the same Mutate as rows ([a1c11cc](https://github.com/LevelFourAB/syncplane/commit/a1c11cc4962446dbe1acbbffa20c37d3a757d103))
+
+
+### Bug Fixes
+
+* **engine:** Apply a record write once when its outcome is unknown ([b693835](https://github.com/LevelFourAB/syncplane/commit/b693835c4806a33488f678de8b447920e3e02e63))
+* **engine:** Flush record edits on Close after a failed pass ([4b6afdd](https://github.com/LevelFourAB/syncplane/commit/4b6afddccd3039098916c2738626ba4a76f4b215))
+* **engine:** Keep a refusal that comes while an older one is in use ([d6817c9](https://github.com/LevelFourAB/syncplane/commit/d6817c9471c875b01d036175a6977da54094162c))
+* **engine:** Keep an engine edit when a record write may have failed ([4971834](https://github.com/LevelFourAB/syncplane/commit/49718347749a631bdf8afa24c2f70c88e945515a))
+* **engine:** Keep an engine edit whose file name another record holds ([38bc85d](https://github.com/LevelFourAB/syncplane/commit/38bc85ddbc2e9ff77cb16d3fd5d6989eea27a228))
+* **engine:** Keep record connector state through garbage collection ([c93cac7](https://github.com/LevelFourAB/syncplane/commit/c93cac74a82e38a0f2c35c9a762a288b9822e1bb))
+* **engine:** Keep record keys when a pass stops after a store write ([24f4006](https://github.com/LevelFourAB/syncplane/commit/24f40062c06eea70f69d49da62058512fb42f5d4))
+* **engine:** Keep rows of a record the codec refuses on first import ([42258b9](https://github.com/LevelFourAB/syncplane/commit/42258b99ae91491adae6e7de8b493ecc0e832225))
+* **engine:** Keep the keys of a renamed file when Touch reports it late ([5f7cb4d](https://github.com/LevelFourAB/syncplane/commit/5f7cb4df1da6d059238af5541fc6df486b1268e9))
+* **engine:** Keep unowned fields of a row the store moves between records ([6c0ba86](https://github.com/LevelFourAB/syncplane/commit/6c0ba86ef43122a7a167cb3c211a92d7d18f1242))
+* **engine:** Let an egress-only RowCodec type omit Decode ([3355bd9](https://github.com/LevelFourAB/syncplane/commit/3355bd99d8d0e5cf203383e9bc692f16206c46e7))
+* **engine:** Make one record of a file the store lists twice ([34ea208](https://github.com/LevelFourAB/syncplane/commit/34ea2080a830a05c7278240e2dad0e9e234c3b88))
+* **engine:** Merge a store edit that keeps its fingerprint before egress ([aeb8726](https://github.com/LevelFourAB/syncplane/commit/aeb872654023bb32777406be75d1ebd1e434d164))
+* **engine:** Mint no text item id twice after a refused ingest ([69f0f89](https://github.com/LevelFourAB/syncplane/commit/69f0f89348f5799d0c8daa70e9ae6d73d6b5b0f7))
+* **engine:** Name a failed OpenStore once in the pass error ([ff70df9](https://github.com/LevelFourAB/syncplane/commit/ff70df9c6b2a88333ac4497b681c2dafcca7cc7f))
+* **engine:** Never write a record over a file the connector does not know ([65d454b](https://github.com/LevelFourAB/syncplane/commit/65d454bdf990327d2b7e8c6aa0059ee80f2f8951))
+* **engine:** Refuse a connector State that record mode would not use ([2fd3299](https://github.com/LevelFourAB/syncplane/commit/2fd3299afb17947a1e8f323d95a5ca8d341a1e08))
+* **engine:** Run no second pass while a forgotten workspace's pass ends ([d0bf13a](https://github.com/LevelFourAB/syncplane/commit/d0bf13a60cd0187a4a7448c2fbe1583f6a64b145))
+* **engine:** Stop guarded fields going empty after a push ([f08efbb](https://github.com/LevelFourAB/syncplane/commit/f08efbbf3b0dc7e8fe47bc0244b769df179ee96a))
+* **engine:** Stop pulls stalling for 60 s when many run at once ([02b244f](https://github.com/LevelFourAB/syncplane/commit/02b244f5a577ba37cc3d07969d267a44748ab908))
+* **engine:** Stop pulls stalling on Postgres under load ([edaa1ea](https://github.com/LevelFourAB/syncplane/commit/edaa1eac8bb0227345c3b95b4abc905192d47c10))
+* **engine:** Update the old record of a row moved during an ingest ([e034588](https://github.com/LevelFourAB/syncplane/commit/e034588d04ce9588425442d04edee90878f9fdc1))
+* **engine:** Write no row of an EgressOnly type for old missing marks ([e06f260](https://github.com/LevelFourAB/syncplane/commit/e06f260cec3a1562eab7ad1ee20aa025987bc227))
+
+
+### Performance Improvements
+
+* **engine:** Cache index and posting metadata per write ([9c91859](https://github.com/LevelFourAB/syncplane/commit/9c91859a81056c6615d3407e6e5c37ed73bfa99d))
+* **engine:** Find dirty records in a read snapshot and skip reloads ([2be63a5](https://github.com/LevelFourAB/syncplane/commit/2be63a50078fb861515fbfdffaa7de7064bda4d7))
+* **engine:** Give the SQLite writer a larger page cache ([1ac5641](https://github.com/LevelFourAB/syncplane/commit/1ac564165ec27c28e50c8ee0333d70513e96673f))
+* **engine:** Let an effects handler skip the changes of named writers ([e79b7da](https://github.com/LevelFourAB/syncplane/commit/e79b7da5eba73275502a63e9fa5a90c8bb614ac3))
+* **engine:** Match keys of long records in linear memory ([59a3511](https://github.com/LevelFourAB/syncplane/commit/59a3511255eb809cbce112378a50beb794612989))
+* **engine:** Read record bookkeeping once per feed page and list ([d5de1dc](https://github.com/LevelFourAB/syncplane/commit/d5de1dc7d100369e62718612bac3b4fc170791db))
+* Store no map-index entry for a row with an empty map ([3969fbb](https://github.com/LevelFourAB/syncplane/commit/3969fbb0fc969029ffcf502316f9e79d84b6d4e3))
+* Use an index for != against an empty string or false ([912d23a](https://github.com/LevelFourAB/syncplane/commit/912d23ab67185424ac580ca8c1c3886a594ea1b0))
+* Use the index for grouped reads on a list inside a map entry ([27cdb02](https://github.com/LevelFourAB/syncplane/commit/27cdb022864a0343dec4e02ab744bf6194820452))
+
 ## [0.8.2](https://github.com/LevelFourAB/syncplane/compare/v0.8.1...v0.8.2) (2026-11-14)
 
 
