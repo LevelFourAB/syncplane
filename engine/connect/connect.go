@@ -222,6 +222,9 @@ type Connector struct {
 	started bool
 	stopped bool
 	cancel  context.CancelFunc
+	// runs holds the run lock of each workspace id with a pass running or
+	// waiting; see runLock.
+	runs map[string]*runLock
 	// tracked is the managed set: every workspace the connector holds a
 	// schedule record for, which is what discovery listed plus what Kick
 	// announced, minus what Forget and a sweep have dropped.
@@ -337,6 +340,7 @@ func New(cfg Config) (*Connector, error) {
 		logger:       logger,
 		mx:           mx,
 		tracked:      make(map[string]*workspace),
+		runs:         make(map[string]*runLock),
 		health:       make(map[string]Health),
 		peer:         peer,
 		label:        label,
@@ -417,8 +421,7 @@ func New(cfg Config) (*Connector, error) {
 func (c *Connector) converge(ctx context.Context, workspaceID string, fn func(*pass) error) (err error) {
 	w := c.hold(workspaceID)
 	defer c.release(w)
-	w.run.Lock()
-	defer w.run.Unlock()
+	defer c.lockRun(workspaceID)()
 
 	ctx, span := c.mx.tracer.Start(ctx, "syncplane.connect.pass",
 		trace.WithAttributes(telemetry.AttrWorkspace.String(workspaceID)))

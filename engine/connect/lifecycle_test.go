@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -19,6 +20,38 @@ import (
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
+
+// gatedSource is a todoSource whose List blocks until release is closed, and
+// that records the most Lists that ran at once.
+type gatedSource struct {
+	*todoSource
+	release chan struct{}
+	mu      sync.Mutex
+	running int
+	most    int
+}
+
+func (s *gatedSource) List(ctx context.Context, ws string, fn func(engineconnect.Item) error) error {
+	s.mu.Lock()
+	s.running++
+	s.most = max(s.most, s.running)
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		s.running--
+		s.mu.Unlock()
+	}()
+	<-s.release
+	return s.todoSource.List(ctx, ws, fn)
+}
+
+func (s *gatedSource) base() *todoSource { return s.todoSource }
+
+func (s *gatedSource) counts() (running, most int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running, s.most
+}
 
 // keptState is a State that outlives the connectors built over it, as a
 // connector state database does when only the engine store is replaced.
@@ -195,6 +228,26 @@ var _ = Describe("Per-workspace sources", func() {
 		opens, _ = opener.counts(ws)
 		Expect(opens).To(Equal(2))
 		Expect(f.engineTodo(ctx, ws, "t1")).NotTo(BeNil())
+	})
+
+	It("runs no pass alongside one a forgotten workspace still has in flight", func() {
+		const ws = "ws-overlap"
+		src := &gatedSource{todoSource: newTodoSource(), release: make(chan struct{})}
+		f := newFixtureOver(nil, src)
+		first := make(chan error, 1)
+		go func() { first <- f.conn.Reconcile(ctx, ws) }()
+		Eventually(func() int { r, _ := src.counts(); return r }).Should(Equal(1))
+
+		f.conn.Forget(ws)
+		second := make(chan error, 1)
+		go func() { second <- f.conn.Reconcile(ctx, ws) }()
+		Consistently(func() int { _, m := src.counts(); return m }, 50*time.Millisecond).Should(Equal(1))
+
+		close(src.release)
+		Eventually(first).Should(Receive(BeNil()))
+		Eventually(second).Should(Receive(BeNil()))
+		_, most := src.counts()
+		Expect(most).To(Equal(1))
 	})
 
 	It("reports a source that cannot be opened at all", func() {

@@ -86,12 +86,41 @@ type workspace struct {
 	// delete grace.
 	wakeAt  time.Time
 	wakeIdx int
+}
 
-	// run serializes passes for this workspace. The state machine already
-	// keeps two workers off one workspace; this is what also excludes a
-	// hand-driven Ingress, Reconcile or Drain from a pass a worker is running,
-	// so two passes cannot interleave their shadow and cursor writes.
-	run sync.Mutex
+// runLock serializes the passes of one workspace id. The state machine
+// already keeps two workers off one workspace; this also excludes a
+// hand-driven Ingress, Reconcile or Drain from a pass a worker is running, so
+// two passes cannot interleave their shadow and cursor writes. It is keyed by
+// id, not held by the workspace record, because Forget orphans a record whose
+// pass is still in flight, and a record admitted again must wait for it.
+type runLock struct {
+	mu sync.Mutex
+	// refs counts the passes that hold or wait for mu. Guarded by
+	// Connector.mu.
+	refs int
+}
+
+// lockRun takes the run lock of a workspace id, waiting for the pass that
+// holds it, and returns the func that releases it.
+func (c *Connector) lockRun(workspaceID string) (unlock func()) {
+	c.mu.Lock()
+	rl, ok := c.runs[workspaceID]
+	if !ok {
+		rl = &runLock{}
+		c.runs[workspaceID] = rl
+	}
+	rl.refs++
+	c.mu.Unlock()
+	rl.mu.Lock()
+	return func() {
+		rl.mu.Unlock()
+		c.mu.Lock()
+		if rl.refs--; rl.refs == 0 {
+			delete(c.runs, workspaceID)
+		}
+		c.mu.Unlock()
+	}
 }
 
 // trackedLocked returns the workspace's record, creating an unscheduled one if
