@@ -393,9 +393,21 @@ func newRecords(cfg Config) (*records, error) {
 			rt.members = append(rt.members, rm)
 			out.memberOf[entity] = rm
 		}
+		if b, ok := t.Codec.(codecBinder); ok {
+			if rt.codec, err = b.bindCodec(cfg.Server, rt); err != nil {
+				return nil, fmt.Errorf("connect: record type %q: %w", name, err)
+			}
+		}
 		out.types = append(out.types, rt)
 	}
 	return out, nil
+}
+
+// codecBinder is a Codec that needs the server and the validated record type
+// to work, such as RowCodec. New calls bindCodec once for each record type
+// that uses it, and the connector uses the Codec it returns.
+type codecBinder interface {
+	bindCodec(srv *server.Server, rt *recordType) (Codec, error)
 }
 
 // recordFieldPath resolves a dotted path of singular fields that ends in a
