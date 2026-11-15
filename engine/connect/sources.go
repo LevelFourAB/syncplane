@@ -118,8 +118,11 @@ func newSourceCache(static Source, open func(context.Context, string) (Source, e
 	if open != nil {
 		sc.open = func(ctx context.Context, workspaceID string) (any, error) {
 			src, err := open(ctx, workspaceID)
-			if err != nil || src == nil {
-				return nil, err
+			if err != nil {
+				return nil, fmt.Errorf("connect: open source for workspace %q: %w", workspaceID, err)
+			}
+			if src == nil {
+				return nil, nil
 			}
 			return src, nil
 		}
@@ -172,7 +175,7 @@ func (sc *sourceCache) acquire(ctx context.Context, workspaceID string) (*pass, 
 	// closed below rather than leaked.
 	src, err := sc.open(ctx, workspaceID)
 	if err != nil {
-		return nil, fmt.Errorf("connect: open source for workspace %q: %w", workspaceID, err)
+		return nil, err
 	}
 	if src == nil {
 		return nil, fmt.Errorf("connect: OpenSource returned a nil Source for workspace %q", workspaceID)

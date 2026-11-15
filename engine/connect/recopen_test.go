@@ -3,6 +3,7 @@ package connect_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -112,7 +113,7 @@ var _ = Describe("Record mode, OpenStore", func() {
 		o.mu.Lock()
 		o.fail = errors.New("no folder")
 		o.mu.Unlock()
-		Expect(f.conn.Reconcile(ctx, "ws1")).To(MatchError(ContainSubstring("no folder")))
+		Expect(f.conn.Reconcile(ctx, "ws1")).To(MatchError(`connect: open project store for workspace "ws1": no folder`))
 
 		o.mu.Lock()
 		o.fail = nil
@@ -120,5 +121,21 @@ var _ = Describe("Record mode, OpenStore", func() {
 		f.store.put("ws1", "a.txt", "A")
 		Expect(f.conn.Reconcile(ctx, "ws1")).To(Succeed())
 		Expect(f.projects(ctx, "ws1")).To(HaveLen(1))
+	})
+
+	It("closes the store after a pass that fails with ErrNeedsUserAction, and opens it again on the next pass", func() {
+		f, o := newOpenFixture()
+		f.store.put("ws1", "a.txt", "A")
+		Expect(f.conn.Reconcile(ctx, "ws1")).To(Succeed())
+
+		f.store.fail(fmt.Errorf("token revoked: %w", engineconnect.ErrNeedsUserAction), nil)
+		Expect(f.conn.Reconcile(ctx, "ws1")).To(MatchError(engineconnect.ErrNeedsUserAction))
+		opened, closed := o.counts("ws1")
+		Expect([]int{opened, closed}).To(Equal([]int{1, 1}))
+
+		f.store.fail(nil, nil)
+		Expect(f.conn.Reconcile(ctx, "ws1")).To(Succeed())
+		opened, closed = o.counts("ws1")
+		Expect([]int{opened, closed}).To(Equal([]int{2, 1}))
 	})
 })
