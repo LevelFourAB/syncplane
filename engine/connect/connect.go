@@ -37,12 +37,13 @@ type Config struct {
 	State State
 	// Entities are prototypes of the entities this connector binds
 	// bidirectionally — the shorthand for one Bindings entry per prototype
-	// with the default Direction. Each must be registered on Server. Changes
-	// to entities outside this set (and outside Bindings) never reach the
-	// Source.
+	// with the default Direction, where the source owns every field. Each must
+	// be registered on Server. Changes to entities outside this set (and
+	// outside Bindings) never reach the Source.
 	Entities []proto.Message
-	// Bindings declares entities whose direction is not the default. Merged
-	// with Entities; binding the same entity through both is an error.
+	// Bindings declares entities whose direction is not the default, or whose
+	// source owns only some fields. Merged with Entities; binding the same
+	// entity through both is an error.
 	Bindings []Binding
 	// BatchSize bounds rows per change-feed page during egress (default 256).
 	BatchSize int
@@ -145,10 +146,17 @@ type Config struct {
 	MeterProvider  metric.MeterProvider
 }
 
-// binding is one bound entity: what to instantiate, and which way it flows.
+// binding is one bound entity: what to instantiate, which way it flows, and
+// which of its fields the source owns.
 type binding struct {
 	prototype proto.Message
 	direction Direction
+	// owned holds the units (top-level fields and oneof groups) the source
+	// owns, key fields included; nil means every field. See ownedFields.
+	owned map[string]bool
+	// ownedUnits lists the owned units that are not text fields: the ones an
+	// item carries on Item.Msg rather than in Item.TextFields.
+	ownedUnits []string
 }
 
 // Connector keeps the engine and one external source converged. Build one
@@ -304,7 +312,7 @@ func New(cfg Config) (*Connector, error) {
 		c.consumer = label
 	}
 	c.ready = sync.NewCond(&c.mu)
-	bind := func(prototype proto.Message, dir Direction) error {
+	bind := func(prototype proto.Message, dir Direction, fields []string) error {
 		entity, _, err := cfg.Server.EntityKey(prototype)
 		if err != nil {
 			return fmt.Errorf("connect: bind %T: %w", prototype, err)
@@ -312,14 +320,19 @@ func New(cfg Config) (*Connector, error) {
 		if _, dup := c.bound[entity]; dup {
 			return fmt.Errorf("connect: entity %q bound twice", entity)
 		}
-		c.bound[entity] = binding{prototype: prototype, direction: dir}
+		meta, _ := cfg.Server.Entity(entity)
+		owned, units, err := ownedFields(meta, fields)
+		if err != nil {
+			return err
+		}
+		c.bound[entity] = binding{prototype: prototype, direction: dir, owned: owned, ownedUnits: units}
 		if dir == Bidirectional {
 			c.needsWriter = true
 		}
 		return nil
 	}
 	for _, prototype := range cfg.Entities {
-		if err := bind(prototype, Bidirectional); err != nil {
+		if err := bind(prototype, Bidirectional, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -327,7 +340,7 @@ func New(cfg Config) (*Connector, error) {
 		if b.Prototype == nil {
 			return nil, fmt.Errorf("connect: binding with no Prototype")
 		}
-		if err := bind(b.Prototype, b.Direction); err != nil {
+		if err := bind(b.Prototype, b.Direction, b.Fields); err != nil {
 			return nil, err
 		}
 	}

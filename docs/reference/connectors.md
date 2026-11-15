@@ -75,10 +75,18 @@ const (
 type Binding struct {
     Prototype proto.Message
     Direction Direction
+    Fields    []string // fields the source owns; empty means all
 }
 ```
 
-`Config.Entities` binds entities bidirectionally. `Config.Bindings` defines bindings with an explicit `Direction`. The connector merges both fields. Binding the same entity in both fields causes an error.
+`Config.Entities` binds entities bidirectionally, and the source owns every field. `Config.Bindings` defines bindings with an explicit `Direction` or `Fields`. The connector merges both fields. Binding the same entity in both fields causes an error.
+
+`Fields` names the fields that the source owns, by top-level protobuf field name, or by oneof name for a whole oneof group. The key fields are always owned. With `Fields` set:
+
+- Ingest takes only the owned fields from an `Item`, in `Msg` and in `TextFields`. Every other field keeps its engine value. A new row starts with those fields empty. Use this for a field that another writer computes and that the source cannot hold.
+- Egress writes the whole row, but only for a change to an owned field. A collaborative-text field compares by its visible string.
+
+`New` returns an error for a name that the entity does not declare, and for a member of a oneof.
 
 ## Config
 
@@ -91,7 +99,7 @@ The `Config` struct contains the following fields:
 | `OpenSource`                  | Optional               | A function with signature `func(ctx, workspaceID) (Source, error)` that constructs and caches one source per workspace. Specify either `Source` or `OpenSource`.                                                                                                                                                                                                                                                                                       |
 | `State`                       | Required               | Durable state storage. The `sqlitestate.Open` function provides the shipped implementation. The connector takes ownership of `State` after `New`.                                                                                                                                                                                                                                                                                                      |
 | `Entities`                    | None                   | Prototypes bound bidirectionally.                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| `Bindings`                    | None                   | Prototypes bound with an explicit `Direction`.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `Bindings`                    | None                   | Prototypes bound with an explicit `Direction` or owned `Fields`.                                                                                                                                                                                                                                                                                                                                                                                       |
 | `BatchSize`                   | `256`                  | The number of rows per change-feed page during egress.                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `Workers`                     | `16`                   | The number of concurrent passes across all workspaces.                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `ReconcileInterval`           | `1m`                   | The interval between workspace passes and discovery sweeps. A negative value disables periodic passes while discovery sweeps continue at `1m` intervals. For an `Incremental` source, this sets the polling interval for `Changes`.                                                                                                                                                                                                                    |

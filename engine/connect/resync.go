@@ -17,8 +17,9 @@ import (
 //
 //   - engine row absent for a shadow → the delete the feed lost → delete at
 //     the source, drop the shadow;
-//   - engine row differing from its shadow base (or with no shadow) → an
-//     update/create the cursor jumped over → write it out.
+//   - engine row differing from its shadow base in a field the source owns
+//     (or with no shadow) → an update/create the cursor jumped over → write
+//     it out.
 //
 // Only bidirectional entities take part; an ingress-only entity has no egress
 // to repair, and its shadows deliberately hold the source's view rather than
@@ -86,7 +87,11 @@ func (c *Connector) resyncSource(ctx context.Context, workspaceID string, p *pas
 						if err != nil {
 							return err
 						}
-						if proto.Equal(base, msg) {
+						same, err := b.equalOwned(base, msg)
+						if err != nil {
+							return err
+						}
+						if same {
 							return nil
 						}
 					}

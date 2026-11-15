@@ -171,9 +171,22 @@ const (
 	IngressOnly
 )
 
-// Binding declares one entity and the direction it syncs in. Config.Entities
-// is the all-Bidirectional shorthand for the same thing.
+// Binding declares one entity, the direction it syncs in, and the fields the
+// source owns. Config.Entities is the shorthand for Bidirectional bindings
+// that own every field.
 type Binding struct {
 	Prototype proto.Message
 	Direction Direction
+	// Fields names the fields the source owns, by top-level proto field name,
+	// or by oneof name for a whole oneof group. Ingest takes only these fields
+	// from an Item, in Msg and in TextFields, and every other field keeps its
+	// engine value: a new row starts with them empty, and an existing row
+	// keeps a field that another writer computes and the source cannot hold.
+	// Egress writes the whole row to the source, but only for a change to an
+	// owned field. A text field compares by its visible string.
+	//
+	// The key fields are always owned. Empty means every field. New returns an
+	// error for a name the entity does not declare, and for a member of a
+	// oneof.
+	Fields []string
 }

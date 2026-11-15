@@ -102,6 +102,9 @@ func (c *Connector) reconcile(ctx context.Context, workspaceID string, p *pass) 
 // diverge the moment a client edits the row — and the base is therefore
 // stored as the SOURCE's view (the item), because a base carrying client-only
 // values would read as a source edit on the next pass and clobber them.
+//
+// A binding with owned fields reads only those from the item: the diff, the
+// text fields and the write-back check all skip the rest.
 func (c *Connector) ingest(ctx context.Context, workspaceID string, p *pass, b binding, entity, key string, item Item) error {
 	sh, err := c.state.Shadow(ctx, workspaceID, entity, key)
 	if err != nil {
@@ -112,6 +115,7 @@ func (c *Connector) ingest(ctx context.Context, workspaceID string, p *pass, b b
 	if sh != nil && sh.SourceFP == item.Fingerprint {
 		return nil
 	}
+	texts := b.ownedTexts(item.TextFields)
 	// baseMsg == nil means "no usable ancestor": apply the item whole.
 	var (
 		baseMsg      proto.Message
@@ -124,8 +128,8 @@ func (c *Connector) ingest(ctx context.Context, workspaceID string, p *pass, b b
 			return err
 		}
 		baseMsg = base
-		paths = fieldDiff(base, item.Msg)
-		if changedTexts, err = changedTextFields(base, sh.BaseText, item.TextFields); err != nil {
+		paths = b.ownedPaths(fieldDiff(base, item.Msg))
+		if changedTexts, err = changedTextFields(base, sh.BaseText, texts); err != nil {
 			return err
 		}
 		if len(paths) == 0 && len(changedTexts) == 0 {
@@ -140,7 +144,7 @@ func (c *Connector) ingest(ctx context.Context, workspaceID string, p *pass, b b
 		}
 	} else {
 		// No ancestor: everything the source reports is new to us.
-		changedTexts = item.TextFields
+		changedTexts = texts
 	}
 	// Without a shadow nothing tells which side changed a row both hold, except
 	// the egress position the engine keeps: a row written after it holds an
@@ -174,17 +178,28 @@ func (c *Connector) ingest(ctx context.Context, workspaceID string, p *pass, b b
 			unsent = true
 			return nil
 		}
-		if !found || baseMsg == nil {
-			merged = proto.Clone(item.Msg)
-		} else {
+		switch {
+		case found && baseMsg != nil:
 			merged = proto.Clone(cur)
 			applyFields(merged, item.Msg, paths)
+		case b.owned != nil:
+			// No ancestor, but the fields the source does not own still
+			// belong to the engine: keep them, or leave them empty on a new
+			// row.
+			if found {
+				merged = proto.Clone(cur)
+			} else {
+				merged = b.prototype.ProtoReflect().New().Interface()
+			}
+			applyFields(merged, item.Msg, b.ownedUnits)
+		default:
+			merged = proto.Clone(item.Msg)
 		}
 		var curForText proto.Message
 		if found {
 			curForText = cur
 		}
-		if err := c.applyTextFields(merged, baseMsg, curForText, b.direction, item.TextFields, changedTexts); err != nil {
+		if err := c.applyTextFields(merged, baseMsg, curForText, b.direction, texts, changedTexts); err != nil {
 			return err
 		}
 		if found && proto.Equal(merged, cur) {
@@ -211,7 +226,7 @@ func (c *Connector) ingest(ctx context.Context, workspaceID string, p *pass, b b
 
 	fp := item.Fingerprint
 	baseMsgOut := merged
-	baseText := item.TextFields
+	baseText := texts
 	if b.direction == Bidirectional {
 		// When the merge kept concurrent client edits, the engine's merged
 		// row differs from what the source holds — push it back out now so
@@ -220,7 +235,7 @@ func (c *Connector) ingest(ctx context.Context, workspaceID string, p *pass, b b
 		// change that carries the client's fields to the source. Text fields
 		// compare by their visible string (the only representation the source
 		// has).
-		same, err := sourceViewEqual(merged, item)
+		same, err := sourceViewEqual(b, merged, item)
 		if err != nil {
 			return err
 		}
@@ -377,25 +392,41 @@ func cloneTexts(texts map[string]string) map[string]string {
 // sourceViewEqual reports whether the engine's merged row and the source's
 // item agree from the SOURCE's point of view: text fields compare by their
 // visible string against Item.TextFields, everything else by proto equality
-// with the text fields cleared (the item never carries document bytes).
-func sourceViewEqual(merged proto.Message, item Item) (bool, error) {
-	a := proto.Clone(merged)
-	b := proto.Clone(item.Msg)
-	fields := a.ProtoReflect().Descriptor().Fields()
+// with the text fields cleared (the item never carries document bytes). With
+// owned fields, only those compare.
+func sourceViewEqual(b binding, merged proto.Message, item Item) (bool, error) {
+	if b.owned != nil {
+		if len(b.ownedPaths(fieldDiff(merged, item.Msg))) > 0 {
+			return false, nil
+		}
+		for _, fd := range b.ownedTextFields(merged) {
+			s, err := text.PlainText(merged.ProtoReflect().Get(fd).Bytes())
+			if err != nil {
+				return false, err
+			}
+			if s != item.TextFields[string(fd.Name())] {
+				return false, nil
+			}
+		}
+		return true, nil
+	}
+	mv := proto.Clone(merged)
+	sv := proto.Clone(item.Msg)
+	fields := mv.ProtoReflect().Descriptor().Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
 		if !lww.IsText(fd) {
 			continue
 		}
-		s, err := text.PlainText(a.ProtoReflect().Get(fd).Bytes())
+		s, err := text.PlainText(mv.ProtoReflect().Get(fd).Bytes())
 		if err != nil {
 			return false, err
 		}
 		if s != item.TextFields[string(fd.Name())] {
 			return false, nil
 		}
-		a.ProtoReflect().Clear(fd)
-		b.ProtoReflect().Clear(fd)
+		mv.ProtoReflect().Clear(fd)
+		sv.ProtoReflect().Clear(fd)
 	}
-	return proto.Equal(a, b), nil
+	return proto.Equal(mv, sv), nil
 }

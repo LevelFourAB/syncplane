@@ -174,7 +174,8 @@ func (c *Connector) forgetShadows(ctx context.Context, workspaceID string) error
 // egress projects one engine change onto the source, consulting the shadow
 // to suppress the connector's own ingress writes.
 func (c *Connector) egress(ctx context.Context, workspaceID string, p *pass, ch server.Change) error {
-	prototype := c.bound[ch.Entity].prototype
+	b := c.bound[ch.Entity]
+	prototype := b.prototype
 	w, err := p.writer()
 	if err != nil {
 		return err
@@ -200,13 +201,19 @@ func (c *Connector) egress(ctx context.Context, workspaceID string, p *pass, ch 
 	}
 	// Crash repair: the content already reached the source (we crashed before
 	// stamping the shadow's engine version); just repair the bookkeeping
-	// instead of re-writing identical content.
+	// instead of re-writing identical content. The same holds for a change to
+	// fields the source does not own: the source already holds every field it
+	// keeps.
 	if sh != nil && len(sh.Base) > 0 {
 		base, err := c.decodeBase(prototype, sh.Base)
 		if err != nil {
 			return err
 		}
-		if proto.Equal(base, ch.Message) {
+		same, err := b.equalOwned(base, ch.Message)
+		if err != nil {
+			return err
+		}
+		if same {
 			return c.state.PutShadow(ctx, workspaceID, ch.Entity, ch.Key, Shadow{
 				SourceFP:      sh.SourceFP,
 				EngineVersion: ch.Seq,
