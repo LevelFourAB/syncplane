@@ -347,7 +347,7 @@ func (c *Connector) mergeOne(tx *server.EntityTx, p *pass, j *ingestJob) (int, e
 	if err != nil {
 		return 0, err
 	}
-	if sh != nil && sh.Locator == j.rec.Locator && sh.Fingerprint == j.rec.Fingerprint {
+	if sh != nil && sh.Fingerprint == j.rec.Fingerprint && sh.sameContent(j.rec.Locator, j.rec.Content) {
 		return 0, nil
 	}
 	root, members, err := c.loadRows(tx, rt, key)

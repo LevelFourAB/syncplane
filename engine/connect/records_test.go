@@ -437,6 +437,28 @@ var _ = Describe("Record mode", func() {
 			Expect(f.content(ws, "a.txt")).To(Equal("T\nedit 6"))
 		})
 
+		It("ingests first a store edit that keeps the fingerprint", func() {
+			var log overwriteLog
+			coarse := coarseStore{newMemStore()}
+			f := newRecFixture(func(cfg *engineconnect.Config) {
+				cfg.Records.Types[0].Store = coarse
+				cfg.Records.Overwrite = log.record
+			})
+			f.store = coarse.memStore
+			f.store.put(ws, "a.txt", "T\none")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			key := f.key(ctx, ws, "a.txt")
+
+			f.store.put(ws, "a.txt", "T\nuno")
+			f.clientWrite(ctx, ws, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.Project{Id: key, Name: "Title"})
+			})
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.content(ws, "a.txt")).To(Equal("Title\nuno"))
+			Expect(f.lines(ctx, ws, key)).To(Equal("Title\nuno"))
+			Expect(log.all()).To(BeEmpty())
+		})
+
 		It("ingests first when the store changed since the last pass", func() {
 			f := newRecFixture()
 			f.store.put(ws, "a.txt", "T\none\ntwo")
@@ -1245,4 +1267,26 @@ func restoreShadows(ctx context.Context, f *recFixture, ws string, snap map[stri
 	pos, _, err := f.srv.ConsumerPosition(ctx, ws, "connect:"+recWriter)
 	Expect(err).NotTo(HaveOccurred())
 	Expect(f.srv.AdvanceConsumer(ctx, ws, "connect:"+recWriter, server.ConsumerUpdate{Cursor: pos, Shadows: writes})).To(Succeed())
+}
+
+// coarseStore is a memStore whose fingerprint does not change with the
+// content, as a store that stamps records coarsely does.
+type coarseStore struct{ *memStore }
+
+func (s coarseStore) List(ctx context.Context, ws string, fn func(engineconnect.RecordRef) error) error {
+	return s.memStore.List(ctx, ws, func(ref engineconnect.RecordRef) error {
+		ref.Fingerprint = "same"
+		return fn(ref)
+	})
+}
+
+func (s coarseStore) Read(ctx context.Context, ws, loc string) (engineconnect.Record, error) {
+	rec, err := s.memStore.Read(ctx, ws, loc)
+	rec.Fingerprint = "same"
+	return rec, err
+}
+
+func (s coarseStore) Write(ctx context.Context, ws string, rec engineconnect.Record, from string) (string, error) {
+	_, err := s.memStore.Write(ctx, ws, rec, from)
+	return "same", err
 }

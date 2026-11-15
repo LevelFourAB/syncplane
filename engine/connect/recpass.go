@@ -431,8 +431,9 @@ type egressOpts struct {
 // position the drain reached: the render reflects at least the changes up to
 // it.
 //
-// Before the write it reads the store record. When its fingerprint moved
-// since the agreed state, the store has an edit the engine has not seen, and
+// Before the write it reads the store record. When its fingerprint or its
+// content moved since the agreed state, the store has an edit the engine has
+// not seen, and
 // the record is ingested instead: the merge keeps both edits, and its
 // write-back takes the engine's edit to the store. An EgressOnly record is
 // written over the edit instead.
@@ -461,7 +462,9 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 		default:
 			cur = &rec
 		}
-		if cur != nil && cur.Fingerprint != sh.Fingerprint && rt.direction != EgressOnly {
+		// A coarse fingerprint can stay the same over an edit; the content
+		// tells.
+		if cur != nil && (cur.Fingerprint != sh.Fingerprint || changedInStore(sh, cur)) && rt.direction != EgressOnly {
 			rec := *cur
 			if o.noIngest {
 				return nil
@@ -573,7 +576,9 @@ func (c *Connector) overwrite(ctx context.Context, ws string, rt *recordType, ke
 }
 
 // changedInStore reports whether the store record cur holds content other
-// than the agreed state sh: an edit the engine does not have.
+// than the agreed state sh: an edit the engine does not have. Egress ingests
+// such an edit first, except for an EgressOnly record, so a write over it is
+// one of an EgressOnly record.
 func changedInStore(sh *recShadow, cur *Record) bool {
 	return sh != nil && cur != nil && !bytes.Equal(contentHash(cur.Content), sh.Hash)
 }
