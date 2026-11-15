@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/rand/v2"
 	"slices"
 	"strings"
 	"sync"
@@ -707,3 +708,55 @@ var _ = DescribeTable("editDistance",
 	Entry("at the limit", "abc", "xyz", 6, 6),
 	Entry("a negative limit gives limit+1", "a", "b", -1, 0),
 )
+
+var _ = Describe("MatchKeys on long content", func() {
+	It("finds a longest common subsequence, as a full table does", func() {
+		r := rand.New(rand.NewPCG(uint64(GinkgoRandomSeed()), 1))
+		seq := func() []string {
+			out := make([]string, r.IntN(12))
+			for i := range out {
+				out[i] = string(rune('a' + r.IntN(3)))
+			}
+			return out
+		}
+		for range 2000 {
+			a, b := seq(), seq()
+			lcs := make([][]int, len(a)+1)
+			for i := range lcs {
+				lcs[i] = make([]int, len(b)+1)
+			}
+			for i := len(a) - 1; i >= 0; i-- {
+				for j := len(b) - 1; j >= 0; j-- {
+					if a[i] == b[j] {
+						lcs[i][j] = lcs[i+1][j+1] + 1
+					} else {
+						lcs[i][j] = max(lcs[i+1][j], lcs[i][j+1])
+					}
+				}
+			}
+			pairs := engineconnect.CommonPairs(a, b)
+			Expect(pairs).To(HaveLen(lcs[0][0]), "a=%v b=%v", a, b)
+			for k, p := range pairs {
+				Expect(a[p[0]]).To(Equal(b[p[1]]))
+				if k > 0 {
+					Expect(p[0]).To(BeNumerically(">", pairs[k-1][0]))
+					Expect(p[1]).To(BeNumerically(">", pairs[k-1][1]))
+				}
+			}
+		}
+	})
+
+	It("matches 5,000 lines edited at the top and the bottom", func() {
+		prev := make([]string, 5000)
+		keys := make([]string, len(prev))
+		for i := range prev {
+			prev[i], keys[i] = fmt.Sprintf("line %d", i), fmt.Sprintf("k%d", i)
+		}
+		next := slices.Clone(prev)
+		next[0], next[len(next)-1] = "top", "bottom"
+		next = slices.Insert(next, 2500, "middle")
+		got := engineconnect.MatchKeys(prev, keys, next)
+		want := slices.Insert(slices.Clone(keys), 2500, "")
+		Expect(got).To(Equal(want))
+	})
+})
