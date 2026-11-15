@@ -341,6 +341,26 @@ var _ = Describe("RowCodec", func() {
 			Expect(f.seq(ctx, ws)).To(Equal(seq))
 		})
 
+		It("keeps an engine edit whose write-back failed when the store changes again", func() {
+			f, _ := newRowFixture()
+			f.store.put(ws, "a.txt", "T\nhello world")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			key := f.key(ctx, ws, "a.txt")
+			w := f.widgetWith(ctx, ws, key, "hello world")
+
+			f.editLine(ctx, ws, w, "hello brave world")
+			f.store.put(ws, "a.txt", "T\nhello world!")
+			f.store.fail(nil, errors.New("disk full"))
+			Expect(f.conn.Reconcile(ctx, ws)).NotTo(Succeed())
+			Expect(bodyOf(widget(f, w))).To(Equal("hello brave world!"))
+
+			f.store.fail(nil, nil)
+			f.store.put(ws, "a.txt", "T\nhello world!?")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(bodyOf(widget(f, w))).To(Equal("hello brave world!?"))
+			Expect(f.content(ws, "a.txt")).To(Equal("T\nhello brave world!?"))
+		})
+
 		It("keeps an engine edit an IngressOnly store never receives when the store changes again", func() {
 			f, _ := newRowFixture(withRecords(func(r *engineconnect.Records) { r.Types[0].Direction = engineconnect.IngressOnly }))
 			f.store.put(ws, "a.txt", "T\nhello world")
