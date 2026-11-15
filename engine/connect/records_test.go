@@ -119,6 +119,24 @@ var _ = Describe("Record mode", func() {
 			Expect(f.seq(ctx, ws)).To(Equal(seq))
 		})
 
+		It("writes the merge back later when the write-back fails", func() {
+			f := newRecFixture()
+			f.store.put(ws, "a.txt", "T\none\ntwo")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			key := f.key(ctx, ws, "a.txt")
+
+			f.editLine(ctx, ws, f.widgetWith(ctx, ws, key, "one"), "one!")
+			f.store.put(ws, "a.txt", "T\none\ntwo?")
+			f.store.fail(nil, errors.New("disk full"))
+			Expect(f.conn.Reconcile(ctx, ws)).To(MatchError(ContainSubstring("disk full")))
+			Expect(f.lines(ctx, ws, key)).To(Equal("T\none!\ntwo?"), "the merge committed")
+
+			f.store.fail(nil, nil)
+			f.restart()
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.content(ws, "a.txt")).To(Equal("T\none!\ntwo?"))
+		})
+
 		It("keeps the engine value of a field the store does not hold", func() {
 			f := newRecFixture()
 			f.store.put(ws, "a.txt", "T\none")
