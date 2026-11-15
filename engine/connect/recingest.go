@@ -326,7 +326,7 @@ func (c *Connector) afterMerge(ctx context.Context, ws string, p *pass, jobs []*
 		if j.back == nil || j.agreed == nil {
 			continue
 		}
-		if err := c.egressRecord(ctx, ws, p, j.rt, j.outKey, j.agreed.Version, egressOpts{noIngest: true}); err != nil {
+		if err := c.egressOrDefer(ctx, ws, p, j.rt, j.outKey, j.agreed.Version, egressOpts{noIngest: true}); err != nil {
 			return fmt.Errorf("connect: write back: %w", err)
 		}
 	}

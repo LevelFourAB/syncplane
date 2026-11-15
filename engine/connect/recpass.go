@@ -321,16 +321,53 @@ func (c *Connector) flushRecords(ctx context.Context, ws string, p *pass, pos ui
 		if err != nil {
 			return err
 		}
+		var taken []string
 		for _, key := range due {
 			if gone[key] != nil {
 				continue
 			}
-			if err := c.egressRecord(ctx, ws, p, rt, key, pos, egressOpts{}); err != nil {
+			err := c.egressRecord(ctx, ws, p, rt, key, pos, egressOpts{})
+			var lt *locatorTaken
+			if errors.As(err, &lt) {
+				taken = append(taken, key)
+				continue
+			}
+			if err != nil {
+				return err
+			}
+		}
+		// A record can take the locator that a later record of this pass
+		// leaves.
+		for _, key := range taken {
+			if err := c.egressOrDefer(ctx, ws, p, rt, key, pos, egressOpts{}); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+// locatorTaken is the error of an egress whose locator belongs to another
+// record.
+type locatorTaken struct{ locator, owner string }
+
+func (e *locatorTaken) Error() string {
+	return fmt.Sprintf("connect: locator %q belongs to record %q", e.locator, e.owner)
+}
+
+// egressOrDefer runs egressRecord, and moves a record whose locator belongs
+// to another record out of the next passes, as deferDirty does: its dirty
+// mark stays, so the edit is written when the locator is free.
+func (c *Connector) egressOrDefer(ctx context.Context, ws string, p *pass, rt *recordType, key string, pos uint64, o egressOpts) error {
+	err := c.egressRecord(ctx, ws, p, rt, key, pos, o)
+	var lt *locatorTaken
+	if !errors.As(err, &lt) {
+		return err
+	}
+	c.logger.LogAttrs(ctx, slog.LevelError, "record skipped: its locator belongs to another record",
+		slog.String("workspace", ws), slog.String("entity", rt.rootName), slog.String("key", key),
+		slog.String("locator", lt.locator), slog.String("owner", lt.owner))
+	return c.deferDirty(ctx, ws, rt, key)
 }
 
 // egressOpts are the options of one egressRecord call.
@@ -472,12 +509,7 @@ func (c *Connector) writeRecord(ctx context.Context, ws string, rt *recordType, 
 			return err
 		}
 		if owner != nil && string(owner) != key {
-			c.logger.LogAttrs(ctx, slog.LevelError, "record skipped: its locator belongs to another record",
-				slog.String("workspace", ws), slog.String("entity", rt.rootName), slog.String("key", key),
-				slog.String("locator", out.Locator), slog.String("owner", string(owner)))
-			return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
-				return tx.DeleteConsumerShadow(c.consumer, dirtyEntity(rt), key)
-			})
+			return &locatorTaken{locator: out.Locator, owner: string(owner)}
 		}
 		existing, err := rt.store.Read(ctx, ws, out.Locator)
 		switch {
@@ -706,7 +738,7 @@ func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 			if shadows[key] != nil {
 				continue
 			}
-			if err := c.egressRecord(ctx, ws, p, rt, key, head, egressOpts{}); err != nil {
+			if err := c.egressOrDefer(ctx, ws, p, rt, key, head, egressOpts{}); err != nil {
 				return err
 			}
 		}

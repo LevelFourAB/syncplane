@@ -409,6 +409,33 @@ var _ = Describe("Record mode", func() {
 			Expect(f.content(ws, "b.txt")).To(Equal("B\nuno"))
 		})
 
+		It("writes a record whose locator another record leaves in the same pass", func() {
+			f := newRecFixture()
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			f.addRecord(ctx, ws, "p1", "X", "a")
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+
+			// p0 sorts before p1, so egress meets it while p1 owns X.txt.
+			f.clientWrite(ctx, ws, func(tx *server.EntityTx) error { return tx.Delete(&testdatav1.Project{}, "p1") })
+			f.addRecord(ctx, ws, "p0", "X", "b")
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.content(ws, "X.txt")).To(Equal("X\nb"))
+			Expect(f.key(ctx, ws, "X.txt")).To(Equal("p0"))
+		})
+
+		It("keeps the edit of a record whose locator another record holds, and writes it when the locator is free", func() {
+			f := newRecFixture()
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			f.addRecord(ctx, ws, "p1", "X", "a")
+			f.addRecord(ctx, ws, "p2", "X", "b")
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.content(ws, "X.txt")).To(Equal("X\na"))
+
+			f.clientWrite(ctx, ws, func(tx *server.EntityTx) error { return tx.Delete(&testdatav1.Project{}, "p1") })
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.content(ws, "X.txt")).To(Equal("X\nb"))
+		})
+
 		It("never writes an IngressOnly type to the store", func() {
 			f := newRecFixture(withRecords(func(r *engineconnect.Records) { r.Types[0].Direction = engineconnect.IngressOnly }))
 			f.store.put(ws, "a.txt", "T\none")
