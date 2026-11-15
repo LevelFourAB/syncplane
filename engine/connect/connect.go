@@ -97,19 +97,13 @@ type Config struct {
 	// workspace (data exists only in the external store) must be supplied here
 	// or nudged with Kick, which manages it regardless of this list.
 	Workspaces func(ctx context.Context) ([]string, error)
-	// WriterID names this connector as a collaborative-text writer, and must be
-	// unique among connectors that can run at the same time — two live writers
-	// sharing one mint colliding item ids (see applyTextFields). Reusing the
-	// same value across restarts of a single connector is the point: the peer
-	// is spelled out in every document it writes to and nothing reclaims it, so
-	// a per-run identity leaves one dead entry per restart in every document
-	// the connector has touched. Empty means a fresh identity per instance,
-	// which is always safe but pays that cost.
-	//
-	// It also labels the connector's writes on the change feed, as
-	// "connect:<WriterID>" — the name an effect or another connector suppresses
-	// its own echo by. Empty labels them "connect", which is enough to tell a
-	// connector's write from a GC pass but not one connector from another.
+	// WriterID names this connector. It labels the connector's writes on the
+	// change feed as "connect:<WriterID>", the name an effect or another
+	// connector suppresses its echo by. Give each instance of one connector the
+	// same WriterID, also an origin and its replicas, so that one constant
+	// skips the writes of all of them. Empty labels the writes "connect", which
+	// tells a connector's write from a GC pass but not one connector from
+	// another.
 	//
 	// With a WriterID, the connector also records how far it has egressed in
 	// the engine's store, as the consumer position of "connect:<WriterID>".
@@ -117,7 +111,22 @@ type Config struct {
 	// client edit the source has not received, and the next pass sends it to
 	// the source instead of taking the source's older value. Without a
 	// WriterID, a lost State loses such edits (see State).
+	//
+	// When TextPeer is empty, WriterID also sets the collaborative-text peer,
+	// as "connector:<WriterID>"; see TextPeer.
 	WriterID string
+	// TextPeer is the collaborative-text writer identity the connector mints
+	// text items under, used as given with no prefix. Two connectors that can
+	// write the same rows at the same time, such as an origin and its replicas,
+	// must have different peers, because two live writers that share a peer
+	// mint colliding item ids. Keep the same value across restarts of one
+	// instance: a document keeps an entry for each peer that wrote to it and
+	// nothing removes it, so a peer per run adds one dead entry per restart to
+	// each document the connector wrote.
+	//
+	// Empty means "connector:<WriterID>", or a new peer for each instance when
+	// WriterID is empty too, which is safe but pays the cost of a peer per run.
+	TextPeer string
 	// Logger is the structured logger the background loops write to. Loop
 	// failures are logged (never returned — convergence work must not take the
 	// process down) with "component" and "workspace" attributes. nil means
@@ -173,8 +182,8 @@ type Connector struct {
 	logger       *slog.Logger
 	mx           *metrics
 	// peer is this connector's collaborative-text writer identity, fixed for the
-	// instance's lifetime (Config.WriterID, or one minted in New): see
-	// applyTextFields.
+	// instance's lifetime (Config.TextPeer, Config.WriterID, or one minted in
+	// New): see applyTextFields.
 	peer string
 	// label names this connector on every row it writes (server.TrustedAs), so
 	// a feed consumer can recognize a connector's writes and skip them. It is
@@ -258,6 +267,10 @@ func New(cfg Config) (*Connector, error) {
 	} else {
 		label += ":" + writerID
 	}
+	peer := cfg.TextPeer
+	if peer == "" {
+		peer = "connector:" + writerID
+	}
 	providers := telemetry.Providers{
 		TracerProvider: cfg.TracerProvider,
 		MeterProvider:  cfg.MeterProvider,
@@ -284,7 +297,7 @@ func New(cfg Config) (*Connector, error) {
 		mx:           mx,
 		tracked:      make(map[string]*workspace),
 		health:       make(map[string]Health),
-		peer:         "connector:" + writerID,
+		peer:         peer,
 		label:        label,
 	}
 	if cfg.WriterID != "" {

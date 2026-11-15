@@ -277,10 +277,10 @@ func (c *Connector) ingest(ctx context.Context, workspaceID string, p *pass, b b
 // The writer identity is the connector's, fixed for its lifetime (two
 // connectors that can run at the same time must never share one, or two
 // processes would allocate colliding item ids). Reusing it across calls — and
-// across restarts, when Config.WriterID pins it — is only sound because the
-// ancestor document OBSERVES cur's version before it is edited: without that,
-// an edit diffed against a stale ancestor would re-spend counters this same
-// peer already used in cur. Calls are serialized per row by the engine's
+// across restarts, when Config.TextPeer or Config.WriterID pins it — is only
+// sound because the ancestor document OBSERVES cur's version before it is
+// edited: without that, an edit diffed against a stale ancestor would re-spend
+// counters this same peer already used in cur. Calls are serialized per row by the engine's
 // write exclusion, and cur is read inside that write transaction, so cur
 // always carries this peer's earlier writes — including on a retry of the
 // transaction closure.

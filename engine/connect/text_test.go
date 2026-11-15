@@ -15,6 +15,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/connect/sqlitestate"
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 	"github.com/levelfourab/syncplane/engine/text"
 )
@@ -390,5 +391,64 @@ var _ = Describe("Connector text fields", func() {
 		doc := f.engineDoc(ctx, ws, "bad")
 		Expect(doc.PlainText()).To(Equal("café latte"))
 		Expect(doc.VersionVector()).To(HaveLen(1))
+	})
+
+	It("names the text peer after WriterID when TextPeer is empty", func() {
+		f := newNoteFixtureWriter("mirror")
+		f.src.edit(ws, "n1", "hello")
+		Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+
+		Expect(f.engineDoc(ctx, ws, "n1").VersionVector()).To(HaveKey("connector:mirror"))
+	})
+
+	// An origin and its replica run the same connector against the same rows.
+	// They share the label, so the effects of the app skip both with one
+	// constant, but each mints text items under its own peer.
+	It("writes text under TextPeer and labels the write with WriterID", func() {
+		f := newNoteFixtureOpts(func(cfg *engineconnect.Config) {
+			cfg.WriterID = "mirror"
+			cfg.TextPeer = "mirror@origin"
+		})
+		st, err := sqlitestate.Open(filepath.Join(GinkgoT().TempDir(), "replica.db"))
+		Expect(err).NotTo(HaveOccurred())
+		replicaSrc := newNoteSource()
+		replica, err := engineconnect.New(engineconnect.Config{
+			Server:   f.srv,
+			Source:   replicaSrc,
+			State:    st,
+			Entities: []proto.Message{&todov1.Note{}},
+			WriterID: "mirror",
+			TextPeer: "mirror@replica",
+		})
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(replica.Close()).To(Succeed()) })
+
+		actorOf := func() storage.Actor {
+			GinkgoHelper()
+			var actor storage.Actor
+			_, _, err := f.srv.Changes(ctx, ws, server.Cursor{}, 0, func(ch server.Change) error {
+				if ch.Key == "n1" {
+					actor = ch.Actor
+				}
+				return nil
+			})
+			Expect(err).NotTo(HaveOccurred())
+			return actor
+		}
+
+		f.src.edit(ws, "n1", "hello")
+		Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+		Expect(actorOf()).To(Equal(storage.Actor{System: "connect:mirror"}))
+
+		replicaSrc.edit(ws, "n1", "hello world")
+		Expect(replica.Reconcile(ctx, ws)).To(Succeed())
+		Expect(actorOf()).To(Equal(storage.Actor{System: "connect:mirror"}))
+
+		doc := f.engineDoc(ctx, ws, "n1")
+		Expect(doc.PlainText()).To(Equal("hello world"))
+		vv := doc.VersionVector()
+		Expect(vv).To(HaveLen(2))
+		Expect(vv).To(HaveKey("mirror@origin"))
+		Expect(vv).To(HaveKey("mirror@replica"))
 	})
 })
