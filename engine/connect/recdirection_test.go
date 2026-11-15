@@ -140,6 +140,35 @@ var _ = Describe("Record mode, EgressOnly", func() {
 		})))
 	})
 
+	DescribeTable("writes no row for a missing mark an earlier Bidirectional run left, in a pass that only drains",
+		func(back string, overwrites int) {
+			f := newRecFixture(withRecords(func(r *engineconnect.Records) { r.DeleteGrace = time.Hour }))
+			f.store.put(ws, "a.txt", "T\none")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			key := f.key(ctx, ws, "a.txt")
+			f.store.remove(ws, "a.txt")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(f.lines(ctx, ws, key)).To(Equal("T\none"))
+			if back != "" {
+				f.store.put(ws, "a.txt", back)
+			}
+
+			var log overwriteLog
+			f.restart(egressOnly(&log), withRecords(func(r *engineconnect.Records) { r.DeleteGrace = -1 }))
+			seq := f.seq(ctx, ws)
+			Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+			Expect(f.seq(ctx, ws)).To(Equal(seq), "an EgressOnly type wrote a row")
+			Expect(f.lines(ctx, ws, key)).To(Equal("T\none"))
+
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.seq(ctx, ws)).To(Equal(seq))
+			Expect(f.content(ws, "a.txt")).To(Equal("T\none"), "the record is written again")
+			Expect(log.all()).To(HaveLen(overwrites))
+		},
+		Entry("when the record is still missing", "", 0),
+		Entry("when the record is back with other content", "T\nedited", 1),
+	)
+
 	It("writes a record the store deleted again, and keeps its rows", func() {
 		var log overwriteLog
 		f := newRecFixture(egressOnly(&log))

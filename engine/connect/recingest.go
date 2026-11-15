@@ -802,6 +802,25 @@ func (c *Connector) applyDeletes(ctx context.Context, ws string, p *pass) error 
 		if err != nil {
 			return err
 		}
+		if rt.direction == EgressOnly && len(gone) > 0 {
+			// Marks an earlier run of the type with another direction left:
+			// no store delete or store content becomes rows of an EgressOnly
+			// type, and egress writes the record again.
+			if err := c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
+				for key := range gone {
+					if err := tx.DeleteConsumerShadow(c.consumer, goneEntity(rt), key); err != nil {
+						return err
+					}
+					if err := c.markDirty(tx, rt, key); err != nil {
+						return err
+					}
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			continue
+		}
 		for _, key := range slices.Sorted(maps.Keys(gone)) {
 			g := gone[key]
 			if c.rec.grace >= 0 && now.Before(time.Unix(0, g.Since).Add(c.rec.grace)) {
