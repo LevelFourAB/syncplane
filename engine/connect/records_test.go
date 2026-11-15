@@ -1290,3 +1290,11 @@ func (s coarseStore) Write(ctx context.Context, ws string, rec engineconnect.Rec
 	_, err := s.memStore.Write(ctx, ws, rec, from)
 	return "same", err
 }
+
+var _ = DescribeTable("OverwriteReason.String",
+	func(r engineconnect.OverwriteReason, want string) { Expect(r.String()).To(Equal(want)) },
+	Entry(nil, engineconnect.OverwriteFirstPass, "first_pass"),
+	Entry(nil, engineconnect.OverwriteEgressOnly, "egress_only"),
+	Entry(nil, engineconnect.OverwriteRefused, "refused"),
+	Entry(nil, engineconnect.OverwriteReason(0), "unknown"),
+)

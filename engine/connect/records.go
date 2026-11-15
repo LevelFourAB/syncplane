@@ -141,6 +141,21 @@ const (
 	OverwriteRefused
 )
 
+// String returns "first_pass", "egress_only" or "refused", and "unknown" for
+// any other value.
+func (r OverwriteReason) String() string {
+	switch r {
+	case OverwriteFirstPass:
+		return "first_pass"
+	case OverwriteEgressOnly:
+		return "egress_only"
+	case OverwriteRefused:
+		return "refused"
+	default:
+		return "unknown"
+	}
+}
+
 // RecordType binds one root entity and its member entities to a store and a
 // codec.
 type RecordType struct {
