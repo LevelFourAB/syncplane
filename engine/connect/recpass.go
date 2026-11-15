@@ -500,13 +500,17 @@ func (c *Connector) deferDirty(ctx context.Context, ws string, rt *recordType, k
 }
 
 // firstPass runs the first pass of a workspace that has no record-mode
-// position, under Records.FirstPass, and then records the position the feed
-// had before it started. The changes the pass itself wrote are skipped by
+// position, under the policy of firstPolicy, and then records the position
+// the feed had before it started. The changes the pass itself wrote are skipped by
 // the shadows' versions; client changes made during the pass are drained.
 //
 // A pass that fails leaves no position, so the next pass runs the first pass
 // again. The records it already agreed on have shadows and are skipped.
 func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
+	policy, err := c.firstPolicy(ctx, ws)
+	if err != nil {
+		return err
+	}
 	head, err := c.srv.CurrentSeq(ctx, ws)
 	if err != nil {
 		return err
@@ -519,11 +523,11 @@ func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 		}); err != nil {
 			return fmt.Errorf("connect: list %s: %w", rt.rootName, err)
 		}
-		if rt.direction == IngressOnly || c.rec.firstPass == SourceWins {
+		if rt.direction == IngressOnly || policy == SourceWins {
 			if err := c.ingestRefs(ctx, ws, p, rt, refs, true); err != nil {
 				return err
 			}
-			if c.rec.firstPass == SourceWins {
+			if policy == SourceWins {
 				if err := c.deleteUnrecorded(ctx, ws, p, rt); err != nil {
 					return err
 				}
@@ -557,6 +561,22 @@ func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 	// that removed them would run the first pass again, and SourceWins would
 	// delete the rows clients created while the connector did not run.
 	return c.srv.AdvanceConsumer(ctx, ws, c.consumer, server.ConsumerUpdate{Cursor: server.Cursor{Seq: head}, Retain: true})
+}
+
+// firstPolicy returns the first-pass policy of the workspace: the one
+// Records.ChooseFirstPass gives, else Records.FirstPass.
+func (c *Connector) firstPolicy(ctx context.Context, ws string) (FirstPass, error) {
+	if c.rec.choose == nil {
+		return c.rec.firstPass, nil
+	}
+	policy, err := c.rec.choose(ctx, ws)
+	if err != nil {
+		return 0, fmt.Errorf("connect: choose first pass of workspace %q: %w", ws, err)
+	}
+	if policy != SourceWins && policy != EngineWins {
+		return 0, fmt.Errorf("connect: ChooseFirstPass returned unknown FirstPass %d for workspace %q", policy, ws)
+	}
+	return policy, nil
 }
 
 // deleteUnrecorded deletes the root rows with no record shadow, and the

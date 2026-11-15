@@ -35,6 +35,14 @@ type Records struct {
 	// FirstPass decides which side wins when a workspace has no record-mode
 	// bookkeeping yet. The zero value is SourceWins.
 	FirstPass FirstPass
+	// ChooseFirstPass, when set, decides the policy for one workspace and
+	// overrides FirstPass. It is called at the start of each first pass of
+	// the workspace, also again after a first pass that failed, and never on
+	// a later pass. It can be called for different workspaces at the same
+	// time. An error, or a value that is not SourceWins or EngineWins, fails
+	// the pass before it reads the store or writes a row. Nil uses FirstPass
+	// for every workspace.
+	ChooseFirstPass func(ctx context.Context, workspaceID string) (FirstPass, error)
 	// Quiet is how long a record must have no engine change before egress
 	// writes it to the store, so that a run of edits makes one write. 0 means
 	// the default (1 second); negative writes at the next pass.
@@ -60,6 +68,8 @@ type Records struct {
 }
 
 // FirstPass is the policy of the first pass of a workspace in record mode.
+// Records.FirstPass sets it for every workspace, and Records.ChooseFirstPass
+// for each workspace.
 //
 // The first pass runs when the consumer "connect:<WriterID>" has no position
 // in the workspace: on the first sync, and after server.ResetConsumer. A
@@ -280,6 +290,7 @@ type records struct {
 	byEntity  map[string]*recordType
 	memberOf  map[string]*recordMember
 	firstPass FirstPass
+	choose    func(ctx context.Context, workspaceID string) (FirstPass, error)
 	quiet     time.Duration
 	grace     time.Duration
 	batchRows int
@@ -302,6 +313,7 @@ func newRecords(cfg Config) (*records, error) {
 		byEntity:  make(map[string]*recordType),
 		memberOf:  make(map[string]*recordMember),
 		firstPass: r.FirstPass,
+		choose:    r.ChooseFirstPass,
 		quiet:     r.Quiet,
 		grace:     r.DeleteGrace,
 		batchRows: r.BatchRows,

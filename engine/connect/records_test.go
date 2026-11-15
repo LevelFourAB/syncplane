@@ -640,6 +640,63 @@ var _ = Describe("Record mode", func() {
 			Expect(f.store.writeCount()).To(Equal(1))
 		})
 
+		It("takes the policy of each workspace from ChooseFirstPass", func() {
+			var asked []string
+			f := newRecFixture(withRecords(func(r *engineconnect.Records) {
+				r.FirstPass = engineconnect.SourceWins
+				r.ChooseFirstPass = func(_ context.Context, workspaceID string) (engineconnect.FirstPass, error) {
+					asked = append(asked, workspaceID)
+					if workspaceID == "mirror" {
+						return engineconnect.EngineWins, nil
+					}
+					return engineconnect.SourceWins, nil
+				}
+			}))
+			for _, id := range []string{"import", "mirror"} {
+				f.addRecord(ctx, id, "p9", "Engine", "x")
+				f.store.put(id, "a.txt", "A\none")
+				Expect(f.conn.Reconcile(ctx, id)).To(Succeed())
+				Expect(f.conn.Flush(ctx, id)).To(Succeed())
+			}
+			Expect(asked).To(Equal([]string{"import", "mirror"}))
+
+			root, _ := f.rows(ctx, "import", "p9")
+			Expect(root).To(BeNil(), "SourceWins deletes the rows the store does not hold")
+			Expect(f.store.locators("import")).To(Equal([]string{"a.txt"}))
+
+			Expect(f.lines(ctx, "mirror", "p9")).To(Equal("Engine\nx"), "EngineWins deletes no row")
+			Expect(f.content("mirror", "Engine.txt")).To(Equal("Engine\nx"))
+			Expect(f.lines(ctx, "mirror", f.key(ctx, "mirror", "a.txt"))).To(Equal("A\none"))
+
+			Expect(f.conn.Reconcile(ctx, "mirror")).To(Succeed())
+			Expect(asked).To(HaveLen(2), "only a first pass asks")
+		})
+
+		It("fails the pass when ChooseFirstPass fails, and asks again on the next pass", func() {
+			fail := errors.New("graph status unknown")
+			f := newRecFixture(withRecords(func(r *engineconnect.Records) {
+				r.ChooseFirstPass = func(context.Context, string) (engineconnect.FirstPass, error) {
+					if fail != nil {
+						return 0, fail
+					}
+					return engineconnect.EngineWins, nil
+				}
+			}))
+			f.addRecord(ctx, ws, "p9", "Engine", "x")
+			f.store.put(ws, "a.txt", "A\none")
+			Expect(f.conn.Reconcile(ctx, ws)).To(MatchError(fail))
+			_, found, err := f.srv.ConsumerPosition(ctx, ws, "connect:"+recWriter)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeFalse())
+			Expect(f.lines(ctx, ws, "p9")).To(Equal("Engine\nx"))
+			Expect(f.store.writeCount()).To(BeZero())
+
+			fail = nil
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(f.content(ws, "Engine.txt")).To(Equal("Engine\nx"))
+			Expect(f.lines(ctx, ws, "p9")).To(Equal("Engine\nx"))
+		})
+
 		It("stops the write and fails the pass when Overwrite fails", func() {
 			f := newRecFixture(withRecords(func(r *engineconnect.Records) {
 				r.FirstPass = engineconnect.EngineWins
