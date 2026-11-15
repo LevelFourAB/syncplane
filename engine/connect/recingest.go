@@ -135,7 +135,7 @@ func (c *Connector) ingestJobs(ctx context.Context, ws string, p *pass, jobs []*
 			if errors.As(err, &ce) {
 				upto := ce.index + 1
 				if len(batch) == 1 {
-					c.skipRecord(ctx, ws, batch[0], err)
+					c.skipRecord(ctx, ws, p, batch[0], err)
 				} else if err := c.ingestEach(ctx, ws, p, batch[:upto]); err != nil {
 					return err
 				}
@@ -162,7 +162,7 @@ func (c *Connector) ingestEach(ctx context.Context, ws string, p *pass, jobs []*
 		_, err := c.mergeBatch(ctx, ws, one)
 		var ce *codecError
 		if errors.As(err, &ce) {
-			c.skipRecord(ctx, ws, j, err)
+			c.skipRecord(ctx, ws, p, j, err)
 			continue
 		}
 		if err != nil {
@@ -175,8 +175,9 @@ func (c *Connector) ingestEach(ctx context.Context, ws string, p *pass, jobs []*
 	return nil
 }
 
-func (c *Connector) skipRecord(ctx context.Context, ws string, j *ingestJob, err error) {
+func (c *Connector) skipRecord(ctx context.Context, ws string, p *pass, j *ingestJob, err error) {
 	j.failed = true
+	p.refused++
 	c.logger.LogAttrs(ctx, slog.LevelError, "record skipped: codec failed",
 		slog.String("workspace", ws), slog.String("entity", j.rt.rootName),
 		slog.String("key", j.key), slog.String("locator", j.ref.Locator), slog.Any("err", err))

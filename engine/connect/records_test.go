@@ -162,6 +162,8 @@ var _ = Describe("Record mode", func() {
 
 		It("writes no row and no shadow for a record the codec refuses", func() {
 			f := newRecFixture()
+			// After the first pass, which fails when the codec refuses a record.
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
 			f.codec.setFailOn("boom")
 			f.store.put(ws, "a.txt", "A\nboom")
 			f.store.put(ws, "b.txt", "B\nfine")
@@ -695,6 +697,49 @@ var _ = Describe("Record mode", func() {
 			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
 			Expect(f.content(ws, "Engine.txt")).To(Equal("Engine\nx"))
 			Expect(f.lines(ctx, ws, "p9")).To(Equal("Engine\nx"))
+		})
+
+		It("deletes no row with SourceWins when the codec refuses a record, and fails the pass", func() {
+			f := newRecFixture()
+			f.conn = f.connector(withRecords(func(r *engineconnect.Records) {
+				r.Types[0].Codec = nameMatchCodec{f.codec}
+			}))
+			f.addRecord(ctx, ws, "p1", "A", "precious")
+			f.addRecord(ctx, ws, "p9", "Stale", "x")
+			f.codec.setFailOn("boom")
+			f.store.put(ws, "A.txt", "A\nprecious\nboom")
+			f.store.put(ws, "b.txt", "B\nfine")
+
+			Expect(f.conn.Reconcile(ctx, ws)).To(MatchError(ContainSubstring("refused")))
+			Expect(f.lines(ctx, ws, "p1")).To(Equal("A\nprecious"), "the record the codec refused would have matched p1")
+			Expect(f.lines(ctx, ws, "p9")).To(Equal("Stale\nx"))
+			_, found, err := f.srv.ConsumerPosition(ctx, ws, "connect:"+recWriter)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeFalse(), "the next pass runs the first pass again")
+
+			f.codec.setFailOn("")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(f.key(ctx, ws, "A.txt")).To(Equal("p1"))
+			Expect(f.lines(ctx, ws, "p1")).To(Equal("A\nprecious\nboom"))
+			root, _ := f.rows(ctx, ws, "p9")
+			Expect(root).To(BeNil())
+		})
+
+		It("ingests no store record with EngineWins when the codec cannot render a root, and fails the pass", func() {
+			f := newRecFixture(withRecords(func(r *engineconnect.Records) { r.FirstPass = engineconnect.EngineWins }))
+			f.addRecord(ctx, ws, "p1", "Engine", "x")
+			f.store.put(ws, "Engine.txt", "Engine\nstale")
+			f.codec.setFailRender("Engine")
+
+			Expect(f.conn.Reconcile(ctx, ws)).To(MatchError(ContainSubstring("refused")))
+			Expect(f.projects(ctx, ws)).To(Equal(map[string]string{"p1": "Engine"}), "the stale file made no record")
+			Expect(f.content(ws, "Engine.txt")).To(Equal("Engine\nstale"))
+
+			f.codec.setFailRender("")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			Expect(f.projects(ctx, ws)).To(Equal(map[string]string{"p1": "Engine"}))
+			Expect(f.content(ws, "Engine.txt")).To(Equal("Engine\nx"), "the engine wins")
+			Expect(f.lines(ctx, ws, "p1")).To(Equal("Engine\nx"))
 		})
 
 		It("stops the write and fails the pass when Overwrite fails", func() {

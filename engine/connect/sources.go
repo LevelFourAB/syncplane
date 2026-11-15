@@ -40,6 +40,8 @@ type pass struct {
 	// recordsPass, applied by afterRecordPass.
 	wake      time.Time
 	unflushed bool
+	// refused counts the records the codec refused in this pass.
+	refused int
 }
 
 // writer returns the source's Writer half. Egress paths are gated on

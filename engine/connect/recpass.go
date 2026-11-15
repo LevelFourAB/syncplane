@@ -415,6 +415,7 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 	})
 	var ce *codecError
 	if errors.As(err, &ce) {
+		p.refused++
 		c.logger.LogAttrs(ctx, slog.LevelError, "record skipped: codec failed",
 			slog.String("workspace", ws), slog.String("entity", rt.rootName),
 			slog.String("key", key), slog.Any("err", err))
@@ -505,7 +506,10 @@ func (c *Connector) deferDirty(ctx context.Context, ws string, rt *recordType, k
 // the shadows' versions; client changes made during the pass are drained.
 //
 // A pass that fails leaves no position, so the next pass runs the first pass
-// again. The records it already agreed on have shadows and are skipped.
+// again. The records it already agreed on have shadows and are skipped. A
+// record the codec refuses fails the pass where skipping it would lose data:
+// SourceWins would delete the rows it holds, and EngineWins would ingest the
+// store record of a root it could not render as a new record.
 func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 	policy, err := c.firstPolicy(ctx, ws)
 	if err != nil {
@@ -523,11 +527,17 @@ func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 		}); err != nil {
 			return fmt.Errorf("connect: list %s: %w", rt.rootName, err)
 		}
+		refused := p.refused
 		if rt.direction == IngressOnly || policy == SourceWins {
 			if err := c.ingestRefs(ctx, ws, p, rt, refs, true); err != nil {
 				return err
 			}
 			if policy == SourceWins {
+				// A refused record holds rows the sweep cannot tell from
+				// stale ones: the codec could have matched it to any root.
+				if n := p.refused - refused; n > 0 {
+					return fmt.Errorf("connect: first pass of %s: the codec refused %d records, so no row was deleted", rt.rootName, n)
+				}
 				if err := c.deleteUnrecorded(ctx, ws, p, rt); err != nil {
 					return err
 				}
@@ -549,6 +559,11 @@ func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 			if err := c.egressRecord(ctx, ws, p, rt, key, head); err != nil {
 				return err
 			}
+		}
+		// The locator of a root the codec could not render is unknown, and
+		// ingest would take the store record there for a new one.
+		if n := p.refused - refused; n > 0 {
+			return fmt.Errorf("connect: first pass of %s: the codec refused %d records, so no store record was ingested", rt.rootName, n)
 		}
 		// What no root rendered to is new to the engine. The rest is agreed
 		// now, and ingest skips it by its fingerprint.

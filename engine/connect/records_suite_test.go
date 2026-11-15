@@ -20,6 +20,7 @@ import (
 	engineconnect "github.com/levelfourab/syncplane/engine/connect"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	"github.com/levelfourab/syncplane/engine/id"
+	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 	"github.com/levelfourab/syncplane/engine/text"
@@ -41,6 +42,10 @@ type memStore struct {
 	deletes   int
 	failRead  error
 	failWrite error
+	// beforeWrite, when set, runs at the start of each Write, outside the
+	// lock. A spec uses it to act at the moment between the connector's
+	// bookkeeping and the store write.
+	beforeWrite func(ctx context.Context, rec engineconnect.Record, from string) error
 }
 
 func newMemStore() *memStore { return &memStore{files: make(map[string]map[string]string)} }
@@ -137,7 +142,15 @@ func (s *memStore) Read(_ context.Context, ws, loc string) (engineconnect.Record
 	}, nil
 }
 
-func (s *memStore) Write(_ context.Context, ws string, rec engineconnect.Record, from string) (string, error) {
+func (s *memStore) Write(ctx context.Context, ws string, rec engineconnect.Record, from string) (string, error) {
+	s.mu.Lock()
+	hook := s.beforeWrite
+	s.mu.Unlock()
+	if hook != nil {
+		if err := hook(ctx, rec, from); err != nil {
+			return "", err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.failWrite != nil {
@@ -171,6 +184,10 @@ type lineCodec struct {
 	mu sync.Mutex
 	// failOn makes Merge fail, after its writes, for content that holds it.
 	failOn string
+	// failRender makes Render fail for a root whose name holds it.
+	failRender string
+	// merges and renders count the calls.
+	merges, renders int
 }
 
 type linePayload struct {
@@ -187,6 +204,19 @@ func (c *lineCodec) setFailOn(s string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.failOn = s
+}
+
+func (c *lineCodec) setFailRender(s string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.failRender = s
+}
+
+// calls returns how many times Merge and Render ran.
+func (c *lineCodec) calls() (merges, renders int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.merges, c.renders
 }
 
 func parseLines(content []byte) (string, []string) {
@@ -283,6 +313,9 @@ func matchLines(base []lineItem, lines []string, cur map[string]*testdatav1.Widg
 }
 
 func (c *lineCodec) Merge(tx *server.EntityTx, in engineconnect.MergeInput) (engineconnect.Merged, error) {
+	c.mu.Lock()
+	c.merges++
+	c.mu.Unlock()
 	name, lines := parseLines(in.Record.Content)
 	var base linePayload
 	if in.Base != nil {
@@ -367,6 +400,13 @@ func (c *lineCodec) Merge(tx *server.EntityTx, in engineconnect.MergeInput) (eng
 
 func (c *lineCodec) Render(_ *server.EntityTx, in engineconnect.RenderInput) (engineconnect.Rendered, bool, error) {
 	root := in.Root.(*testdatav1.Project)
+	c.mu.Lock()
+	c.renders++
+	failRender := c.failRender
+	c.mu.Unlock()
+	if failRender != "" && strings.Contains(root.GetName(), failRender) {
+		return engineconnect.Rendered{}, false, errors.New("codec cannot render " + root.GetName())
+	}
 	ws := make([]*testdatav1.Widget, 0, len(in.Members))
 	for _, m := range in.Members {
 		ws = append(ws, m.(*testdatav1.Widget))
@@ -623,4 +663,55 @@ func (f *recFixture) content(ws, loc string) string {
 	c, ok := f.store.get(ws, loc)
 	Expect(ok).To(BeTrue(), "store has no record at %q", loc)
 	return c
+}
+
+// nameMatchCodec is a lineCodec that matches a store record new to the
+// connector to the root row with the same name, as a codec that rebuilds
+// lost bookkeeping from the content would.
+type nameMatchCodec struct{ *lineCodec }
+
+func (m nameMatchCodec) Merge(tx *server.EntityTx, in engineconnect.MergeInput) (engineconnect.Merged, error) {
+	var hit string
+	if in.Base == nil && in.Root == nil {
+		name, _ := parseLines(in.Record.Content)
+		if err := tx.Query(&testdatav1.Project{}, query.Spec{Where: query.Eq("name", name)}, func(msg proto.Message) error {
+			hit = msg.(*testdatav1.Project).GetId()
+			return nil
+		}); err != nil {
+			return engineconnect.Merged{}, err
+		}
+	}
+	if hit != "" {
+		var p testdatav1.Project
+		if _, err := tx.Get(&p, hit); err != nil {
+			return engineconnect.Merged{}, err
+		}
+		in.Key, in.Root, in.Members = hit, &p, nil
+		if err := tx.Query(&testdatav1.Widget{}, query.Spec{Where: query.Eq("label", hit)}, func(msg proto.Message) error {
+			in.Members = append(in.Members, msg)
+			return nil
+		}); err != nil {
+			return engineconnect.Merged{}, err
+		}
+	}
+	out, err := m.lineCodec.Merge(tx, in)
+	if hit != "" {
+		out.Key = hit
+	}
+	return out, err
+}
+
+// projects returns the name of every project in the workspace, by key.
+func (f *recFixture) projects(ctx context.Context, ws string) map[string]string {
+	GinkgoHelper()
+	out := map[string]string{}
+	Expect(f.srv.View(server.Trusted(ctx), ws, func(tx *server.ViewTx) error {
+		_, _, err := tx.ScanPage(&testdatav1.Project{}, "", 1000, func(msg proto.Message, _ uint64) error {
+			p := msg.(*testdatav1.Project)
+			out[p.GetId()] = p.GetName()
+			return nil
+		})
+		return err
+	})).To(Succeed())
+	return out
 }

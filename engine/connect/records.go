@@ -80,12 +80,14 @@ type FirstPass int
 
 const (
 	// SourceWins imports the store: each record is merged with no base, and
-	// root rows and member rows that no store record holds are deleted.
+	// root rows and member rows that no store record holds are deleted. When
+	// the codec refuses a record, the pass fails and deletes no row.
 	SourceWins FirstPass = iota
 	// EngineWins rebuilds the store from the rows: each root row is rendered
 	// and written to the store, and Records.Overwrite gets each store record
 	// it replaces with other content. A store record with no rows is ingested
-	// as a new record. No row is deleted.
+	// as a new record. No row is deleted. When the codec cannot render a root
+	// row, the pass fails before it ingests a store record.
 	EngineWins
 )
 
