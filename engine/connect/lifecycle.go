@@ -161,11 +161,12 @@ func (c *Connector) Touch(workspaceID string, locators ...string) {
 // gone — a sweep drops what that list no longer names, so with the default
 // list a workspace that disappears from the engine needs no Forget at all.
 //
-// In record mode Forget first flushes the workspace (see Flush), so the edits
-// that wait out the quiet period reach the store; a flush error is logged.
+// In record mode Forget first flushes the workspace (see Flush), for at most
+// one minute, so the edits that wait out the quiet period reach the store; a
+// flush error is logged.
 func (c *Connector) Forget(workspaceID string) {
 	if c.rec != nil {
-		if err := c.Flush(context.Background(), workspaceID); err != nil {
+		if err := c.flushOnExit(workspaceID); err != nil {
 			c.logPassFailure(context.Background(), workspaceID, "flush", err)
 		}
 		c.mu.Lock()

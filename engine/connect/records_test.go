@@ -373,6 +373,32 @@ var _ = Describe("Record mode", func() {
 			Expect(f.content(ws, "a.txt")).To(Equal("T\none!"))
 		})
 
+		It("writes pending egress on Close after a pass that failed", func() {
+			f := newRecFixture(withRecords(func(r *engineconnect.Records) { r.Quiet = time.Hour }))
+			f.store.put(ws, "a.txt", "T\none")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			key := f.key(ctx, ws, "a.txt")
+			f.editLine(ctx, ws, f.widgetWith(ctx, ws, key, "one"), "one!")
+			Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+
+			f.store.fail(errors.New("offline"), nil)
+			Expect(f.conn.Reconcile(ctx, ws)).NotTo(Succeed())
+			f.store.fail(nil, nil)
+			Expect(f.conn.Close()).To(Succeed())
+			Expect(f.content(ws, "a.txt")).To(Equal("T\none!"))
+		})
+
+		It("runs no first pass on Flush or Forget", func() {
+			f := newRecFixture()
+			f.addRecord(ctx, ws, "p1", "Engine", "x")
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			f.conn.Forget(ws)
+			Expect(f.lines(ctx, ws, "p1")).To(Equal("Engine\nx"), "a SourceWins first pass over the empty store would delete it")
+			_, found, err := f.srv.ConsumerPosition(ctx, ws, "connect:"+recWriter)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeFalse())
+		})
+
 		It("deletes the store record of a deleted root row", func() {
 			f := newRecFixture()
 			f.store.put(ws, "a.txt", "T\none")

@@ -38,8 +38,9 @@ func (c *Connector) Drain(ctx context.Context, workspaceID string) error {
 
 // Flush writes the pending egress of the workspace now. In record mode it
 // drains the feed and writes every record that waits for egress, also those
-// whose quiet period is not over. In row mode it is Drain. Close and Forget
-// flush in record mode.
+// whose quiet period is not over; for a workspace that has had no first pass
+// it does nothing. In row mode it is Drain. Close and Forget flush in record
+// mode.
 func (c *Connector) Flush(ctx context.Context, workspaceID string) error {
 	if c.rec == nil {
 		return c.Drain(ctx, workspaceID)

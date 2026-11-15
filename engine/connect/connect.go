@@ -442,7 +442,7 @@ func (c *Connector) converge(ctx context.Context, workspaceID string, fn func(*p
 		err = fn(p)
 		p.release()
 		if c.rec != nil {
-			c.afterRecordPass(w, p)
+			c.afterRecordPass(ctx, w, p, err)
 		}
 	}
 	// A cancelled context is the caller (or Close) stopping the pass, not the
@@ -466,7 +466,8 @@ func (c *Connector) converge(ctx context.Context, workspaceID string, fn func(*p
 // the connector's state store. Idempotent.
 //
 // In record mode Close first flushes each workspace whose records wait for
-// egress (see Flush), and returns the errors of those flushes with the rest.
+// egress, or whose last pass failed (see Flush), for at most one minute each,
+// and returns the errors of those flushes with the rest.
 func (c *Connector) Close() error {
 	c.stop()
 	c.wg.Wait()
@@ -479,7 +480,7 @@ func (c *Connector) Close() error {
 		}
 		c.mu.Unlock()
 		for _, ws := range pending {
-			if err := c.Flush(context.Background(), ws); err != nil {
+			if err := c.flushOnExit(ws); err != nil {
 				errs = append(errs, fmt.Errorf("connect: flush workspace %q: %w", ws, err))
 			}
 		}
@@ -492,6 +493,18 @@ func (c *Connector) Close() error {
 		errs = append(errs, c.state.Close())
 	}
 	return errors.Join(errs...)
+}
+
+// exitFlushTimeout bounds the flush of one workspace that Close and Forget
+// run in record mode.
+const exitFlushTimeout = time.Minute
+
+// flushOnExit flushes one workspace for Close or Forget, bounded by
+// exitFlushTimeout.
+func (c *Connector) flushOnExit(ws string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), exitFlushTimeout)
+	defer cancel()
+	return c.Flush(ctx, ws)
 }
 
 // decodeBase unmarshals a shadow's base bytes into a fresh message of the

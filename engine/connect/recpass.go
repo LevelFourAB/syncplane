@@ -43,6 +43,11 @@ func (c *Connector) recordsPass(ctx context.Context, ws string, p *pass, steps p
 		return err
 	}
 	if !ok {
+		if steps.flushAll {
+			// Nothing waits for egress before the first pass, and a flush
+			// on Close or Forget must not import or rebuild a workspace.
+			return nil
+		}
 		if err := c.firstPass(ctx, ws, p); err != nil {
 			return err
 		}
@@ -78,11 +83,29 @@ func (c *Connector) recordsPass(ctx context.Context, ws string, p *pass, steps p
 }
 
 // afterRecordPass hands the wake a pass asked for to the scheduler, and
-// remembers whether the workspace has records waiting for egress.
-func (c *Connector) afterRecordPass(w *workspace, p *pass) {
+// remembers whether the workspace has records waiting for egress. A pass that
+// failed stopped before it planned, so the plan is made here; when that fails
+// too, the workspace counts as unflushed and keeps the wake it had.
+func (c *Connector) afterRecordPass(ctx context.Context, w *workspace, p *pass, err error) {
+	keepWake := false
+	if err != nil {
+		p.wake, p.unflushed = time.Time{}, false
+		pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), bookkeepTimeout)
+		if perr := c.planWake(pctx, w.id, p); perr != nil {
+			p.unflushed, keepWake = true, true
+		}
+		cancel()
+		// A wake that is due now would retry the failed pass at once when
+		// backoff is disabled.
+		if floor := c.now().Add(max(c.retryMin, time.Second)); !p.wake.IsZero() && p.wake.Before(floor) {
+			p.wake = floor
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.setWakeLocked(w, p.wake)
+	if !keepWake {
+		c.setWakeLocked(w, p.wake)
+	}
 	if p.unflushed {
 		c.unflushed[w.id] = struct{}{}
 	} else {
