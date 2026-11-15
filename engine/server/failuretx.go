@@ -140,6 +140,15 @@ func (t *failureTx) ConsumerShadow(consumer, entity, key string) ([]byte, error)
 	return v, t.note(err)
 }
 
+func (t *failureTx) ScanConsumerShadows(consumer, entity, afterKey string, limit int, fn func(key string, snapshot []byte) error) error {
+	var own error
+	err := t.WriteTx.ScanConsumerShadows(consumer, entity, afterKey, limit, func(key string, snapshot []byte) error {
+		own = fn(key, snapshot)
+		return own
+	})
+	return t.noteAround(err, own)
+}
+
 func (t *failureTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]byte, bool, error) {
 	v, complete, err := t.WriteTx.FieldDeltas(entity, key, field, afterSeq)
 	return v, complete, t.note(err)

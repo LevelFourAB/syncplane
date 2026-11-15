@@ -316,6 +316,34 @@ func (s *Server) ConsumerShadow(ctx context.Context, workspaceID, consumer, enti
 	return snapshot, err
 }
 
+// ScanConsumerShadows calls fn for every shadow a consumer holds for one entity
+// name in the workspace, in bytewise key order. The entity name is the one the
+// shadows were written under and need not be a registered entity. A consumer or
+// entity with no shadows calls fn zero times.
+//
+// The scan runs in ONE read transaction, so fn sees one snapshot of all the
+// shadows: a write that commits while the scan runs is not seen. fn runs inside
+// that transaction and must not start a write; to read and write shadows
+// together, use EntityTx.ScanConsumerShadows inside Mutate. When fn returns an
+// error, the scan stops and returns it.
+//
+// It refuses a consumer name that is empty, longer than MaxConsumerNameBytes,
+// or starts with ReservedConsumerPrefix.
+func (s *Server) ScanConsumerShadows(ctx context.Context, workspaceID, consumer, entity string, fn func(key string, snapshot []byte) error) error {
+	if err := validateConsumerName(consumer); err != nil {
+		return err
+	}
+	if workspaceID == "" {
+		return fmt.Errorf("server: workspace id is required")
+	}
+	if fn == nil {
+		return fmt.Errorf("server: ScanConsumerShadows needs a func")
+	}
+	return s.store.WithReadTx(ctx, workspaceID, func(tx storage.ReadTx) error {
+		return tx.ScanConsumerShadows(consumer, entity, "", 0, fn)
+	})
+}
+
 // ResetConsumer drops a consumer's position and every shadow it holds in the
 // workspace, so its next pass is a first run.
 //
@@ -349,4 +377,102 @@ func validateConsumerName(consumer string) error {
 		return fmt.Errorf("server: consumer name %q starts with %q, which the engine reserves", consumer, ReservedConsumerPrefix)
 	}
 	return nil
+}
+
+// ConsumerShadow returns the snapshot a consumer recorded for one key of one
+// entity name, or nil if it holds none, as Server.ConsumerShadow does. It reads
+// inside this transaction, so it sees the transaction's own shadow writes.
+//
+// It refuses a consumer name that is empty, longer than MaxConsumerNameBytes,
+// or starts with ReservedConsumerPrefix.
+func (e *EntityTx) ConsumerShadow(consumer, entity, key string) ([]byte, error) {
+	if err := validateConsumerName(consumer); err != nil {
+		return nil, err
+	}
+	return e.tx.ConsumerShadow(consumer, entity, key)
+}
+
+// PutConsumerShadow records snapshot as a consumer's shadow for one key of one
+// entity name, and replaces the shadow that was there. The entity name need not
+// be a registered entity. The bytes are opaque to the server. An empty snapshot
+// can read back as nil, which is also what ConsumerShadow returns when there is
+// no shadow.
+//
+// The shadow commits with the rows the transaction writes, and rolls back with
+// them, so a connector can write rows and the shadow that describes them with
+// no crash between the two. A shadow is local bookkeeping and not a row: it
+// takes no sequence, adds nothing to the change feed, notifies no client, and
+// is not passed to the WriteCapture. A transaction that writes only shadows
+// takes no sequence and Seq stays 0, but the workspace is registered as after
+// any other write.
+//
+// It refuses a consumer name that is empty, longer than MaxConsumerNameBytes,
+// or starts with ReservedConsumerPrefix.
+func (e *EntityTx) PutConsumerShadow(consumer, entity, key string, snapshot []byte) error {
+	if err := validateConsumerName(consumer); err != nil {
+		return err
+	}
+	return e.tx.PutConsumerShadow(consumer, entity, key, snapshot)
+}
+
+// DeleteConsumerShadow removes a consumer's shadow for one key of one entity
+// name. Removing a shadow that does not exist is not an error. It commits and
+// rolls back with the transaction, as PutConsumerShadow does.
+//
+// It refuses a consumer name that is empty, longer than MaxConsumerNameBytes,
+// or starts with ReservedConsumerPrefix.
+func (e *EntityTx) DeleteConsumerShadow(consumer, entity, key string) error {
+	if err := validateConsumerName(consumer); err != nil {
+		return err
+	}
+	return e.tx.DeleteConsumerShadow(consumer, entity, key)
+}
+
+// ScanConsumerShadows calls fn for up to limit shadows a consumer holds for one
+// entity name with key > afterKey, in bytewise key order. It returns the key of
+// the last shadow visited and whether more follow; pass lastKey back as
+// afterKey to continue. limit must be positive. The scan sees the
+// transaction's own shadow writes.
+//
+// The page is read in full before fn runs, so fn may read and write shadows
+// and rows through this transaction. A shadow fn writes after the page was read
+// is seen by the next page when its key sorts after lastKey. When fn returns an
+// error, the scan stops and returns it.
+//
+// It refuses a consumer name that is empty, longer than MaxConsumerNameBytes,
+// or starts with ReservedConsumerPrefix.
+func (e *EntityTx) ScanConsumerShadows(consumer, entity, afterKey string, limit int, fn func(key string, snapshot []byte) error) (lastKey string, more bool, err error) {
+	if err := validateConsumerName(consumer); err != nil {
+		return "", false, err
+	}
+	if limit <= 0 {
+		return "", false, fmt.Errorf("server: ScanConsumerShadows limit must be positive, got %d", limit)
+	}
+	if fn == nil {
+		return "", false, fmt.Errorf("server: ScanConsumerShadows needs a func")
+	}
+	// Buffered because an adapter need not tolerate a write while its scan
+	// is open (see the storage package contract), and a caller that rewrites
+	// the shadows it scans is the expected use.
+	type entry struct {
+		key      string
+		snapshot []byte
+	}
+	page := make([]entry, 0, min(limit+1, 256))
+	if err := e.tx.ScanConsumerShadows(consumer, entity, afterKey, limit+1, func(key string, snapshot []byte) error {
+		page = append(page, entry{key, snapshot})
+		return nil
+	}); err != nil {
+		return "", false, err
+	}
+	if len(page) > limit {
+		page, more = page[:limit], true
+	}
+	for _, en := range page {
+		if err := fn(en.key, en.snapshot); err != nil {
+			return "", false, err
+		}
+		lastKey = en.key
+	}
+	return lastKey, more, nil
 }

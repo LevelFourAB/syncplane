@@ -299,7 +299,7 @@ func (s *Server) InvokeIdempotent(...) (WriteOutcome, error)
 
 `ApplyTx` provides `Get`, `GetMeta`, `Query`, `ScanPage`, `Put`, `Patch`, and `Delete`. Reads query the initial snapshot and do not observe uncommitted writes from the same closure. Reading a key already written within the transaction returns an error.
 
-`EntityTx` provides `Get`, `GetMeta`, `Put`, `Patch`, `Delete`, `Scan`, `Query`, `Seq`, and `ScanPage(prototype, afterKey, limit, fn)`.
+`EntityTx` provides `Get`, `GetMeta`, `Put`, `Patch`, `Delete`, `Scan`, `Query`, `Seq`, and `ScanPage(prototype, afterKey, limit, fn)`. It also reads and writes [consumer shadows](#effect-consumer-state) in the same transaction as its rows.
 
 Write options for `ApplyTx` and `EntityTx`:
 
@@ -543,6 +543,7 @@ The server provides methods to track durable consumer state:
 func (s *Server) ConsumerPosition(ctx, workspaceID, consumer string) (Cursor, bool, error)
 func (s *Server) ConsumerPositions(ctx, workspaceID string) ([]storage.ConsumerPosition, error)
 func (s *Server) ConsumerShadow(ctx, workspaceID, consumer, entity, key string) ([]byte, error)
+func (s *Server) ScanConsumerShadows(ctx, workspaceID, consumer, entity string, fn func(key string, snapshot []byte) error) error
 func (s *Server) AdvanceConsumer(ctx, workspaceID, consumer string, up ConsumerUpdate) error
 func (s *Server) ResetConsumer(ctx, workspaceID, consumer string) error
 func (s *Server) ConsumerPendingWorkspaces(ctx, consumer, after string, limit int) ([]string, error)
@@ -552,6 +553,20 @@ func (s *Server) PendingWorkspaces(ctx, consumer string) iter.Seq2[string, error
 `AdvanceConsumer` commits an updated cursor position and shadow state in a single transaction. It returns `ErrCursorForeign` and records nothing when the cursor names a history the store does not hold: an `Epoch` or `Lineage` the store does not report, or a sequence above the current one. This occurs when the workspace is deleted and restored, or the store is swapped or restored, after `Changes` returned the cursor. Pass the cursor that `Changes` returned, with its `Epoch` and `Lineage`, to get the full check.
 
 Set `ConsumerUpdate.From` to the position that `ConsumerPosition` returned before the page was handled. `AdvanceConsumer` then returns `ErrConsumerMoved` and records nothing when the stored position is not `From` any more, because another pass committed in the meantime. A consumer with no position matches the zero cursor. When `From` is nil, there is no check.
+
+`ScanConsumerShadows` calls `fn` for every shadow of one consumer and one entity name, in bytewise key order, in one read transaction. `fn` sees one snapshot and must not start a write.
+
+`EntityTx` has the same shadow operations inside a write transaction:
+
+```go
+func (e *EntityTx) ConsumerShadow(consumer, entity, key string) ([]byte, error)
+func (e *EntityTx) PutConsumerShadow(consumer, entity, key string, snapshot []byte) error
+func (e *EntityTx) DeleteConsumerShadow(consumer, entity, key string) error
+func (e *EntityTx) ScanConsumerShadows(consumer, entity, afterKey string, limit int,
+    fn func(key string, snapshot []byte) error) (lastKey string, more bool, err error)
+```
+
+A shadow written through `EntityTx` commits and rolls back with the rows of the same `Mutate`, so a connector can write rows and the shadow that describes them with no crash between the two. A shadow is not a row: it takes no sequence, adds nothing to the change feed, notifies no client, and does not go to the [write capture](#write-capture). A `Mutate` that writes only shadows takes no sequence. `EntityTx.ScanConsumerShadows` reads each page before it calls `fn`, so `fn` can write through the transaction.
 
 `ConsumerPendingWorkspaces` returns workspace IDs with unprocessed changes for a consumer, paginated after an exclusive `after` workspace ID. `PendingWorkspaces` yields all of them in ID order and reads one page at a time. Each page is a separate snapshot.
 
