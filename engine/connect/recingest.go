@@ -503,7 +503,50 @@ func (c *Connector) reconcileType(ctx context.Context, ws string, p *pass, rt *r
 		listed[ref.Locator] = true
 	}
 	c.pruneFailures(ws, rt.rootName, listed)
+	if rt.direction == EgressOnly {
+		return c.restoreListed(ctx, ws, p, rt, refs)
+	}
 	return c.ingestRefs(ctx, ws, p, rt, refs, true)
+}
+
+// restoreListed writes each record of an EgressOnly type whose store content
+// changed, or that the store deleted, from its rows again. refs is the whole
+// store.
+func (c *Connector) restoreListed(ctx context.Context, ws string, p *pass, rt *recordType, refs []RecordRef) error {
+	known, err := c.loadKnown(ctx, ws, rt)
+	if err != nil {
+		return err
+	}
+	fps := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		fps[ref.Locator] = ref.Fingerprint
+	}
+	var keys []string
+	for _, key := range slices.Sorted(maps.Keys(known.shadows)) {
+		sh := known.shadows[key]
+		if fp, ok := fps[sh.Locator]; !ok || fp != sh.Fingerprint {
+			keys = append(keys, key)
+		}
+	}
+	return c.restore(ctx, ws, p, rt, keys)
+}
+
+// restore writes records of an EgressOnly type from their rows over what the
+// store holds.
+func (c *Connector) restore(ctx context.Context, ws string, p *pass, rt *recordType, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	head, err := c.srv.CurrentSeq(ctx, ws)
+	if err != nil {
+		return err
+	}
+	for _, key := range keys {
+		if err := c.egressOrDefer(ctx, ws, p, rt, key, head, egressOpts{}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ingestTouched ingests the locators Touch reported. They go back to the
@@ -546,6 +589,7 @@ func (c *Connector) ingestLocators(ctx context.Context, ws string, p *pass, locs
 		rec Record
 	}
 	var present []found
+	restores := make(map[*recordType][]string)
 	gone := make(map[*recordType]map[string]*goneMark)
 	goneOf := func(rt *recordType) (map[string]*goneMark, error) {
 		if g, ok := gone[rt]; ok {
@@ -570,12 +614,20 @@ func (c *Connector) ingestLocators(ctx context.Context, ws string, p *pass, locs
 				break
 			}
 		}
+		if owner != nil && owner.direction == EgressOnly {
+			restores[owner] = append(restores[owner], key)
+			continue
+		}
 		candidates := c.rec.types
 		if owner != nil {
 			candidates = []*recordType{owner}
 		}
 		var hit bool
 		for _, rt := range candidates {
+			if rt.direction == EgressOnly {
+				// No store record becomes rows of an EgressOnly type.
+				continue
+			}
 			rec, err := rt.store.Read(ctx, ws, loc)
 			if errors.Is(err, ErrRecordNotFound) {
 				continue
@@ -616,7 +668,15 @@ func (c *Connector) ingestLocators(ctx context.Context, ws string, p *pass, locs
 			jobs = append(jobs, j)
 		}
 	}
-	return c.ingestJobs(ctx, ws, p, jobs)
+	if err := c.ingestJobs(ctx, ws, p, jobs); err != nil {
+		return err
+	}
+	for _, rt := range c.rec.types {
+		if err := c.restore(ctx, ws, p, rt, restores[rt]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ingestUnknown ingests a store record that no locator index entry names.

@@ -64,12 +64,12 @@ type Records struct {
 	// 0 means the default (1000). Config.IngestChunk and Config.IngestPause
 	// count these transactions.
 	BatchRows int
-	// Overwrite is called before a first pass with EngineWins replaces a
-	// store record with other content, so that the adopter can keep a copy
-	// of it. An error stops the write and fails the pass. Nil writes without
-	// a call.
+	// Overwrite is called before egress replaces or deletes store content
+	// that holds edits the engine does not have, so that the adopter can
+	// keep a copy of it; Overwrite.Reason tells why. An error stops the
+	// write and fails the pass. Nil writes without a call.
 	//
-	// After the first pass, egress never replaces a store record the
+	// Outside these cases, egress never replaces a store record the
 	// connector does not know: it ingests it as a new record, and the engine
 	// record whose locator it holds waits until the locator is free.
 	Overwrite func(ctx context.Context, o Overwrite) error
@@ -100,18 +100,32 @@ const (
 )
 
 // Overwrite describes a store record that an egress write is about to
-// replace. Old and New are not retained after the call returns.
+// replace or delete. Old and New are not retained after the call returns.
 type Overwrite struct {
 	WorkspaceID string
 	// Entity is the root entity of the record type.
 	Entity  string
 	Key     string
 	Locator string
+	Reason  OverwriteReason
 	// Old is the content the store holds now, New the content that replaces
-	// it.
+	// it; New is nil when egress deletes the record.
 	Old []byte
 	New []byte
 }
+
+// OverwriteReason tells why egress replaces store content that holds edits
+// the engine does not have.
+type OverwriteReason int
+
+const (
+	// OverwriteFirstPass is a first pass with EngineWins that replaces a
+	// store record with other content.
+	OverwriteFirstPass OverwriteReason = iota + 1
+	// OverwriteEgressOnly is a record of an EgressOnly type whose store
+	// content changed since the connector wrote it.
+	OverwriteEgressOnly
+)
 
 // RecordType binds one root entity and its member entities to a store and a
 // codec.
@@ -125,9 +139,19 @@ type RecordType struct {
 	Store RecordStore
 	// Codec maps records to rows and rows to records.
 	Codec Codec
-	// Direction is Bidirectional (the default) or IngressOnly. An IngressOnly
-	// type never writes to the store: engine edits stay in the engine, and
-	// ingest does not render the record.
+	// Direction is Bidirectional (the default), IngressOnly or EgressOnly.
+	//
+	// An IngressOnly type never writes to the store: engine edits stay in the
+	// engine, and ingest does not render the record.
+	//
+	// An EgressOnly type never writes a row: the engine is the only source of
+	// its records. A store edit of one of its records is not merged; the
+	// next pass that sees it, or egresses the record, writes the engine's
+	// render over it, after a call to Records.Overwrite with the store's
+	// content. A record the store deleted is written again and keeps its
+	// rows. A store record no root row renders to is left in the store. The
+	// first pass writes every root row to the store, whatever the
+	// FirstPass policy is.
 	Direction Direction
 }
 
@@ -368,7 +392,7 @@ func newRecords(cfg Config) (*records, error) {
 		if t.Root == nil || t.Store == nil || t.Codec == nil {
 			return nil, fmt.Errorf("connect: record type %d needs Root, Store and Codec", i)
 		}
-		if t.Direction != Bidirectional && t.Direction != IngressOnly {
+		if t.Direction != Bidirectional && t.Direction != IngressOnly && t.Direction != EgressOnly {
 			return nil, fmt.Errorf("connect: record type %d: unknown Direction %d", i, t.Direction)
 		}
 		rt := &recordType{root: t.Root, store: t.Store, codec: t.Codec, direction: t.Direction}

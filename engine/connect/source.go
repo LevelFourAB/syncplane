@@ -180,6 +180,10 @@ const (
 	// the engine — and are overwritten field-by-field whenever the source
 	// changes the same field (see the shadow-base note on Shadow.BaseText).
 	IngressOnly
+	// EgressOnly writes engine rows to the store and never takes a store edit
+	// into the engine. Only a record type can be EgressOnly (see
+	// RecordType.Direction); New refuses it on a Binding.
+	EgressOnly
 )
 
 // Binding declares one entity, the direction it syncs in, and the fields the

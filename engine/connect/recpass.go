@@ -165,7 +165,7 @@ func (c *Connector) drainRecords(ctx context.Context, ws string, pos server.Curs
 	for {
 		var page []server.Change
 		next, more, err := c.srv.Changes(ctx, ws, pos, c.batch, func(ch server.Change) error {
-			if rt, ok := c.rec.byEntity[ch.Entity]; ok && rt.direction == Bidirectional {
+			if rt, ok := c.rec.byEntity[ch.Entity]; ok && rt.direction != IngressOnly {
 				page = append(page, ch)
 			}
 			return nil
@@ -279,14 +279,14 @@ func (c *Connector) changeRecords(tx shadowReader, rt *recordType, ch server.Cha
 	return keys, nil
 }
 
-// markAll returns a dirty mark for every record of every bidirectional type:
+// markAll returns a dirty mark for every record of every type egress writes:
 // each record with a shadow and each root row.
 func (c *Connector) markAll(ctx context.Context, ws string) ([]server.ConsumerShadowWrite, error) {
 	t := c.now()
 	now := encodeDirty(dirtyMark{last: t, first: t})
 	var marks []server.ConsumerShadowWrite
 	for _, rt := range c.rec.types {
-		if rt.direction != Bidirectional {
+		if rt.direction == IngressOnly {
 			continue
 		}
 		keys := make(map[string]bool)
@@ -336,7 +336,7 @@ func (c *Connector) rootKeys(ctx context.Context, ws string, rt *recordType) ([]
 func (c *Connector) flushRecords(ctx context.Context, ws string, p *pass, pos uint64, all bool) error {
 	now := c.now()
 	for _, rt := range c.rec.types {
-		if rt.direction != Bidirectional {
+		if rt.direction == IngressOnly {
 			continue
 		}
 		var due []string
@@ -431,23 +431,31 @@ type egressOpts struct {
 // Before the write it reads the store record. When its fingerprint moved
 // since the agreed state, the store has an edit the engine has not seen, and
 // the record is ingested instead: the merge keeps both edits, and its
-// write-back takes the engine's edit to the store.
+// write-back takes the engine's edit to the store. An EgressOnly record is
+// written over the edit instead.
 func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *recordType, key string, pos uint64, o egressOpts) error {
 	sh, err := c.loadRecShadow(ctx, ws, rt, key)
 	if err != nil {
 		return err
 	}
+	// cur is the store record at the agreed locator; nil when there is none.
+	var cur *Record
 	if sh != nil {
 		rec, err := rt.store.Read(ctx, ws, sh.Locator)
-		if errors.Is(err, ErrRecordNotFound) {
+		switch {
+		case errors.Is(err, ErrRecordNotFound) && rt.direction == EgressOnly:
+			// Written again below: the engine is the only source of the record.
+		case errors.Is(err, ErrRecordNotFound):
 			// The dirty mark stays: a record that comes back in the grace
 			// gets the engine's edit.
 			return c.markGone(ctx, ws, rt, key, nil)
-		}
-		if err != nil {
+		case err != nil:
 			return fmt.Errorf("connect: read %s at %q: %w", rt.rootName, sh.Locator, err)
+		default:
+			cur = &rec
 		}
-		if rec.Fingerprint != sh.Fingerprint {
+		if cur != nil && cur.Fingerprint != sh.Fingerprint && rt.direction != EgressOnly {
+			rec := *cur
 			if o.noIngest {
 				return nil
 			}
@@ -506,9 +514,9 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 		}
 		out = r
 		next = &recShadow{Locator: r.Locator, Hash: contentHash(r.Content), Version: max(pos, tx.Seq()), Payload: r.Payload, Members: mk}
-		if sh.sameContent(r.Locator, r.Content) {
+		if cur != nil && r.Locator == sh.Locator && bytes.Equal(cur.Content, r.Content) {
 			agreed = true
-			next.Fingerprint = sh.Fingerprint
+			next.Fingerprint = cur.Fingerprint
 			return c.putAgreed(tx, rt, key, sh, next, true)
 		}
 		return nil
@@ -531,31 +539,65 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 	}
 	switch {
 	case del:
-		return c.deleteRecord(ctx, ws, rt, key, sh)
+		return c.deleteRecord(ctx, ws, rt, key, sh, cur)
 	case agreed:
 		c.clearFailure(ws, rt.rootName, key, "")
 		return nil
 	}
-	return c.writeRecord(ctx, ws, p, rt, key, pos, sh, out, next, o)
+	return c.writeRecord(ctx, ws, p, rt, key, pos, sh, cur, out, next, o)
+}
+
+// overwrite calls Records.Overwrite, when set, before egress replaces old at
+// locator with next, nil for a delete.
+func (c *Connector) overwrite(ctx context.Context, ws string, rt *recordType, key, locator string, why OverwriteReason, old, next []byte) error {
+	if c.rec.overwrite == nil {
+		return nil
+	}
+	if err := c.rec.overwrite(ctx, Overwrite{
+		WorkspaceID: ws, Entity: rt.rootName, Key: key, Locator: locator, Reason: why, Old: old, New: next,
+	}); err != nil {
+		return fmt.Errorf("connect: overwrite %s %q at %q: %w", rt.rootName, key, locator, err)
+	}
+	return nil
+}
+
+// changedInStore reports whether the store record cur holds content other
+// than the agreed state sh: an edit the engine does not have.
+func changedInStore(sh *recShadow, cur *Record) bool {
+	return sh != nil && cur != nil && !bytes.Equal(contentHash(cur.Content), sh.Hash)
 }
 
 // writeRecord writes the render out of the record with key to the store, and
 // agrees on it as next. sh is the agreed state, nil for a record the store
-// does not hold yet.
+// does not hold yet, and cur the store record at its locator, nil when there
+// is none.
 //
 // A pending write commits before the store write and names what the store
 // holds when the write is done, so that a pass that stops between the store
 // write and the agreed state is completed by the next one (see
 // settlePending) instead of taking the written record for a new one.
-func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *recordType, key string, pos uint64, sh *recShadow, out Rendered, next *recShadow, o egressOpts) error {
+func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *recordType, key string, pos uint64, sh *recShadow, cur *Record, out Rendered, next *recShadow, o egressOpts) error {
 	pend := &pendingWrite{Next: next}
 	write := true
 	if sh != nil && out.Locator == sh.Locator {
-		// egressRecord found the agreed content at the locator.
-		pend.Replaces = sh.Hash
+		if cur != nil {
+			pend.Replaces = contentHash(cur.Content)
+		}
+		// Only an EgressOnly record gets here with a store edit; another is
+		// ingested first.
+		if changedInStore(sh, cur) {
+			if err := c.overwrite(ctx, ws, rt, key, out.Locator, OverwriteEgressOnly, cur.Content, out.Content); err != nil {
+				return err
+			}
+		}
 	} else {
 		if sh != nil {
 			pend.From = sh.Locator
+			if changedInStore(sh, cur) {
+				if err := c.overwrite(ctx, ws, rt, key, sh.Locator, OverwriteEgressOnly, cur.Content, nil); err != nil {
+					return err
+				}
+			}
 		}
 		// A locator new to this record: no shadow describes what the store
 		// holds there.
@@ -574,7 +616,7 @@ func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *rec
 		case bytes.Equal(existing.Content, out.Content):
 			write = false
 			next.Fingerprint = existing.Fingerprint
-		case !o.rebuild:
+		case !o.rebuild && rt.direction != EgressOnly:
 			// A store record made since the last list. It is no part of this
 			// record, so it is ingested as its own; this record then waits
 			// for a free locator. Once is enough: when the ingest did not
@@ -590,13 +632,12 @@ func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *rec
 			}
 			return c.egressRecord(ctx, ws, p, rt, key, pos, egressOpts{noIngest: true})
 		default:
-			if c.rec.overwrite != nil {
-				if err := c.rec.overwrite(ctx, Overwrite{
-					WorkspaceID: ws, Entity: rt.rootName, Key: key, Locator: out.Locator,
-					Old: existing.Content, New: out.Content,
-				}); err != nil {
-					return fmt.Errorf("connect: overwrite %s %q at %q: %w", rt.rootName, key, out.Locator, err)
-				}
+			why := OverwriteFirstPass
+			if rt.direction == EgressOnly {
+				why = OverwriteEgressOnly
+			}
+			if err := c.overwrite(ctx, ws, rt, key, out.Locator, why, existing.Content, out.Content); err != nil {
+				return err
 			}
 			pend.Replaces = contentHash(existing.Content)
 		}
@@ -629,8 +670,20 @@ func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *rec
 }
 
 // deleteRecord removes the record with key from the store and forgets it. sh
-// is its agreed state, nil for a record the store never held.
-func (c *Connector) deleteRecord(ctx context.Context, ws string, rt *recordType, key string, sh *recShadow) error {
+// is its agreed state, nil for a record the store never held, and cur the
+// store record at its locator, nil when there is none.
+func (c *Connector) deleteRecord(ctx context.Context, ws string, rt *recordType, key string, sh *recShadow, cur *Record) error {
+	if sh != nil && cur == nil && rt.direction == EgressOnly {
+		// The store deleted it too.
+		return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
+			return c.forgetRecord(tx, rt, key, sh)
+		})
+	}
+	if changedInStore(sh, cur) {
+		if err := c.overwrite(ctx, ws, rt, key, sh.Locator, OverwriteEgressOnly, cur.Content, nil); err != nil {
+			return err
+		}
+	}
 	if sh == nil {
 		c.clearFailure(ws, rt.rootName, key, "")
 		return c.shadowMutate(ctx, ws, func(tx *server.EntityTx) error {
@@ -781,6 +834,12 @@ func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 		return err
 	}
 	for _, rt := range c.rec.types {
+		if rt.direction == EgressOnly {
+			if err := c.rebuildRoots(ctx, ws, p, rt, head); err != nil {
+				return err
+			}
+			continue
+		}
 		var refs []RecordRef
 		if err := rt.store.List(ctx, ws, func(ref RecordRef) error {
 			refs = append(refs, ref)
@@ -805,21 +864,8 @@ func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 			}
 			continue
 		}
-		shadows, err := c.loadRecShadows(ctx, ws, rt)
-		if err != nil {
+		if err := c.rebuildRoots(ctx, ws, p, rt, head); err != nil {
 			return err
-		}
-		roots, err := c.rootKeys(ctx, ws, rt)
-		if err != nil {
-			return err
-		}
-		for _, key := range roots {
-			if shadows[key] != nil {
-				continue
-			}
-			if err := c.egressOrDefer(ctx, ws, p, rt, key, head, egressOpts{rebuild: true}); err != nil {
-				return err
-			}
 		}
 		// The locator of a root the codec could not render is unknown, and
 		// ingest would take the store record there for a new one.
@@ -837,6 +883,29 @@ func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 	// that removed them would run the first pass again, and SourceWins would
 	// delete the rows clients created while the connector did not run.
 	return c.srv.AdvanceConsumer(ctx, ws, c.consumer, server.ConsumerUpdate{Cursor: server.Cursor{Seq: head}, Retain: true})
+}
+
+// rebuildRoots writes each root row of a type that has no record shadow to
+// the store, and replaces what the store holds at its locator after a call to
+// Records.Overwrite.
+func (c *Connector) rebuildRoots(ctx context.Context, ws string, p *pass, rt *recordType, head uint64) error {
+	shadows, err := c.loadRecShadows(ctx, ws, rt)
+	if err != nil {
+		return err
+	}
+	roots, err := c.rootKeys(ctx, ws, rt)
+	if err != nil {
+		return err
+	}
+	for _, key := range roots {
+		if shadows[key] != nil {
+			continue
+		}
+		if err := c.egressOrDefer(ctx, ws, p, rt, key, head, egressOpts{rebuild: true}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // firstPolicy returns the first-pass policy of the workspace: the one

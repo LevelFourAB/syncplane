@@ -358,6 +358,13 @@ func New(cfg Config) (*Connector, error) {
 		if err != nil {
 			return fmt.Errorf("connect: bind %T: %w", prototype, err)
 		}
+		switch dir {
+		case Bidirectional, IngressOnly:
+		case EgressOnly:
+			return fmt.Errorf("connect: binding %q: EgressOnly is for record types only", entity)
+		default:
+			return fmt.Errorf("connect: binding %q: unknown Direction %d", entity, dir)
+		}
 		if _, dup := c.bound[entity]; dup {
 			return fmt.Errorf("connect: entity %q bound twice", entity)
 		}
