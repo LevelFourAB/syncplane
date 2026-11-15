@@ -53,7 +53,8 @@ type recShadow struct {
 	// change at or below it is already in the content.
 	Version uint64 `json:"v"`
 	Payload []byte `json:"p,omitempty"`
-	// Members are the member row keys of the agreed state, by entity.
+	// Members are the member row keys of the agreed state, by entity. The
+	// shadow is written whole, so each agreed state costs O(members).
 	Members map[string][]string `json:"m,omitempty"`
 }
 

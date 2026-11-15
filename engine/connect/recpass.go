@@ -152,7 +152,7 @@ func (c *Connector) planWake(ctx context.Context, ws string, p *pass) error {
 
 // drainRecords reads the feed from pos and marks each record a change
 // reaches, unless the record's agreed content already reflects the change.
-// The marks and the new position commit together.
+// The marks of a page commit before the position that passes it.
 //
 // A change maps to its record by the root key, by the RecordField of a
 // member row, and by the member index for the row's earlier record, which
@@ -188,41 +188,51 @@ func (c *Connector) drainRecords(ctx context.Context, ws string, pos server.Curs
 		if err != nil {
 			return pos, err
 		}
-		now := c.now()
-		shadows := make(map[recID]*recShadow)
-		marked := make(map[recID]bool)
-		var marks []server.ConsumerShadowWrite
-		for _, ch := range page {
-			rt := c.rec.byEntity[ch.Entity]
-			keys, err := c.changeRecords(ctx, ws, rt, ch)
-			if err != nil {
+		// The lookups and marks of a page share one transaction. It writes
+		// shadows only, so it takes no sequence, and a crash before the
+		// position commits marks the page again.
+		if len(page) > 0 {
+			if err := c.srv.Mutate(server.TrustedAs(ctx, c.label), ws, func(tx *server.EntityTx) error {
+				shadows := make(map[recID]*recShadow)
+				marked := make(map[recID]bool)
+				for _, ch := range page {
+					rt := c.rec.byEntity[ch.Entity]
+					keys, err := c.changeRecords(tx, rt, ch)
+					if err != nil {
+						return err
+					}
+					for _, key := range keys {
+						id := recID{rt, key}
+						if marked[id] {
+							continue
+						}
+						sh, ok := shadows[id]
+						if !ok {
+							if sh, err = c.txRecShadow(tx, rt, key); err != nil {
+								return err
+							}
+							shadows[id] = sh
+						}
+						if sh != nil && ch.Seq <= sh.Version {
+							continue
+						}
+						if sh == nil && ch.Deleted && ch.Entity == rt.rootName {
+							// No store record to delete: the store never had it, or
+							// the connector removed it with its shadow.
+							continue
+						}
+						marked[id] = true
+						if err := c.markDirty(tx, rt, key); err != nil {
+							return err
+						}
+					}
+				}
+				return nil
+			}); err != nil {
 				return pos, err
 			}
-			for _, key := range keys {
-				id := recID{rt, key}
-				if marked[id] {
-					continue
-				}
-				sh, ok := shadows[id]
-				if !ok {
-					if sh, err = c.loadRecShadow(ctx, ws, rt, key); err != nil {
-						return pos, err
-					}
-					shadows[id] = sh
-				}
-				if sh != nil && ch.Seq <= sh.Version {
-					continue
-				}
-				if sh == nil && ch.Deleted && ch.Entity == rt.rootName {
-					// No store record to delete: the store never had it, or
-					// the connector removed it with its shadow.
-					continue
-				}
-				marked[id] = true
-				marks = append(marks, server.ConsumerShadowWrite{Entity: dirtyEntity(rt), Key: key, Snapshot: encodeTime(now)})
-			}
 		}
-		if done, err := c.advance(ctx, ws, pos, next, marks); err != nil || done {
+		if done, err := c.advance(ctx, ws, pos, next, nil); err != nil || done {
 			return pos, err
 		}
 		pos = next
@@ -245,12 +255,12 @@ func (c *Connector) advance(ctx context.Context, ws string, pos, next server.Cur
 }
 
 // changeRecords returns the keys of the records one change reaches.
-func (c *Connector) changeRecords(ctx context.Context, ws string, rt *recordType, ch server.Change) ([]string, error) {
+func (c *Connector) changeRecords(tx *server.EntityTx, rt *recordType, ch server.Change) ([]string, error) {
 	if ch.Entity == rt.rootName {
 		return []string{ch.Key}, nil
 	}
 	var keys []string
-	raw, err := c.readShadow(ctx, ws, idxEntity(ch.Entity), ch.Key)
+	raw, err := tx.ConsumerShadow(c.consumer, idxEntity(ch.Entity), ch.Key)
 	if err != nil {
 		return nil, err
 	}

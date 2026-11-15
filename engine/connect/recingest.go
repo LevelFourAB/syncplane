@@ -43,23 +43,55 @@ type ingestJob struct {
 	failed bool
 }
 
-// resolveRef finds the record key of a store record, and returns nil when
-// the shadow already agrees with it. gone holds the type's missing-record
-// marks: a new locator with the fingerprint of a missing record is a rename,
-// and takes that record's key and mark.
-func (c *Connector) resolveRef(ctx context.Context, ws string, rt *recordType, ref RecordRef, gone map[string]*goneMark) (*ingestJob, error) {
-	raw, err := c.readShadow(ctx, ws, locEntity(rt), ref.Locator)
+// knownRecords is a snapshot of the record shadows and the locator index of
+// one type, which resolveRef reads instead of the store during a full list.
+type knownRecords struct {
+	shadows map[string]*recShadow
+	byLoc   map[string]string
+}
+
+// loadKnown reads the record shadows and the locator index of a type.
+func (c *Connector) loadKnown(ctx context.Context, ws string, rt *recordType) (*knownRecords, error) {
+	shadows, err := c.loadRecShadows(ctx, ws, rt)
 	if err != nil {
 		return nil, err
 	}
-	key := string(raw)
+	byLoc := make(map[string]string, len(shadows))
+	err = c.srv.ScanConsumerShadows(ctx, ws, c.consumer, locEntity(rt), func(loc string, raw []byte) error {
+		byLoc[loc] = string(raw)
+		return nil
+	})
+	return &knownRecords{shadows: shadows, byLoc: byLoc}, err
+}
+
+// resolveRef finds the record key of a store record, and returns nil when
+// the shadow already agrees with it. gone holds the type's missing-record
+// marks: a new locator with the fingerprint of a missing record is a rename,
+// and takes that record's key and mark. known, when not nil, is read instead
+// of the store.
+func (c *Connector) resolveRef(ctx context.Context, ws string, rt *recordType, ref RecordRef, gone map[string]*goneMark, known *knownRecords) (*ingestJob, error) {
+	var key string
+	if known != nil {
+		key = known.byLoc[ref.Locator]
+	} else {
+		raw, err := c.readShadow(ctx, ws, locEntity(rt), ref.Locator)
+		if err != nil {
+			return nil, err
+		}
+		key = string(raw)
+	}
 	if key == "" {
 		key = ref.Key
 	}
 	if key != "" {
-		sh, err := c.loadRecShadow(ctx, ws, rt, key)
-		if err != nil {
-			return nil, err
+		var sh *recShadow
+		if known != nil {
+			sh = known.shadows[key]
+		} else {
+			var err error
+			if sh, err = c.loadRecShadow(ctx, ws, rt, key); err != nil {
+				return nil, err
+			}
 		}
 		if sh != nil && sh.Locator == ref.Locator && sh.Fingerprint == ref.Fingerprint {
 			// Unchanged, or the echo of the connector's own write. A missing
@@ -342,6 +374,10 @@ func (c *Connector) ingestRefs(ctx context.Context, ws string, p *pass, rt *reco
 	if err != nil {
 		return err
 	}
+	known, err := c.loadKnown(ctx, ws, rt)
+	if err != nil {
+		return err
+	}
 	if markMissing {
 		locs := make(map[string]bool, len(refs))
 		keys := make(map[string]bool)
@@ -351,14 +387,10 @@ func (c *Connector) ingestRefs(ctx context.Context, ws string, p *pass, rt *reco
 				keys[ref.Key] = true
 			}
 		}
-		shadows, err := c.loadRecShadows(ctx, ws, rt)
-		if err != nil {
-			return err
-		}
 		now := c.now()
 		var marks []string
-		for _, key := range slices.Sorted(maps.Keys(shadows)) {
-			sh := shadows[key]
+		for _, key := range slices.Sorted(maps.Keys(known.shadows)) {
+			sh := known.shadows[key]
 			if locs[sh.Locator] || keys[key] || gone[key] != nil {
 				continue
 			}
@@ -386,7 +418,7 @@ func (c *Connector) ingestRefs(ctx context.Context, ws string, p *pass, rt *reco
 			continue
 		}
 		seen[ref.Locator] = true
-		j, err := c.resolveRef(ctx, ws, rt, ref, gone)
+		j, err := c.resolveRef(ctx, ws, rt, ref, gone, known)
 		if err != nil {
 			return err
 		}
@@ -508,7 +540,7 @@ func (c *Connector) ingestLocators(ctx context.Context, ws string, p *pass, locs
 		if err != nil {
 			return err
 		}
-		j, err := c.resolveRef(ctx, ws, f.rt, f.rec.RecordRef, g)
+		j, err := c.resolveRef(ctx, ws, f.rt, f.rec.RecordRef, g, nil)
 		if err != nil {
 			return err
 		}
@@ -526,7 +558,7 @@ func (c *Connector) ingestUnknown(ctx context.Context, ws string, p *pass, rt *r
 	if err != nil {
 		return err
 	}
-	j, err := c.resolveRef(ctx, ws, rt, rec.RecordRef, gone)
+	j, err := c.resolveRef(ctx, ws, rt, rec.RecordRef, gone, nil)
 	if err != nil || j == nil {
 		return err
 	}
@@ -585,7 +617,7 @@ func (c *Connector) applyDeletes(ctx context.Context, ws string, p *pass) error 
 				if rec.Locator == "" {
 					rec.Locator = g.Locator
 				}
-				j, err := c.resolveRef(ctx, ws, rt, rec.RecordRef, nil)
+				j, err := c.resolveRef(ctx, ws, rt, rec.RecordRef, nil, nil)
 				if err != nil {
 					return err
 				}
