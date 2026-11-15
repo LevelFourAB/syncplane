@@ -371,10 +371,13 @@ func (c *Connector) flushRecords(ctx context.Context, ws string, p *pass, pos ui
 }
 
 // locatorTaken is the error of an egress whose locator belongs to another
-// record.
+// record, or holds a store record the connector does not know (owner empty).
 type locatorTaken struct{ locator, owner string }
 
 func (e *locatorTaken) Error() string {
+	if e.owner == "" {
+		return fmt.Sprintf("connect: locator %q holds a store record the connector does not know", e.locator)
+	}
 	return fmt.Sprintf("connect: locator %q belongs to record %q", e.locator, e.owner)
 }
 
@@ -395,6 +398,10 @@ func (c *Connector) egressOrDefer(ctx context.Context, ws string, p *pass, rt *r
 
 // egressOpts are the options of one egressRecord call.
 type egressOpts struct {
+	// rebuild replaces store content that no shadow describes, after a call
+	// to Records.Overwrite: the first pass with EngineWins. Without it, such
+	// content is ingested as a store record first.
+	rebuild bool
 	// noIngest leaves a record whose store content moved since the agreed
 	// state for a later pass, instead of ingesting it first. A write-back
 	// sets it, so that a store that keeps changing cannot recurse.
@@ -504,7 +511,7 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 	case agreed:
 		return nil
 	}
-	return c.writeRecord(ctx, ws, rt, key, sh, out, next)
+	return c.writeRecord(ctx, ws, p, rt, key, pos, sh, out, next, o)
 }
 
 // writeRecord writes the render out of the record with key to the store, and
@@ -515,7 +522,7 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 // holds when the write is done, so that a pass that stops between the store
 // write and the agreed state is completed by the next one (see
 // settlePending) instead of taking the written record for a new one.
-func (c *Connector) writeRecord(ctx context.Context, ws string, rt *recordType, key string, sh *recShadow, out Rendered, next *recShadow) error {
+func (c *Connector) writeRecord(ctx context.Context, ws string, p *pass, rt *recordType, key string, pos uint64, sh *recShadow, out Rendered, next *recShadow, o egressOpts) error {
 	pend := &pendingWrite{Next: next}
 	write := true
 	if sh != nil && out.Locator == sh.Locator {
@@ -542,6 +549,21 @@ func (c *Connector) writeRecord(ctx context.Context, ws string, rt *recordType, 
 		case bytes.Equal(existing.Content, out.Content):
 			write = false
 			next.Fingerprint = existing.Fingerprint
+		case !o.rebuild:
+			// A store record made since the last list. It is no part of this
+			// record, so it is ingested as its own; this record then waits
+			// for a free locator. Once is enough: when the ingest did not
+			// take the locator, the next list tries again.
+			if o.noIngest {
+				return &locatorTaken{locator: out.Locator}
+			}
+			if existing.Locator == "" {
+				existing.Locator = out.Locator
+			}
+			if err := c.ingestUnknown(ctx, ws, p, rt, existing); err != nil {
+				return err
+			}
+			return c.egressRecord(ctx, ws, p, rt, key, pos, egressOpts{noIngest: true})
 		default:
 			if c.rec.overwrite != nil {
 				if err := c.rec.overwrite(ctx, Overwrite{
@@ -761,7 +783,7 @@ func (c *Connector) firstPass(ctx context.Context, ws string, p *pass) error {
 			if shadows[key] != nil {
 				continue
 			}
-			if err := c.egressOrDefer(ctx, ws, p, rt, key, head, egressOpts{}); err != nil {
+			if err := c.egressOrDefer(ctx, ws, p, rt, key, head, egressOpts{rebuild: true}); err != nil {
 				return err
 			}
 		}

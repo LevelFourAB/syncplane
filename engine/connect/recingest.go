@@ -514,6 +514,20 @@ func (c *Connector) ingestLocators(ctx context.Context, ws string, p *pass, locs
 	return c.ingestJobs(ctx, ws, p, jobs)
 }
 
+// ingestUnknown ingests a store record that no locator index entry names.
+func (c *Connector) ingestUnknown(ctx context.Context, ws string, p *pass, rt *recordType, rec Record) error {
+	gone, err := c.loadGone(ctx, ws, rt)
+	if err != nil {
+		return err
+	}
+	j, err := c.resolveRef(ctx, ws, rt, rec.RecordRef, gone)
+	if err != nil || j == nil {
+		return err
+	}
+	j.rec, j.read = rec, true
+	return c.ingestJobs(ctx, ws, p, []*ingestJob{j})
+}
+
 // markGone gives a record that is missing from the store a missing mark,
 // unless it has one. gone, when not nil, is the type's marks, kept current.
 func (c *Connector) markGone(ctx context.Context, ws string, rt *recordType, key string, gone map[string]*goneMark) error {

@@ -462,6 +462,30 @@ var _ = Describe("Record mode", func() {
 			Expect(f.content(ws, "X.txt")).To(Equal("X\nb"))
 		})
 
+		It("ingests a store record the connector does not know instead of writing over it", func() {
+			var overwrites int
+			f := newRecFixture(withRecords(func(r *engineconnect.Records) {
+				r.Overwrite = func(context.Context, engineconnect.Overwrite) error { overwrites++; return nil }
+			}))
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			f.addRecord(ctx, ws, "p1", "X", "a")
+			// Another program made X.txt after the last list.
+			f.store.put(ws, "X.txt", "X\nmine")
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+
+			Expect(f.content(ws, "X.txt")).To(Equal("X\nmine"))
+			other := f.key(ctx, ws, "X.txt")
+			Expect(other).NotTo(BeElementOf("", "p1"))
+			Expect(f.lines(ctx, ws, other)).To(Equal("X\nmine"))
+			Expect(f.lines(ctx, ws, "p1")).To(Equal("X\na"))
+			Expect(overwrites).To(BeZero())
+
+			f.clientWrite(ctx, ws, func(tx *server.EntityTx) error { return tx.Put(&testdatav1.Project{Id: "p1", Name: "Y"}) })
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(f.content(ws, "Y.txt")).To(Equal("Y\na"))
+			Expect(f.content(ws, "X.txt")).To(Equal("X\nmine"))
+		})
+
 		It("writes both records of a row a client moved while the target record was ingested", func() {
 			f := newRecFixture()
 			f.store.put(ws, "a.txt", "A\nmover\nstay")

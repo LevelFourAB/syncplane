@@ -59,11 +59,14 @@ type Records struct {
 	// 0 means the default (1000). Config.IngestChunk and Config.IngestPause
 	// count these transactions.
 	BatchRows int
-	// Overwrite is called before an egress write replaces store content that
-	// no shadow describes, so that the adopter can keep a copy of it: a first
-	// pass with EngineWins over a record with other content, and an engine
-	// record whose locator holds a store record the connector does not know.
-	// An error stops the write and fails the pass. Nil writes without a call.
+	// Overwrite is called before a first pass with EngineWins replaces a
+	// store record with other content, so that the adopter can keep a copy
+	// of it. An error stops the write and fails the pass. Nil writes without
+	// a call.
+	//
+	// After the first pass, egress never replaces a store record the
+	// connector does not know: it ingests it as a new record, and the engine
+	// record whose locator it holds waits until the locator is free.
 	Overwrite func(ctx context.Context, o Overwrite) error
 }
 
