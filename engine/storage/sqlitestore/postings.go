@@ -280,15 +280,32 @@ func checkHead(cnt int, chunks []*postingChunk, tail []int64) error {
 // postingScope returns the scope id of one posting index, or 0 when there is
 // none.
 func (t *sqliteTx) postingScope(entity, index string) (int64, error) {
+	name := postingScopeName{entity, index}
+	if id, ok := t.postingScopeIDs[name]; ok {
+		return id, nil
+	}
 	var id int64
 	err := t.queryRow(
 		`SELECT id FROM posting_scopes WHERE workspace_id = ? AND entity = ? AND idx = ?`,
 		t.ws, entity, index,
 	).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+		err = nil
 	}
-	return id, err
+	if err != nil {
+		return 0, err
+	}
+	t.holdPostingScope(name, id)
+	return id, nil
+}
+
+// holdPostingScope keeps the scope id of name, or 0 for none, for the next
+// postingScope call of the transaction.
+func (t *sqliteTx) holdPostingScope(name postingScopeName, id int64) {
+	if t.postingScopeIDs == nil {
+		t.postingScopeIDs = make(map[postingScopeName]int64)
+	}
+	t.postingScopeIDs[name] = id
 }
 
 // postingRowNum returns the number of a row in a scope, or 0 when the row has
@@ -387,10 +404,17 @@ func (t *sqliteTx) createPostingScope(entity, index string) (int64, error) {
 		`INSERT INTO posting_scopes (workspace_id, entity, idx) VALUES (?, ?, ?)`,
 		t.ws, entity, index,
 	)
+	name := postingScopeName{entity, index}
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	if id, err = res.LastInsertId(); err != nil {
+		// The row is stored, but its id is not known.
+		delete(t.postingScopeIDs, name)
+		return 0, err
+	}
+	t.holdPostingScope(name, id)
+	return id, nil
 }
 
 // newPostingRow gives a row the next number of its scope.
@@ -897,7 +921,7 @@ func (pc *postingPages) change(k []byte, num int64, add bool) error {
 			return err
 		}
 		if heads {
-			h, err := pc.t.loadPostingHead(pc.scope, k)
+			h, err := pc.t.takePostingHead(pc.scope, k)
 			if err != nil {
 				return err
 			}
@@ -952,6 +976,7 @@ func (pc *postingPages) change(k []byte, num int64, add bool) error {
 	if err := pc.saveHead(h); err != nil {
 		return err
 	}
+	pc.t.holdPostingHead(pc.scope, h)
 	pc.headsRead, pc.heads = true, true
 	if inPage {
 		pc.remove(pg, i)
@@ -984,7 +1009,11 @@ func (pc *postingPages) changeHead(h *postingHead, num int64, add bool) error {
 		return fmt.Errorf("sqlitestore: posting key %x: %w", h.k, err)
 	}
 	if !h.dirty || h.cnt >= postingPageMaxRows/2 {
-		return pc.saveHead(h)
+		if err := pc.saveHead(h); err != nil {
+			return err
+		}
+		pc.t.holdPostingHead(pc.scope, h)
+		return nil
 	}
 	// The key moves to its page. The page is read before the head goes: a
 	// page that cannot be read must leave the head as it is stored.
@@ -1086,6 +1115,44 @@ func (t *sqliteTx) pagesOf(scope int64) *postingPages {
 		t.postingPages[scope] = pc
 	}
 	return pc
+}
+
+// postingHeldHeadsMax is the most heads one transaction keeps (see
+// sqliteTx.heads). It bounds the memory of a transaction that writes many
+// keys, such as an index build.
+const postingHeldHeadsMax = 1 << 13
+
+// takePostingHead returns the head of k in scope, which does not exist when
+// the key has none. It takes a head the transaction keeps out of
+// sqliteTx.heads, so that a change that fails part of the way leaves no
+// changed head there, and reads the head when the transaction keeps none.
+func (t *sqliteTx) takePostingHead(scope int64, k []byte) (*postingHead, error) {
+	name := postingHeadName{scope, string(k)}
+	if h, ok := t.heads[name]; ok {
+		delete(t.heads, name)
+		return h, nil
+	}
+	return t.loadPostingHead(scope, k)
+}
+
+// holdPostingHead keeps h, which savePostingHead stored, for the next
+// takePostingHead of its key. A head that holds nothing is deleted, so it is
+// not kept. The numbers of the chunks are dropped, so that the memory of a
+// kept head is its directory and its tail; a change that needs a chunk reads
+// it again.
+func (t *sqliteTx) holdPostingHead(scope int64, h *postingHead) {
+	if h.cnt == 0 || h.dirty {
+		return
+	}
+	for _, c := range h.chunks {
+		if c.id != 0 && !c.dirty {
+			c.nums = nil
+		}
+	}
+	if t.heads == nil || len(t.heads) >= postingHeldHeadsMax {
+		t.heads = make(map[postingHeadName]*postingHead)
+	}
+	t.heads[postingHeadName{scope, string(h.k)}] = h
 }
 
 // postingFailed returns the error of sqliteTx.postingErr for a call that
@@ -1309,6 +1376,10 @@ func (t *sqliteTx) ClearPostings(entity, index string) error {
 func (t *sqliteTx) dropPostingScope(scope int64) error {
 	// The page changes that are not stored yet go with the pages.
 	delete(t.postingPages, scope)
+	// The held scope ids and heads can belong to this scope. A drop is rare,
+	// so all of them go.
+	t.postingScopeIDs = nil
+	t.heads = nil
 	// Nothing here decodes a record, so a corrupt record cannot stop the
 	// clear that a rebuild starts with, or a workspace delete.
 	for _, q := range []string{

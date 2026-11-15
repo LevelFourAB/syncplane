@@ -65,6 +65,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1697,6 +1698,23 @@ type sqliteTx struct {
 	// stored and the others lost, so while it is set every posting call
 	// fails and the transaction does not commit (see flushPostings).
 	postingErr error
+	// indexStates, indexScopeIDs and postingScopeIDs hold what this
+	// transaction read of index_state, index_scopes and posting_scopes, by
+	// entity (and index for postingScopeIDs, where 0 means no scope). Each
+	// row write reads them again for the same entity, and only this
+	// transaction can change those rows while it is open. The writes of this
+	// transaction to them update or drop the entries, and a savepoint rollback
+	// drops them all (see forgetTxReads).
+	indexStates     map[string][]storage.IndexStatus
+	indexScopeIDs   map[string]map[string]int64
+	postingScopeIDs map[postingScopeName]int64
+	// heads holds posting heads as this transaction last stored them, by
+	// scope and key (see takePostingHead and holdPostingHead). The keys that
+	// many rows hold have a head, and a write of many rows changes each such
+	// head many times. A change takes its head out and puts it back once
+	// savePostingHead stored it, and a scope drop or a savepoint rollback
+	// drops them all.
+	heads map[postingHeadName]*postingHead
 	// savepoint nesting depth; names savepoints sp1, sp2, ...
 	spDepth int
 	// registered memoizes register's INSERT so a write burst does not repeat
@@ -1709,6 +1727,28 @@ type sqliteTx struct {
 	// allocation it names.
 	seqStart uint64
 	mark     uint64
+}
+
+// postingScopeName names one posting index of a workspace: its entity and
+// its index.
+type postingScopeName struct {
+	entity, index string
+}
+
+// postingHeadName names one posting key of a scope.
+type postingHeadName struct {
+	scope int64
+	k     string
+}
+
+// forgetTxReads drops what the transaction holds of index_state,
+// index_scopes, posting_scopes and posting_heads, so that the next call reads
+// the tables again.
+func (t *sqliteTx) forgetTxReads() {
+	t.indexStates = nil
+	t.indexScopeIDs = nil
+	t.postingScopeIDs = nil
+	t.heads = nil
 }
 
 // register creates the workspaces row, and is called by every mutating method
@@ -2551,6 +2591,23 @@ func (t *sqliteTx) IndexState(entity, index string) (string, bool, error) {
 }
 
 func (t *sqliteTx) IndexStates(entity string) ([]storage.IndexStatus, error) {
+	// A copy, so that a caller that changes the slice does not change the
+	// held states.
+	if states, ok := t.indexStates[entity]; ok {
+		return slices.Clone(states), nil
+	}
+	states, err := t.readIndexStates(entity)
+	if err != nil {
+		return nil, err
+	}
+	if t.indexStates == nil {
+		t.indexStates = make(map[string][]storage.IndexStatus)
+	}
+	t.indexStates[entity] = states
+	return slices.Clone(states), nil
+}
+
+func (t *sqliteTx) readIndexStates(entity string) ([]storage.IndexStatus, error) {
 	rows, err := t.query(
 		`SELECT idx, spec_hash, ready FROM index_state
 		 WHERE workspace_id = ? AND entity = ?
@@ -2587,6 +2644,7 @@ func (t *sqliteTx) SetIndexState(entity, index, specHash string, ready bool) err
 		 DO UPDATE SET spec_hash = excluded.spec_hash, ready = excluded.ready`,
 		t.ws, entity, index, specHash, boolToInt(ready),
 	)
+	delete(t.indexStates, entity)
 	return err
 }
 
@@ -2667,7 +2725,6 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 			if id, err = t.createIndexScope(entity, e.Index); err != nil {
 				return err
 			}
-			scopes[e.Index] = id
 		}
 		// A set, so a caller that passes the same entry twice stores one copy
 		// instead of failing the whole write on a primary-key conflict: two
@@ -2748,9 +2805,25 @@ type rowIndexEntry struct {
 	k     string
 }
 
-// indexScopes reads the scope id of every index of entity this workspace has
-// stored entries for, keyed by index name.
+// indexScopes returns the scope id of every index of entity this workspace has
+// stored entries for, keyed by index name. The map is the one the transaction
+// holds: the caller must not change it.
 func (t *sqliteTx) indexScopes(entity string) (map[string]int64, error) {
+	if scopes, ok := t.indexScopeIDs[entity]; ok {
+		return scopes, nil
+	}
+	scopes, err := t.readIndexScopes(entity)
+	if err != nil {
+		return nil, err
+	}
+	if t.indexScopeIDs == nil {
+		t.indexScopeIDs = make(map[string]map[string]int64)
+	}
+	t.indexScopeIDs[entity] = scopes
+	return scopes, nil
+}
+
+func (t *sqliteTx) readIndexScopes(entity string) (map[string]int64, error) {
 	rows, err := t.query(
 		`SELECT idx, id FROM index_scopes WHERE workspace_id = ? AND entity = ?`,
 		t.ws, entity,
@@ -2773,9 +2846,9 @@ func (t *sqliteTx) indexScopes(entity string) (map[string]int64, error) {
 	return out, rows.Err()
 }
 
-// createIndexScope allocates the scope id of one index. The caller has read
-// the scopes in the same write transaction and found none, so the insert
-// cannot conflict.
+// createIndexScope allocates the scope id of one index and adds it to the
+// scopes indexScopes returns. The caller has read the scopes in the same write
+// transaction and found none, so the insert cannot conflict.
 func (t *sqliteTx) createIndexScope(entity, index string) (int64, error) {
 	res, err := t.exec(
 		`INSERT INTO index_scopes (workspace_id, entity, idx) VALUES (?, ?, ?)`,
@@ -2784,7 +2857,16 @@ func (t *sqliteTx) createIndexScope(entity, index string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		// The row is stored, but its id is not known.
+		delete(t.indexScopeIDs, entity)
+		return 0, err
+	}
+	if scopes, ok := t.indexScopeIDs[entity]; ok {
+		scopes[index] = id
+	}
+	return id, nil
 }
 
 // rowIndexEntries reads the id of one row and every index entry the row
@@ -3366,6 +3448,9 @@ func (t *sqliteTx) InSavepoint(fn func() error) error {
 		// The page changes fn made are not in the tables, or the rewind
 		// takes them out.
 		t.postingPages = nil
+		// The rewind can take out a scope, an index state or a head that fn
+		// wrote, or put back one that fn deleted.
+		t.forgetTxReads()
 		// ROLLBACK TO rewinds the writes but keeps the savepoint open;
 		// RELEASE discards it.
 		if _, rbErr := t.exec(`ROLLBACK TO ` + name); rbErr != nil {
