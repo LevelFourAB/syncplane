@@ -19,6 +19,7 @@ import (
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
+	"github.com/levelfourab/syncplane/engine/text"
 	"github.com/levelfourab/syncplane/engine/upstream"
 )
 
@@ -172,6 +173,47 @@ var _ = Describe("Record mode on a replica", func() {
 		})))
 		pr.flush(ws)
 		Expect(origin.lines(ctx, ws, key)).To(Equal("T\none"))
+	})
+
+	It("keeps both text edits of two connectors with one WriterID and their own TextPeer (acceptance 16)", func() {
+		pr := newReplicaPair(ws)
+		peer := func(p string) func(*engineconnect.Config) {
+			return func(cfg *engineconnect.Config) { cfg.TextPeer = p }
+		}
+		o := recFixtureOn(pr.origin, peer("files@origin"))
+		r := recFixtureOn(pr.replica, peer("files@replica"), withRecords(func(rs *engineconnect.Records) {
+			rs.FirstPass = engineconnect.EngineWins
+		}))
+		o.store.put(ws, "T.txt", "T\nhello world")
+		Expect(o.conn.Reconcile(ctx, ws)).To(Succeed())
+		key := o.key(ctx, ws, "T.txt")
+		Eventually(func() string { return r.lines(ctx, ws, key) }).WithTimeout(10 * time.Second).Should(Equal("T\nhello world"))
+		Expect(r.conn.Reconcile(ctx, ws)).To(Succeed())
+		Expect(r.content(ws, "T.txt")).To(Equal("T\nhello world"))
+		w := o.widgetWith(ctx, ws, key, "hello world")
+
+		o.store.put(ws, "T.txt", "T\nhello brave world")
+		r.store.put(ws, "T.txt", "T\nhello world!")
+		Expect(o.conn.Reconcile(ctx, ws)).To(Succeed())
+		Expect(r.conn.Reconcile(ctx, ws)).To(Succeed())
+		pr.flush(ws)
+		Eventually(func() string { return r.lines(ctx, ws, key) }).WithTimeout(10 * time.Second).Should(Equal("T\nhello brave world!"))
+		Expect(o.lines(ctx, ws, key)).To(Equal("T\nhello brave world!"))
+		Expect(o.conn.Flush(ctx, ws)).To(Succeed())
+		Expect(r.conn.Flush(ctx, ws)).To(Succeed())
+		Expect(o.content(ws, "T.txt")).To(Equal("T\nhello brave world!"))
+		Expect(r.content(ws, "T.txt")).To(Equal("T\nhello brave world!"))
+
+		// Each peer minted its own items: the document holds the original
+		// text of the origin's peer and one edit of each.
+		_, widgets := o.rows(ctx, ws, key)
+		Expect(widgets).To(HaveLen(1))
+		Expect(widgets[0].GetId()).To(Equal(w))
+		doc, err := text.Decode(widgets[0].GetBody(), "check")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(doc.VersionVector()).To(HaveKey("files@origin"))
+		Expect(doc.VersionVector()).To(HaveKey("files@replica"))
+		Expect(doc.VersionVector()).NotTo(HaveKey("connector:files"))
 	})
 
 	It("writes no row from an ingest of an EgressOnly type (acceptance 18)", func() {

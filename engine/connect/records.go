@@ -295,6 +295,9 @@ type RenderInput struct {
 	Root proto.Message
 	// Members are the member rows, as in MergeInput.
 	Members []proto.Message
+	// TextPeer is the collaborative-text peer to write text under, as in
+	// MergeInput.
+	TextPeer string
 }
 
 // Rendered is the native form of a record.

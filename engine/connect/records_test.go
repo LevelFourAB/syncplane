@@ -183,6 +183,20 @@ var _ = Describe("Record mode", func() {
 			Expect(widgets[0].GetFlag()).To(BeTrue())
 		})
 
+		It("gives Merge and Render the TextPeer", func() {
+			var peers []string
+			f := newRecFixture(func(cfg *engineconnect.Config) {
+				cfg.TextPeer = "files@here"
+				cfg.Records.Types[0].Codec = peerSpy{lineCodec: &lineCodec{}, peers: &peers}
+			})
+			f.store.put(ws, "a.txt", "T\none")
+			Expect(f.conn.Reconcile(ctx, ws)).To(Succeed())
+			f.addRecord(ctx, ws, "p2", "New")
+			Expect(f.conn.Flush(ctx, ws)).To(Succeed())
+			Expect(peers).To(ContainElements("merge files@here", "render files@here"))
+			Expect(peers).To(HaveEach(HaveSuffix(" files@here")))
+		})
+
 		It("reads and merges no record whose fingerprint is unchanged", func() {
 			f := newRecFixture()
 			f.store.put(ws, "a.txt", "A\none")

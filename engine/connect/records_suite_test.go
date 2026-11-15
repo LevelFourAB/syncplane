@@ -700,6 +700,26 @@ func (c spyCodec) Merge(tx *server.EntityTx, in engineconnect.MergeInput) (engin
 	return c.lineCodec.Merge(tx, in)
 }
 
+// peerSpy is a lineCodec that records the TextPeer of each Merge and Render.
+type peerSpy struct {
+	*lineCodec
+	peers *[]string
+}
+
+func (c peerSpy) Merge(tx *server.EntityTx, in engineconnect.MergeInput) (engineconnect.Merged, error) {
+	c.mu.Lock()
+	*c.peers = append(*c.peers, "merge "+in.TextPeer)
+	c.mu.Unlock()
+	return c.lineCodec.Merge(tx, in)
+}
+
+func (c peerSpy) Render(tx *server.EntityTx, in engineconnect.RenderInput) (engineconnect.Rendered, bool, error) {
+	c.mu.Lock()
+	*c.peers = append(*c.peers, "render "+in.TextPeer)
+	c.mu.Unlock()
+	return c.lineCodec.Render(tx, in)
+}
+
 // nameMatchCodec is a lineCodec that matches a store record new to the
 // connector to the root row with the same name, as a codec that rebuilds
 // lost bookkeeping from the content would.

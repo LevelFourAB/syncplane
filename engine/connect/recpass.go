@@ -496,7 +496,7 @@ func (c *Connector) egressRecord(ctx context.Context, ws string, p *pass, rt *re
 			return nil
 		}
 		writes := tx.Writes()
-		r, ok, err := rt.codec.Render(tx, RenderInput{Key: key, Base: sh.agreed(), Root: root, Members: members})
+		r, ok, err := rt.codec.Render(tx, RenderInput{Key: key, Base: sh.agreed(), Root: root, Members: members, TextPeer: c.peer})
 		if err != nil {
 			return &codecError{err: fmt.Errorf("connect: render %s %q: %w", rt.rootName, key, err)}
 		}

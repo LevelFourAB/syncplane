@@ -352,7 +352,7 @@ func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 			dirty = true
 		} else {
 			writes := tx.Writes()
-			out, ok, err := rt.codec.Render(tx, RenderInput{Key: key, Base: next.agreed(), Root: root, Members: members})
+			out, ok, err := rt.codec.Render(tx, RenderInput{Key: key, Base: next.agreed(), Root: root, Members: members, TextPeer: c.peer})
 			if err != nil {
 				return 0, &codecError{err: fmt.Errorf("connect: render %s %q: %w", rt.rootName, key, err)}
 			}
