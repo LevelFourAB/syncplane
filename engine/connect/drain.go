@@ -21,9 +21,11 @@ import (
 // like any other, they just never reach the source.
 //
 // In record mode Drain marks the records that the feed reports changed, and
-// writes those whose last change is at least Records.Quiet old. Before a
-// write it reads the store record, and when its fingerprint moved since the
-// last agreed state, it ingests the record first, so the store edit stays.
+// writes those whose last change is at least Records.Quiet old, or whose
+// first unwritten change is at least Records.MaxDelay old. Before a write it
+// reads the store record, and when its fingerprint or its content changed
+// since the last agreed state, it ingests the record first, so the store edit
+// stays.
 // It also deletes the rows of records whose delete grace is over.
 func (c *Connector) Drain(ctx context.Context, workspaceID string) error {
 	if c.rec != nil {
