@@ -51,7 +51,8 @@ type Records struct {
 	// MaxDelay bounds how long a record waits for egress after its first
 	// engine change the store has not received, also while changes keep
 	// coming faster than Quiet. 0 means the default (10 × Quiet); negative
-	// means no bound.
+	// means no bound. It has no effect when Quiet is negative: records then
+	// do not wait.
 	MaxDelay time.Duration
 	// DeleteGrace is how long a record must be missing from the store before
 	// its rows are deleted. A store record that comes back in this time keeps
@@ -242,9 +243,11 @@ type RecordStore interface {
 
 // Codec maps the records of one record type to rows and back. Its methods run
 // inside a trusted write transaction, under the workspace write lock, so keep
-// them free of I/O. The transaction can be retried, so the methods must give
-// the same result for the same input and rows. A Codec is shared by all
-// workspaces and must be safe for concurrent use.
+// them free of I/O. The transaction can roll back and run again, also when
+// another record merged in it fails, so the methods must have no effect
+// outside tx. Render must give the same content for the same rows: the
+// connector writes each render whose content differs from the store's. A
+// Codec is shared by all workspaces and must be safe for concurrent use.
 //
 // An error from Merge or Render rolls back the transaction: no row and no
 // shadow of the record changes. The connector logs the error, lists the

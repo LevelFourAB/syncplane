@@ -49,8 +49,9 @@ import (
 // type; its Merge and Render methods return an error when called directly.
 // Decode and Encode run inside the merge transaction, under the workspace
 // write lock: keep them free of I/O. They can be called more than once for
-// one change, and concurrently for different records, so they must give the
-// same result for the same input and be safe for concurrent use.
+// one change, after the transaction rolls back, and at the same time for
+// different records, so they must have no effect outside the call and be safe
+// for concurrent use. Encode must give the same content for the same rows.
 type RowCodec struct {
 	// Decode returns the rows a record holds. It is required, except for an
 	// EgressOnly record type.

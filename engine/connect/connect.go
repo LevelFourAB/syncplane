@@ -36,7 +36,8 @@ type Config struct {
 	// It is called lazily on the workspace's first pass and the result is
 	// reused; when the returned Source implements io.Closer it is closed once
 	// the connector is done with it (Close, Forget, or a pass failing with
-	// ErrNeedsUserAction). Exactly one of Source and OpenSource is required.
+	// ErrNeedsUserAction). Exactly one of Source and OpenSource is required,
+	// except in record mode.
 	OpenSource func(ctx context.Context, workspaceID string) (Source, error)
 	// State is the connector's durable bookkeeping (e.g. sqlitestate.Open).
 	// The Connector owns it after New succeeds; Close closes it.
@@ -165,7 +166,8 @@ type binding struct {
 	ownedUnits []string
 }
 
-// Connector keeps the engine and one external source converged. Build one
+// Connector keeps the engine and one external store converged: a Source in
+// row mode, the record stores of Config.Records in record mode. Build one
 // with New, then drive it manually (Ingress, Reconcile, Drain, Flush) or via
 // Start. Its methods are safe for concurrent use; passes for one workspace
 // never overlap.
@@ -175,7 +177,7 @@ type binding struct {
 // not a loop per workspace. What runs at once is Config.Workers; what is
 // remembered is the workspaces Config.Workspaces names plus the ones Kick
 // announced, since everything durable about a workspace's progress lives in
-// State. Tracked reports that set.
+// State, or in the engine's store in record mode. Tracked reports that set.
 type Connector struct {
 	srv   *server.Server
 	srcs  *sourceCache
