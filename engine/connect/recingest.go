@@ -36,7 +36,6 @@ type ingestJob struct {
 
 	// Results of the merge, reset on each attempt of the transaction.
 	outKey string
-	prev   *recShadow
 	agreed *recShadow
 	back   *Rendered
 	wrote  bool
@@ -221,7 +220,7 @@ func (c *Connector) mergeBatch(ctx context.Context, ws string, batch []*ingestJo
 // the write-back does not lose those edits.
 func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 	rt := j.rt
-	j.outKey, j.prev, j.agreed, j.back, j.wrote = "", nil, nil, nil, false
+	j.outKey, j.agreed, j.back, j.wrote = "", nil, nil, false
 	key := j.key
 	sh, err := c.txRecShadow(tx, rt, key)
 	if err != nil {
@@ -307,7 +306,7 @@ func (c *Connector) mergeOne(tx *server.EntityTx, j *ingestJob) (int, error) {
 			return 0, err
 		}
 	}
-	j.outKey, j.prev, j.agreed, j.wrote = key, sh, next, tx.Seq() != 0
+	j.outKey, j.agreed, j.wrote = key, next, tx.Seq() != 0
 	return 1 + len(members), nil
 }
 
