@@ -2123,6 +2123,15 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				Expect(collectable(storage.GCCutoffs{Tombstones: future()}, "", 10)).To(BeEmpty())
 			})
 
+			It("leaves out a workspace whose only consumer is retained", func() {
+				// CollectIdleConsumers never removes it, so reporting it would
+				// visit the workspace on every pass.
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetConsumerPosition("mirror", storage.ConsumerPosition{Seq: 1, Retain: true})).To(Succeed())
+				})
+				Expect(collectable(storage.GCCutoffs{Tombstones: future()}, "", 10)).To(BeEmpty())
+			})
+
 			It("reports nothing for a store with no workspaces", func() {
 				Expect(collectable(all(), "", 10)).To(BeEmpty())
 			})
@@ -3008,6 +3017,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					Expect(pos.Key).To(Equal("k4"))
 					Expect(pos.UpdatedAt).To(BeTemporally("~", time.Now(), time.Minute),
 						"the adapter stamps its own clock on write")
+					Expect(pos.Retain).To(BeFalse(), "a consumer is not retained unless a write says so")
 				})
 			})
 
@@ -3396,6 +3406,82 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 						shadow, err = tx.ConsumerShadow("stranded", "widget", "k")
 						Expect(err).NotTo(HaveOccurred())
 						Expect(shadow).To(BeNil())
+					})
+				})
+
+				It("spares a retained consumer with its shadows", func() {
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.SetConsumerPosition("mirror", storage.ConsumerPosition{Seq: 1, Retain: true})).To(Succeed())
+						Expect(tx.PutConsumerShadow("mirror", "widget", "k", []byte("kept"))).To(Succeed())
+						Expect(tx.SetConsumerPosition("indexer", storage.ConsumerPosition{Seq: 1})).To(Succeed())
+						Expect(tx.PutConsumerShadow("indexer", "widget", "k", []byte("gone"))).To(Succeed())
+					})
+					write("ws1", func(tx storage.WriteTx) {
+						// Both are stale and stranded; only the one that is not
+						// retained goes.
+						removed, err := tx.CollectIdleConsumers(time.Now().Add(time.Hour), 5)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(removed).To(Equal(1))
+					})
+					read("ws1", func(tx storage.ReadTx) {
+						all, err := tx.ListConsumerPositions()
+						Expect(err).NotTo(HaveOccurred())
+						Expect(all).To(HaveLen(1))
+						Expect(all[0].Consumer).To(Equal("mirror"))
+						Expect(all[0].Retain).To(BeTrue())
+						shadow, err := tx.ConsumerShadow("mirror", "widget", "k")
+						Expect(err).NotTo(HaveOccurred())
+						Expect(shadow).To(Equal([]byte("kept")))
+						shadow, err = tx.ConsumerShadow("indexer", "widget", "k")
+						Expect(err).NotTo(HaveOccurred())
+						Expect(shadow).To(BeNil())
+					})
+				})
+
+				It("keeps the retain mark when a later write leaves it unset", func() {
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.SetConsumerPosition("mirror", storage.ConsumerPosition{Seq: 1, Retain: true})).To(Succeed())
+					})
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.SetConsumerPosition("mirror", storage.ConsumerPosition{Seq: 2})).To(Succeed())
+					})
+					read("ws1", func(tx storage.ReadTx) {
+						pos, found, err := tx.ConsumerPosition("mirror")
+						Expect(err).NotTo(HaveOccurred())
+						Expect(found).To(BeTrue())
+						Expect(pos.Seq).To(BeEquivalentTo(2))
+						Expect(pos.Retain).To(BeTrue(), "the mark is sticky")
+					})
+					write("ws1", func(tx storage.WriteTx) {
+						removed, err := tx.CollectIdleConsumers(time.Now().Add(time.Hour), 5)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(removed).To(BeZero())
+					})
+				})
+
+				It("removes the retain mark with the consumer on DeleteConsumer", func() {
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.SetConsumerPosition("mirror", storage.ConsumerPosition{Seq: 1, Retain: true})).To(Succeed())
+						Expect(tx.PutConsumerShadow("mirror", "widget", "k", []byte("a"))).To(Succeed())
+					})
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.DeleteConsumer("mirror")).To(Succeed())
+					})
+					read("ws1", func(tx storage.ReadTx) {
+						_, found, err := tx.ConsumerPosition("mirror")
+						Expect(err).NotTo(HaveOccurred())
+						Expect(found).To(BeFalse(), "a retained consumer is deleted like any other")
+						shadow, err := tx.ConsumerShadow("mirror", "widget", "k")
+						Expect(err).NotTo(HaveOccurred())
+						Expect(shadow).To(BeNil())
+					})
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.SetConsumerPosition("mirror", storage.ConsumerPosition{Seq: 1})).To(Succeed())
+					})
+					write("ws1", func(tx storage.WriteTx) {
+						removed, err := tx.CollectIdleConsumers(time.Now().Add(time.Hour), 5)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(removed).To(Equal(1), "the consumer written again holds no mark")
 					})
 				})
 

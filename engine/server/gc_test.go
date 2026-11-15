@@ -565,6 +565,61 @@ var _ = Describe("Garbage collection", func() {
 			Expect(snapshot).To(BeNil(), "its shadows go with it")
 		})
 
+		It("spares a retained consumer below the horizon, with its shadows", func() {
+			srv := newTestServer(server.WithGC(-time.Second, 0))
+			DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
+			start(srv)
+
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+			Expect(srv.AdvanceConsumer(ctx, ws, "mirror", server.ConsumerUpdate{
+				Cursor: server.Cursor{Seq: 0},
+				Retain: true,
+			})).To(Succeed())
+			// A later update without the mark keeps it.
+			Expect(srv.AdvanceConsumer(ctx, ws, "mirror", server.ConsumerUpdate{
+				Cursor:  server.Cursor{Seq: 1},
+				Shadows: []server.ConsumerShadowWrite{{Entity: "todo", Key: "t1", Snapshot: []byte("shadow")}},
+			})).To(Succeed())
+
+			push(deleteMutation("c1", 2, "todo", "t1"))
+			Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+
+			pos, found, err := srv.ConsumerPosition(ctx, ws, "mirror")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue(), "a retained consumer is not collected")
+			Expect(pos.Seq).To(BeEquivalentTo(1))
+			snapshot, err := srv.ConsumerShadow(ctx, ws, "mirror", "todo", "t1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(snapshot).To(Equal([]byte("shadow")))
+			positions, err := srv.ConsumerPositions(ctx, ws)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(positions).To(HaveLen(1))
+			Expect(positions[0].Retain).To(BeTrue())
+		})
+
+		It("collects a consumer that was retained before ResetConsumer", func() {
+			srv := newTestServer(server.WithGC(-time.Second, 0))
+			DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
+			start(srv)
+
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+			Expect(srv.AdvanceConsumer(ctx, ws, "mirror", server.ConsumerUpdate{
+				Cursor: server.Cursor{Seq: 1},
+				Retain: true,
+			})).To(Succeed())
+			Expect(srv.ResetConsumer(ctx, ws, "mirror")).To(Succeed())
+			Expect(srv.AdvanceConsumer(ctx, ws, "mirror", server.ConsumerUpdate{
+				Cursor: server.Cursor{Seq: 1},
+			})).To(Succeed())
+
+			push(deleteMutation("c1", 2, "todo", "t1"))
+			Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+
+			_, found, err := srv.ConsumerPosition(ctx, ws, "mirror")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeFalse(), "ResetConsumer removes the mark with the consumer")
+		})
+
 		It("spares a consumer that has kept up", func() {
 			srv := newTestServer(server.WithGC(-time.Second, 0))
 			DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })

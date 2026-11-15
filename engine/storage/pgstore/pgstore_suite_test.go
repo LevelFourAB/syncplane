@@ -252,7 +252,7 @@ var _ = Describe("Postgres migrations", func() {
 		}
 		rows.Close()
 		Expect(rows.Err()).NotTo(HaveOccurred())
-		Expect(applied).To(Equal([]int{1, 2, 3, 4, 5}), "every migration, each recorded exactly once")
+		Expect(applied).To(Equal([]int{1, 2, 3, 4, 5, 6}), "every migration, each recorded exactly once")
 	})
 
 	It("upgrades a baseline database to record sequence lineage", func() {
@@ -341,6 +341,25 @@ var _ = Describe("Postgres migrations", func() {
 		Entry("unpartitioned"),
 		Entry("partitioned", pgstore.WithPartitions(4)),
 	)
+
+	It("upgrades consumer positions to hold a retain mark, keeping them", func() {
+		dsn := pgtest.DSN()
+		migrateThrough(dsn, 5, `
+			INSERT INTO workspaces (workspace_id, last_seq) VALUES ('ws1', 9);
+			INSERT INTO consumer_positions (workspace_id, consumer, seq, updated_at) VALUES ('ws1', 'mail', 3, 1);`)
+
+		store, err := pgstore.Open(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+			pos, found, err := tx.ConsumerPosition("mail")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(pos.Seq).To(BeEquivalentTo(3))
+			Expect(pos.Retain).To(BeFalse(), "a consumer from before the upgrade is not retained")
+			return nil
+		})).To(Succeed())
+	})
 
 	DescribeTable("refuses a database that an earlier baseline created",
 		// Such a database is at this binary's ledger version but has no

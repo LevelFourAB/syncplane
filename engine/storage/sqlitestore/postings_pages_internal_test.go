@@ -1779,9 +1779,10 @@ var _ = Describe("posting pages in the store", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 		}
-		// The delta log and the shadows also go back to the shape of version
-		// 9, which migration 11 reads.
+		// The delta log, the shadows and the consumer positions also go back
+		// to the shape of version 9, which migration 11 reads.
 		_, err = db.Exec(`DROP TABLE posting_pages;
+			ALTER TABLE consumer_positions DROP COLUMN retain;
 			DROP TABLE field_deltas;
 			DROP TABLE field_ids;
 			DROP TABLE field_scopes;

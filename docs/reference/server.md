@@ -554,6 +554,8 @@ func (s *Server) PendingWorkspaces(ctx, consumer string) iter.Seq2[string, error
 
 Set `ConsumerUpdate.From` to the position that `ConsumerPosition` returned before the page was handled. `AdvanceConsumer` then returns `ErrConsumerMoved` and records nothing when the stored position is not `From` any more, because another pass committed in the meantime. A consumer with no position matches the zero cursor. When `From` is nil, there is no check.
 
+Set `ConsumerUpdate.Retain` to mark the consumer as retained. Garbage collection never removes a retained consumer, also when its position stays below the tombstone horizon. The mark is sticky: a later update with `Retain` false keeps it. `ConsumerPositions` reports it as `storage.ConsumerPosition.Retain`. Use it for a consumer whose shadows stay valid below the horizon and that heals by itself when `Changes` returns `ErrCursorTooOld`, such as a connector in record mode.
+
 `ScanConsumerShadows` calls `fn` for every shadow of one consumer and one entity name, in bytewise key order, in one read transaction. `fn` sees one snapshot and must not start a write.
 
 `EntityTx` has the same shadow operations inside a write transaction:
@@ -574,7 +576,7 @@ Every method that takes a consumer name refuses one that starts with `ReservedCo
 
 Workspaces whose id starts with `ReservedWorkspacePrefix` (`#syncplane.`) hold only engine state, such as a replication link's list of linked workspaces. `WorkspaceIDs`, `ConsumerPendingWorkspaces` and `PendingWorkspaces` leave them out, and the wire API refuses their ids, as it refuses every id that is not a valid workspace id.
 
-`ResetConsumer` removes stored positions and shadow states for a consumer. Consumers below the tombstone horizon are pruned by garbage collection. See [the effects runtime](../how-to/react-to-changes.md).
+`ResetConsumer` removes the stored position, the retain mark and the shadow states of a consumer. Garbage collection removes consumers that are idle and below the tombstone horizon, unless they are retained. See [the effects runtime](../how-to/react-to-changes.md).
 
 ## Permissions and identity
 

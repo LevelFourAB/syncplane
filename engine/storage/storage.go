@@ -350,6 +350,14 @@ type ConsumerPosition struct {
 	// it holds — the adapter stamps its own clock, which is what
 	// CollectIdleConsumers measures its cutoff against — and reads populate it.
 	UpdatedAt time.Time
+	// Retain marks a consumer that CollectIdleConsumers never removes. The mark
+	// is sticky: a write with Retain set marks the consumer, and a later write
+	// without it keeps the mark. Only DeleteConsumer removes the mark, together
+	// with the consumer. Reads populate it.
+	//
+	// It is for a consumer whose shadows stay valid below the tombstone
+	// horizon and that heals a cursor that is too old by itself.
+	Retain bool
 }
 
 // Range bounds a scan of workspace ids. Both ends are EXCLUSIVE and compared
@@ -572,8 +580,8 @@ type TextCompactMark struct {
 // this is the same set of thresholds asked across workspaces instead.
 type GCCutoffs struct {
 	// Tombstones bounds deleted rows, idle clients' recorded verdicts, idle
-	// effect consumers and sequence lineage records (PruneSeqLineage), which
-	// share one retention.
+	// effect consumers that are not retained and sequence lineage records
+	// (PruneSeqLineage), which share one retention.
 	Tombstones time.Time
 	// Clients bounds idle clients' watermark records as a whole
 	// (CollectIdleClients). Zero on a pass that keeps every watermark, which is
@@ -1138,7 +1146,9 @@ type WriteTx interface {
 	// SetConsumerPosition records a consumer's feed position, stamping the
 	// adapter's own clock over p.UpdatedAt. An unconditional upsert, so a
 	// retried write closure lands the same position rather than failing on the
-	// one its own earlier attempt wrote.
+	// one its own earlier attempt wrote. p.Retain set marks the consumer as
+	// retained; p.Retain unset keeps the mark the consumer holds (see
+	// ConsumerPosition.Retain).
 	SetConsumerPosition(consumer string, p ConsumerPosition) error
 	// PutConsumerShadow records a consumer's snapshot of one row (see
 	// ReadTx.ConsumerShadow), replacing any previous one.
@@ -1154,8 +1164,8 @@ type WriteTx interface {
 	// DeleteConsumerShadow drops one row's shadow for one consumer. Deleting a
 	// shadow that does not exist is not an error.
 	DeleteConsumerShadow(consumer, entity, key string) error
-	// DeleteConsumer removes a consumer's position and every shadow it holds in
-	// this workspace, so its next pass is a first run. This is how a consumer
+	// DeleteConsumer removes a consumer's position, its retain mark and every
+	// shadow it holds in this workspace, so its next pass is a first run. This is how a consumer
 	// resets after falling below the tombstone horizon: the changes its shadows
 	// describe are gone, so the shadows describe a past nothing can line up
 	// against.
@@ -1163,7 +1173,8 @@ type WriteTx interface {
 	// CollectIdleConsumers deletes consumers that are BOTH stale (position last
 	// written before cutoff) and stranded (position strictly below belowSeq,
 	// which the engine passes as the tombstone horizon), together with their
-	// shadows, and returns how many were removed.
+	// shadows, and returns how many were removed. A retained consumer (see
+	// ConsumerPosition.Retain) is never removed, however stale and stranded.
 	//
 	// Both conditions are load-bearing. Staleness alone would collect a live
 	// consumer that is merely caught up — a consumer with nothing to do writes
@@ -1177,7 +1188,8 @@ type WriteTx interface {
 	// The consequence is that a workspace which has never collected a tombstone
 	// keeps a retired consumer's row indefinitely (horizon 0, nothing below it).
 	// That is a bounded leak — one row per consumer name ever used — and the
-	// cure is to delete the consumer explicitly rather than to widen this.
+	// cure is to delete the consumer explicitly rather than to widen this. A
+	// retired retained consumer is kept the same way in every workspace.
 	CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (removed int, err error)
 	// PutFieldDelta records one entry of a text field's delta log at seq: the
 	// fragment carrying the state written at seq beyond the state before it. An

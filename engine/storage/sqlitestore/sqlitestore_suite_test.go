@@ -60,7 +60,7 @@ var _ = Describe("SQLite schema versioning", func() {
 	const baselineVersion = 1
 	// The version a database this binary creates or upgrades ends at: the
 	// baseline plus every migration since. Bump it with each migration added.
-	const latestVersion = 11
+	const latestVersion = 12
 
 	// oldSideTables puts the delta log and the consumer shadows back in the
 	// shape every version before 11 has, empty, which every rewind below
@@ -90,6 +90,11 @@ var _ = Describe("SQLite schema versioning", func() {
 			snapshot     BLOB NOT NULL,
 			PRIMARY KEY (workspace_id, consumer, entity, key)
 		);`
+
+	// noRetain takes consumer_positions back to its shape before migration
+	// 12, which every rewind below needs.
+	const noRetain = `
+		ALTER TABLE consumer_positions DROP COLUMN retain;`
 
 	// noPostings drops the posting tables of migrations 9 and 10, which every
 	// rewind below needs.
@@ -190,7 +195,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// lineage table existed.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldSideTables + noPostings + noApplied + oldIndexTables + fmt.Sprintf("\nDROP TABLE seq_lineage;\nDROP TABLE deleted_workspaces;\nPRAGMA user_version = %d;", baselineVersion))
+		_, err = db.Exec(noRetain + oldSideTables + noPostings + noApplied + oldIndexTables + fmt.Sprintf("\nDROP TABLE seq_lineage;\nDROP TABLE deleted_workspaces;\nPRAGMA user_version = %d;", baselineVersion))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db.Close()).To(Succeed())
 
@@ -222,7 +227,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// a workspace whose build mark says it is up to date.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldSideTables + noPostings + noApplied + oldIndexTables + `
+		_, err = db.Exec(noRetain + oldSideTables + noPostings + noApplied + oldIndexTables + `
 			INSERT INTO index_entries VALUES ('ws1', 'widget', 'by_label', x'01', 'k1');
 			INSERT INTO index_state (workspace_id, entity, idx, spec_hash, ready)
 				VALUES ('ws1', 'widget', 'by_label', 'h1', 1);
@@ -285,7 +290,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// a ready index and a workspace whose build mark says it is up to date.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldSideTables + noPostings + noApplied + `
+		_, err = db.Exec(noRetain + oldSideTables + noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -368,7 +373,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		var scope int
 		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
 		Expect(scope).To(Equal(1))
-		_, err = db.Exec(oldSideTables + noPostings + noApplied + `
+		_, err = db.Exec(noRetain + oldSideTables + noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -455,7 +460,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		var scope int
 		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
 		Expect(scope).To(Equal(1))
-		_, err = db.Exec(oldSideTables + noPostings + noApplied + `
+		_, err = db.Exec(noRetain + oldSideTables + noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -555,7 +560,7 @@ var _ = Describe("SQLite schema versioning", func() {
 
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldSideTables + noPostings + `
+		_, err = db.Exec(noRetain + oldSideTables + noPostings + `
 			PRAGMA user_version = 8;`)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db.Close()).To(Succeed())
@@ -606,7 +611,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// two consumers.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldSideTables + `
+		_, err = db.Exec(noRetain + oldSideTables + `
 			INSERT INTO field_deltas VALUES
 				('ws1', 'widget', 'k1', 'body', 2, x'0a', 1),
 				('ws1', 'widget', 'k1', 'body', 3, x'0b', 1),
@@ -663,6 +668,36 @@ var _ = Describe("SQLite schema versioning", func() {
 			Expect(complete).To(BeTrue())
 			Expect(frags).To(Equal([][]byte{{0x0d}}))
 			Expect(tx.ConsumerShadow("mailer", "widget", "k2")).To(Equal([]byte{0x04}))
+			return nil
+		})).To(Succeed())
+	})
+
+	It("upgrades version-11 consumer positions and keeps them, not retained", func() {
+		ctx := context.Background()
+		path := filepath.Join(GinkgoT().TempDir(), "v11.db")
+		store, err := sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.Close()).To(Succeed())
+
+		db, err := sql.Open("sqlite", path)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = db.Exec(noRetain + `
+			INSERT INTO workspaces (workspace_id) VALUES ('ws1');
+			INSERT INTO consumer_positions (workspace_id, consumer, seq, updated_at)
+				VALUES ('ws1', 'mailer', 3, 1);
+			PRAGMA user_version = 11;`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(db.Close()).To(Succeed())
+
+		store, err = sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+			pos, found, err := tx.ConsumerPosition("mailer")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(found).To(BeTrue())
+			Expect(pos.Seq).To(BeEquivalentTo(3))
+			Expect(pos.Retain).To(BeFalse())
 			return nil
 		})).To(Succeed())
 	})

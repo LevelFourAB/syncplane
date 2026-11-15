@@ -647,6 +647,10 @@ INSERT INTO consumer_shadows (scope, entity, key, snapshot)
 	  FROM consumer_shadows_old o
 	  JOIN consumer_scopes c ON c.workspace_id = o.workspace_id AND c.consumer = o.consumer;
 DROP TABLE consumer_shadows_old;`,
+	// 12: the retain mark of an effect consumer (see
+	// storage.ConsumerPosition.Retain). 0 for every consumer stored before
+	// the upgrade, which is what each of them was.
+	`ALTER TABLE consumer_positions ADD COLUMN retain INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // workspaceTables names every table that holds state of one workspace, keyed
@@ -1476,7 +1480,7 @@ func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []a
 		at := cutoffs.Tombstones.UnixMilli()
 		exists(scoped("rows") + " AND t.deleted = 1 AND t.updated_at < " + next(at))
 		exists(scoped("clients") + " AND t.updated_at < " + next(at) + " AND t.rejections IS NOT NULL")
-		exists(scoped("consumer_positions") + " AND t.updated_at < " + next(at))
+		exists(scoped("consumer_positions") + " AND t.retain = 0 AND t.updated_at < " + next(at))
 		// The newest record is never pruned, so only an old one below it counts.
 		exists(scoped("seq_lineage") + " AND t.written_at < " + next(at) +
 			" AND EXISTS (SELECT 1 FROM seq_lineage n WHERE n.workspace_id = t.workspace_id AND n.start_seq > t.start_seq)")
@@ -2151,10 +2155,10 @@ func (t *sqliteTx) ConsumerPosition(consumer string) (storage.ConsumerPosition, 
 	pos := storage.ConsumerPosition{Consumer: consumer}
 	var updated int64
 	err := t.queryRow(
-		`SELECT seq, entity, key, updated_at FROM consumer_positions
+		`SELECT seq, entity, key, updated_at, retain FROM consumer_positions
 		 WHERE workspace_id = ? AND consumer = ?`,
 		t.ws, consumer,
-	).Scan(&pos.Seq, &pos.Entity, &pos.Key, &updated)
+	).Scan(&pos.Seq, &pos.Entity, &pos.Key, &updated, &pos.Retain)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storage.ConsumerPosition{}, false, nil
 	}
@@ -2167,7 +2171,7 @@ func (t *sqliteTx) ConsumerPosition(consumer string) (storage.ConsumerPosition, 
 
 func (t *sqliteTx) ListConsumerPositions() ([]storage.ConsumerPosition, error) {
 	rows, err := t.query(
-		`SELECT consumer, seq, entity, key, updated_at FROM consumer_positions
+		`SELECT consumer, seq, entity, key, updated_at, retain FROM consumer_positions
 		 WHERE workspace_id = ? ORDER BY consumer`,
 		t.ws,
 	)
@@ -2181,7 +2185,7 @@ func (t *sqliteTx) ListConsumerPositions() ([]storage.ConsumerPosition, error) {
 			pos     storage.ConsumerPosition
 			updated int64
 		)
-		if err := rows.Scan(&pos.Consumer, &pos.Seq, &pos.Entity, &pos.Key, &updated); err != nil {
+		if err := rows.Scan(&pos.Consumer, &pos.Seq, &pos.Entity, &pos.Key, &updated, &pos.Retain); err != nil {
 			return nil, err
 		}
 		pos.UpdatedAt = time.UnixMilli(updated)
@@ -2195,12 +2199,13 @@ func (t *sqliteTx) SetConsumerPosition(consumer string, p storage.ConsumerPositi
 		return err
 	}
 	_, err := t.exec(
-		`INSERT INTO consumer_positions (workspace_id, consumer, seq, entity, key, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
+		`INSERT INTO consumer_positions (workspace_id, consumer, seq, entity, key, updated_at, retain)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (workspace_id, consumer)
 		 DO UPDATE SET seq = excluded.seq, entity = excluded.entity,
-		               key = excluded.key, updated_at = excluded.updated_at`,
-		t.ws, consumer, p.Seq, p.Entity, p.Key, time.Now().UnixMilli(),
+		               key = excluded.key, updated_at = excluded.updated_at,
+		               retain = MAX(retain, excluded.retain)`,
+		t.ws, consumer, p.Seq, p.Entity, p.Key, time.Now().UnixMilli(), p.Retain,
 	)
 	return err
 }
@@ -2322,7 +2327,7 @@ func (t *sqliteTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int,
 	// still exist: the reverse order would leave every collected consumer's
 	// shadows behind with nothing left to identify them by.
 	idle := `SELECT consumer FROM consumer_positions
-		     WHERE workspace_id = ? AND updated_at < ? AND seq < ?`
+		     WHERE workspace_id = ? AND updated_at < ? AND seq < ? AND retain = 0`
 	if _, err := t.exec(
 		`DELETE FROM consumer_shadows
 		 WHERE scope IN (
@@ -2342,7 +2347,7 @@ func (t *sqliteTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int,
 	}
 	res, err := t.exec(
 		`DELETE FROM consumer_positions
-		 WHERE workspace_id = ? AND updated_at < ? AND seq < ?`,
+		 WHERE workspace_id = ? AND updated_at < ? AND seq < ? AND retain = 0`,
 		t.ws, cutoff.UnixMilli(), belowSeq,
 	)
 	if err != nil {

@@ -38,7 +38,20 @@ var migrations = []migration{
 	{additive: true, sql: fixed(deletedWorkspacesDDL)},
 	{additive: true, sql: fixed(clientsAppliedDDL)},
 	{additive: false, sql: internedNamesSchema},
+	{additive: true, sql: fixed(consumerRetainDDL)},
 }
+
+// consumerRetainDDL is migration 6: the retain mark of an effect consumer
+// (see storage.ConsumerPosition.Retain). false for every consumer stored
+// before the upgrade, which is what each of them was. consumer_positions is
+// not partitioned in any layout, so the step does not depend on the layout.
+//
+// Additive: an older binary never names the column, so its upserts keep the
+// mark. Its garbage collection does not read the mark, though, and can remove
+// a retained consumer that is stale and stranded while it runs.
+const consumerRetainDDL = `
+ALTER TABLE consumer_positions ADD COLUMN retain BOOLEAN NOT NULL DEFAULT false;
+`
 
 // internedNamesDDL is migration 5: field_deltas and consumer_shadows keyed by
 // int ids in place of the workspace id, the entity, the field and the

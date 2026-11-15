@@ -62,6 +62,17 @@ type ConsumerUpdate struct {
 	// From. Only Seq, Entity and Key are compared, and a consumer with no
 	// position matches the zero cursor. Nil skips the check.
 	From *Cursor
+	// Retain marks the consumer as retained: garbage collection (see
+	// WithGC) never removes it, also when its position stays below the
+	// tombstone horizon. The mark is sticky: an update with Retain false
+	// keeps it. ResetConsumer removes it, together with the position and the
+	// shadows.
+	//
+	// Set it for a consumer whose shadows stay valid below the horizon and
+	// that heals by itself when Changes returns ErrCursorTooOld. A retained
+	// consumer that is no longer used stays in each workspace until
+	// ResetConsumer removes it.
+	Retain bool
 }
 
 // ErrConsumerMoved is returned by AdvanceConsumer when ConsumerUpdate.From is
@@ -273,6 +284,7 @@ func (s *Server) AdvanceConsumer(ctx context.Context, workspaceID, consumer stri
 			Seq:    up.Cursor.Seq,
 			Entity: up.Cursor.Entity,
 			Key:    up.Cursor.Key,
+			Retain: up.Retain,
 		})
 	})
 }
@@ -344,8 +356,9 @@ func (s *Server) ScanConsumerShadows(ctx context.Context, workspaceID, consumer,
 	})
 }
 
-// ResetConsumer drops a consumer's position and every shadow it holds in the
-// workspace, so its next pass is a first run.
+// ResetConsumer drops a consumer's position, its retain mark (see
+// ConsumerUpdate.Retain) and every shadow it holds in the workspace, so its
+// next pass is a first run.
 //
 // This is what a consumer does after falling below the tombstone horizon: the
 // changes its shadows describe have been collected, so the shadows record a

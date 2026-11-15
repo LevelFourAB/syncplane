@@ -65,8 +65,9 @@ const defaultIdempotencyRetention = 24 * time.Hour
 // verdict). The same pass also carries the text delta log and the
 // trusted-write idempotency ledger, each on its own retention
 // (WithTextDeltaRetention, WithIdempotencyRetention), and effect consumers
-// stranded below the horizon the pass just set — a consumer still keeping up
-// is never below it, however long it idles. The same pass also expires
+// stranded below the horizon the pass just set, unless they are retained
+// (ConsumerUpdate.Retain) — a consumer still keeping up is never below it,
+// however long it idles. The same pass also expires
 // field-history records (WithHistoryRetention), which it hard-deletes rather
 // than tombstones because nothing syncs them. On the tombstone retention it
 // also deletes the sequence lineage records that let a pull detect a store
@@ -415,6 +416,7 @@ func (s *Server) collectRows(ctx context.Context, workspaceID string) error {
 		// established: one below it has already missed collected tombstones and
 		// resets on its owner's next pass either way. A caught-up consumer sits
 		// at the current sequence and is never below it, however long it idles.
+		// A retained consumer heals by itself, and the adapter keeps it.
 		if consumersRemoved, err = tx.CollectIdleConsumers(cutoff, horizon); err != nil {
 			return err
 		}

@@ -753,10 +753,10 @@ func (t *pgTx) ConsumerPosition(consumer string) (storage.ConsumerPosition, bool
 		updated int64
 	)
 	err := t.queryRow(
-		`SELECT seq, entity, key, updated_at FROM consumer_positions
+		`SELECT seq, entity, key, updated_at, retain FROM consumer_positions
 		 WHERE workspace_id = $1 AND consumer = $2`,
 		t.ws, consumer,
-	).Scan(&seq, &pos.Entity, &pos.Key, &updated)
+	).Scan(&seq, &pos.Entity, &pos.Key, &updated, &pos.Retain)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return storage.ConsumerPosition{}, false, nil
 	}
@@ -770,7 +770,7 @@ func (t *pgTx) ConsumerPosition(consumer string) (storage.ConsumerPosition, bool
 
 func (t *pgTx) ListConsumerPositions() ([]storage.ConsumerPosition, error) {
 	rows, err := t.query(
-		`SELECT consumer, seq, entity, key, updated_at FROM consumer_positions
+		`SELECT consumer, seq, entity, key, updated_at, retain FROM consumer_positions
 		 WHERE workspace_id = $1 ORDER BY consumer`,
 		t.ws,
 	)
@@ -785,7 +785,7 @@ func (t *pgTx) ListConsumerPositions() ([]storage.ConsumerPosition, error) {
 			seq     int64
 			updated int64
 		)
-		if err := rows.Scan(&pos.Consumer, &seq, &pos.Entity, &pos.Key, &updated); err != nil {
+		if err := rows.Scan(&pos.Consumer, &seq, &pos.Entity, &pos.Key, &updated, &pos.Retain); err != nil {
 			return nil, err
 		}
 		pos.Seq = uint64(seq)
@@ -800,12 +800,13 @@ func (t *pgTx) SetConsumerPosition(consumer string, p storage.ConsumerPosition) 
 		return err
 	}
 	return t.queue(
-		`INSERT INTO consumer_positions (workspace_id, consumer, seq, entity, key, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO consumer_positions (workspace_id, consumer, seq, entity, key, updated_at, retain)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 ON CONFLICT (workspace_id, consumer)
 		 DO UPDATE SET seq = excluded.seq, entity = excluded.entity,
-		               key = excluded.key, updated_at = excluded.updated_at`,
-		t.ws, consumer, int64(p.Seq), p.Entity, p.Key, time.Now().UnixMilli(),
+		               key = excluded.key, updated_at = excluded.updated_at,
+		               retain = consumer_positions.retain OR excluded.retain`,
+		t.ws, consumer, int64(p.Seq), p.Entity, p.Key, time.Now().UnixMilli(), p.Retain,
 	)
 }
 
@@ -945,13 +946,13 @@ func (t *pgTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int, err
 	// identify it by, and a pass that finds nothing idle costs one probe. A
 	// workspace without a number holds no shadow.
 	sql := `DELETE FROM consumer_positions
-		 WHERE workspace_id = $1 AND updated_at < $2 AND seq < $3
+		 WHERE workspace_id = $1 AND updated_at < $2 AND seq < $3 AND NOT retain
 		 RETURNING consumer`
 	args := []any{t.ws, cutoff.UnixMilli(), int64(belowSeq)}
 	if hasWS {
 		sql = `WITH idle AS (
 		     DELETE FROM consumer_positions
-		     WHERE workspace_id = $1 AND updated_at < $2 AND seq < $3
+		     WHERE workspace_id = $1 AND updated_at < $2 AND seq < $3 AND NOT retain
 		     RETURNING consumer
 		 ), sets AS (
 		     DELETE FROM shadow_sets

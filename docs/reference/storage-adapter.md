@@ -54,6 +54,7 @@
   Postings are derived and disposable, like index entries. `DeleteWorkspace` removes them.
 - **`ScanEntityByVersionDesc`.** Yields live rows for an entity ordered by version descending, breaking ties by row key ascending.
 - **`ScanConsumerShadows`.** Yields the shadows of one consumer for one entity name with a key after `afterKey`, in bytewise key order, at most `limit` of them (`<= 0` is unlimited). The entity name is the one the consumer gave `PutConsumerShadow`; it need not be a registered entity. A write transaction yields its own puts and deletes. The callback can read from the transaction, as with the other scans. Serve the range and the order from an index on `(workspace, consumer, entity, key)`.
+- **Retained consumers.** `ConsumerPosition.Retain` marks a consumer that `CollectIdleConsumers` never removes, however stale and stranded. Store the mark with the position. `SetConsumerPosition` with `Retain` set marks the consumer, and a write with `Retain` unset keeps the mark: make the upsert an OR of the stored and the new value. Only `DeleteConsumer` removes the mark, together with the consumer. `ConsumerPosition` and `ListConsumerPositions` return it. `ListCollectableWorkspaceIDs` does not report a workspace for a retained consumer.
 - **`SetIndexBuildMark`.** Updates the workspace with an opaque string mark representing the index declaration fingerprint. The operation updates existing workspace records and must not insert a record if the workspace does not exist.
 - **Workspace deletion.** `DeleteWorkspace(ctx, id)` removes every piece of state the workspace holds, in every table keyed by workspace ID, and records a deletion mark, in one transaction under the workspace's write lock. Afterwards `ListWorkspaceIDs` and the work queries omit the workspace, reads see a workspace that was never written (sequence `0`, epoch `0`, no rows), and `WorkspaceDeleted` reports `true`. A write transaction whose writes would register the workspace fails with `storage.ErrWorkspaceDeleted` and commits nothing. Check the mark under the workspace lock: a check before the lock lets a write that races the deletion bring the workspace back. Deleting an unwritten workspace still records the mark. Deleting a deleted workspace changes nothing.
 
@@ -222,6 +223,8 @@ The package provides the following migration functions:
 #### Schema upgrades in `pgstore`
 
 Migration 5 is not additive. It keys `field_deltas` and `consumer_shadows` by integer ids in place of the workspace id, entity, field, and consumer names, which makes each table approximately 0.6 times its earlier size. The migration copies the stored entries to the new tables and keeps all of them. While it copies, it holds an exclusive lock on both tables. A binary at schema version 4 or lower cannot open a database at version 5, so stop all older nodes before you apply it.
+
+Migration 6 is additive. It adds the `retain` column to `consumer_positions`, with `false` for every stored consumer. A binary at schema version 5 can serve a database at version 6, but its garbage collection does not read the mark: while such a node runs, it can remove a retained consumer that is stale and below the tombstone horizon. Upgrade every node before you rely on retained consumers.
 
 #### Connection budget
 
