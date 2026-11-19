@@ -51,9 +51,12 @@
 // often query-planner statistics are refreshed; see maintain). The rest is
 // fixed: synchronous is NORMAL, the WAL default, which trades the last commits
 // before a power loss or kernel panic — not a process crash — for not paying an
-// fsync per transaction. Each connection also holds a prepared statement per distinct SQL
-// text the store has run on it — a bounded set, but one that counts against the
-// same per-connection budget as the page cache.
+// fsync per transaction. Checkpoints run in the background on a connection of
+// their own (see checkpointLoop), so a commit does not wait for the WAL to be
+// copied into the database file and for the fsyncs that come with it. Each
+// connection also holds a prepared statement per distinct SQL text the store
+// has run on it — a bounded set, but one that counts against the same
+// per-connection budget as the page cache.
 package sqlitestore
 
 import (
@@ -809,11 +812,16 @@ type Store struct {
 	// it to read in that interval.
 	afterPostingCommit func()
 
-	// The maintenance loop: stop asks it to return and done reports that it
-	// has. Both are nil when
-	// WithOptimizeInterval disabled the loop.
+	// ckpt is the connection checkpointLoop runs on, and walWritten tells
+	// the loop that a write transaction has committed. Both are nil for an
+	// in-memory database, which has no WAL.
+	ckpt       *sql.DB
+	walWritten chan struct{}
+
+	// The background loops (maintain and checkpointLoop): stop asks them to
+	// return and loops reports that they have. stop is nil when no loop runs.
 	stop     chan struct{}
-	done     chan struct{}
+	loops    sync.WaitGroup
 	stopOnce sync.Once
 }
 
@@ -827,6 +835,12 @@ type config struct {
 	readConns        int
 	walSizeLimit     int64
 	optimizeInterval time.Duration
+	// The checkpoint settings have no Option. Tests set them to make the WAL
+	// limits small enough to reach.
+	checkpointDelay     time.Duration
+	rewindPages         int
+	autocheckpointPages int
+	truncateDelay       time.Duration
 }
 
 const (
@@ -862,6 +876,32 @@ const (
 	// for a long-lived connection, and hourly is the safer end for a store
 	// whose indexes are created at runtime rather than at schema time.
 	defaultOptimizeInterval = time.Hour
+	// defaultCheckpointDelay is the shortest time between two passes of
+	// checkpointLoop. Each pass that copies frames does an fsync of the WAL
+	// and of the database file, so a pass after each small commit would do
+	// the fsyncs again for a small number of pages.
+	defaultCheckpointDelay = 10 * time.Millisecond
+	// defaultRewindPages is the WAL size, in frames, at which checkpointLoop
+	// runs a pass on the writer connection so that the next write can rewind
+	// the WAL (see checkpointLoop). SQLite's own wal_autocheckpoint default
+	// is 1000 pages. A larger value gives fewer passes that hold the write
+	// path, and each one copies only the frames that the background passes
+	// did not copy. 5000 pages is about 20 MiB of WAL at 4 KiB pages. In the
+	// corpus benchmark (corpus_internal_test.go), 5000 pages made the write
+	// phases faster than 2500 pages did.
+	defaultRewindPages = 5000
+	// defaultAutocheckpointPages is the WAL size, in pages, at which the
+	// writer checkpoints at the end of its own commit (wal_autocheckpoint).
+	// It is a backstop for when checkpointLoop does not keep up, so it is
+	// four times defaultRewindPages: about 80 MiB of WAL at 4 KiB pages.
+	defaultAutocheckpointPages = 4 * defaultRewindPages
+	// defaultTruncateDelay is how long checkpointLoop waits after its last
+	// pass with no new commit before it truncates the -wal file to zero
+	// bytes. A burst of writes leaves the file at up to about 30 MiB, and
+	// journal_size_limit does not make it smaller than defaultWALSizeLimit.
+	// One second is long compared with the time between the commits of a
+	// burst, so a truncate almost never runs while writes continue.
+	defaultTruncateDelay = time.Second
 	// readIdleTimeout retires reader connections that have gone quiet, so an
 	// idle process eventually gives back the page cache a read burst grew.
 	readIdleTimeout = 5 * time.Minute
@@ -884,6 +924,11 @@ func defaultConfig() config {
 		readConns:        max(4, min(runtime.GOMAXPROCS(0), 8)),
 		walSizeLimit:     defaultWALSizeLimit,
 		optimizeInterval: defaultOptimizeInterval,
+
+		checkpointDelay:     defaultCheckpointDelay,
+		rewindPages:         defaultRewindPages,
+		autocheckpointPages: defaultAutocheckpointPages,
+		truncateDelay:       defaultTruncateDelay,
 	}
 }
 
@@ -934,8 +979,15 @@ func WithReadConnections(n int) Option {
 	return func(c *config) { c.readConns = n }
 }
 
-// WithWALSizeLimit caps the -wal sidecar in bytes. Zero lets it grow to its
-// high-water mark and stay there, which is SQLite's default.
+// WithWALSizeLimit caps, in bytes, the size the -wal sidecar keeps when the
+// writer rewinds it to its start after a checkpoint. Between rewinds the
+// sidecar grows with the writes: to about 30 MiB while writes do not stop,
+// to about 80 MiB when the background checkpoints fall behind, and without a
+// limit while a read transaction holds a snapshot that no checkpoint can
+// pass. Zero lets it grow to its high-water mark and stay there, which is
+// SQLite's default. This limit applies while writes continue: about one
+// second after the last commit, the store truncates the sidecar to zero bytes
+// unless a read transaction still uses it.
 func WithWALSizeLimit(bytes int64) Option {
 	return func(c *config) { c.walSizeLimit = bytes }
 }
@@ -975,7 +1027,8 @@ func Open(path string, opts ...Option) (*Store, error) {
 		"_txlock=immediate",
 		"_pragma=journal_mode(WAL)",
 		"_pragma=synchronous(NORMAL)",
-		"_pragma=analysis_limit(400)")
+		"_pragma=analysis_limit(400)",
+		fmt.Sprintf("_pragma=wal_autocheckpoint(%d)", cfg.autocheckpointPages))
 	if cfg.walSizeLimit > 0 {
 		writeParams = append(writeParams,
 			fmt.Sprintf("_pragma=journal_size_limit(%d)", cfg.walSizeLimit))
@@ -1017,6 +1070,23 @@ func Open(path string, opts ...Option) (*Store, error) {
 		}
 		read.SetConnMaxIdleTime(readIdleTimeout)
 	}
+	// The checkpoint connection is not in the reader pool, so a checkpoint
+	// never waits for a reader connection and never holds one. query_only
+	// does not stop a checkpoint, and it keeps the connection from writing
+	// rows. busy_timeout(0) makes the TRUNCATE checkpoint give up at once
+	// when the writer or a reader is busy, instead of waiting while it holds
+	// the WAL write lock.
+	var ckpt *sql.DB
+	if !isMemory(path) {
+		ckpt, err = sql.Open("sqlite", dsn(path, "_pragma=query_only(true)", "_pragma=busy_timeout(0)"))
+		if err != nil {
+			read.Close()
+			write.Close()
+			return nil, err
+		}
+		ckpt.SetMaxOpenConns(1)
+		ckpt.SetMaxIdleConns(1)
+	}
 	writeStmts := newStmtCache(write)
 	readStmts := writeStmts
 	if read != write {
@@ -1028,15 +1098,23 @@ func Open(path string, opts ...Option) (*Store, error) {
 		leases:      lease.NewLocal(),
 		rowKeys:     newRowKeyCache(rowKeyCacheCap),
 		postingKeys: newPostingKeyCache(rowKeyCacheCap),
+		ckpt:        ckpt,
 	}
 	// Creating the schema creates indexes, which is one of the moments SQLite
 	// names for re-analysis; it is also the only pass a short-lived process
 	// gets before Close.
 	s.optimize()
-	if cfg.optimizeInterval > 0 {
+	if cfg.optimizeInterval > 0 || ckpt != nil {
 		s.stop = make(chan struct{})
-		s.done = make(chan struct{})
+	}
+	if cfg.optimizeInterval > 0 {
+		s.loops.Add(1)
 		go s.maintain(cfg.optimizeInterval)
+	}
+	if ckpt != nil {
+		s.walWritten = make(chan struct{}, 1)
+		s.loops.Add(1)
+		go s.checkpointLoop(cfg.checkpointDelay, cfg.rewindPages, cfg.truncateDelay)
 	}
 	return s, nil
 }
@@ -1079,7 +1157,7 @@ func cacheSizePragma(bytes int64) string {
 // do not cost correctness, only plan quality, which is why the pass is
 // advisory and its errors are dropped.
 func (s *Store) maintain(interval time.Duration) {
-	defer close(s.done)
+	defer s.loops.Done()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -1089,6 +1167,105 @@ func (s *Store) maintain(interval time.Duration) {
 		case <-ticker.C:
 			s.optimize()
 		}
+	}
+}
+
+// checkpointLoop copies the WAL into the database file after write
+// transactions commit, at most one time per delay, until Close.
+//
+// Without it, the commit that takes the WAL past wal_autocheckpoint runs the
+// checkpoint itself: it copies the frames and does an fsync of both files
+// while the one writer connection is held, so every write behind it waits.
+// Here a PASSIVE checkpoint runs on its own connection. It takes no write
+// lock and does not wait for readers or for the writer; it copies the frames
+// that no reader still needs and leaves the rest for the next pass. A reader
+// that begins after a pass reads the copied frames from the database file,
+// not from the WAL.
+//
+// The writer rewinds the WAL to its start only when a transaction begins
+// with all frames copied. While writes do not stop, a background pass almost
+// never copies the last frame before the next transaction begins, so the WAL
+// keeps growing. When a pass sees rewindPages frames or more, all of them
+// copied, it runs one more pass on the writer connection. That pass waits for
+// the current write transaction, copies only the frames written since the
+// background pass, and lets the next transaction rewind the WAL. It is not
+// left to the writer's own wal_autocheckpoint: that checkpoint does not wait
+// for the checkpoint lock, so while background passes hold the lock most of
+// the time, it is skipped and the WAL grows past it.
+//
+// A rewind does not make the -wal file smaller. When no commit arrives for
+// truncateDelay after a pass that saw frames, the loop runs one TRUNCATE
+// checkpoint, which sets the file to zero bytes. It runs on the checkpoint
+// connection, not on the writer pool: it takes the WAL write lock itself, and
+// with busy_timeout(0) it stops at once with SQLITE_BUSY when a transaction
+// writes or a reader still uses the WAL. Thus it never waits while it holds
+// the write lock, and a write that begins during it waits only for the
+// truncate itself. After one attempt, the loop tries again only after more
+// commits.
+//
+// Errors are dropped. A failed or skipped pass leaves frames for the next
+// pass or for the writer's own checkpoint.
+func (s *Store) checkpointLoop(delay time.Duration, rewindPages int, truncateDelay time.Duration) {
+	defer s.loops.Done()
+	var last time.Time
+	// grown reports that the -wal file may hold frames since the last
+	// TRUNCATE attempt.
+	grown := false
+	idle := time.NewTimer(truncateDelay)
+	idle.Stop()
+	defer idle.Stop()
+	for {
+		var idleC <-chan time.Time
+		if grown {
+			idle.Reset(truncateDelay)
+			idleC = idle.C
+		}
+		select {
+		case <-s.stop:
+			return
+		case <-idleC:
+			_, _ = s.ckpt.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+			grown = false
+			continue
+		case <-s.walWritten:
+			idle.Stop()
+		}
+		if wait := delay - time.Since(last); wait > 0 {
+			t := time.NewTimer(wait)
+			select {
+			case <-s.stop:
+				t.Stop()
+				return
+			case <-t.C:
+			}
+		}
+		var busy, frames, copied int
+		err := s.ckpt.QueryRow(`PRAGMA wal_checkpoint(PASSIVE)`).Scan(&busy, &frames, &copied)
+		last = time.Now()
+		// A commit that changed nothing leaves a truncated WAL at zero
+		// frames, and then there is nothing to truncate.
+		grown = grown || err != nil || frames > 0
+		// copied < frames means a reader still needs frames that a pass
+		// cannot copy, so a pass on the writer could not rewind the WAL
+		// either.
+		if err == nil && frames >= rewindPages && copied == frames {
+			ctx, cancel := context.WithTimeout(context.Background(), optimizeTimeout)
+			_, _ = s.write.ExecContext(ctx, `PRAGMA wal_checkpoint(PASSIVE)`)
+			cancel()
+		}
+	}
+}
+
+// walWrote tells checkpointLoop that the WAL has new frames. It does not
+// block: one signal waits for the loop, and the loop reads it after its
+// current pass, so the last commit always gets a pass after it.
+func (s *Store) walWrote() {
+	if s.walWritten == nil {
+		return
+	}
+	select {
+	case s.walWritten <- struct{}{}:
+	default:
 	}
 }
 
@@ -1227,22 +1404,28 @@ func applyBaseline(db *sql.DB) error {
 	return nil
 }
 
-// Close stops the maintenance loop and closes the database handle.
+// Close stops the background loops and closes the database handles.
 func (s *Store) Close() error {
+	var err error
 	if s.stop != nil {
 		// Once: a second Close must not close a closed channel. It waits for
-		// the loop to return before the pools go, so a pass in flight cannot
+		// the loops to return before the pools go, so a pass in flight cannot
 		// outlive the handle it is running on.
 		s.stopOnce.Do(func() {
 			close(s.stop)
-			<-s.done
+			s.loops.Wait()
+			// The pools below close after it: the last connection to close
+			// checkpoints the WAL and removes the -wal file.
+			if s.ckpt != nil {
+				err = s.ckpt.Close()
+			}
 		})
 	}
 	// A parting pass, so a process that never lived long enough to tick still
 	// leaves statistics behind for the next one that opens this file.
 	s.optimize()
 	// Statements go before the pools they were prepared on.
-	err := s.writeStmts.close()
+	err = errors.Join(err, s.writeStmts.close())
 	if s.readStmts != s.writeStmts {
 		err = errors.Join(err, s.readStmts.close())
 	}
@@ -1343,7 +1526,11 @@ func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(sto
 		return err
 	}
 	if len(st.forgotten) == 0 {
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		s.walWrote()
+		return nil
 	}
 	// A transaction that forgot posting rows must not let the cache name them
 	// once it commits. The count goes odd before the commit and even after
@@ -1373,6 +1560,9 @@ func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(sto
 	s.postingForgets.Add(1)
 	for n := range st.forgotten {
 		s.postingKeys.remove(n)
+	}
+	if err == nil {
+		s.walWrote()
 	}
 	return err
 }

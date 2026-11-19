@@ -36,6 +36,8 @@ var _ = Describe("SQLite tuning", func() {
 		Expect(pragma(store.write, "temp_store")).To(Equal("2"), "MEMORY")
 		Expect(pragma(store.write, "journal_size_limit")).To(Equal("1048576"))
 		Expect(pragma(store.write, "analysis_limit")).To(Equal("400"))
+		Expect(pragma(store.write, "wal_autocheckpoint")).To(Equal("20000"),
+			"the backstop behind the background checkpoints")
 		Expect(pragma(store.write, "mmap_size")).To(Equal("1073741824"), "the default mapping")
 
 		// The reader pool is a separate connection, and every pragma above is

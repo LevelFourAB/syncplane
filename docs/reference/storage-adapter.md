@@ -191,6 +191,7 @@ Fixed SQLite settings include:
 - Locking: `BEGIN IMMEDIATE` on write transactions
 - Reader pool mode: `query_only`
 - Synchronous mode: `NORMAL`
+- Checkpoints: a background connection runs passive checkpoints after write transactions commit. When the WAL passes 5000 pages (about 20 MiB), it runs one checkpoint on the writer connection between two write transactions, so that the next write can rewind the WAL. The writer checkpoints at the end of its own commit only when the WAL passes 20000 pages (about 80 MiB). About one second after the last commit, a checkpoint truncates the `-wal` file to zero bytes. If a read transaction still uses the WAL at that time, the truncate does not occur, and the next try comes after more writes.
 
 ### Schema upgrades in `sqlitestore`
 
