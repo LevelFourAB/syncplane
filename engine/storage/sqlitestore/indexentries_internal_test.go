@@ -207,7 +207,8 @@ var _ = Describe("byte-equal index entries of different rows", func() {
 		GinkgoHelper()
 		var id int64
 		Expect(store.read.QueryRow(
-			`SELECT id FROM index_row_ids WHERE workspace_id = 'ws1' AND entity = 'widget' AND key = ?`, key,
+			`SELECT i.id FROM index_row_ids i JOIN row_scopes s ON s.id = i.scope
+			 WHERE s.workspace_id = 'ws1' AND i.entity = 'widget' AND i.key = ?`, key,
 		).Scan(&id)).To(Succeed())
 		return id
 	}
@@ -304,7 +305,8 @@ var _ = Describe("row key cache", func() {
 		GinkgoHelper()
 		var id int64
 		Expect(store.read.QueryRow(
-			`SELECT id FROM index_row_ids WHERE workspace_id = 'ws1' AND entity = 'widget' AND key = ?`, key,
+			`SELECT i.id FROM index_row_ids i JOIN row_scopes s ON s.id = i.scope
+			 WHERE s.workspace_id = 'ws1' AND i.entity = 'widget' AND i.key = ?`, key,
 		).Scan(&id)).To(Succeed())
 		return id
 	}

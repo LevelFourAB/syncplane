@@ -653,6 +653,69 @@ DROP TABLE consumer_shadows_old;`,
 	// storage.ConsumerPosition.Retain). 0 for every consumer stored before
 	// the upgrade, which is what each of them was.
 	`ALTER TABLE consumer_positions ADD COLUMN retain INTEGER NOT NULL DEFAULT 0;`,
+	// 13: a short id per workspace in rows and index_row_ids. Both tables
+	// held the workspace id text in each record, and rows held it again in
+	// each of its indexes. The records are copied, not dropped: a row is not
+	// derived state.
+	//
+	// row_scopes gives each workspace with rows or row ids a scope id, as
+	// field_scopes does for the delta log, and both tables hold the scope id
+	// in place of the workspace id. AUTOINCREMENT gives each id one time
+	// only, so a row left under an old id is never read as a row of the
+	// workspace that gets the next id. The copies go in primary key order,
+	// so that SQLite fills the b-tree pages, and the indexes of rows are made
+	// after the copy, with the same columns in the same order.
+	`CREATE TABLE row_scopes (
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	workspace_id TEXT NOT NULL UNIQUE
+);
+INSERT INTO row_scopes (workspace_id)
+	SELECT workspace_id FROM rows
+	UNION SELECT workspace_id FROM index_row_ids
+	ORDER BY 1;
+DROP INDEX rows_by_version;
+DROP INDEX rows_gc;
+DROP INDEX rows_by_entity_version;
+ALTER TABLE rows RENAME TO rows_old;
+CREATE TABLE rows (
+	scope           INTEGER NOT NULL,
+	entity          TEXT NOT NULL,
+	key             TEXT NOT NULL,
+	value           BLOB,
+	version         INTEGER NOT NULL,
+	created_version INTEGER NOT NULL DEFAULT 0,
+	deleted         INTEGER NOT NULL DEFAULT 0,
+	updated_at      INTEGER NOT NULL DEFAULT 0,
+	actor_subject   TEXT NOT NULL DEFAULT '',
+	actor_system    TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (scope, entity, key)
+);
+INSERT INTO rows (scope, entity, key, value, version, created_version, deleted, updated_at,
+                  actor_subject, actor_system)
+	SELECT s.id, o.entity, o.key, o.value, o.version, o.created_version, o.deleted, o.updated_at,
+	       o.actor_subject, o.actor_system
+	  FROM rows_old o
+	  JOIN row_scopes s ON s.workspace_id = o.workspace_id
+	 ORDER BY o.workspace_id, o.entity, o.key;
+DROP TABLE rows_old;
+CREATE INDEX rows_by_version ON rows (scope, version);
+CREATE INDEX rows_gc ON rows (scope, updated_at) WHERE deleted = 1;
+CREATE INDEX rows_by_entity_version
+	ON rows (scope, entity, version DESC, key) WHERE deleted = 0;
+ALTER TABLE index_row_ids RENAME TO index_row_ids_old;
+CREATE TABLE index_row_ids (
+	scope  INTEGER NOT NULL,
+	entity TEXT NOT NULL,
+	key    TEXT NOT NULL,
+	id     INTEGER NOT NULL,
+	PRIMARY KEY (scope, entity, key)
+) WITHOUT ROWID;
+INSERT INTO index_row_ids (scope, entity, key, id)
+	SELECT s.id, o.entity, o.key, o.id
+	  FROM index_row_ids_old o
+	  JOIN row_scopes s ON s.workspace_id = o.workspace_id
+	 ORDER BY o.workspace_id, o.entity, o.key;
+DROP TABLE index_row_ids_old;`,
 }
 
 // workspaceTables names every table that holds state of one workspace, keyed
@@ -664,19 +727,18 @@ DROP TABLE consumer_shadows_old;`,
 // through index_scopes and index_row_ids, and DeleteWorkspace deletes them
 // through those before it empties them. The posting tables other than
 // posting_scopes belong to a workspace through a scope, and DeleteWorkspace
-// drops each scope of the workspace with its rows first. field_ids,
-// field_deltas and consumer_shadows also belong to a workspace through a
-// scope, and DeleteWorkspace deletes their rows before it empties the scope
-// tables.
+// drops each scope of the workspace with its rows first. rows,
+// index_row_ids, field_ids, field_deltas and consumer_shadows also belong to
+// a workspace through a scope, and DeleteWorkspace deletes their rows before
+// it empties the scope tables.
 var workspaceTables = []string{
 	"workspaces",
-	"rows",
+	"row_scopes",
 	"clients",
 	"field_scopes",
 	"text_floors",
 	"idempotency",
 	"index_scopes",
-	"index_row_ids",
 	"index_state",
 	"posting_scopes",
 	"consumer_positions",
@@ -1294,7 +1356,8 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 		for _, table := range []string{"index_row_entries", "index_row_keys"} {
 			if _, err := t.exec(
 				`DELETE FROM `+table+`
-				 WHERE id IN (SELECT id FROM index_row_ids WHERE workspace_id = ?)`,
+				 WHERE id IN (SELECT i.id FROM row_scopes s JOIN index_row_ids i ON i.scope = s.id
+				              WHERE s.workspace_id = ?)`,
 				workspaceID,
 			); err != nil {
 				return fmt.Errorf("sqlitestore: delete workspace %q from %s: %w", workspaceID, table, err)
@@ -1317,6 +1380,8 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 			}
 		}
 		for _, scoped := range []struct{ table, scopes string }{
+			{"rows", "row_scopes"},
+			{"index_row_ids", "row_scopes"},
 			{"field_deltas", "field_scopes"},
 			{"field_ids", "field_scopes"},
 			{"consumer_shadows", "consumer_scopes"},
@@ -1382,12 +1447,13 @@ func (s *Store) ListWorkspaceIDs(ctx context.Context, rng storage.Range) ([]stri
 // ListCollectableWorkspaceIDs answers "which workspaces hold something this
 // pass would reclaim" as a single query: the workspace scan is in primary-key
 // order, and each row probes the _gc index of each collectable table on its
-// own (workspace_id, timestamp) prefix. Each probe stops at the first match, so
-// a workspace with nothing collectable costs one index descent per table and no
+// own (workspace, timestamp) prefix, where a table with a scope column finds
+// the scope of the workspace first. Each probe stops at the first match, so a
+// workspace with nothing collectable costs one index descent per table and no
 // transaction at all.
 //
 // The entity purges are the exception. Live rows of an aging entity are found
-// on rows_by_entity_version's (workspace_id, entity) prefix with
+// on rows_by_entity_version's (scope, entity) prefix with
 // updated_at left as a filter, so a workspace whose entity has no expired row
 // reads that entity's entries to say so — the same range PurgeEntityRows walks
 // to delete them, read instead of written.
@@ -1503,9 +1569,10 @@ func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []a
 	scoped := func(table string) string {
 		return table + " t WHERE t.workspace_id = w.workspace_id"
 	}
+	rows := "row_scopes s JOIN rows t ON t.scope = s.id WHERE s.workspace_id = w.workspace_id"
 	if !cutoffs.Tombstones.IsZero() {
 		at := cutoffs.Tombstones.UnixMilli()
-		exists(scoped("rows") + " AND t.deleted = 1 AND t.updated_at < " + next(at))
+		exists(rows + " AND t.deleted = 1 AND t.updated_at < " + next(at))
 		exists(scoped("clients") + " AND t.updated_at < " + next(at) + " AND t.rejections IS NOT NULL")
 		exists(scoped("consumer_positions") + " AND t.retain = 0 AND t.updated_at < " + next(at))
 		// The newest record is never pruned, so only an old one below it counts.
@@ -1526,7 +1593,7 @@ func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []a
 		if e.Before.IsZero() {
 			continue
 		}
-		exists(scoped("rows") + " AND t.deleted = 0 AND t.entity = " + next(e.Entity) +
+		exists(rows + " AND t.deleted = 0 AND t.entity = " + next(e.Entity) +
 			" AND t.updated_at < " + next(e.Before.UnixMilli()))
 	}
 	if len(probes) == 0 {
@@ -1746,6 +1813,10 @@ type sqliteTx struct {
 	// registered memoizes register's INSERT so a write burst does not repeat
 	// it. Cleared on savepoint rollback, which may have undone that INSERT.
 	registered bool
+	// rowScopeID memoizes the workspace's id in row_scopes, 0 until this
+	// transaction read or made it (see rowScope). Cleared on savepoint
+	// rollback, which may have undone the INSERT that made it.
+	rowScopeID int64
 	// seqStart is the first sequence this transaction allocated, 0 for none,
 	// and mark the lineage mark its sequences carry once it commits (see
 	// ReadTx.SeqLineage). commitLineage records the pair just before COMMIT,
@@ -1818,6 +1889,43 @@ func (t *sqliteTx) register() error {
 	}
 	t.registered = true
 	return nil
+}
+
+// rowScope returns the workspace's id in row_scopes, which rows and
+// index_row_ids hold in place of the workspace id, or 0 when the workspace has
+// none. SQLite gives out ids from 1 up, so a statement that binds 0 as the
+// scope finds no record, which is what a workspace without one holds.
+func (t *sqliteTx) rowScope() (int64, error) {
+	if t.rowScopeID != 0 {
+		return t.rowScopeID, nil
+	}
+	err := t.queryRow(`SELECT id FROM row_scopes WHERE workspace_id = ?`, t.ws).Scan(&t.rowScopeID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return t.rowScopeID, err
+}
+
+// writeRowScope registers the workspace and returns its id in row_scopes,
+// which it makes when the workspace has none. Every write to rows or
+// index_row_ids takes its scope from here.
+func (t *sqliteTx) writeRowScope() (int64, error) {
+	if err := t.register(); err != nil {
+		return 0, err
+	}
+	if id, err := t.rowScope(); err != nil || id != 0 {
+		return id, err
+	}
+	res, err := t.exec(`INSERT INTO row_scopes (workspace_id) VALUES (?)`, t.ws)
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	t.rowScopeID = id
+	return id, nil
 }
 
 func (t *sqliteTx) CurrentSeq() (uint64, error) {
@@ -1920,12 +2028,16 @@ func (t *sqliteTx) TombstoneHorizon() (uint64, error) {
 }
 
 func (t *sqliteTx) GetRow(entity, key string) (storage.Row, error) {
+	scope, err := t.rowScope()
+	if err != nil {
+		return storage.Row{}, err
+	}
 	row := storage.Row{Entity: entity, Key: key}
 	var deleted int
-	err := t.queryRow(
+	err = t.queryRow(
 		`SELECT value, version, created_version, deleted, actor_subject, actor_system FROM rows
-		 WHERE workspace_id = ? AND entity = ? AND key = ?`,
-		t.ws, entity, key,
+		 WHERE scope = ? AND entity = ? AND key = ?`,
+		scope, entity, key,
 	).Scan(&row.Value, &row.Version, &row.CreatedVersion, &deleted,
 		&row.Actor.Subject, &row.Actor.System)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1976,12 +2088,16 @@ func (t *sqliteTx) GetRows(entity string, keys []string, fn func(storage.Row) er
 // result set before returning. It selects the same columns GetRow does, so a
 // batched read round-trips the actor and creation version the same way.
 func (t *sqliteTx) readRowsByKey(entity string, keys []string) (map[string]storage.Row, error) {
+	scope, err := t.rowScope()
+	if err != nil {
+		return nil, err
+	}
 	var sb strings.Builder
 	sb.WriteString(
 		`SELECT key, value, version, created_version, deleted, actor_subject, actor_system FROM rows
-		 WHERE workspace_id = ? AND entity = ? AND key IN (`)
+		 WHERE scope = ? AND entity = ? AND key IN (`)
 	args := make([]any, 0, len(keys)+3)
-	args = append(args, t.ws, entity)
+	args = append(args, scope, entity)
 	for i, key := range keys {
 		if i > 0 {
 			sb.WriteByte(',')
@@ -2018,11 +2134,15 @@ func (t *sqliteTx) ScanEntityAfter(entity, afterKey string, limit int, fn func(s
 	if limit <= 0 {
 		limit = -1 // SQLite: negative LIMIT means unlimited
 	}
+	scope, err := t.rowScope()
+	if err != nil {
+		return err
+	}
 	return t.scanRows(
 		`SELECT key, value, version, created_version, actor_subject, actor_system FROM rows
-		 WHERE workspace_id = ? AND entity = ? AND deleted = 0 AND key > ?
+		 WHERE scope = ? AND entity = ? AND deleted = 0 AND key > ?
 		 ORDER BY key LIMIT ?`,
-		[]any{t.ws, entity, afterKey, limit},
+		[]any{scope, entity, afterKey, limit},
 		func(rows *sql.Rows) error {
 			r := storage.Row{Entity: entity}
 			if err := rows.Scan(&r.Key, &r.Value, &r.Version, &r.CreatedVersion,
@@ -2040,11 +2160,15 @@ func (t *sqliteTx) ScanEntityByVersionDesc(entity string, limit int, fn func(sto
 	// ORDER BY matches rows_by_entity_version exactly (version DESC, key ASC,
 	// partial on deleted = 0), so this reads the index prefix and stops at
 	// LIMIT instead of sorting the entity.
+	scope, err := t.rowScope()
+	if err != nil {
+		return err
+	}
 	return t.scanRows(
 		`SELECT key, value, version, created_version, actor_subject, actor_system FROM rows
-		 WHERE workspace_id = ? AND entity = ? AND deleted = 0
+		 WHERE scope = ? AND entity = ? AND deleted = 0
 		 ORDER BY version DESC, key LIMIT ?`,
-		[]any{t.ws, entity, limit},
+		[]any{scope, entity, limit},
 		func(rows *sql.Rows) error {
 			r := storage.Row{Entity: entity}
 			if err := rows.Scan(&r.Key, &r.Value, &r.Version, &r.CreatedVersion,
@@ -2061,20 +2185,28 @@ func (t *sqliteTx) ScanEntityByVersionDesc(entity string, limit int, fn func(sto
 // One statement per entity: a statement is a local call with no round trip,
 // and a fixed text stays in the statement cache.
 func (t *sqliteTx) CountRows(entities []string) ([]uint64, error) {
+	scope, err := t.rowScope()
+	if err != nil {
+		return nil, err
+	}
 	out := make([]uint64, len(entities))
 	for i, entity := range entities {
-		if err := t.queryRow(countRowsSQL, t.ws, entity).Scan(&out[i]); err != nil {
+		if err := t.queryRow(countRowsSQL, scope, entity).Scan(&out[i]); err != nil {
 			return nil, err
 		}
 	}
 	return out, nil
 }
 
-const countRowsSQL = `SELECT COUNT(*) FROM rows WHERE workspace_id = ? AND entity = ? AND deleted = 0`
+const countRowsSQL = `SELECT COUNT(*) FROM rows WHERE scope = ? AND entity = ? AND deleted = 0`
 
 func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, limit int, fn func(storage.Row) error) error {
 	if limit <= 0 {
 		limit = -1
+	}
+	scope, err := t.rowScope()
+	if err != nil {
+		return err
 	}
 	// Order by the full (version, entity, key) tuple so the first page of a
 	// same-version group and every resume page agree on row order; the cursor
@@ -2087,20 +2219,20 @@ func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, li
 		// Clean version boundary: everything strictly past afterSeq.
 		text = `SELECT entity, key, value, version, created_version, deleted,
 			        actor_subject, actor_system FROM rows
-			 WHERE workspace_id = ? AND version > ?
+			 WHERE scope = ? AND version > ?
 			 ORDER BY version, entity, key LIMIT ?`
-		args = []any{t.ws, afterSeq, limit}
+		args = []any{scope, afterSeq, limit}
 	} else {
 		// Resume inside a same-version group: past afterSeq, plus the rest of
 		// the split group whose (entity, key) sorts after (afterEntity, afterKey).
 		text = `SELECT entity, key, value, version, created_version, deleted,
 			        actor_subject, actor_system FROM rows
-			 WHERE workspace_id = ? AND (
+			 WHERE scope = ? AND (
 			   version > ?
 			   OR (version = ? AND (entity > ? OR (entity = ? AND key > ?)))
 			 )
 			 ORDER BY version, entity, key LIMIT ?`
-		args = []any{t.ws, afterSeq, afterSeq, afterEntity, afterEntity, afterKey, limit}
+		args = []any{scope, afterSeq, afterSeq, afterEntity, afterEntity, afterKey, limit}
 	}
 	return t.scanRows(text, args, func(rows *sql.Rows) error {
 		var r storage.Row
@@ -2725,7 +2857,8 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 		// entries must not register the workspace on its account.
 		return t.DeleteIndexEntries(entity, key)
 	}
-	if err := t.register(); err != nil {
+	rowScope, err := t.writeRowScope()
+	if err != nil {
 		return err
 	}
 	// Replace-set by DIFFERENCE, not by clear-and-reinsert. A row carries an
@@ -2781,8 +2914,8 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 			return err
 		}
 		if _, err := t.exec(
-			`INSERT INTO index_row_ids (workspace_id, entity, key, id) VALUES (?, ?, ?, ?)`,
-			t.ws, entity, key, listID,
+			`INSERT INTO index_row_ids (scope, entity, key, id) VALUES (?, ?, ?, ?)`,
+			rowScope, entity, key, listID,
 		); err != nil {
 			return err
 		}
@@ -2899,14 +3032,18 @@ func (t *sqliteTx) createIndexScope(entity, index string) (int64, error) {
 // currently occupies, as the set PutIndexEntries diffs against. A row with no
 // stored list has id 0 and no entries; a stored id is never 0.
 func (t *sqliteTx) rowIndexEntries(entity, key string) (int64, map[rowIndexEntry]struct{}, error) {
+	scope, err := t.rowScope()
+	if err != nil {
+		return 0, nil, err
+	}
 	var (
 		id   int64
 		blob []byte
 	)
-	err := t.queryRow(
+	err = t.queryRow(
 		`SELECT i.id, e.entries FROM index_row_ids i JOIN index_row_entries e ON e.id = i.id
-		 WHERE i.workspace_id = ? AND i.entity = ? AND i.key = ?`,
-		t.ws, entity, key,
+		 WHERE i.scope = ? AND i.entity = ? AND i.key = ?`,
+		scope, entity, key,
 	).Scan(&id, &blob)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, map[rowIndexEntry]struct{}{}, nil
@@ -3138,10 +3275,12 @@ func (t *sqliteTx) DeleteIndexEntries(entity, key string) error {
 			return err
 		}
 	}
+	// rowIndexEntries found the row's id, so it read the row scope and
+	// rowScopeID holds it.
 	if _, err := t.exec(
 		`DELETE FROM index_row_ids
-		 WHERE workspace_id = ? AND entity = ? AND key = ?`,
-		t.ws, entity, key,
+		 WHERE scope = ? AND entity = ? AND key = ?`,
+		t.rowScopeID, entity, key,
 	); err != nil {
 		return err
 	}
@@ -3344,40 +3483,42 @@ func (t *sqliteTx) NextSeq() (uint64, error) {
 }
 
 func (t *sqliteTx) PutRow(entity, key string, value []byte, version uint64, actor storage.Actor) error {
-	if err := t.register(); err != nil {
+	scope, err := t.writeRowScope()
+	if err != nil {
 		return err
 	}
 	// created_version stays out of the conflict SET: the stored value is the
 	// key's original creation, which every overwrite keeps (see storage.Row).
-	_, err := t.exec(
-		`INSERT INTO rows (workspace_id, entity, key, value, version, created_version, deleted, updated_at,
+	_, err = t.exec(
+		`INSERT INTO rows (scope, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
 		 VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
-		 ON CONFLICT (workspace_id, entity, key)
+		 ON CONFLICT (scope, entity, key)
 		 DO UPDATE SET value = excluded.value, version = excluded.version, deleted = 0,
 		               updated_at = excluded.updated_at,
 		               actor_subject = excluded.actor_subject,
 		               actor_system = excluded.actor_system`,
-		t.ws, entity, key, value, version, version, time.Now().UnixMilli(),
+		scope, entity, key, value, version, version, time.Now().UnixMilli(),
 		actor.Subject, actor.System,
 	)
 	return err
 }
 
 func (t *sqliteTx) DeleteRow(entity, key string, version uint64, actor storage.Actor) error {
-	if err := t.register(); err != nil {
+	scope, err := t.writeRowScope()
+	if err != nil {
 		return err
 	}
-	_, err := t.exec(
-		`INSERT INTO rows (workspace_id, entity, key, value, version, created_version, deleted, updated_at,
+	_, err = t.exec(
+		`INSERT INTO rows (scope, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
 		 VALUES (?, ?, ?, NULL, ?, ?, 1, ?, ?, ?)
-		 ON CONFLICT (workspace_id, entity, key)
+		 ON CONFLICT (scope, entity, key)
 		 DO UPDATE SET value = NULL, version = excluded.version, deleted = 1,
 		               updated_at = excluded.updated_at,
 		               actor_subject = excluded.actor_subject,
 		               actor_system = excluded.actor_system`,
-		t.ws, entity, key, version, version, time.Now().UnixMilli(),
+		scope, entity, key, version, version, time.Now().UnixMilli(),
 		actor.Subject, actor.System,
 	)
 	return err
@@ -3471,6 +3612,7 @@ func (t *sqliteTx) InSavepoint(fn func() error) error {
 		// the INSERT predates the savepoint the extra statement is a harmless
 		// ON CONFLICT DO NOTHING.
 		t.registered = false
+		t.rowScopeID = 0
 		// The page changes fn made are not in the tables, or the rewind
 		// takes them out.
 		t.postingPages = nil
@@ -3498,20 +3640,24 @@ func (t *sqliteTx) InSavepoint(fn func() error) error {
 }
 
 func (t *sqliteTx) CollectTombstones(cutoff time.Time) (uint64, error) {
+	scope, err := t.rowScope()
+	if err != nil {
+		return 0, err
+	}
 	cutoffMillis := cutoff.UnixMilli()
 	var maxDeleted uint64
-	err := t.queryRow(
+	err = t.queryRow(
 		`SELECT COALESCE(MAX(version), 0) FROM rows
-		 WHERE workspace_id = ? AND deleted = 1 AND updated_at < ?`,
-		t.ws, cutoffMillis,
+		 WHERE scope = ? AND deleted = 1 AND updated_at < ?`,
+		scope, cutoffMillis,
 	).Scan(&maxDeleted)
 	if err != nil {
 		return 0, err
 	}
 	if maxDeleted > 0 {
 		if _, err := t.exec(
-			`DELETE FROM rows WHERE workspace_id = ? AND deleted = 1 AND updated_at < ?`,
-			t.ws, cutoffMillis,
+			`DELETE FROM rows WHERE scope = ? AND deleted = 1 AND updated_at < ?`,
+			scope, cutoffMillis,
 		); err != nil {
 			return 0, err
 		}
@@ -3547,17 +3693,21 @@ func (t *sqliteTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 // exactly emptied the selection costs one more no-op call, which is cheaper than
 // probing for a next row on every chunk.
 func (t *sqliteTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, limit int) (int, bool, error) {
-	where, args := purgeWhere(t.ws, entity, keyPrefix, before)
+	scope, err := t.rowScope()
+	if err != nil {
+		return 0, false, err
+	}
+	where, args := purgeWhere(scope, entity, keyPrefix, before)
 	selected, rowsWhere := where, where
 	rowsArgs := args
 	if limit > 0 {
 		selected = where + " ORDER BY key LIMIT ?"
 		args = append(args, limit)
-		// The outer predicate repeats the (workspace, entity) keys the
-		// subquery already applies; the subquery is what narrows the delete.
-		rowsWhere = `workspace_id = ? AND entity = ? AND key IN (
+		// The outer predicate repeats the (scope, entity) keys the subquery
+		// already applies; the subquery is what narrows the delete.
+		rowsWhere = `scope = ? AND entity = ? AND key IN (
 		   SELECT key FROM rows WHERE ` + selected + `)`
-		rowsArgs = append([]any{t.ws, entity}, args...)
+		rowsArgs = append([]any{scope, entity}, args...)
 	}
 	// Entries are found through each row's entry list, which no statement over
 	// index_entries alone can read, so the selected keys come out first. The
@@ -3590,9 +3740,9 @@ func (t *sqliteTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, l
 // narrowings are optional: an empty prefix bounds nothing, and a zero `before`
 // means no age bound at all — which is NOT what its UnixMilli() would say, so
 // the branch is load-bearing rather than an optimization.
-func purgeWhere(ws, entity, keyPrefix string, before time.Time) (string, []any) {
-	where := "workspace_id = ? AND entity = ?"
-	args := []any{ws, entity}
+func purgeWhere(scope int64, entity, keyPrefix string, before time.Time) (string, []any) {
+	where := "scope = ? AND entity = ?"
+	args := []any{scope, entity}
 	if keyPrefix != "" {
 		hi, bounded := prefixUpperBound(keyPrefix)
 		where += " AND key >= ?"

@@ -60,7 +60,50 @@ var _ = Describe("SQLite schema versioning", func() {
 	const baselineVersion = 1
 	// The version a database this binary creates or upgrades ends at: the
 	// baseline plus every migration since. Bump it with each migration added.
-	const latestVersion = 12
+	const latestVersion = 13
+
+	// oldRowTables takes rows and index_row_ids back to their shape before
+	// migration 13, with their data, which every rewind below needs.
+	const oldRowTables = `
+		DROP INDEX rows_by_version;
+		DROP INDEX rows_gc;
+		DROP INDEX rows_by_entity_version;
+		ALTER TABLE rows RENAME TO rows_new;
+		CREATE TABLE rows (
+			workspace_id    TEXT NOT NULL,
+			entity          TEXT NOT NULL,
+			key             TEXT NOT NULL,
+			value           BLOB,
+			version         INTEGER NOT NULL,
+			created_version INTEGER NOT NULL DEFAULT 0,
+			deleted         INTEGER NOT NULL DEFAULT 0,
+			updated_at      INTEGER NOT NULL DEFAULT 0,
+			actor_subject   TEXT NOT NULL DEFAULT '',
+			actor_system    TEXT NOT NULL DEFAULT '',
+			PRIMARY KEY (workspace_id, entity, key)
+		);
+		INSERT INTO rows
+			SELECT s.workspace_id, r.entity, r.key, r.value, r.version, r.created_version,
+			       r.deleted, r.updated_at, r.actor_subject, r.actor_system
+			  FROM rows_new r JOIN row_scopes s ON s.id = r.scope;
+		DROP TABLE rows_new;
+		CREATE INDEX rows_by_version ON rows (workspace_id, version);
+		CREATE INDEX rows_gc ON rows (workspace_id, updated_at) WHERE deleted = 1;
+		CREATE INDEX rows_by_entity_version
+			ON rows (workspace_id, entity, version DESC, key) WHERE deleted = 0;
+		ALTER TABLE index_row_ids RENAME TO index_row_ids_new;
+		CREATE TABLE index_row_ids (
+			workspace_id TEXT NOT NULL,
+			entity       TEXT NOT NULL,
+			key          TEXT NOT NULL,
+			id           INTEGER NOT NULL,
+			PRIMARY KEY (workspace_id, entity, key)
+		) WITHOUT ROWID;
+		INSERT INTO index_row_ids
+			SELECT s.workspace_id, i.entity, i.key, i.id
+			  FROM index_row_ids_new i JOIN row_scopes s ON s.id = i.scope;
+		DROP TABLE index_row_ids_new;
+		DROP TABLE row_scopes;`
 
 	// oldSideTables puts the delta log and the consumer shadows back in the
 	// shape every version before 11 has, empty, which every rewind below
@@ -195,7 +238,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// lineage table existed.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noRetain + oldSideTables + noPostings + noApplied + oldIndexTables + fmt.Sprintf("\nDROP TABLE seq_lineage;\nDROP TABLE deleted_workspaces;\nPRAGMA user_version = %d;", baselineVersion))
+		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + noPostings + noApplied + oldIndexTables + fmt.Sprintf("\nDROP TABLE seq_lineage;\nDROP TABLE deleted_workspaces;\nPRAGMA user_version = %d;", baselineVersion))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db.Close()).To(Succeed())
 
@@ -227,7 +270,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// a workspace whose build mark says it is up to date.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noRetain + oldSideTables + noPostings + noApplied + oldIndexTables + `
+		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + noPostings + noApplied + oldIndexTables + `
 			INSERT INTO index_entries VALUES ('ws1', 'widget', 'by_label', x'01', 'k1');
 			INSERT INTO index_state (workspace_id, entity, idx, spec_hash, ready)
 				VALUES ('ws1', 'widget', 'by_label', 'h1', 1);
@@ -290,7 +333,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// a ready index and a workspace whose build mark says it is up to date.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noRetain + oldSideTables + noPostings + noApplied + `
+		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -373,7 +416,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		var scope int
 		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
 		Expect(scope).To(Equal(1))
-		_, err = db.Exec(noRetain + oldSideTables + noPostings + noApplied + `
+		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -460,7 +503,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		var scope int
 		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
 		Expect(scope).To(Equal(1))
-		_, err = db.Exec(noRetain + oldSideTables + noPostings + noApplied + `
+		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -560,7 +603,7 @@ var _ = Describe("SQLite schema versioning", func() {
 
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noRetain + oldSideTables + noPostings + `
+		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + noPostings + `
 			PRAGMA user_version = 8;`)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db.Close()).To(Succeed())
@@ -611,7 +654,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// two consumers.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noRetain + oldSideTables + `
+		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + `
 			INSERT INTO field_deltas VALUES
 				('ws1', 'widget', 'k1', 'body', 2, x'0a', 1),
 				('ws1', 'widget', 'k1', 'body', 3, x'0b', 1),
@@ -681,7 +724,7 @@ var _ = Describe("SQLite schema versioning", func() {
 
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(noRetain + `
+		_, err = db.Exec(oldRowTables + noRetain + `
 			INSERT INTO workspaces (workspace_id) VALUES ('ws1');
 			INSERT INTO consumer_positions (workspace_id, consumer, seq, updated_at)
 				VALUES ('ws1', 'mailer', 3, 1);
@@ -700,6 +743,120 @@ var _ = Describe("SQLite schema versioning", func() {
 			Expect(pos.Retain).To(BeFalse())
 			return nil
 		})).To(Succeed())
+	})
+
+	It("upgrades version-12 rows and row ids and keeps their data", func() {
+		ctx := context.Background()
+		path := filepath.Join(GinkgoT().TempDir(), "v12.db")
+		store, err := sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		alice := storage.Actor{Subject: "alice"}
+		sync := storage.Actor{System: "sync"}
+		// One entry ends with the row key and one does not, so both forms of
+		// the entry's key column come through the upgrade.
+		entries := func(label string) []storage.IndexEntry {
+			return []storage.IndexEntry{
+				{Index: "by_label", Key: []byte(label + "\x00k1\x00\x00")},
+				{Index: "by_flag", Key: []byte{0x01}},
+			}
+		}
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			if err := tx.PutRow("widget", "k1", []byte("v1"), 1, alice); err != nil {
+				return err
+			}
+			if err := tx.PutRow("widget", "k1", []byte("v3"), 3, sync); err != nil {
+				return err
+			}
+			if err := tx.PutIndexEntries("widget", "k1", entries("a")); err != nil {
+				return err
+			}
+			if err := tx.PutRow("widget", "k2", []byte("v2"), 2, alice); err != nil {
+				return err
+			}
+			return tx.DeleteRow("widget", "k2", 4, sync)
+		})).To(Succeed())
+		Expect(store.WithWriteTx(ctx, "ws2", func(tx storage.WriteTx) error {
+			if err := tx.PutRow("widget", "k1", []byte("w1"), 1, storage.Actor{}); err != nil {
+				return err
+			}
+			return tx.PutIndexEntries("widget", "k1", entries("b"))
+		})).To(Succeed())
+		Expect(store.Close()).To(Succeed())
+
+		db, err := sql.Open("sqlite", path)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = db.Exec(oldRowTables + `
+			PRAGMA user_version = 12;`)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(db.Close()).To(Succeed())
+
+		store, err = sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+		scan := func(ws, index string) []string {
+			GinkgoHelper()
+			var keys []string
+			Expect(store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
+				return tx.ScanIndex("widget", index, nil, nil, 0, storage.ScanAsc, func(k []byte, key string) error {
+					keys = append(keys, string(k)+"="+key)
+					return nil
+				})
+			})).To(Succeed())
+			return keys
+		}
+		changes := func(ws string) []storage.Row {
+			GinkgoHelper()
+			var out []storage.Row
+			Expect(store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
+				return tx.ScanChanges(0, "", "", 0, func(r storage.Row) error {
+					out = append(out, r)
+					return nil
+				})
+			})).To(Succeed())
+			return out
+		}
+
+		Expect(changes("ws1")).To(Equal([]storage.Row{
+			{Entity: "widget", Key: "k1", Value: []byte("v3"), Version: 3, CreatedVersion: 1, Actor: sync},
+			{Entity: "widget", Key: "k2", Version: 4, CreatedVersion: 2, Deleted: true, Actor: sync},
+		}))
+		Expect(changes("ws2")).To(Equal([]storage.Row{
+			{Entity: "widget", Key: "k1", Value: []byte("w1"), Version: 1, CreatedVersion: 1},
+		}))
+		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+			row, err := tx.GetRow("widget", "k2")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(row.Deleted).To(BeTrue(), "a tombstone must survive the upgrade")
+			counts, err := tx.(storage.RowCounter).CountRows([]string{"widget"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(counts).To(Equal([]uint64{1}))
+			return nil
+		})).To(Succeed())
+		Expect(scan("ws1", "by_label")).To(Equal([]string{"a\x00k1\x00\x00=k1"}))
+		Expect(scan("ws1", "by_flag")).To(Equal([]string{"\x01=k1"}))
+		Expect(scan("ws2", "by_label")).To(Equal([]string{"b\x00k1\x00\x00=k1"}))
+
+		// A put finds the row's entry list under the new scope: the entry it
+		// replaces goes, and the one it keeps is not stored a second time.
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			return tx.PutIndexEntries("widget", "k1", entries("c"))
+		})).To(Succeed())
+		Expect(scan("ws1", "by_label")).To(Equal([]string{"c\x00k1\x00\x00=k1"}))
+		Expect(scan("ws1", "by_flag")).To(Equal([]string{"\x01=k1"}))
+
+		// A workspace new after the upgrade gets a scope of its own and reads
+		// none of the rows the upgrade kept.
+		Expect(store.WithWriteTx(ctx, "ws3", func(tx storage.WriteTx) error {
+			return tx.PutRow("widget", "k9", []byte("x"), 1, storage.Actor{})
+		})).To(Succeed())
+		Expect(changes("ws3")).To(HaveLen(1))
+		Expect(changes("ws3")[0].Key).To(Equal("k9"))
+
+		Expect(store.DeleteWorkspace(ctx, "ws1")).To(Succeed())
+		Expect(changes("ws1")).To(BeEmpty())
+		Expect(scan("ws1", "by_flag")).To(BeEmpty())
+		Expect(changes("ws2")).To(HaveLen(1), "deleting one workspace keeps the rows of another")
+		Expect(scan("ws2", "by_flag")).To(Equal([]string{"\x01=k1"}))
 	})
 
 	It("refuses a database from a schema lineage that predates the stamp", func() {

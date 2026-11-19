@@ -1779,9 +1779,37 @@ var _ = Describe("posting pages in the store", func() {
 				Expect(err).NotTo(HaveOccurred())
 			}
 		}
-		// The delta log, the shadows and the consumer positions also go back
-		// to the shape of version 9, which migration 11 reads.
+		// The delta log, the shadows, the consumer positions and the empty
+		// rows and row ids also go back to the shape of version 9, which
+		// migrations 11 and 13 read.
 		_, err = db.Exec(`DROP TABLE posting_pages;
+			DROP TABLE rows;
+			DROP TABLE index_row_ids;
+			DROP TABLE row_scopes;
+			CREATE TABLE rows (
+				workspace_id    TEXT NOT NULL,
+				entity          TEXT NOT NULL,
+				key             TEXT NOT NULL,
+				value           BLOB,
+				version         INTEGER NOT NULL,
+				created_version INTEGER NOT NULL DEFAULT 0,
+				deleted         INTEGER NOT NULL DEFAULT 0,
+				updated_at      INTEGER NOT NULL DEFAULT 0,
+				actor_subject   TEXT NOT NULL DEFAULT '',
+				actor_system    TEXT NOT NULL DEFAULT '',
+				PRIMARY KEY (workspace_id, entity, key)
+			);
+			CREATE INDEX rows_by_version ON rows (workspace_id, version);
+			CREATE INDEX rows_gc ON rows (workspace_id, updated_at) WHERE deleted = 1;
+			CREATE INDEX rows_by_entity_version
+				ON rows (workspace_id, entity, version DESC, key) WHERE deleted = 0;
+			CREATE TABLE index_row_ids (
+				workspace_id TEXT NOT NULL,
+				entity       TEXT NOT NULL,
+				key          TEXT NOT NULL,
+				id           INTEGER NOT NULL,
+				PRIMARY KEY (workspace_id, entity, key)
+			) WITHOUT ROWID;
 			ALTER TABLE consumer_positions DROP COLUMN retain;
 			DROP TABLE field_deltas;
 			DROP TABLE field_ids;
