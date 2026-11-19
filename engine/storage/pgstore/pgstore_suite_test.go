@@ -173,8 +173,9 @@ var _ = Describe("Postgres leases", func() {
 	})
 })
 
-// grantReadWriteRole creates a login role holding DML on the schema behind dsn
-// and nothing that can change it, and returns dsn pointed at that role. What a
+// grantReadWriteRole creates a login role holding DML on the schema behind dsn,
+// and USAGE on its sequences, and nothing that can change it, and returns dsn
+// pointed at that role, as docs/how-to/deploy-for-high-availability.md says. What a
 // node needs from the database is not observable on the superuser connection
 // every other spec runs as.
 func grantReadWriteRole(dsn string) string {
@@ -207,6 +208,7 @@ func grantReadWriteRole(dsn string) string {
 	})
 	exec(fmt.Sprintf(`GRANT USAGE ON SCHEMA %q TO %q`, schema, role))
 	exec(fmt.Sprintf(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %q TO %q`, schema, role))
+	exec(fmt.Sprintf(`GRANT USAGE ON ALL SEQUENCES IN SCHEMA %q TO %q`, schema, role))
 
 	u, err := url.Parse(dsn)
 	Expect(err).NotTo(HaveOccurred(), "the suite's DSN must be a URI to re-point at a role")
@@ -252,7 +254,7 @@ var _ = Describe("Postgres migrations", func() {
 		}
 		rows.Close()
 		Expect(rows.Err()).NotTo(HaveOccurred())
-		Expect(applied).To(Equal([]int{1, 2, 3, 4, 5, 6, 7}), "every migration, each recorded exactly once")
+		Expect(applied).To(Equal([]int{1, 2, 3, 4, 5, 6, 7, 8}), "every migration, each recorded exactly once")
 	})
 
 	It("upgrades a baseline database to record sequence lineage", func() {
@@ -360,6 +362,104 @@ var _ = Describe("Postgres migrations", func() {
 			return nil
 		})).To(Succeed())
 	})
+
+	DescribeTable("upgrades rows to the workspace number, keeping them",
+		func(opts ...pgstore.Option) {
+			dsn := pgtest.DSN()
+			// Rows of two workspaces in the shape before migration 8: ws1
+			// has a number already, from its index entries, and ws2 has none.
+			// ws1 holds a tombstone.
+			migrateThrough(dsn, 7, `
+				INSERT INTO workspaces (workspace_id, last_seq) VALUES ('ws1', 3), ('ws2', 2);
+				INSERT INTO index_scopes (workspace_id, entity, idx, scope)
+				  VALUES ('ws1', '', '', nextval('posting_scope_ids')::int4);
+				INSERT INTO rows (workspace_id, entity, key, value, version, created_version, deleted, updated_at,
+				                  actor_subject, actor_system) VALUES
+				  ('ws1', 'doc', 'a', '\x01', 1, 1, false, 1, 'alice', ''),
+				  ('ws1', 'doc', 'b', NULL, 3, 2, true, 1, '', ''),
+				  ('ws1', 'note', 'a', '\x02', 2, 2, false, 1, '', 'sync'),
+				  ('ws2', 'doc', 'a', '\x03', 2, 1, false, 1, 'bob', '');`,
+				opts...)
+			conn, err := pgx.Connect(ctx, dsn)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(conn.Close(ctx)).To(Succeed()) })
+			number := func(ws string) (wsn int32) {
+				GinkgoHelper()
+				Expect(conn.QueryRow(ctx, `SELECT scope FROM index_scopes
+					WHERE workspace_id = $1 AND entity = '' AND idx = ''`, ws).Scan(&wsn)).To(Succeed())
+				return wsn
+			}
+			ws1 := number("ws1")
+
+			store, err := pgstore.Open(ctx, dsn)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+			Expect(number("ws1")).To(Equal(ws1), "a workspace keeps the number it has")
+			Expect(number("ws2")).NotTo(Equal(ws1))
+
+			changes := func(ws string) []storage.Row {
+				GinkgoHelper()
+				var out []storage.Row
+				Expect(store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
+					return tx.ScanChanges(0, "", "", 0, func(r storage.Row) error {
+						out = append(out, r)
+						return nil
+					})
+				})).To(Succeed())
+				return out
+			}
+			Expect(changes("ws1")).To(Equal([]storage.Row{
+				{Entity: "doc", Key: "a", Value: []byte{1}, Version: 1, CreatedVersion: 1, Actor: storage.Actor{Subject: "alice"}},
+				{Entity: "note", Key: "a", Value: []byte{2}, Version: 2, CreatedVersion: 2, Actor: storage.Actor{System: "sync"}},
+				{Entity: "doc", Key: "b", Version: 3, CreatedVersion: 2, Deleted: true},
+			}))
+			Expect(changes("ws2")).To(Equal([]storage.Row{
+				{Entity: "doc", Key: "a", Value: []byte{3}, Version: 2, CreatedVersion: 1, Actor: storage.Actor{Subject: "bob"}},
+			}))
+
+			// The copied rows take the number the step gave, so a write after
+			// it lands beside them, and garbage collection and a delete reach
+			// them.
+			Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+				Expect(tx.PutRow("doc", "a", []byte{4}, 4, storage.Actor{})).To(Succeed())
+				horizon, err := tx.CollectTombstones(time.UnixMilli(2))
+				Expect(horizon).To(BeEquivalentTo(3))
+				return err
+			})).To(Succeed())
+			Expect(store.DeleteWorkspace(ctx, "ws2")).To(Succeed())
+			Expect(changes("ws1")).To(Equal([]storage.Row{
+				{Entity: "note", Key: "a", Value: []byte{2}, Version: 2, CreatedVersion: 2, Actor: storage.Actor{System: "sync"}},
+				{Entity: "doc", Key: "a", Value: []byte{4}, Version: 4, CreatedVersion: 1},
+			}))
+			Expect(changes("ws2")).To(BeEmpty())
+
+			var columns []string
+			Expect(conn.QueryRow(ctx, `SELECT array_agg(attname::text ORDER BY attnum) FROM pg_attribute
+				WHERE attrelid = 'rows'::regclass AND attnum > 0 AND NOT attisdropped`).Scan(&columns)).To(Succeed())
+			Expect(columns).To(Equal([]string{"version", "created_version", "updated_at", "wsn", "deleted",
+				"entity", "key", "value", "actor_subject", "actor_system"}))
+			var indexes []string
+			Expect(conn.QueryRow(ctx, `SELECT array_agg(indexname::text || substring(indexdef from ' USING .*$')
+				ORDER BY indexname) FROM pg_indexes
+				WHERE schemaname = current_schema() AND tablename = 'rows'`).Scan(&indexes)).To(Succeed())
+			Expect(indexes).To(Equal([]string{
+				"rows_by_entity_version USING btree (wsn, entity, version DESC, key) WHERE (NOT deleted)",
+				"rows_by_version USING btree (wsn, version, entity, key)",
+				"rows_gc USING btree (wsn, updated_at) WHERE deleted",
+				"rows_pkey USING btree (wsn, entity, key)",
+			}))
+			var partitions int
+			Expect(conn.QueryRow(ctx, `SELECT count(*) FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+				WHERE i.inhparent = 'rows'::regclass AND c.relname ~ '^rows_p[0-9]+$'`).Scan(&partitions)).To(Succeed())
+			if len(opts) > 0 {
+				Expect(partitions).To(Equal(4), "the new table takes the modulus the layout had")
+			} else {
+				Expect(partitions).To(BeZero())
+			}
+		},
+		Entry("unpartitioned"),
+		Entry("partitioned", pgstore.WithPartitions(4)),
+	)
 
 	DescribeTable("refuses a database that an earlier baseline created",
 		// Such a database is at this binary's ledger version but has no

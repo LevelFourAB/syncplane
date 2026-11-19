@@ -164,3 +164,80 @@ var _ = Describe("Table size", func() {
 		Expect(perRow).To(BeNumerically("<", 175))
 	})
 })
+
+var _ = Describe("Row table size", func() {
+	ctx := context.Background()
+
+	// The bytes of rows, its heap and every index of it, per row after VACUUM
+	// FULL. Workspace ids and row keys are 36-character uuids, each value is
+	// 40 bytes, and one row in ten is a tombstone. The shape keyed by the
+	// workspace number takes about 400 bytes per row, where the shape keyed by
+	// the workspace id took about 550. The ceiling sits about 10% above.
+	It("keeps the stored rows small per row", func() {
+		const (
+			workspaces = 3
+			rowsPerWS  = 1500
+		)
+		dsn := pgtest.DSN()
+		store, err := pgstore.Open(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+
+		rng := rand.New(rand.NewPCG(5, 6))
+		uuid := func() string {
+			return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+				rng.Uint32(), rng.Uint32()&0xffff, rng.Uint32()&0xffff, rng.Uint32()&0xffff, rng.Uint64()&0xffffffffffff)
+		}
+		value := make([]byte, 40)
+		actor := storage.Actor{Subject: "user-1"}
+		for range workspaces {
+			ws := uuid()
+			seq := uint64(0)
+			for start := 0; start < rowsPerWS; start += 250 {
+				Expect(store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
+					for i := start; i < start+250; i++ {
+						seq++
+						if i%10 == 0 {
+							if err := tx.DeleteRow("todos", uuid(), seq, actor); err != nil {
+								return err
+							}
+							continue
+						}
+						if err := tx.PutRow("todos", uuid(), value, seq, actor); err != nil {
+							return err
+						}
+					}
+					return nil
+				})).To(Succeed())
+			}
+		}
+
+		conn, err := pgx.Connect(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(conn.Close(ctx)).To(Succeed()) })
+		_, err = conn.Exec(ctx, `VACUUM FULL rows`)
+		Expect(err).NotTo(HaveOccurred())
+		var size, n int64
+		Expect(conn.QueryRow(ctx,
+			`SELECT pg_total_relation_size('rows'), (SELECT count(*) FROM rows)`).Scan(&size, &n)).To(Succeed())
+		Expect(n).To(Equal(int64(workspaces * rowsPerWS)))
+		parts, err := conn.Query(ctx,
+			`SELECT c.relname, pg_relation_size(c.oid) FROM pg_class c
+			 WHERE c.oid = 'rows'::regclass
+			    OR c.oid IN (SELECT indexrelid FROM pg_index WHERE indrelid = 'rows'::regclass)
+			 ORDER BY c.oid`)
+		Expect(err).NotTo(HaveOccurred())
+		for parts.Next() {
+			var (
+				name string
+				rel  int64
+			)
+			Expect(parts.Scan(&name, &rel)).To(Succeed())
+			GinkgoWriter.Printf("%s %d bytes, %.0f bytes/row\n", name, rel, float64(rel)/float64(n))
+		}
+		Expect(parts.Err()).NotTo(HaveOccurred())
+		perRow := float64(size) / float64(n)
+		GinkgoWriter.Printf("rows %.0f bytes/row\n", perRow)
+		Expect(perRow).To(BeNumerically("<", 440))
+	})
+})

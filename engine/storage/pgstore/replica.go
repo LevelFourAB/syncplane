@@ -100,7 +100,7 @@ func (r replicaReader) withFloor(ctx context.Context, workspaceID string, minSeq
 		return storage.ReadRouteFallbackStale, s.WithReadTx(ctx, workspaceID, fn)
 	}
 	defer t.end()
-	t.scopes, t.partitioned = s.scopes, s.partitioned
+	t.scopes, t.numbers, t.partitioned = s.scopes, s.numbers, s.partitioned
 	return storage.ReadRouteReplica, fn(readOnlyTx{t})
 }
 

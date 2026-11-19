@@ -108,9 +108,12 @@ var _ = Describe("Postgres round trips", func() {
 
 	var (
 		store *Store
-		// trips runs fn twice and returns the round trips of the second run.
-		// The first fills the connection's statement cache, which costs a
-		// round trip per batch that holds a statement new to the connection.
+		// trips runs fn three times and returns the round trips of the last
+		// run. The first two fill the connection's statement cache, which
+		// costs a round trip per batch that holds a statement new to the
+		// connection. It takes two: the first read of rows in a transaction
+		// names the workspace number by a subquery until the store's cache
+		// holds it, and binds it after that (see rows.go).
 		trips func(fn func()) int64
 	)
 	BeforeEach(func() {
@@ -121,6 +124,7 @@ var _ = Describe("Postgres round trips", func() {
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
 		trips = func(fn func()) int64 {
+			fn()
 			fn()
 			before := counter.trips.Load()
 			fn()
@@ -153,6 +157,61 @@ var _ = Describe("Postgres round trips", func() {
 			Expect(err).To(MatchError(storage.ErrNotFound))
 			return nil
 		}))).To(BeEquivalentTo(2))
+	})
+
+	It("reads the rows of a workspace that holds rows with the first read", func() {
+		write(func(tx storage.WriteTx) error {
+			return tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})
+		})()
+		Expect(trips(read(func(tx storage.ReadTx) error {
+			row, err := tx.GetRow("widget", "k")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(row.Value).To(Equal([]byte("v")))
+			return nil
+		}))).To(BeEquivalentTo(2), "the read with BEGIN, then the ROLLBACK")
+		Expect(trips(read(func(tx storage.ReadTx) error {
+			n := 0
+			Expect(tx.GetRows("widget", []string{"k", "x"}, func(storage.Row) error { n++; return nil })).To(Succeed())
+			Expect(n).To(Equal(1))
+			return nil
+		}))).To(BeEquivalentTo(2), "the read with BEGIN, then the ROLLBACK")
+		Expect(trips(read(func(tx storage.ReadTx) error {
+			n := 0
+			Expect(tx.ScanChanges(0, "", "", 10, func(storage.Row) error { n++; return nil })).To(Succeed())
+			Expect(n).To(Equal(1))
+			return nil
+		}))).To(BeEquivalentTo(2), "the read with BEGIN, then the ROLLBACK")
+	})
+
+	It("sends a push of one mutation in four round trips", func() {
+		seq := uint64(0)
+		push := write(func(tx storage.WriteTx) error {
+			// The reads and writes a push of one mutation makes, in its order.
+			if _, err := tx.ClientLastMutationID("c1"); err != nil {
+				return err
+			}
+			if _, err := tx.GetRow("widget", "k"); err != nil && !errors.Is(err, storage.ErrNotFound) {
+				return err
+			}
+			var err error
+			if seq, err = tx.NextSeq(); err != nil {
+				return err
+			}
+			if _, err := tx.IndexStates("widget"); err != nil {
+				return err
+			}
+			if err := tx.PutRow("widget", "k", []byte("v"), seq, storage.Actor{}); err != nil {
+				return err
+			}
+			if err := tx.PutIndexEntries("widget", "k", []storage.IndexEntry{
+				{Index: "by_v", Key: []byte("\x01v\x00\x00k\x00\x00")},
+			}); err != nil {
+				return err
+			}
+			return tx.SetClientLastMutationID("c1", seq)
+		})
+		Expect(trips(push)).To(BeEquivalentTo(4),
+			"the opening with the watermark, the row with the workspace state, the sequence, then the writes and COMMIT")
 	})
 
 	It("reads the workspace position and every index state in one round trip", func() {

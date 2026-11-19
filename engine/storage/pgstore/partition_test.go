@@ -138,7 +138,7 @@ var _ = Describe("Postgres partitioning", func() {
 		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
 
 		conn := connect(dsn)
-		for _, table := range []string{"rows", "idempotency"} {
+		for _, table := range []string{"idempotency"} {
 			var (
 				strategy string
 				columns  []string
@@ -153,9 +153,10 @@ var _ = Describe("Postgres partitioning", func() {
 			Expect(columns).To(Equal([]string{"workspace_id"}), "partition key of %s", table)
 		}
 		// The posting tables hold no workspace_id; they are keyed by scope. The
-		// index tables, the delta log and the shadows hold none either; they are
-		// keyed by the workspace number.
+		// rows, the index tables, the delta log and the shadows hold none
+		// either; they are keyed by the workspace number.
 		for table, key := range map[string]string{
+			"rows":         "wsn",
 			"posting_rows": "scope", "posting_chunks": "scope", "posting_pages": "scope",
 			"index_rows": "wsn", "index_entries": "wsn",
 			"field_deltas": "wsn", "consumer_shadows": "wsn",

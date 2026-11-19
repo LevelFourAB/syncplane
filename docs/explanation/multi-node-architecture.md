@@ -49,9 +49,11 @@ A pull with no cursor always reads on the primary. A client with no state uses i
 
 ## Table layout and partitioning
 
-Partitioning the large tables improves autovacuum maintenance by isolating dead tuples into smaller concurrent tasks. `rows` and `idempotency` are partitioned by `workspace_id`. The value index tables `index_rows` and `index_entries`, the text delta log `field_deltas`, and `consumer_shadows` are partitioned by a workspace number, and the search tables `posting_rows`, `posting_chunks`, and `posting_pages` by a posting scope. In each case, all the data of one workspace or one search index is in one partition.
+Partitioning the large tables improves autovacuum maintenance by isolating dead tuples into smaller concurrent tasks. `idempotency` is partitioned by `workspace_id`. The `rows` table, the value index tables `index_rows` and `index_entries`, the text delta log `field_deltas`, and `consumer_shadows` are partitioned by a workspace number, and the search tables `posting_rows`, `posting_chunks`, and `posting_pages` by a posting scope. In each case, all the data of one workspace or one search index is in one partition.
 
 The index tables hold integer ids in place of names. `index_scopes` gives each workspace, entity, and index an id, and `index_rows` gives each indexed row an id. An index entry then holds ids and the entry bytes. The workspace id, the entity name, the index name, and the row key are not repeated in each entry and in each index of the table.
+
+`rows` holds the workspace number in place of the workspace id, in the table and in each of its indexes. With UUID workspace ids, this makes the table and its indexes about 0.7 times the size. A workspace gets its number with its first row or index entry. `DeleteWorkspace` deletes the number with the rows, and a later write gives the workspace a new number. Each node keeps the numbers of the workspaces it reads in memory, so that a read can give PostgreSQL the number as a parameter and PostgreSQL can plan for one partition. Another node can delete a workspace and change its number, so each read gets the current number of the workspace in the same round trip and in the same snapshot. When the two numbers are different, the node reads again with the current number. A write never uses a number from memory.
 
 `field_deltas` and `consumer_shadows` hold ids in the same way. Each entry holds the workspace number, and an id that `text_fields` gives each text field of an entity, or an id that `shadow_sets` gives the shadows of one consumer in one entity. These entries keep the row key as text.
 
@@ -59,7 +61,7 @@ The index tables hold integer ids in place of names. `index_scopes` gives each w
 
 On a partitioned layout, `pgstore` makes PostgreSQL plan each statement on the index tables with the workspace number of the transaction. PostgreSQL then locks only the partition of that workspace. A plan that PostgreSQL makes one time and uses for all workspaces locks every partition on each use. An exclusive lock on one partition, which some maintenance commands take, then stalls the index writes of all workspaces.
 
-The ids in `index_scopes` are 32-bit integers from one sequence, which the search indexes share. A workspace takes one id, and one more for each entity and each index that holds entries. An id is not used again, so a database can give out 2^31 ids in its life. After that, a write that needs a new id fails.
+The ids in `index_scopes` are 32-bit integers from one sequence, which the search indexes share. A workspace takes one id when it first holds rows or entries, and one more for each entity and each index that holds entries. A workspace that is deleted and written again takes a new id. An id is not used again, so a database can give out 2^31 ids in its life. After that, a write that needs a new id fails.
 
 Tables such as `workspaces`, `clients`, `text_floors`, `index_state`, `index_scopes`, `consumer_positions`, `cursor_state`, and `schemas` remain unpartitioned because they are small or scanned across workspaces.
 

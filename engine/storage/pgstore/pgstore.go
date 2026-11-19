@@ -156,8 +156,10 @@ type Store struct {
 	replica *pgxpool.Pool
 	// leases backs the lease.Provider implementation (see leases.go).
 	leases *pgLeases
-	// scopes caches posting scope ids for the transactions of this store.
-	scopes *scopeCache
+	// scopes caches posting scope ids for the transactions of this store, and
+	// numbers workspace numbers (see rows.go).
+	scopes  *scopeCache
+	numbers *scopeCache
 	// partitioned reports that the database has the partitioned layout (see
 	// WithPartitions). The statements on the index tables choose their plan
 	// mode by it (see entryPlanMode).
@@ -222,7 +224,7 @@ func WithReplicaMaxConns(n int32) Option {
 // WithPartitions hash-partitions the workspace-scoped tables with the given
 // modulus.
 //
-// The tables rows and idempotency are partitioned by workspace_id, the tables
+// The table idempotency is partitioned by workspace_id, the tables rows,
 // index_rows, index_entries, field_deltas and consumer_shadows by the
 // workspace number that index_scopes gives each workspace, and the
 // posting tables posting_rows, posting_chunks and posting_pages by their
@@ -317,7 +319,7 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	// deployment that never leases never pays the connection.
 	return &Store{
 		pool: pool, replica: replica, leases: newPgLeases(poolCfg.ConnConfig.Copy()),
-		scopes: newScopeCache(), partitioned: partitioned,
+		scopes: newScopeCache(), numbers: newScopeCache(), partitioned: partitioned,
 	}, nil
 }
 
@@ -380,7 +382,7 @@ func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(stor
 		return err
 	}
 	defer t.end()
-	t.scopes, t.partitioned = s.scopes, s.partitioned
+	t.scopes, t.numbers, t.partitioned = s.scopes, s.numbers, s.partitioned
 	return fn(readOnlyTx{t})
 }
 
@@ -420,7 +422,7 @@ func (s *Store) writeOnce(ctx context.Context, workspaceID string, fn func(stora
 		return err
 	}
 	defer t.end()
-	t.scopes, t.partitioned = s.scopes, s.partitioned
+	t.scopes, t.numbers, t.partitioned = s.scopes, s.numbers, s.partitioned
 	// The workspaces row is NOT created here: pgTx.register mints it on the
 	// transaction's first actual write. A closure that only reads (a read-only
 	// Mutate, a push whose every mutation was already applied) must leave the
@@ -465,10 +467,13 @@ func isRetryable(err error) bool {
 }
 
 // DeleteWorkspace empties every table in scopedTables, numberedTables and
-// workspaceTables for the workspace and records its mark, in one write
-// transaction under the workspace lock. The statements are queued, so they
-// travel with COMMIT as one batch.
+// workspaceTables, and the tables of namedDeletes, for the workspace and
+// records its mark, in one write transaction under the workspace lock. The
+// statements are queued, so they travel with COMMIT as one batch.
 func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
+	// Another node can hold the number in its cache after this. It finds the
+	// number stale when it reads (see readRows).
+	defer s.numbers.drop(workspaceID, "", "")
 	return s.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
 		t := tx.(*pgTx)
 		// The scope ids cost a round trip of their own, which a deletion can
@@ -498,9 +503,9 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string) error {
 			}
 		}
 		restore()
-		// field_deltas and consumer_shadows are keyed by the workspace number
-		// and the ids of text_fields and shadow_sets, which the loop below
-		// also deletes.
+		// rows, field_deltas and consumer_shadows are keyed by the workspace
+		// number and the ids of text_fields and shadow_sets, which the loop
+		// below also deletes.
 		for _, stmt := range namedDeletes(workspaceID, t.indexScopes) {
 			if err := t.queue(stmt.sql, stmt.args...); err != nil {
 				return err
@@ -558,17 +563,19 @@ func numberedDeletes(scopes map[indexKey]int32) []queuedStmt {
 	return out
 }
 
-// namedDeletes are the statements that empty field_deltas and
-// consumer_shadows for workspace ws, given its index_scopes rows.
-// field_deltas goes by the workspace number, which leads its GC index;
-// consumer_shadows by the ids of the workspace's shadow sets, which lead its
-// primary key. A workspace without a number holds nothing in them.
+// namedDeletes are the statements that empty rows, field_deltas and
+// consumer_shadows for workspace ws, given its index_scopes rows. rows and
+// field_deltas go by the workspace number, which leads the primary key of rows
+// and the GC index of field_deltas; consumer_shadows by the ids of the
+// workspace's shadow sets, which lead its primary key. A workspace without a
+// number holds nothing in them.
 func namedDeletes(ws string, scopes map[indexKey]int32) []queuedStmt {
 	wsn, ok := scopes[indexKey{}]
 	if !ok {
 		return nil
 	}
 	return []queuedStmt{
+		{sql: `DELETE FROM rows WHERE wsn = $1`, args: []any{wsn}},
 		{sql: `DELETE FROM field_deltas WHERE wsn = $1`, args: []any{wsn}},
 		{
 			sql: `DELETE FROM consumer_shadows WHERE wsn = $2 AND sid IN (
@@ -633,14 +640,15 @@ func (s *Store) listWorkspaceIDs(ctx context.Context, pool *pgxpool.Pool, rng st
 // ListCollectableWorkspaceIDs answers "which workspaces hold something this
 // pass would reclaim" as a single query: the workspace scan is in primary-key
 // order, and every candidate table is reached through its _gc index on
-// (workspace_id, updated_at) — correlated per workspace or hashed
-// once, whichever the planner costs lower. Either way a workspace with nothing
+// (workspace_id, updated_at), or on (wsn, updated_at) after the workspace
+// number is read from index_scopes — correlated per workspace or hashed once,
+// whichever the planner costs lower. Either way a workspace with nothing
 // collectable costs index reads and no transaction, where a pass without this
 // took the workspace's advisory lock and ran six DELETEs to learn the same
 // thing.
 //
 // The entity purges are the exception. Live rows of an aging entity are found
-// on rows_by_entity_version's (workspace_id, entity) prefix with
+// on rows_by_entity_version's (wsn, entity) prefix with
 // updated_at left as a filter, so a workspace whose entity has no expired row
 // reads that entity's entries to say so — the same range PurgeEntityRows walks
 // to delete them, read instead of written.
@@ -688,9 +696,13 @@ func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []a
 	scoped := func(table string) string {
 		return table + " t WHERE t.workspace_id = w.workspace_id"
 	}
+	numbered := func(table string) string {
+		return "index_scopes s JOIN " + table + " t ON t.wsn = s.scope" +
+			" WHERE s.workspace_id = w.workspace_id AND s.entity = '' AND s.idx = ''"
+	}
 	if !cutoffs.Tombstones.IsZero() {
 		at := cutoffs.Tombstones.UnixMilli()
-		exists(scoped("rows") + " AND t.deleted AND t.updated_at < " + next(at))
+		exists(numbered("rows") + " AND t.deleted AND t.updated_at < " + next(at))
 		exists(scoped("clients") + " AND t.updated_at < " + next(at) + " AND t.rejections IS NOT NULL")
 		exists(scoped("consumer_positions") + " AND NOT t.retain AND t.updated_at < " + next(at))
 		// The newest record is never pruned, so only an old one below it counts.
@@ -704,15 +716,13 @@ func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []a
 		exists(scoped("idempotency") + " AND t.updated_at < " + next(cutoffs.IdempotencyKeys.UnixMilli()))
 	}
 	if !cutoffs.FieldDeltas.IsZero() {
-		exists("index_scopes s JOIN field_deltas t ON t.wsn = s.scope" +
-			" WHERE s.workspace_id = w.workspace_id AND s.entity = '' AND s.idx = ''" +
-			" AND t.updated_at < " + next(cutoffs.FieldDeltas.UnixMilli()))
+		exists(numbered("field_deltas") + " AND t.updated_at < " + next(cutoffs.FieldDeltas.UnixMilli()))
 	}
 	for _, e := range cutoffs.Entities {
 		if e.Before.IsZero() {
 			continue
 		}
-		exists(scoped("rows") + " AND NOT t.deleted AND t.entity = " + next(e.Entity) +
+		exists(numbered("rows") + " AND NOT t.deleted AND t.entity = " + next(e.Entity) +
 			" AND t.updated_at < " + next(e.Before.UnixMilli()))
 	}
 	if len(probes) == 0 {

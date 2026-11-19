@@ -78,8 +78,18 @@ type pgTx struct {
 	// that resolvePostings has written. See postings.go.
 	postingLog  []postingOp
 	postingDone int
-	// scopes is the store's cache of posting scope ids, nil for none.
-	scopes *scopeCache
+	// scopes is the store's cache of posting scope ids, and numbers its cache
+	// of workspace numbers (see rows.go), nil for none.
+	scopes  *scopeCache
+	numbers *scopeCache
+	// rideState says that the next read carries the reads of loadState, and
+	// checkNumber is the number from numbers that the read binds, 0 for none.
+	// See readRows.
+	rideState   bool
+	checkNumber int32
+	// numbered memoizes that writeNumber queued makeNumberSQL. Restored on
+	// savepoint rollback, which may have undone it.
+	numbered bool
 	// partitioned reports that the database has the partitioned layout.
 	partitioned bool
 	// entryLog holds PutIndexEntries and DeleteIndexEntries calls of the
@@ -238,6 +248,20 @@ func (t *pgTx) loadIndexScopes() error {
 // and each further read costs the server less than the round trip it saves
 // when it is needed.
 func (t *pgTx) loadState() error {
+	br, err := t.sendWith(t.stateReads()...)
+	if err != nil {
+		return err
+	}
+	if err := t.decodeState(br); err != nil {
+		_ = br.Close()
+		return err
+	}
+	return br.Close()
+}
+
+// stateReads returns the reads that fill whichever of the memos loadState
+// fills is empty, in the order decodeState reads their results.
+func (t *pgTx) stateReads() []queuedStmt {
 	var reads []queuedStmt
 	if !t.wsLoaded {
 		reads = append(reads, queuedStmt{
@@ -268,15 +292,7 @@ func (t *pgTx) loadState() error {
 			args: []any{t.ws},
 		})
 	}
-	br, err := t.sendWith(reads...)
-	if err != nil {
-		return err
-	}
-	if err := t.decodeState(br); err != nil {
-		_ = br.Close()
-		return err
-	}
-	return br.Close()
+	return reads
 }
 
 // decodeState reads the results loadState asked for from br, in its order.
@@ -344,6 +360,11 @@ func (t *pgTx) decodeState(br pgx.BatchResults) error {
 			return err
 		}
 		t.indexScopes = scopes
+		if wsn, ok := scopes[indexKey{}]; ok {
+			t.numbers.put(t.ws, "", "", wsn)
+		} else {
+			t.numbers.drop(t.ws, "", "")
+		}
 	}
 	return nil
 }
@@ -443,22 +464,33 @@ func (t *pgTx) TombstoneHorizon() (uint64, error) {
 
 func (t *pgTx) GetRow(entity, key string) (storage.Row, error) {
 	row := storage.Row{Entity: entity, Key: key}
-	var version, created int64
-	err := t.queryRow(
-		`SELECT value, version, created_version, deleted, actor_subject, actor_system
-		 FROM rows
-		 WHERE workspace_id = $1 AND entity = $2 AND key = $3`,
-		t.ws, entity, key,
-	).Scan(&row.Value, &version, &created, &row.Deleted,
-		&row.Actor.Subject, &row.Actor.System)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return storage.Row{}, storage.ErrNotFound
-	}
+	found := false
+	err := t.readRows(func(n rowsNumber) error {
+		var version, created int64
+		err := t.queryRow(
+			`SELECT value, version, created_version, deleted, actor_subject, actor_system
+			 FROM rows
+			 WHERE wsn = `+n.expr+` AND entity = $2 AND key = $3`,
+			n.arg, entity, key,
+		).Scan(&row.Value, &version, &created, &row.Deleted,
+			&row.Actor.Subject, &row.Actor.System)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		row.Version = uint64(version)
+		row.CreatedVersion = uint64(created)
+		found = true
+		return nil
+	})
 	if err != nil {
 		return storage.Row{}, err
 	}
-	row.Version = uint64(version)
-	row.CreatedVersion = uint64(created)
+	if !found {
+		return storage.Row{}, storage.ErrNotFound
+	}
 	return row, nil
 }
 
@@ -493,11 +525,21 @@ func (t *pgTx) GetRows(entity string, keys []string, fn func(storage.Row) error)
 }
 
 func (t *pgTx) readRowsByKey(entity string, keys []string) (map[string]storage.Row, error) {
+	var byKey map[string]storage.Row
+	err := t.readRows(func(n rowsNumber) error {
+		var err error
+		byKey, err = t.readRowsByKeyWith(n, entity, keys)
+		return err
+	})
+	return byKey, err
+}
+
+func (t *pgTx) readRowsByKeyWith(n rowsNumber, entity string, keys []string) (map[string]storage.Row, error) {
 	rows, err := t.query(
 		`SELECT key, value, version, created_version, deleted, actor_subject, actor_system
 		 FROM rows
-		 WHERE workspace_id = $1 AND entity = $2 AND key = ANY($3)`,
-		t.ws, entity, keys,
+		 WHERE wsn = `+n.expr+` AND entity = $2 AND key = ANY($3)`,
+		n.arg, entity, keys,
 	)
 	if err != nil {
 		return nil, err
@@ -539,28 +581,32 @@ func (t *pgTx) ScanEntity(entity string, fn func(storage.Row) error) error {
 }
 
 func (t *pgTx) ScanEntityAfter(entity, afterKey string, limit int, fn func(storage.Row) error) error {
-	return scanRows(t,
-		`SELECT key, value, version, created_version, actor_subject, actor_system
-		 FROM rows
-		 WHERE workspace_id = $1 AND entity = $2 AND NOT deleted AND key > $3
-		 ORDER BY key
-		 LIMIT $4`,
-		[]any{t.ws, entity, afterKey, limitArg(limit)}, limit,
-		decodeEntityRow(entity), fn)
+	return t.readRows(func(n rowsNumber) error {
+		return scanRows(t,
+			`SELECT key, value, version, created_version, actor_subject, actor_system
+			 FROM rows
+			 WHERE wsn = `+n.expr+` AND entity = $2 AND NOT deleted AND key > $3
+			 ORDER BY key
+			 LIMIT $4`,
+			[]any{n.arg, entity, afterKey, limitArg(limit)}, limit,
+			decodeEntityRow(entity), fn)
+	})
 }
 
 func (t *pgTx) ScanEntityByVersionDesc(entity string, limit int, fn func(storage.Row) error) error {
 	// ORDER BY matches rows_by_entity_version exactly (version DESC, key ASC,
 	// partial on NOT deleted), so this reads the index prefix and stops at the
 	// limit instead of sorting the entity.
-	return scanRows(t,
-		`SELECT key, value, version, created_version, actor_subject, actor_system
-		 FROM rows
-		 WHERE workspace_id = $1 AND entity = $2 AND NOT deleted
-		 ORDER BY version DESC, key
-		 LIMIT $3`,
-		[]any{t.ws, entity, limitArg(limit)}, limit,
-		decodeEntityRow(entity), fn)
+	return t.readRows(func(n rowsNumber) error {
+		return scanRows(t,
+			`SELECT key, value, version, created_version, actor_subject, actor_system
+			 FROM rows
+			 WHERE wsn = `+n.expr+` AND entity = $2 AND NOT deleted
+			 ORDER BY version DESC, key
+			 LIMIT $3`,
+			[]any{n.arg, entity, limitArg(limit)}, limit,
+			decodeEntityRow(entity), fn)
+	})
 }
 
 // CountRows implements storage.RowCounter in one round trip. The filter
@@ -575,29 +621,35 @@ func (t *pgTx) CountRows(entities []string) ([]uint64, error) {
 	for i, e := range entities {
 		at[e] = append(at[e], i)
 	}
-	rows, err := t.query(
-		`SELECT entity, count(*) FROM rows
-		 WHERE workspace_id = $1 AND entity = ANY($2) AND NOT deleted
-		 GROUP BY entity`,
-		t.ws, entities,
-	)
+	err := t.readRows(func(n rowsNumber) error {
+		rows, err := t.query(
+			`SELECT entity, count(*) FROM rows
+			 WHERE wsn = `+n.expr+` AND entity = ANY($2) AND NOT deleted
+			 GROUP BY entity`,
+			n.arg, entities,
+		)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				entity string
+				count  int64
+			)
+			if err := rows.Scan(&entity, &count); err != nil {
+				return err
+			}
+			for _, i := range at[entity] {
+				out[i] = uint64(count)
+			}
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			entity string
-			n      int64
-		)
-		if err := rows.Scan(&entity, &n); err != nil {
-			return nil, err
-		}
-		for _, i := range at[entity] {
-			out[i] = uint64(n)
-		}
-	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func (t *pgTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, limit int, fn func(storage.Row) error) error {
@@ -619,29 +671,31 @@ func (t *pgTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, limit 
 	                     actor_subject, actor_system
 	              FROM rows `
 
-	if afterEntity == "" {
-		// A clean version boundary: everything strictly past afterSeq. This
-		// cannot be folded into the row comparison below — every row carries a
-		// non-empty entity, so (version, entity, key) > (afterSeq, '', '') would
-		// also take the rows AT afterSeq.
+	return t.readRows(func(n rowsNumber) error {
+		if afterEntity == "" {
+			// A clean version boundary: everything strictly past afterSeq.
+			// This cannot be folded into the row comparison below — every row
+			// carries a non-empty entity, so (version, entity, key) >
+			// (afterSeq, '', '') would also take the rows AT afterSeq.
+			return scanRows(t,
+				cols+`WHERE wsn = `+n.expr+` AND version > $2
+				      ORDER BY version, entity, key
+				      LIMIT $3`,
+				[]any{n.arg, int64(afterSeq), limitArg(limit)}, limit,
+				decode, fn)
+		}
+		// Resume inside a same-version group. The row-value comparison is the
+		// whole tie-break in one predicate — Postgres compares it
+		// lexicographically, bytewise for entity and key because both columns
+		// are COLLATE "C" — where SQLite needs the disjunction spelled out.
 		return scanRows(t,
-			cols+`WHERE workspace_id = $1 AND version > $2
+			cols+`WHERE wsn = `+n.expr+`
+			        AND (version, entity, key) > ($2::bigint, $3::text, $4::text)
 			      ORDER BY version, entity, key
-			      LIMIT $3`,
-			[]any{t.ws, int64(afterSeq), limitArg(limit)}, limit,
+			      LIMIT $5`,
+			[]any{n.arg, int64(afterSeq), afterEntity, afterKey, limitArg(limit)}, limit,
 			decode, fn)
-	}
-	// Resume inside a same-version group. The row-value comparison is the whole
-	// tie-break in one predicate — Postgres compares it lexicographically,
-	// bytewise for entity and key because both columns are COLLATE "C" — where
-	// SQLite needs the disjunction spelled out.
-	return scanRows(t,
-		cols+`WHERE workspace_id = $1
-		        AND (version, entity, key) > ($2::bigint, $3::text, $4::text)
-		      ORDER BY version, entity, key
-		      LIMIT $5`,
-		[]any{t.ws, int64(afterSeq), afterEntity, afterKey, limitArg(limit)}, limit,
-		decode, fn)
+	})
 }
 
 func (t *pgTx) ClientLastMutationID(clientID string) (uint64, error) {
@@ -1365,18 +1419,22 @@ func (t *pgTx) PutRow(entity, key string, value []byte, version uint64, actor st
 	if err := t.register(); err != nil {
 		return err
 	}
+	n, err := t.writeNumber()
+	if err != nil {
+		return err
+	}
 	// created_version stays out of the conflict SET: the stored value is the
 	// key's original creation, which every overwrite keeps (see storage.Row).
 	return t.queue(
-		`INSERT INTO rows (workspace_id, entity, key, value, version, created_version, deleted, updated_at,
+		`INSERT INTO rows (wsn, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
-		 VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, $8, $9)
-		 ON CONFLICT (workspace_id, entity, key)
+		 VALUES (`+n.expr+`, $2, $3, $4, $5, $6, FALSE, $7, $8, $9)
+		 ON CONFLICT (wsn, entity, key)
 		 DO UPDATE SET value = excluded.value, version = excluded.version, deleted = FALSE,
 		               updated_at = excluded.updated_at,
 		               actor_subject = excluded.actor_subject,
 		               actor_system = excluded.actor_system`,
-		t.ws, entity, key, value, int64(version), int64(version), time.Now().UnixMilli(),
+		n.arg, entity, key, value, int64(version), int64(version), time.Now().UnixMilli(),
 		actor.Subject, actor.System,
 	)
 }
@@ -1385,16 +1443,20 @@ func (t *pgTx) DeleteRow(entity, key string, version uint64, actor storage.Actor
 	if err := t.register(); err != nil {
 		return err
 	}
+	n, err := t.writeNumber()
+	if err != nil {
+		return err
+	}
 	return t.queue(
-		`INSERT INTO rows (workspace_id, entity, key, value, version, created_version, deleted, updated_at,
+		`INSERT INTO rows (wsn, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
-		 VALUES ($1, $2, $3, NULL, $4, $5, TRUE, $6, $7, $8)
-		 ON CONFLICT (workspace_id, entity, key)
+		 VALUES (`+n.expr+`, $2, $3, NULL, $4, $5, TRUE, $6, $7, $8)
+		 ON CONFLICT (wsn, entity, key)
 		 DO UPDATE SET value = NULL, version = excluded.version, deleted = TRUE,
 		               updated_at = excluded.updated_at,
 		               actor_subject = excluded.actor_subject,
 		               actor_system = excluded.actor_system`,
-		t.ws, entity, key, int64(version), int64(version), time.Now().UnixMilli(),
+		n.arg, entity, key, int64(version), int64(version), time.Now().UnixMilli(),
 		actor.Subject, actor.System,
 	)
 }
@@ -1517,9 +1579,9 @@ func (t *pgTx) InSavepoint(fn func() error) error {
 	// NextSeq allocates from memory, so the rewind below has to undo the
 	// allocation the way ROLLBACK TO undoes the statements — a rejected
 	// mutation must leave the next one the sequence it took, or the log would
-	// gap. registered rides along for the same reason: the rewind may undo
-	// register's INSERT.
-	seq, seqPersisted, seqLoaded, registered := t.seq, t.seqPersisted, t.seqLoaded, t.registered
+	// gap. registered and numbered ride along for the same reason: the rewind
+	// may undo the INSERT of register or of writeNumber.
+	seq, seqPersisted, seqLoaded, registered, numbered := t.seq, t.seqPersisted, t.seqLoaded, t.registered, t.numbered
 	// The posting calls fn logged go with the rewind. When fn made
 	// resolvePostings write calls logged before the savepoint as well, the
 	// rewind also undoes those writes, so the calls are pending again.
@@ -1528,7 +1590,7 @@ func (t *pgTx) InSavepoint(fn func() error) error {
 	entryLen, entryDone, entryPending := len(t.entryLog), t.entryDone, t.entryPending
 
 	if err := fn(); err != nil {
-		t.seq, t.seqPersisted, t.seqLoaded, t.registered = seq, seqPersisted, seqLoaded, registered
+		t.seq, t.seqPersisted, t.seqLoaded, t.registered, t.numbered = seq, seqPersisted, seqLoaded, registered, numbered
 		t.postingLog, t.postingDone = t.postingLog[:postingLen], postingDone
 		t.entryLog, t.entryDone, t.entryPending = t.entryLog[:entryLen], entryDone, entryPending
 		// The rewind may undo a register, a CollectTombstones, a SetIndexState
@@ -1600,20 +1662,27 @@ func (t *pgTx) PruneSeqLineage(cutoff time.Time) (int, error) {
 }
 
 func (t *pgTx) CollectTombstones(cutoff time.Time) (uint64, error) {
+	wsn, hasRows, err := t.workspaceNumber()
+	if err != nil {
+		return 0, err
+	}
+	if !hasRows {
+		return t.TombstoneHorizon()
+	}
 	cutoffMillis := cutoff.UnixMilli()
 	var maxDeleted int64
 	if err := t.queryRow(
 		`SELECT COALESCE(MAX(version), 0) FROM rows
-		 WHERE workspace_id = $1 AND deleted AND updated_at < $2`,
-		t.ws, cutoffMillis,
+		 WHERE wsn = $1 AND deleted AND updated_at < $2`,
+		wsn, cutoffMillis,
 	).Scan(&maxDeleted); err != nil {
 		return 0, err
 	}
 	if maxDeleted > 0 {
 		if _, err := t.exec(
 			`DELETE FROM rows
-			 WHERE workspace_id = $1 AND deleted AND updated_at < $2`,
-			t.ws, cutoffMillis,
+			 WHERE wsn = $1 AND deleted AND updated_at < $2`,
+			wsn, cutoffMillis,
 		); err != nil {
 			return 0, err
 		}
@@ -1660,41 +1729,42 @@ func (t *pgTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, limit
 	if err := t.loadIndexScopes(); err != nil {
 		return 0, false, err
 	}
-	where, args := purgeWhere(t.ws, entity, keyPrefix, before)
+	wsn, hasRows := t.indexScopes[indexKey{}]
+	if !hasRows {
+		return 0, false, nil
+	}
+	where, args := purgeWhere(wsn, entity, keyPrefix, before)
 	selected, rowsWhere := where, where
 	if limit > 0 {
 		args = append(args, limit)
 		selected = fmt.Sprintf("%s ORDER BY key LIMIT $%d", where, len(args))
 		// The outer predicate reuses $1 and $2, which purgeWhere always numbers
-		// as workspace and entity.
-		rowsWhere = `workspace_id = $1 AND entity = $2 AND key IN (
+		// as workspace number and entity.
+		rowsWhere = `wsn = $1 AND entity = $2 AND key IN (
 		   SELECT key FROM rows WHERE ` + selected + `)`
 	}
-	wsn, hasEntries := t.indexScopes[indexKey{}]
-	ent, entityHasEntries := t.indexScopes[indexKey{entity: entity}]
-	// A workspace or an entity without an id holds no entry.
-	if hasEntries && entityHasEntries {
+	// An entity without an id holds no entry.
+	if ent, entityHasEntries := t.indexScopes[indexKey{entity: entity}]; entityHasEntries {
 		// tgt holds the row keys and ids before either delete runs. It finds
 		// them with a probe per selected row and the deletes take them as an
 		// array, for the reasons indexPutSQL gives. gone finds its tuples by
 		// the primary key, as no index of index_rows holds the row id of every
 		// row.
-		w, e := len(args)+1, len(args)+2
 		restore := t.customPlanIfPartitioned()
 		_, err := t.exec(fmt.Sprintf(
 			`WITH tgt AS MATERIALIZED (
-			     SELECT s.key, r.rid FROM (SELECT key FROM rows WHERE %[3]s) s
+			     SELECT s.key, r.rid FROM (SELECT key FROM rows WHERE %[2]s) s
 			     CROSS JOIN LATERAL (
-			       SELECT x.rid FROM index_rows x WHERE x.ent = $%[2]d AND x.wsn = $%[1]d AND x.key = s.key LIMIT 1
+			       SELECT x.rid FROM index_rows x WHERE x.ent = $%[1]d AND x.wsn = $1 AND x.key = s.key LIMIT 1
 			     ) r
 			 ),
 			 gone AS (
 			     DELETE FROM index_rows x
-			     WHERE x.ent = $%[2]d AND x.wsn = $%[1]d AND x.key = ANY (ARRAY(SELECT t.key FROM tgt t))
+			     WHERE x.ent = $%[1]d AND x.wsn = $1 AND x.key = ANY (ARRAY(SELECT t.key FROM tgt t))
 			 )
-			 DELETE FROM index_entries e WHERE e.wsn = $%[1]d AND e.rid = ANY (ARRAY(SELECT t.rid FROM tgt t))`,
-			w, e, selected),
-			append(slices.Clone(args), wsn, ent)...,
+			 DELETE FROM index_entries e WHERE e.wsn = $1 AND e.rid = ANY (ARRAY(SELECT t.rid FROM tgt t))`,
+			len(args)+1, selected),
+			append(slices.Clone(args), ent)...,
 		)
 		restore()
 		if err != nil {
@@ -1716,9 +1786,9 @@ func (t *pgTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, limit
 // Both narrowings are optional: an empty prefix bounds nothing, and a zero
 // `before` means no age bound at all — which is NOT what its UnixMilli() would
 // say, so the branch is load-bearing rather than an optimization.
-func purgeWhere(ws, entity, keyPrefix string, before time.Time) (string, []any) {
-	where := "workspace_id = $1 AND entity = $2"
-	args := []any{ws, entity}
+func purgeWhere(wsn int32, entity, keyPrefix string, before time.Time) (string, []any) {
+	where := "wsn = $1 AND entity = $2"
+	args := []any{wsn, entity}
 	next := func(v any) string {
 		args = append(args, v)
 		return fmt.Sprintf("$%d", len(args))

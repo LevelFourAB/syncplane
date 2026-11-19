@@ -40,6 +40,81 @@ var migrations = []migration{
 	{additive: false, sql: internedNamesSchema},
 	{additive: true, sql: fixed(consumerRetainDDL)},
 	{additive: false, sql: fixed(rowIDIndexDDL)},
+	{additive: false, sql: numberedRowsSchema},
+}
+
+// numberedRowsDDL is migration 8: rows keyed by the workspace number, the wsn
+// column, in place of the workspace id, which repeats in every row and in each
+// of its three indexes. That makes the table and its indexes about 0.7 times
+// the size with uuid workspace ids. A partitioned layout hashes the table by
+// the workspace number, as it does index_rows.
+//
+// The step gives a number to each workspace that holds rows and has none, and
+// copies the rows to a new table in primary key order. It then drops the old
+// table, gives the new one its name, and creates the indexes, which builds
+// each of them in one pass. The fixed-width columns come first, in an order
+// that packs without alignment padding.
+//
+// It is not additive: a binary that does not know it reads and writes the
+// column it drops. It holds an exclusive lock on rows while it copies the
+// table, and needs the disk space of a second copy until it commits.
+//
+// %[1]s is where the partitioning clause of the new table lands, and %[2]s
+// and %[3]s are where its partitions are created and renamed.
+const numberedRowsDDL = `
+-- nextval is evaluated only for the rows the WHERE clause keeps, so a
+-- workspace that has a number already uses no id.
+INSERT INTO index_scopes (workspace_id, entity, idx, scope)
+SELECT x.workspace_id, '', '', nextval('posting_scope_ids')::int4
+FROM (SELECT DISTINCT workspace_id FROM rows) x
+WHERE NOT EXISTS (
+	SELECT 1 FROM index_scopes s WHERE s.workspace_id = x.workspace_id AND s.entity = '' AND s.idx = '');
+
+CREATE TABLE rows_v8 (
+	version         BIGINT NOT NULL,
+	created_version BIGINT NOT NULL DEFAULT 0,
+	updated_at      BIGINT NOT NULL DEFAULT 0,
+	wsn             INTEGER NOT NULL,
+	deleted         BOOLEAN NOT NULL DEFAULT FALSE,
+	entity          TEXT COLLATE "C" NOT NULL,
+	key             TEXT COLLATE "C" NOT NULL,
+	value           BYTEA,
+	actor_subject   TEXT COLLATE "C" NOT NULL DEFAULT '',
+	actor_system    TEXT COLLATE "C" NOT NULL DEFAULT '',
+	CONSTRAINT rows_v8_pkey PRIMARY KEY (wsn, entity, key)
+)%[1]s;
+%[2]s
+INSERT INTO rows_v8 (version, created_version, updated_at, wsn, deleted, entity, key, value,
+                     actor_subject, actor_system)
+SELECT r.version, r.created_version, r.updated_at, s.scope, r.deleted, r.entity, r.key, r.value,
+       r.actor_subject, r.actor_system
+FROM rows r
+JOIN index_scopes s ON s.workspace_id = r.workspace_id AND s.entity = '' AND s.idx = ''
+ORDER BY s.scope, r.entity, r.key;
+
+DROP TABLE rows;
+ALTER TABLE rows_v8 RENAME TO rows;
+ALTER INDEX rows_v8_pkey RENAME TO rows_pkey;
+%[3]s
+CREATE INDEX rows_by_version ON rows (wsn, version, entity, key);
+CREATE INDEX rows_gc ON rows (wsn, updated_at) WHERE deleted;
+CREATE INDEX rows_by_entity_version ON rows (wsn, entity, version DESC, key) WHERE NOT deleted;
+`
+
+// numberedRowsSchema is migration 8 under the given layout. A partitioned
+// layout creates the new table with as many partitions as the layout found,
+// hashed by the workspace number.
+func numberedRowsSchema(l layout) string {
+	if l.partitions == 0 {
+		return fmt.Sprintf(numberedRowsDDL, "", "", "")
+	}
+	var create, rename strings.Builder
+	writePartitions(&create, "rows_v8", l.partitions, "")
+	for _, name := range partitionSuffixes(l.partitions) {
+		fmt.Fprintf(&rename, "ALTER TABLE rows_v8%[1]s RENAME TO rows%[1]s;\n", name)
+		fmt.Fprintf(&rename, "ALTER INDEX rows_v8%[1]s_pkey RENAME TO rows%[1]s_pkey;\n", name)
+	}
+	return fmt.Sprintf(numberedRowsDDL, " PARTITION BY HASH (wsn)", create.String(), rename.String())
 }
 
 // rowIDIndexDDL is migration 7: the index of index_rows by row id holds only
@@ -222,12 +297,11 @@ CREATE TABLE deleted_workspaces (
 // by its workspace_id column. DeleteWorkspace empties each of them for the
 // workspace it deletes, so a table added by a migration must be added here
 // too; deleted_workspaces is the one table with that column left out, because
-// it holds the mark DeleteWorkspace leaves. field_deltas and consumer_shadows
-// hold no workspace_id, and DeleteWorkspace empties them by their ids (see
-// namedDeletes).
+// it holds the mark DeleteWorkspace leaves. rows, field_deltas and
+// consumer_shadows hold no workspace_id, and DeleteWorkspace empties them by
+// their ids (see namedDeletes).
 var workspaceTables = []string{
 	"workspaces",
-	"rows",
 	"clients",
 	"text_floors",
 	"idempotency",
@@ -344,6 +418,7 @@ CREATE TABLE workspaces (
 	PRIMARY KEY (workspace_id)
 );
 
+-- Migration 8 replaces the table.
 CREATE TABLE rows (
 	workspace_id  TEXT COLLATE "C" NOT NULL,
 	entity        TEXT COLLATE "C" NOT NULL,
@@ -591,11 +666,10 @@ CREATE TABLE cursor_state (
 `
 
 // partitionedTables names the tables a partitioned layout hash-partitions by
-// workspace_id, in the order the baseline creates them. Each one leads its primary key with
-// workspace_id — which is what Postgres demands of a unique constraint on a
-// partitioned table — and every statement against them binds that column to
-// equality, so pruning reaches a single partition and no update ever moves a
-// row across one.
+// workspace_id. Each one leads its primary key with workspace_id — which is
+// what Postgres demands of a unique constraint on a partitioned table — and
+// every statement against them binds that column to equality, so pruning
+// reaches a single partition and no update ever moves a row across one.
 //
 // The rest are left whole on purpose. workspaces is scanned ACROSS workspaces
 // by ListWorkspaceIDs and ListPendingWorkspaceIDs, with no equality on the key
@@ -604,15 +678,17 @@ CREATE TABLE cursor_state (
 // small enough that the partition count would cost more than the maintenance
 // granularity buys.
 var partitionedTables = []string{
-	"rows",
 	"idempotency",
 }
 
 // numberPartitionedTables names the tables a partitioned layout hash-partitions
 // by the workspace number, the wsn column, rather than by workspace_id. Every
-// statement against them binds wsn to equality as a parameter, so pruning
-// reaches one partition, and all entries of a workspace share it.
+// statement against index_rows, index_entries, field_deltas and
+// consumer_shadows binds wsn to equality as a parameter, so pruning reaches
+// one partition, and all entries of a workspace share it. A statement against
+// rows binds wsn as a parameter too, except where rows.go says otherwise.
 var numberPartitionedTables = []string{
+	"rows",
 	"index_rows",
 	"index_entries",
 	"field_deltas",
@@ -622,9 +698,9 @@ var numberPartitionedTables = []string{
 // baselinePartitionedTables and baselineNumberPartitionedTables are the tables
 // the baseline partitions by workspace_id and by the workspace number. They
 // differ from partitionedTables and numberPartitionedTables because migration
-// 5 creates field_deltas and consumer_shadows again, keyed by the workspace
-// number. They must not change: the baseline is the schema every database
-// starts from.
+// 5 creates field_deltas and consumer_shadows again, and migration 8 rows,
+// keyed by the workspace number. They must not change: the baseline is the
+// schema every database starts from.
 var (
 	baselinePartitionedTables       = []string{"rows", "field_deltas", "idempotency", "consumer_shadows"}
 	baselineNumberPartitionedTables = []string{"index_rows", "index_entries"}
@@ -1070,10 +1146,11 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, want layout) error {
 func detectLayout(ctx context.Context, conn *pgxpool.Conn) (layout, error) {
 	var partitions int
 	// to_regclass resolves through search_path and yields NULL — hence a count
-	// of zero — for a table that is not there at all.
+	// of zero — for a table that is not there at all. rows is partitioned in
+	// every version of a partitioned layout, whatever its partition key.
 	if err := conn.QueryRow(ctx,
-		`SELECT count(*) FROM pg_inherits WHERE inhparent = to_regclass($1)`,
-		partitionedTables[0]).Scan(&partitions); err != nil {
+		`SELECT count(*) FROM pg_inherits WHERE inhparent = to_regclass('rows')`,
+	).Scan(&partitions); err != nil {
 		return layout{}, fmt.Errorf("pgstore: read table layout: %w", err)
 	}
 	return layout{partitions: partitions}, nil

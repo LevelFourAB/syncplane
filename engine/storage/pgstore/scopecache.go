@@ -2,16 +2,18 @@ package pgstore
 
 import "sync"
 
-// scopeCache holds the scope id of each posting index a Store has read, so a
-// posting statement can bind the scope as a parameter. A bound scope lets a
-// partitioned layout prune to one partition when it plans the statement;
-// a scope that comes from a join can only prune when the statement runs,
-// after the planner has planned and the executor has opened every partition.
+// scopeCache holds ids a Store has read, so a statement can bind the id as a
+// parameter: a Store keeps one for the scope id of each posting index, and one
+// for the number of each workspace (see rows.go), keyed by the workspace with
+// an empty entity and index. A bound id lets a partitioned layout prune to one
+// partition when it plans the statement; an id that comes from a join can only
+// prune when the statement runs, after the planner has planned and the
+// executor has opened every partition.
 //
 // An entry can be stale: another node may have cleared the index, or deleted
-// the workspace, and so dropped the scope. Every statement that uses an entry
-// therefore travels with a read of the current scope id, and the reader
-// throws its result away and reads again when the two differ. The cache is
+// the workspace, and so dropped the id. Every statement that uses an entry
+// therefore travels with a read of the current id, and the reader throws its
+// result away and reads again when the two differ. The cache is
 // safe for concurrent use. The zero of *scopeCache, nil, holds nothing.
 type scopeCache struct {
 	mu sync.Mutex
@@ -21,7 +23,8 @@ type scopeCache struct {
 type scopeCacheKey struct{ ws, entity, index string }
 
 // scopeCacheMax bounds the entries. A full cache starts again empty, which
-// costs each posting index one round trip to read its scope id again.
+// costs each posting index, and on a partitioned layout each workspace, one
+// round trip to read its id again.
 const scopeCacheMax = 1 << 16
 
 func newScopeCache() *scopeCache {

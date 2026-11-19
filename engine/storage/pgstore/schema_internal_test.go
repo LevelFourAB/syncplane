@@ -194,6 +194,7 @@ var _ = Describe("Migration scripts", func() {
 		decided := map[int]bool{
 			5: true, // field_deltas and consumer_shadows keyed by int ids
 			7: true, // index_rows_by_rid holds only the rows marked by_id
+			8: true, // rows keyed by the workspace number
 		}
 		for version, step := range migrations {
 			Expect(step.additive).To(Equal(!decided[version+1]), "migration %d", version+1)

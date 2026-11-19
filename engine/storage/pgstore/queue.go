@@ -158,16 +158,17 @@ func (t *pgTx) exec(sql string, args ...any) (pgconn.CommandTag, error) {
 }
 
 // query runs a read in one batch with the queue, so the read sees this
-// transaction's own writes. The caller must close the rows before it issues
-// another statement.
+// transaction's own writes, and with the reads of loadState when readRows
+// asked for them (see sendRead). The caller must close the rows before it
+// issues another statement.
 func (t *pgTx) query(sql string, args ...any) (pgx.Rows, error) {
 	if t.failed != nil {
 		return nil, t.failed
 	}
-	if len(t.queued) == 0 {
+	if len(t.queued) == 0 && !t.rideState {
 		return t.conn.Query(t.ctx, sql, args...)
 	}
-	br, err := t.sendWith(queuedStmt{sql: sql, args: args})
+	br, err := t.sendRead(queuedStmt{sql: sql, args: args})
 	if err != nil {
 		return nil, err
 	}
@@ -179,17 +180,17 @@ func (t *pgTx) query(sql string, args ...any) (pgx.Rows, error) {
 	return &batchRows{Rows: rows, br: br}, nil
 }
 
-// queryRow runs a single-row read in one batch with the queue. A failed send
-// is reported from the returned row's Scan, which is where pgx reports a query
-// failure too.
+// queryRow runs a single-row read in one batch with the queue, as query does.
+// A failed send is reported from the returned row's Scan, which is where pgx
+// reports a query failure too.
 func (t *pgTx) queryRow(sql string, args ...any) pgx.Row {
 	if t.failed != nil {
 		return errRow{err: t.failed}
 	}
-	if len(t.queued) == 0 {
+	if len(t.queued) == 0 && !t.rideState {
 		return t.conn.QueryRow(t.ctx, sql, args...)
 	}
-	br, err := t.sendWith(queuedStmt{sql: sql, args: args})
+	br, err := t.sendRead(queuedStmt{sql: sql, args: args})
 	if err != nil {
 		return errRow{err: err}
 	}

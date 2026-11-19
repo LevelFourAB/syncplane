@@ -519,6 +519,11 @@ func (t *pgTx) makeIndexScopes(names []indexKey) error {
 			return err
 		}
 		t.indexScopes[k] = scope
+		if k == (indexKey{}) {
+			// Not committed yet, but a read checks every number the cache
+			// gives it (see readRows).
+			t.numbers.put(t.ws, "", "", scope)
+		}
 	}
 	return rows.Err()
 }
