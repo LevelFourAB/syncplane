@@ -716,6 +716,42 @@ INSERT INTO index_row_ids (scope, entity, key, id)
 	  JOIN row_scopes s ON s.workspace_id = o.workspace_id
 	 ORDER BY o.workspace_id, o.entity, o.key;
 DROP TABLE index_row_ids_old;`,
+	// 14: row ids from index_row_entries, and index_row_keys only for the
+	// rows that need it. The lists and the map are copied, not dropped, so
+	// the index stays as it is.
+	//
+	// index_row_entries gives each row with entries its id, and
+	// AUTOINCREMENT gives each id one time only, for the reason migration 6
+	// gives. Its sequence starts at the greatest id that index_row_keys gave
+	// out, so that no id of a deleted row comes back. index_row_keys keeps
+	// the row key of an id only while the row holds an entry in the id form
+	// (see entryKeyValue), which few rows do: a value entry ends with its
+	// row key, and the search entries are in the posting tables. Its id is
+	// the id of the list, so it has no sequence of its own.
+	`ALTER TABLE index_row_entries RENAME TO index_row_entries_old;
+CREATE TABLE index_row_entries (
+	id      INTEGER PRIMARY KEY AUTOINCREMENT,
+	entries BLOB NOT NULL
+);
+INSERT INTO index_row_entries (id, entries)
+	SELECT id, entries FROM index_row_entries_old ORDER BY id;
+DROP TABLE index_row_entries_old;
+DELETE FROM sqlite_sequence WHERE name = 'index_row_entries';
+INSERT INTO sqlite_sequence (name, seq)
+	SELECT 'index_row_entries', max(
+		COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'index_row_keys'), 0),
+		COALESCE((SELECT MAX(id) FROM index_row_keys), 0),
+		COALESCE((SELECT MAX(id) FROM index_row_entries), 0));
+ALTER TABLE index_row_keys RENAME TO index_row_keys_old;
+CREATE TABLE index_row_keys (
+	id  INTEGER PRIMARY KEY,
+	key TEXT NOT NULL
+);
+INSERT INTO index_row_keys (id, key)
+	SELECT id, key FROM index_row_keys_old
+	 WHERE id IN (SELECT key FROM index_entries WHERE key > 0)
+	 ORDER BY id;
+DROP TABLE index_row_keys_old;`,
 }
 
 // workspaceTables names every table that holds state of one workspace, keyed
@@ -2906,7 +2942,7 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 	// The id goes first: an entry that does not end with the row key stores
 	// it, and a row new to the index has none yet.
 	if listID == 0 {
-		res, err := t.exec(`INSERT INTO index_row_keys (key) VALUES (?)`, key)
+		res, err := t.exec(`INSERT INTO index_row_entries (entries) VALUES (?)`, encodeRowEntries(key, want))
 		if err != nil {
 			return err
 		}
@@ -2919,17 +2955,22 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 		); err != nil {
 			return err
 		}
-		if _, err := t.exec(
-			`INSERT INTO index_row_entries (id, entries) VALUES (?, ?)`,
-			listID, encodeRowEntries(key, want),
-		); err != nil {
-			return err
-		}
 	} else if _, err := t.exec(
 		`UPDATE index_row_entries SET entries = ? WHERE id = ?`,
 		encodeRowEntries(key, want), listID,
 	); err != nil {
 		return err
+	}
+	// index_row_keys holds the row key while an entry of the row holds the id
+	// in place of it, and no longer: most rows never need the record.
+	if needs, had := hasIDFormEntry(key, want), hasIDFormEntry(key, have); needs && !had {
+		if _, err := t.exec(`INSERT INTO index_row_keys (id, key) VALUES (?, ?)`, listID, key); err != nil {
+			return err
+		}
+	} else if had && !needs {
+		if _, err := t.exec(`DELETE FROM index_row_keys WHERE id = ?`, listID); err != nil {
+			return err
+		}
 	}
 	for e := range have {
 		if _, keep := want[e]; keep {
@@ -3156,6 +3197,18 @@ func entryKeyValue(k, rowKey string, id int64) int64 {
 	return id
 }
 
+// hasIDFormEntry reports whether an entry of set, the entries of the row with
+// key rowKey, stores the row's id in the key column of index_entries (see
+// entryKeyValue).
+func hasIDFormEntry(rowKey string, set map[rowIndexEntry]struct{}) bool {
+	for e := range set {
+		if !endsWithRowKey(e.k, rowKey) {
+			return true
+		}
+	}
+	return false
+}
+
 // entryRowKey reverses entryKeyValue for the entry k, given the value the key
 // column holds for it.
 func (t *sqliteTx) entryRowKey(k []byte, stored int64) (string, error) {
@@ -3287,7 +3340,9 @@ func (t *sqliteTx) DeleteIndexEntries(entity, key string) error {
 	if _, err := t.exec(`DELETE FROM index_row_entries WHERE id = ?`, listID); err != nil {
 		return err
 	}
-	_, err = t.exec(`DELETE FROM index_row_keys WHERE id = ?`, listID)
+	if hasIDFormEntry(key, have) {
+		_, err = t.exec(`DELETE FROM index_row_keys WHERE id = ?`, listID)
+	}
 	return err
 }
 

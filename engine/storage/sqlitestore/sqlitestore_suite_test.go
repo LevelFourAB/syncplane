@@ -60,7 +60,29 @@ var _ = Describe("SQLite schema versioning", func() {
 	const baselineVersion = 1
 	// The version a database this binary creates or upgrades ends at: the
 	// baseline plus every migration since. Bump it with each migration added.
-	const latestVersion = 13
+	const latestVersion = 14
+
+	// oldRowLists takes index_row_entries and index_row_keys back to their
+	// shape before migration 14, with their data, which every rewind below
+	// needs: index_row_keys gives out the ids and holds the key of every row
+	// with a list, and its sequence is the one index_row_entries has.
+	const oldRowLists = `
+		DROP TABLE index_row_keys;
+		CREATE TABLE index_row_keys (
+			id  INTEGER PRIMARY KEY AUTOINCREMENT,
+			key TEXT NOT NULL
+		);
+		INSERT INTO index_row_keys (id, key) SELECT id, key FROM index_row_ids;
+		DELETE FROM sqlite_sequence WHERE name = 'index_row_keys';
+		INSERT INTO sqlite_sequence (name, seq)
+			SELECT 'index_row_keys', seq FROM sqlite_sequence WHERE name = 'index_row_entries';
+		ALTER TABLE index_row_entries RENAME TO index_row_entries_new;
+		CREATE TABLE index_row_entries (
+			id      INTEGER PRIMARY KEY,
+			entries BLOB NOT NULL
+		);
+		INSERT INTO index_row_entries SELECT id, entries FROM index_row_entries_new;
+		DROP TABLE index_row_entries_new;`
 
 	// oldRowTables takes rows and index_row_ids back to their shape before
 	// migration 13, with their data, which every rewind below needs.
@@ -238,7 +260,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// lineage table existed.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + noPostings + noApplied + oldIndexTables + fmt.Sprintf("\nDROP TABLE seq_lineage;\nDROP TABLE deleted_workspaces;\nPRAGMA user_version = %d;", baselineVersion))
+		_, err = db.Exec(oldRowLists + oldRowTables + noRetain + oldSideTables + noPostings + noApplied + oldIndexTables + fmt.Sprintf("\nDROP TABLE seq_lineage;\nDROP TABLE deleted_workspaces;\nPRAGMA user_version = %d;", baselineVersion))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db.Close()).To(Succeed())
 
@@ -270,7 +292,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// a workspace whose build mark says it is up to date.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + noPostings + noApplied + oldIndexTables + `
+		_, err = db.Exec(oldRowLists + oldRowTables + noRetain + oldSideTables + noPostings + noApplied + oldIndexTables + `
 			INSERT INTO index_entries VALUES ('ws1', 'widget', 'by_label', x'01', 'k1');
 			INSERT INTO index_state (workspace_id, entity, idx, spec_hash, ready)
 				VALUES ('ws1', 'widget', 'by_label', 'h1', 1);
@@ -333,7 +355,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// a ready index and a workspace whose build mark says it is up to date.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + noPostings + noApplied + `
+		_, err = db.Exec(oldRowLists + oldRowTables + noRetain + oldSideTables + noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -416,7 +438,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		var scope int
 		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
 		Expect(scope).To(Equal(1))
-		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + noPostings + noApplied + `
+		_, err = db.Exec(oldRowLists + oldRowTables + noRetain + oldSideTables + noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -503,7 +525,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		var scope int
 		Expect(db.QueryRow(`SELECT id FROM index_scopes`).Scan(&scope)).To(Succeed())
 		Expect(scope).To(Equal(1))
-		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + noPostings + noApplied + `
+		_, err = db.Exec(oldRowLists + oldRowTables + noRetain + oldSideTables + noPostings + noApplied + `
 			DROP TABLE index_entries;
 			DROP TABLE index_row_entries;
 			DROP TABLE index_row_ids;
@@ -603,7 +625,7 @@ var _ = Describe("SQLite schema versioning", func() {
 
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + noPostings + `
+		_, err = db.Exec(oldRowLists + oldRowTables + noRetain + oldSideTables + noPostings + `
 			PRAGMA user_version = 8;`)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db.Close()).To(Succeed())
@@ -654,7 +676,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		// two consumers.
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldRowTables + noRetain + oldSideTables + `
+		_, err = db.Exec(oldRowLists + oldRowTables + noRetain + oldSideTables + `
 			INSERT INTO field_deltas VALUES
 				('ws1', 'widget', 'k1', 'body', 2, x'0a', 1),
 				('ws1', 'widget', 'k1', 'body', 3, x'0b', 1),
@@ -724,7 +746,7 @@ var _ = Describe("SQLite schema versioning", func() {
 
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldRowTables + noRetain + `
+		_, err = db.Exec(oldRowLists + oldRowTables + noRetain + `
 			INSERT INTO workspaces (workspace_id) VALUES ('ws1');
 			INSERT INTO consumer_positions (workspace_id, consumer, seq, updated_at)
 				VALUES ('ws1', 'mailer', 3, 1);
@@ -785,7 +807,7 @@ var _ = Describe("SQLite schema versioning", func() {
 
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(oldRowTables + `
+		_, err = db.Exec(oldRowLists + oldRowTables + `
 			PRAGMA user_version = 12;`)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(db.Close()).To(Succeed())
@@ -857,6 +879,109 @@ var _ = Describe("SQLite schema versioning", func() {
 		Expect(scan("ws1", "by_flag")).To(BeEmpty())
 		Expect(changes("ws2")).To(HaveLen(1), "deleting one workspace keeps the rows of another")
 		Expect(scan("ws2", "by_flag")).To(Equal([]string{"\x01=k1"}))
+	})
+
+	It("upgrades version-13 row ids and keeps the row keys that entries name", func() {
+		ctx := context.Background()
+		path := filepath.Join(GinkgoT().TempDir(), "v13.db")
+		store, err := sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		put := func(key string, entries ...storage.IndexEntry) {
+			GinkgoHelper()
+			Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+				return tx.PutIndexEntries("widget", key, entries)
+			})).To(Succeed())
+		}
+		// A by_label entry ends with the row key, so its key column holds a
+		// length. A by_flag entry does not, so its key column holds the row id.
+		label := func(prefix, key string) storage.IndexEntry {
+			return storage.IndexEntry{Index: "by_label", Key: []byte(prefix + "\x00" + key + "\x00\x00")}
+		}
+		flag := func(b byte) storage.IndexEntry {
+			return storage.IndexEntry{Index: "by_flag", Key: []byte{b}}
+		}
+		put("plain", label("a", "plain"))
+		put("byid", label("b", "byid"), flag(0x01))
+		// The greatest id goes with its row, so only the sequence knows it.
+		put("gone", flag(0x02))
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			return tx.DeleteIndexEntries("widget", "gone")
+		})).To(Succeed())
+		Expect(store.Close()).To(Succeed())
+
+		db, err := sql.Open("sqlite", path)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(db.Close()).To(Succeed()) })
+		_, err = db.Exec(oldRowLists + `
+			PRAGMA user_version = 13;`)
+		Expect(err).NotTo(HaveOccurred())
+		rowKeys := func() map[int64]string {
+			GinkgoHelper()
+			out := map[int64]string{}
+			rows, err := db.Query(`SELECT id, key FROM index_row_keys`)
+			Expect(err).NotTo(HaveOccurred())
+			defer rows.Close()
+			for rows.Next() {
+				var (
+					id  int64
+					key string
+				)
+				Expect(rows.Scan(&id, &key)).To(Succeed())
+				out[id] = key
+			}
+			Expect(rows.Err()).NotTo(HaveOccurred())
+			return out
+		}
+		listID := func(key string) int64 {
+			GinkgoHelper()
+			var id int64
+			Expect(db.QueryRow(`SELECT id FROM index_row_ids WHERE key = ?`, key).Scan(&id)).To(Succeed())
+			return id
+		}
+		plainID, byidID := listID("plain"), listID("byid")
+		Expect(rowKeys()).To(Equal(map[int64]string{plainID: "plain", byidID: "byid"}))
+		var issued int64
+		Expect(db.QueryRow(`SELECT seq FROM sqlite_sequence WHERE name = 'index_row_keys'`).Scan(&issued)).To(Succeed())
+		Expect(issued).To(BeNumerically(">", max(plainID, byidID)), "the id of the deleted row is the greatest")
+
+		store, err = sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+		Expect(rowKeys()).To(Equal(map[int64]string{byidID: "byid"}), "only an id-form entry needs the row key")
+		scan := func(index string) []string {
+			GinkgoHelper()
+			var keys []string
+			Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+				return tx.ScanIndex("widget", index, nil, nil, 0, storage.ScanAsc, func(k []byte, key string) error {
+					keys = append(keys, string(k)+"="+key)
+					return nil
+				})
+			})).To(Succeed())
+			return keys
+		}
+		Expect(scan("by_label")).To(Equal([]string{"a\x00plain\x00\x00=plain", "b\x00byid\x00\x00=byid"}))
+		Expect(scan("by_flag")).To(Equal([]string{"\x01=byid"}))
+
+		// A row new after the upgrade gets an id above every id given out
+		// before it, also the id of the deleted row.
+		put("fresh", flag(0x03))
+		Expect(listID("fresh")).To(BeNumerically(">", issued))
+		Expect(scan("by_flag")).To(Equal([]string{"\x01=byid", "\x03=fresh"}))
+
+		// A put finds the lists of the upgrade: one row gains an id-form entry
+		// and the other loses its own.
+		put("plain", label("a", "plain"), flag(0x04))
+		put("byid", label("b", "byid"))
+		Expect(scan("by_label")).To(Equal([]string{"a\x00plain\x00\x00=plain", "b\x00byid\x00\x00=byid"}))
+		Expect(scan("by_flag")).To(Equal([]string{"\x03=fresh", "\x04=plain"}))
+		Expect(rowKeys()).To(Equal(map[int64]string{plainID: "plain", listID("fresh"): "fresh"}))
+
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			return tx.DeleteIndexEntries("widget", "plain")
+		})).To(Succeed())
+		Expect(scan("by_label")).To(Equal([]string{"b\x00byid\x00\x00=byid"}))
+		Expect(scan("by_flag")).To(Equal([]string{"\x03=fresh"}))
+		Expect(rowKeys()).To(Equal(map[int64]string{listID("fresh"): "fresh"}))
 	})
 
 	It("refuses a database from a schema lineage that predates the stamp", func() {

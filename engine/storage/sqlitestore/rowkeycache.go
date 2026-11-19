@@ -5,14 +5,17 @@ import "sync"
 // rowKeyCache maps the ids of index_row_keys to their row keys, so that
 // ScanIndex can resolve the id form of an entry without a read of that table.
 //
-// A cached mapping cannot go stale. AUTOINCREMENT gives each id one time only,
-// so an id that is committed names the same row key for the life of the file.
-// When the row is deleted, its entries go in the same transaction, and no
-// entry can name the id again; the cached mapping is then unused, not wrong.
-// The cache can learn a mapping only when the mapping is known to be
-// committed (see sqliteTx.learnRowKeys): an insert that rolls back also rolls
-// back sqlite_sequence, and SQLite can then give the same id to a different
-// row key. A migration that drops index_row_keys also resets its sequence,
+// A cached mapping cannot go stale. An id is the id of a row's entry list,
+// and AUTOINCREMENT on index_row_entries gives each id one time only, so an
+// id that is committed names the same row key for the life of the file. The
+// mapping stays true while index_row_keys drops and adds the record of the
+// id, because the record always holds the key of the same row. When the row
+// is deleted, its entries go in the same transaction, and no entry can name
+// the id again; the cached mapping is then unused, not wrong. The cache can
+// learn a mapping only when the mapping is known to be committed (see
+// sqliteTx.learnRowKeys): an insert that rolls back also rolls back
+// sqlite_sequence, and SQLite can then give the same id to a different row
+// key. A migration that drops index_row_entries also resets its sequence,
 // but migrations run in Open, before the Store has a cache.
 type rowKeyCache = keyCache[int64]
 

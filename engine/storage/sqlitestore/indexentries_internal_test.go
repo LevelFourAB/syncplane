@@ -159,6 +159,68 @@ var _ = Describe("index entry row keys", func() {
 		DeferCleanup(func() { entries["plain"] = []byte("a\x00\x00plain\x00\x00") })
 		Expect(scan(storage.ScanAsc)).To(Equal([]string{"nul\u0000key", "astral\U0001f600", "elsewhere", "plain"}))
 	})
+
+	It("keeps a row key in index_row_keys only while an entry of the row holds the id", func() {
+		recorded := func(key string) bool {
+			GinkgoHelper()
+			var n int
+			Expect(store.read.QueryRow(
+				`SELECT COUNT(*) FROM index_row_keys r JOIN index_row_ids i ON i.id = r.id
+				 WHERE i.key = ? AND r.key = i.key`, key,
+			).Scan(&n)).To(Succeed())
+			return n == 1
+		}
+		put := func(mark string) {
+			GinkgoHelper()
+			set := []storage.IndexEntry{{Index: "by_label", Key: entries["plain"]}}
+			if mark != "" {
+				set = append(set, storage.IndexEntry{Index: "by_mark", Key: []byte(mark)})
+			}
+			Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+				return tx.PutIndexEntries("widget", "plain", set)
+			})).To(Succeed())
+		}
+		scanMarks := func() []string {
+			GinkgoHelper()
+			var keys []string
+			Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
+				return tx.ScanIndex("widget", "by_mark", nil, nil, 0, storage.ScanAsc, func(entry []byte, rowKey string) error {
+					keys = append(keys, string(entry)+"="+rowKey)
+					return nil
+				})
+			})).To(Succeed())
+			return keys
+		}
+
+		Expect(recorded("plain")).To(BeFalse())
+		Expect(recorded("elsewhere")).To(BeTrue())
+
+		put("m")
+		Expect(recorded("plain")).To(BeTrue())
+		Expect(scanMarks()).To(Equal([]string{"m=plain"}))
+
+		put("")
+		Expect(recorded("plain")).To(BeFalse())
+		Expect(scanMarks()).To(BeEmpty())
+		Expect(scan(storage.ScanAsc)).To(Equal(order))
+
+		// The cache learned the id of the row above. The row gets the record
+		// back under the same id, and a read of the table gives the same key.
+		put("n")
+		Expect(recorded("plain")).To(BeTrue())
+		Expect(scanMarks()).To(Equal([]string{"n=plain"}))
+		store.rowKeys = newRowKeyCache(rowKeyCacheCap)
+		Expect(scanMarks()).To(Equal([]string{"n=plain"}))
+		Expect(scan(storage.ScanAsc)).To(Equal(order))
+
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			return tx.DeleteIndexEntries("widget", "plain")
+		})).To(Succeed())
+		var n int
+		Expect(store.read.QueryRow(`SELECT COUNT(*) FROM index_row_keys WHERE key = 'plain'`).Scan(&n)).To(Succeed())
+		Expect(n).To(BeZero())
+		Expect(scanMarks()).To(BeEmpty())
+	})
 })
 
 var _ = Describe("byte-equal index entries of different rows", func() {
