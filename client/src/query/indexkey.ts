@@ -70,12 +70,18 @@
 //   product either: the second fan lives inside one position of the first.
 // - A row whose collection is empty or unset still writes exactly one entry,
 //   with the missing tag at each fan-out component. Every live row occupies at
-//   least one position in every index, which is what lets a range that does NOT
-//   constrain the fan-out component still see every row.
+//   least one position in every DENSE index, which is what lets a range that
+//   does NOT constrain the fan-out component still see every row. A SPARSE
+//   index leaves out each entry whose leading component is missing, and a
+//   sparse field index over a field with implicit presence also leaves out
+//   the entries that hold the field's zero value (see
+//   sparseFieldIndexEncoder). The planner reads a sparse index only where it
+//   holds what the dense one holds.
 // - Duplicate positions collapse: they would produce identical keys, and an
 //   entry is a position, not a count.
 
 import type { DescMessage } from '@bufbuild/protobuf';
+import { FeatureSet_FieldPresence } from '@bufbuild/protobuf/wkt';
 
 import { isTextField } from '../mutations.js';
 import type { Path, Scalar } from './ast.js';
@@ -136,6 +142,13 @@ export interface IndexComponent {
 	 * `custom.*.key`.
 	 */
 	keyComponent: boolean;
+	/**
+	 * True when the leaf is a singular field with implicit presence, which is
+	 * never missing and holds its zero value when not set. Only
+	 * {@link compileIndexComponent} sets it, and only on a component that does
+	 * not fan out.
+	 */
+	implicitPresence?: boolean;
 	/**
 	 * Makes this a COMPUTED component: its value is the row's match rank (a
 	 * number) rather than anything read through a path, and `path` is empty.
@@ -253,6 +266,9 @@ export function compileIndexComponent(
 		unsigned: isUnsigned64(leaf.field),
 		fans: leaf.fans,
 		keyComponent: false,
+		...(leaf.fans.length === 0 && leaf.field.presence === FeatureSet_FieldPresence.IMPLICIT
+			? { implicitPresence: true }
+			: {}),
 	};
 }
 
@@ -318,6 +334,14 @@ export class IndexEncoder {
 	readonly sparse: boolean;
 
 	/**
+	 * One encoded leading component that a sparse encoder also leaves out: the
+	 * zero value of a field with implicit presence, in an index that
+	 * {@link sparseFieldIndexEncoder} builds. The planner keeps every range out of
+	 * the entries that start with it.
+	 */
+	readonly omitted: string | undefined;
+
+	/**
 	 * Throws when two components fan out over different chains. Their cross
 	 * product would be the only way to store both, and a cross product pairs
 	 * values that never belonged to the same element — so such an index is
@@ -327,12 +351,23 @@ export class IndexEncoder {
 	 * value simply repeats across the positions below it.
 	 *
 	 * Also throws for a sparse encoder with no components, which has no leading
-	 * component to leave rows out by.
+	 * component to leave rows out by, and for `omitted` on an encoder that is
+	 * not sparse.
+	 *
+	 * @param options.omitted - An encoded leading component to leave out as
+	 * well, which must be one whole component.
 	 */
-	constructor(readonly components: IndexComponent[], options?: { sparse?: boolean }) {
+	constructor(
+		readonly components: IndexComponent[],
+		options?: { sparse?: boolean; omitted?: string },
+	) {
 		this.sparse = options?.sparse ?? false;
+		this.omitted = options?.omitted;
 		if (this.sparse && components.length === 0) {
 			throw new Error('a sparse index needs at least one component');
+		}
+		if (this.omitted !== undefined && !this.sparse) {
+			throw new Error('only a sparse index can leave out a value');
 		}
 		for (const c of components) {
 			const levels = fanLevelsOf(c);
@@ -374,6 +409,9 @@ export class IndexEncoder {
 		for (const pos of this.positions(row, schema)) {
 			const entry = this.encodeAt(row, rowKey, schema, pos);
 			if (this.sparse && entry.charCodeAt(0) === TAG_MISSING) continue;
+			// The components are self-delimiting, so an entry that starts with
+			// `omitted` has exactly that leading component.
+			if (this.omitted !== undefined && entry.startsWith(this.omitted)) continue;
 			// Two positions can encode identically — duplicate list elements, or
 			// two map entries no component distinguishes. An entry is a position,
 			// not a count, so the second one would just overwrite the first.
@@ -487,11 +525,13 @@ export class IndexEncoder {
 	/**
 	 * Fingerprints what the stored entries of this index depend on. For a dense
 	 * encoder it equals {@link specHash} over the same components; a sparse
-	 * encoder fingerprints differently, so entries stored under one form are
-	 * stale under the other and rebuild. Mirrors the Go `IndexEncoder.SpecHash`.
+	 * encoder, and one that also leaves out a value, each fingerprint
+	 * differently, so entries stored under one form are stale under the others
+	 * and rebuild. Mirrors the Go `IndexEncoder.SpecHash`.
 	 */
 	specHash(): string {
 		const h = specHash(this.components);
+		if (this.omitted !== undefined) return fingerprint(`${h}:sparse:${keyToHex(this.omitted)}`);
 		return this.sparse ? fingerprint(`${h}:sparse`) : h;
 	}
 
@@ -586,6 +626,56 @@ export function declaredIndexEncoder(comps: IndexComponent[]): IndexEncoder {
 	// the missing rank as its no-value group, so a leading list fan stays dense.
 	const sparse = comps.length > 0 && comps[0]!.fans.some((f) => f.isMap);
 	return new IndexEncoder(comps, { sparse });
+}
+
+/**
+ * The encoder for the index of a field that sets both
+ * (syncplane.v1.field_behavior).indexed and sparse_index, over the one
+ * component compiled from that field. The encoder is sparse, and when the leaf
+ * field has implicit presence it also leaves out each entry that holds the
+ * zero value of that field: the empty string, 0, false or the zero enum value.
+ * The index then holds an entry only for a row that sets the field. Mirrors
+ * the Go `NewSparseFieldIndexEncoder`, and must decide the same way: the
+ * decision is part of the fingerprint.
+ *
+ * Throws when the component fans out over a repeated field, and otherwise as
+ * the {@link IndexEncoder} constructor does.
+ */
+export function sparseFieldIndexEncoder(comp: IndexComponent): IndexEncoder {
+	if (comp.fans.length > 0) {
+		throw new Error(
+			`a sparse field index needs a singular field, not the repeated ${comp.path.join('.')}`,
+		);
+	}
+	if (!comp.implicitPresence) return new IndexEncoder([ comp ], { sparse: true });
+	// Encoded through appendComponent rather than spelled out per kind, so the
+	// key encode compares against is the key it writes.
+	const out: number[] = [];
+	appendComponent(out, comp, true, zeroOf(comp.kind));
+	return new IndexEncoder([ comp ], { sparse: true, omitted: bytesToKey(out) });
+}
+
+/** The zero value of a payload shape, as a field with implicit presence holds
+ * it when not set. */
+function zeroOf(kind: IndexKind): Scalar {
+	switch (kind) {
+		case 'string':
+			return '';
+		case 'bool':
+			return false;
+		case 'number':
+			return 0;
+		case 'bigint':
+			return 0n;
+	}
+}
+
+/** A key of one character per byte, as lowercase hex — Go's
+ * `hex.EncodeToString` over the same bytes. */
+function keyToHex(key: string): string {
+	let out = '';
+	for (let i = 0; i < key.length; i++) out += key.charCodeAt(i).toString(16).padStart(2, '0');
+	return out;
 }
 
 /**

@@ -23,6 +23,7 @@ import {
 	compileIndexComponent,
 	declaredIndexEncoder,
 	IndexEncoder,
+	sparseFieldIndexEncoder,
 } from '../../src/query/indexkey.js';
 import {
 	type GroupPlan,
@@ -48,6 +49,9 @@ interface SpecVector {
 	/** Builds a sparse index. Without it the index is a declared one, which
 	 * declaredIndexEncoder builds. */
 	sparse?: boolean;
+	/** Builds the index of a field that sets `sparse_index`, over the one
+	 * component, which sparseFieldIndexEncoder builds. */
+	fieldSparse?: boolean;
 }
 
 interface EncodeCase {
@@ -105,6 +109,10 @@ const schemaFor = (type?: string): DescMessage =>
 
 const encoderFor = (spec: SpecVector, schema: DescMessage): IndexEncoder => {
 	const comps = spec.key.map((k) => compileIndexComponent(schema, k.path, k.desc));
+	if (spec.fieldSparse) {
+		if (comps.length !== 1) throw new Error(`${spec.name}: a field index has one component`);
+		return sparseFieldIndexEncoder(comps[0]!);
+	}
 	return spec.sparse ? new IndexEncoder(comps, { sparse: true }) : declaredIndexEncoder(comps);
 };
 

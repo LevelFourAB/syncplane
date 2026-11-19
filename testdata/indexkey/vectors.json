@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the index-entry encoding: engine/query/indexkey.go and client/src/query/indexkey.ts must produce byte-identical entries. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; spec.key paths use proto field names (Widget's localNames coincide). encodeCases pin the bytes themselves, as testdata/text does, so a change to either encoder that is not mirrored in the other fails here rather than silently corrupting stored indexes. orderCases pin the property that actually matters: sorting rows by their encoded entry must give the SAME order as the row comparator (Order.Compare / compareRows) over an ordering with the same keys, which both loaders assert against each other rather than only against `want`. probeCases pin the PLANNER's decisions — which index it picks, how many ranges it produces, whether it claims the ordering, whether it reads its ranges backward to supply it, and whether anything is left to re-check. A reversed plan reads each range from its high end, the ranges in the order listed: the component's real values backward, then its NaN rank, then its missing rank, because those two sort last in either direction while their tags do not invert. A probeCase with `walk` pins that order: the row keys a walk of the plan's ranges yields, each row at its first position. Both planners must agree: a planner that chose differently would still return the right rows, just at a different cost, so nothing else in either suite would notice the divergence. `want` is \"scan\" when the query must fall back. A probeCase with `rows` also pins what the plan READS: the rows whose entries fall in its ranges, re-checked by the residual where there is one, must be `matches`, and a scan with the condition must give the same keys. The shape alone cannot see a range that selects the wrong rows, and a bug both planners share passes every shape assertion. groupCases pin the GROUP planner in the same way: which index partitions the match set, whether anything is left to re-check, whether the partition component is stored descending (so the walk reads the range backward to yield groups in ascending value order), and whether one entry inside a group is one row (so a count can be read off entries with no row read). groupBy is a row path, not an index path, so it names a map entry by key where a component writes `*`. Ranges are not compared byte-for-byte here — encodeCases already pin the encoding, and the bounds are derived from it. A component whose path runs through a repeated field fans out: the row takes one entry per element, an empty list still takes one entry tagged missing so every live row stays reachable, and duplicate elements collapse. Components sharing a list fan out TOGETHER, element by element — the cross-product pairing is what a co-referring query would silently get wrong, so \"two components on one list stay paired per element\" is the case that pins it. A `*` segment in a spec path means FAN OUT over every entry of that map, and expands to TWO components: the entry key ascending, then the leaf in the declared direction. That is what makes a probe on one user-defined field a contiguous range. A row's entries come out in KEY order on both sides — Go randomizes map iteration and JS orders integer-like properties first, so both sort explicitly, and the encodeCases pin the result. A `*` may be followed by a repeated field inside one entry (multi-select), which yields one entry per (key, element) and is not a cross product: the second fan lives inside ONE position of the first. There are no orderCases for a `*` spec: an orderCase asserts that sorting by the encoded entry equals sorting by the COMPARATOR over the same paths, and a comparator path cannot contain a `*` — an ordering within one custom field is only meaningful once the entry key is pinned, which is a planner question. The differential index-vs-scan suites on both sides cover it instead. The field_history cases pin the one shape the engine itself depends on: a history row key renders `seq` as unpadded decimal, so the keyspace sorts \"10\" < \"100\" < \"9\" and a bare scan does not give sequence order. Only the declared by_source index does: the descending read walks it forward and the ascending one walks it backward. cursorCases pin the QUERY CURSOR, which is the same entry encoding with the query's order keys as its components, framed as 0x01 ++ a 16-hex shape fingerprint ++ the entry. Unlike an index entry a cursor CROSSES THE WIRE — minted on one side and replayed on the other — so its bytes and its shape are pinned here for the same reason encodeCases pin theirs, and both loaders additionally assert the property the feature rests on: sorting rows by cursor equals sorting them by the comparator, and filtering by after or before (a byte comparison against one row's cursor) selects exactly the rows the comparator ranks after or before that row. Two shapes exist only here and cannot appear in encodeCases: an order key over a COLLABORATIVE TEXT field, which an index refuses because a keystroke would rewrite the stored entry, and an order key naming ONE ENTRY of a map by key (custom.priority.number), where an index path fans out over every entry instead — which is why the shape folds the entry key in, so a cursor for one custom field is not accepted for another. A spec with `sparse: true` is built as a sparse index, which leaves out every entry whose leading component is missing; every other spec is built as a DECLARED index, which is sparse exactly when its leading component fans out over a map and dense otherwise. A sparse index is a candidate only for a plan whose every range lies inside the present ranks of its leading component, so isNotSet on it, an ordering with no bound on it, a union branch outside those ranks and a grouping over its missing group all fall back. An encodeCase with `specHash` pins the fingerprint of its spec, which differs between the sparse and the dense form of the same components so that entries stored under one are never read as the other. A neq term plans only against the lowest value of its kind, the empty string or false, where it selects exactly the rows a gt term on the same literal selects; against any other value it does not plan.",
+	"comment": "Shared conformance vectors for the index-entry encoding: engine/query/indexkey.go and client/src/query/indexkey.ts must produce byte-identical entries. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; spec.key paths use proto field names (Widget's localNames coincide). encodeCases pin the bytes themselves, as testdata/text does, so a change to either encoder that is not mirrored in the other fails here rather than silently corrupting stored indexes. orderCases pin the property that actually matters: sorting rows by their encoded entry must give the SAME order as the row comparator (Order.Compare / compareRows) over an ordering with the same keys, which both loaders assert against each other rather than only against `want`. probeCases pin the PLANNER's decisions — which index it picks, how many ranges it produces, whether it claims the ordering, whether it reads its ranges backward to supply it, and whether anything is left to re-check. A reversed plan reads each range from its high end, the ranges in the order listed: the component's real values backward, then its NaN rank, then its missing rank, because those two sort last in either direction while their tags do not invert. A probeCase with `walk` pins that order: the row keys a walk of the plan's ranges yields, each row at its first position. Both planners must agree: a planner that chose differently would still return the right rows, just at a different cost, so nothing else in either suite would notice the divergence. `want` is \"scan\" when the query must fall back. A probeCase with `rows` also pins what the plan READS: the rows whose entries fall in its ranges, re-checked by the residual where there is one, must be `matches`, and a scan with the condition must give the same keys. The shape alone cannot see a range that selects the wrong rows, and a bug both planners share passes every shape assertion. groupCases pin the GROUP planner in the same way: which index partitions the match set, whether anything is left to re-check, whether the partition component is stored descending (so the walk reads the range backward to yield groups in ascending value order), and whether one entry inside a group is one row (so a count can be read off entries with no row read). groupBy is a row path, not an index path, so it names a map entry by key where a component writes `*`. Ranges are not compared byte-for-byte here — encodeCases already pin the encoding, and the bounds are derived from it. A component whose path runs through a repeated field fans out: the row takes one entry per element, an empty list still takes one entry tagged missing so every live row stays reachable, and duplicate elements collapse. Components sharing a list fan out TOGETHER, element by element — the cross-product pairing is what a co-referring query would silently get wrong, so \"two components on one list stay paired per element\" is the case that pins it. A `*` segment in a spec path means FAN OUT over every entry of that map, and expands to TWO components: the entry key ascending, then the leaf in the declared direction. That is what makes a probe on one user-defined field a contiguous range. A row's entries come out in KEY order on both sides — Go randomizes map iteration and JS orders integer-like properties first, so both sort explicitly, and the encodeCases pin the result. A `*` may be followed by a repeated field inside one entry (multi-select), which yields one entry per (key, element) and is not a cross product: the second fan lives inside ONE position of the first. There are no orderCases for a `*` spec: an orderCase asserts that sorting by the encoded entry equals sorting by the COMPARATOR over the same paths, and a comparator path cannot contain a `*` — an ordering within one custom field is only meaningful once the entry key is pinned, which is a planner question. The differential index-vs-scan suites on both sides cover it instead. The field_history cases pin the one shape the engine itself depends on: a history row key renders `seq` as unpadded decimal, so the keyspace sorts \"10\" < \"100\" < \"9\" and a bare scan does not give sequence order. Only the declared by_source index does: the descending read walks it forward and the ascending one walks it backward. cursorCases pin the QUERY CURSOR, which is the same entry encoding with the query's order keys as its components, framed as 0x01 ++ a 16-hex shape fingerprint ++ the entry. Unlike an index entry a cursor CROSSES THE WIRE — minted on one side and replayed on the other — so its bytes and its shape are pinned here for the same reason encodeCases pin theirs, and both loaders additionally assert the property the feature rests on: sorting rows by cursor equals sorting them by the comparator, and filtering by after or before (a byte comparison against one row's cursor) selects exactly the rows the comparator ranks after or before that row. Two shapes exist only here and cannot appear in encodeCases: an order key over a COLLABORATIVE TEXT field, which an index refuses because a keystroke would rewrite the stored entry, and an order key naming ONE ENTRY of a map by key (custom.priority.number), where an index path fans out over every entry instead — which is why the shape folds the entry key in, so a cursor for one custom field is not accepted for another. A spec with `sparse: true` is built as a sparse index, which leaves out every entry whose leading component is missing; every other spec is built as a DECLARED index, which is sparse exactly when its leading component fans out over a map and dense otherwise. A sparse index is a candidate only for a plan whose every range lies inside the present ranks of its leading component, so isNotSet on it, an ordering with no bound on it, a union branch outside those ranks and a grouping over its missing group all fall back. An encodeCase with `specHash` pins the fingerprint of its spec, which differs between the sparse and the dense form of the same components so that entries stored under one are never read as the other. A neq term plans only against the lowest value of its kind, the empty string or false, where it selects exactly the rows a gt term on the same literal selects; against any other value it does not plan. A spec with `fieldSparse: true` is built as the index of a field that sets both `indexed` and `sparse_index`, over its one singular component: it is sparse, and over a field with implicit presence it also leaves out every entry that holds the zero value of the field (the empty string, 0, false). A plain `indexed` field index is a declared index over one component, so it stays dense, and its cases need no flag. Such an index is a candidate only for a plan whose every range lies inside the present ranks of its leading component and reaches no entry that starts with that zero value, so an equality on the zero value, isSet, a range that includes it, an ordering or a grouping with no predicate that leaves it out, and a union branch that reads it all fall back.",
 	"encodeCases": [
 		{
 			"name": "ascending string",
@@ -1303,6 +1303,403 @@
 				"0180000000000000010161000077310000",
 				"0180000000000000020162000077310000"
 			]
+		},
+		{
+			"name": "a sparse field index leaves out the empty string of a string field with implicit presence",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_label",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [],
+			"specHash": "134af119e09b2d69"
+		},
+		{
+			"name": "a sparse field index keeps a set string, byte for byte as the dense index writes it",
+			"row": {
+				"label": "hi"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_label",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [
+				"016869000077310000"
+			],
+			"specHash": "134af119e09b2d69"
+		},
+		{
+			"name": "a sparse field index leaves out 0 of an int32 field with implicit presence",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_count",
+				"key": [
+					{
+						"path": [
+							"count"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [],
+			"specHash": "63d73db3978b0e62"
+		},
+		{
+			"name": "a sparse field index keeps a set int32",
+			"row": {
+				"count": 3
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_count",
+				"key": [
+					{
+						"path": [
+							"count"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [
+				"01c00800000000000077310000"
+			],
+			"specHash": "63d73db3978b0e62"
+		},
+		{
+			"name": "a sparse field index leaves out false of a bool field with implicit presence",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_flag",
+				"key": [
+					{
+						"path": [
+							"flag"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [],
+			"specHash": "af183aafac0ce781"
+		},
+		{
+			"name": "a sparse field index keeps true",
+			"row": {
+				"flag": true
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_flag",
+				"key": [
+					{
+						"path": [
+							"flag"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [
+				"010177310000"
+			],
+			"specHash": "af183aafac0ce781"
+		},
+		{
+			"name": "a sparse field index leaves out 0 of a signed 64-bit field",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_big",
+				"key": [
+					{
+						"path": [
+							"big"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [],
+			"specHash": "0915df3b1f2a4ca0"
+		},
+		{
+			"name": "a sparse field index keeps a set signed 64-bit value",
+			"row": {
+				"big": "-1"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_big",
+				"key": [
+					{
+						"path": [
+							"big"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [
+				"017fffffffffffffff77310000"
+			],
+			"specHash": "0915df3b1f2a4ca0"
+		},
+		{
+			"name": "a sparse field index leaves out 0 of an unsigned 64-bit field",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_ubig",
+				"key": [
+					{
+						"path": [
+							"ubig"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [],
+			"specHash": "dafab93608ae2eb7"
+		},
+		{
+			"name": "a sparse field index keeps a set unsigned 64-bit value",
+			"row": {
+				"ubig": "1"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_ubig",
+				"key": [
+					{
+						"path": [
+							"ubig"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [
+				"01000000000000000177310000"
+			],
+			"specHash": "dafab93608ae2eb7"
+		},
+		{
+			"name": "a sparse field index leaves out -0 of a double field, which encodes as 0",
+			"row": {
+				"ratio": -0.0
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_ratio",
+				"key": [
+					{
+						"path": [
+							"ratio"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [],
+			"specHash": "ce6b890bfde18a33"
+		},
+		{
+			"name": "a sparse field index keeps NaN of a double field",
+			"row": {
+				"ratio": "NaN"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_ratio",
+				"key": [
+					{
+						"path": [
+							"ratio"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [
+				"fd77310000"
+			],
+			"specHash": "ce6b890bfde18a33"
+		},
+		{
+			"name": "a sparse field index over a field with explicit presence leaves out a row that does not set it",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_maybe",
+				"key": [
+					{
+						"path": [
+							"maybe"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [],
+			"specHash": "07f136a4ace76374"
+		},
+		{
+			"name": "a sparse field index over a field with explicit presence keeps an empty string the row sets",
+			"row": {
+				"maybe": ""
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_maybe",
+				"key": [
+					{
+						"path": [
+							"maybe"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [
+				"01000077310000"
+			],
+			"specHash": "07f136a4ace76374"
+		},
+		{
+			"name": "a sparse field index over a oneof member leaves out a row whose case is another",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_choice_text",
+				"key": [
+					{
+						"path": [
+							"choice_text"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [],
+			"specHash": "e0e484227bffb3b8"
+		},
+		{
+			"name": "a sparse field index over a oneof member keeps an empty string the row sets",
+			"row": {
+				"choiceText": ""
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_choice_text",
+				"key": [
+					{
+						"path": [
+							"choice_text"
+						],
+						"desc": false
+					}
+				],
+				"fieldSparse": true
+			},
+			"want": [
+				"01000077310000"
+			],
+			"specHash": "e0e484227bffb3b8"
+		},
+		{
+			"name": "a plain field index stays dense: the zero value of a field with implicit presence has an entry",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_label",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01000077310000"
+			],
+			"specHash": "a1dbfc1aae1df8b7"
+		},
+		{
+			"name": "a plain field index stays dense: 0 has an entry",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_count",
+				"key": [
+					{
+						"path": [
+							"count"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01800000000000000077310000"
+			]
+		},
+		{
+			"name": "a plain field index over a repeated field stays dense: an empty list takes the missing tag",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "__field_tags",
+				"key": [
+					{
+						"path": [
+							"tags"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"ff77310000"
+			],
+			"specHash": "58948be52bedfdaa"
 		}
 	],
 	"orderCases": [
@@ -8094,6 +8491,1790 @@
 				"ordered": false,
 				"residual": false
 			}
+		},
+		{
+			"name": "a sparse field index serves an equality on a set value",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "b"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r3"
+			],
+			"want": {
+				"index": "__field_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index serves neq against the empty string, the range above the value it leaves out",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_NEQ",
+					"value": {
+						"stringValue": ""
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r3",
+				"r5"
+			],
+			"want": {
+				"index": "__field_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index serves a range above a set value",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"stringValue": "a"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r3",
+				"r5"
+			],
+			"want": {
+				"index": "__field_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index serves an in over set values",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"in": {
+					"path": [
+						"label"
+					],
+					"values": [
+						{
+							"stringValue": "a"
+						},
+						{
+							"stringValue": "c"
+						}
+					]
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r5"
+			],
+			"want": {
+				"index": "__field_label",
+				"ranges": 2,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index serves startsWith a non-empty prefix",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_STARTS_WITH",
+					"value": "b"
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r3"
+			],
+			"want": {
+				"index": "__field_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index declines an equality on the empty string, whose rows it leaves out",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": ""
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r2",
+				"r4"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index declines an in that names the empty string",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"in": {
+					"path": [
+						"label"
+					],
+					"values": [
+						{
+							"stringValue": ""
+						},
+						{
+							"stringValue": "a"
+						}
+					]
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r4"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index declines a range below a value, which reaches the empty string",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"stringValue": "b"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r4"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index declines startsWith the empty prefix",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_STARTS_WITH",
+					"value": ""
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r3",
+				"r4",
+				"r5"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index declines isSet on a field with implicit presence",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"present": {
+					"path": [
+						"label"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r3",
+				"r4",
+				"r5"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index declines isNotSet",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"present": {
+					"path": [
+						"label"
+					],
+					"op": "PRESENT_OP_IS_NOT_SET"
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index declines an ordering with no predicate",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index declines a descending ordering with no predicate",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_DESC"
+				}
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index supplies an ordering when the predicate leaves out the empty string",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_NEQ",
+					"value": {
+						"stringValue": ""
+					}
+				}
+			},
+			"orderBy": [
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r3",
+				"r5"
+			],
+			"want": {
+				"index": "__field_label",
+				"ranges": 1,
+				"ordered": true,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index serves a range above 0",
+			"indexes": [
+				{
+					"name": "__field_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"doubleValue": 0
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"count": 5
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"count": -3
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"count": 7
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"count": 0
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r4"
+			],
+			"want": {
+				"index": "__field_count",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index serves a range below 0",
+			"indexes": [
+				{
+					"name": "__field_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"doubleValue": 0
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"count": 5
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"count": -3
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"count": 7
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"count": 0
+					}
+				}
+			],
+			"matches": [
+				"r3"
+			],
+			"want": {
+				"index": "__field_count",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index serves an equality on a set number",
+			"indexes": [
+				{
+					"name": "__field_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": 7
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"count": 5
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"count": -3
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"count": 7
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"count": 0
+					}
+				}
+			],
+			"matches": [
+				"r4"
+			],
+			"want": {
+				"index": "__field_count",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index declines an equality on 0",
+			"indexes": [
+				{
+					"name": "__field_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": 0
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"count": 5
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"count": -3
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"count": 7
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"count": 0
+					}
+				}
+			],
+			"matches": [
+				"r2",
+				"r5"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index declines a range that includes 0",
+			"indexes": [
+				{
+					"name": "__field_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_GTE",
+					"value": {
+						"doubleValue": -5
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"count": 5
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"count": -3
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"count": 7
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"count": 0
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r3",
+				"r4",
+				"r5"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index declines a range that ends at 0 inclusive",
+			"indexes": [
+				{
+					"name": "__field_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_LTE",
+					"value": {
+						"doubleValue": 0
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"count": 5
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"count": -3
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"count": 7
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"count": 0
+					}
+				}
+			],
+			"matches": [
+				"r2",
+				"r3",
+				"r5"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index declines a union whose branch reads 0",
+			"indexes": [
+				{
+					"name": "__field_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"or": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"doubleValue": 5
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"doubleValue": 0
+								}
+							}
+						}
+					]
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"count": 5
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"count": -3
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"count": 7
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"count": 0
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r5"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index serves an equality on true",
+			"indexes": [
+				{
+					"name": "__field_flag",
+					"key": [
+						{
+							"path": [
+								"flag"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"flag"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"boolValue": true
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"flag": true
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"flag": true
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r3"
+			],
+			"want": {
+				"index": "__field_flag",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index serves neq against false",
+			"indexes": [
+				{
+					"name": "__field_flag",
+					"key": [
+						{
+							"path": [
+								"flag"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"flag"
+					],
+					"op": "CMP_OP_NEQ",
+					"value": {
+						"boolValue": false
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"flag": true
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"flag": true
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r3"
+			],
+			"want": {
+				"index": "__field_flag",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index declines an equality on false",
+			"indexes": [
+				{
+					"name": "__field_flag",
+					"key": [
+						{
+							"path": [
+								"flag"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"flag"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"boolValue": false
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"flag": true
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"flag": true
+					}
+				}
+			],
+			"matches": [
+				"r2"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "sparse field indexes over two fields union their branches",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				},
+				{
+					"name": "__field_flag",
+					"key": [
+						{
+							"path": [
+								"flag"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"or": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "a"
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"flag"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"boolValue": true
+								}
+							}
+						}
+					]
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"flag": true
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2"
+			],
+			"want": {
+				"union": [
+					{
+						"index": "__field_label",
+						"ranges": 1
+					},
+					{
+						"index": "__field_flag",
+						"ranges": 1
+					}
+				],
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index over a field with explicit presence serves an equality on the empty string",
+			"indexes": [
+				{
+					"name": "__field_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"maybe"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": ""
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"maybe": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"maybe": ""
+					}
+				},
+				{
+					"key": "r3",
+					"row": {}
+				}
+			],
+			"matches": [
+				"r2"
+			],
+			"want": {
+				"index": "__field_maybe",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a sparse field index over a field with explicit presence declines isNotSet",
+			"indexes": [
+				{
+					"name": "__field_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"present": {
+					"path": [
+						"maybe"
+					],
+					"op": "PRESENT_OP_IS_NOT_SET"
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"maybe": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"maybe": ""
+					}
+				},
+				{
+					"key": "r3",
+					"row": {}
+				}
+			],
+			"matches": [
+				"r3"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a plain field index serves an equality on the empty string",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": ""
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r2",
+				"r4"
+			],
+			"want": {
+				"index": "__field_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a plain field index supplies an ordering with no predicate",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": {
+				"index": "__field_label",
+				"ranges": 1,
+				"ordered": true,
+				"residual": false
+			}
 		}
 	],
 	"groupCases": [
@@ -9389,6 +11570,216 @@
 			],
 			"want": {
 				"index": "by_label",
+				"residual": false,
+				"desc": false,
+				"entriesAreRows": true
+			}
+		},
+		{
+			"name": "a sparse field index declines a grouping that would count the group of the empty string",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"groupBy": [
+				"label"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index partitions when the predicate leaves out the empty string",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_NEQ",
+					"value": {
+						"stringValue": ""
+					}
+				}
+			},
+			"groupBy": [
+				"label"
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r3",
+				"r5"
+			],
+			"want": {
+				"index": "__field_label",
+				"residual": false,
+				"desc": false,
+				"entriesAreRows": true
+			}
+		},
+		{
+			"name": "a sparse field index declines a grouping by a number with no predicate",
+			"indexes": [
+				{
+					"name": "__field_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"groupBy": [
+				"count"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a sparse field index partitions numbers above 0",
+			"indexes": [
+				{
+					"name": "__field_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					],
+					"fieldSparse": true
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"doubleValue": 0
+					}
+				}
+			},
+			"groupBy": [
+				"count"
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"count": 5
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"count": -3
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"count": 7
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"count": 0
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r4"
+			],
+			"want": {
+				"index": "__field_count",
+				"residual": false,
+				"desc": false,
+				"entriesAreRows": true
+			}
+		},
+		{
+			"name": "a plain field index partitions with no predicate",
+			"indexes": [
+				{
+					"name": "__field_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"groupBy": [
+				"label"
+			],
+			"want": {
+				"index": "__field_label",
 				"residual": false,
 				"desc": false,
 				"entriesAreRows": true

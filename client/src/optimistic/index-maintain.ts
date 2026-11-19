@@ -102,8 +102,8 @@ import type { EntityRegistry } from '../mutations.js';
 import {
 	compileIndexComponent,
 	declaredIndexEncoder,
-	type IndexComponent,
 	type IndexEncoder,
+	sparseFieldIndexEncoder,
 } from '../query/indexkey.js';
 import { type SearchDecl, searchDeclOf } from '../query/match.js';
 import type { SearchPostingsWriter } from '../query/postings.js';
@@ -152,6 +152,7 @@ export interface CompiledIndex {
 export function compileIndexes(schema: DescMessage, defs: {
 	name: string;
 	key: { path: string[]; desc: boolean }[];
+	sparseIndex?: boolean;
 }[]): CompiledIndex[] {
 	const compiled: CompiledIndex[] = [];
 	for (const def of defs) {
@@ -160,7 +161,9 @@ export function compileIndexes(schema: DescMessage, defs: {
 			// side of the entry it stores (`custom.*.key`, `custom.*.value.number`),
 			// so the layout is declared rather than derived here.
 			const comps = def.key.map((k) => compileIndexComponent(schema, k.path, k.desc));
-			const encoder = declaredIndexEncoder(comps);
+			const encoder = def.sparseIndex && comps.length === 1
+				? sparseFieldIndexEncoder(comps[0]!)
+				: declaredIndexEncoder(comps);
 			compiled.push({ name: def.name, specHash: encoder.specHash(), encoder });
 		} catch (err) {
 			// Unusable, not fatal: queries scan, which is always correct.
@@ -170,7 +173,7 @@ export function compileIndexes(schema: DescMessage, defs: {
 			);
 		}
 	}
-	const drop = subsumedBy(compiled.map((c) => c.encoder!.components));
+	const drop = subsumedBy(compiled.map((c) => c.encoder!));
 	const kept = compiled.filter((_, i) => !drop[i]!);
 	// The search index rides the same list: same markers, same build, same
 	// position encoding — it differs only in the record its positions are
@@ -212,9 +215,13 @@ export function compileIndexes(schema: DescMessage, defs: {
  * resolve to the same path, and reading one index's entries as the other's would
  * answer with keys where values were asked for.
  *
- * Whether an index is sparse follows from its leading component alone (see
- * declaredIndexEncoder), so a list and every list it is a prefix of are sparse
- * or dense together, and the longer one holds the rows the shorter one does.
+ * A list subsumes another only when it holds every row the other holds: when
+ * it is dense, or leaves out the same entries. Whether an index is sparse
+ * follows from its leading component alone (see declaredIndexEncoder), so
+ * lists that share a prefix are sparse or dense together, except for a field
+ * that sets `sparse_index` (see sparseFieldIndexEncoder). Its index leaves out
+ * more, so it and a dense index over the same field are both kept, and the
+ * planner reads the dense one where the other leaves rows out.
  *
  * Two lists that are EQUAL subsume each other, so the tie-break keeps the first
  * — otherwise a duplicated declaration would drop both and leave the queries
@@ -222,15 +229,17 @@ export function compileIndexes(schema: DescMessage, defs: {
  * of prefixes exactly the longest survives, and of a set of equals exactly the
  * earliest.
  */
-function subsumedBy(lists: IndexComponent[][]): boolean[] {
-	const sigs = lists.map((comps) =>
-		comps.map((c) => `${c.protoPath.join('.')}:${c.desc}:${c.keyComponent}`)
+function subsumedBy(encoders: IndexEncoder[]): boolean[] {
+	const sigs = encoders.map((e) =>
+		e.components.map((c) => `${c.protoPath.join('.')}:${c.desc}:${c.keyComponent}`)
 	);
+	const leavesOut = (e: IndexEncoder): string => e.sparse ? `sparse:${e.omitted ?? ''}` : '';
 	return sigs.map((sig, i) =>
 		sigs.some((other, j) =>
 			j !== i
 			&& (other.length > sig.length || (other.length === sig.length && j < i))
 			&& sig.every((s, n) => other[n] === s)
+			&& (leavesOut(encoders[j]!) === '' || leavesOut(encoders[j]!) === leavesOut(encoders[i]!))
 		)
 	);
 }
@@ -245,10 +254,12 @@ function subsumedBy(lists: IndexComponent[][]): boolean[] {
  *
  * A row is absent from an index only when the index is sparse and the row's
  * leading component is missing: an index whose leading component fans out over
- * a map has no position for a row with an empty map. Any other index that fans
- * out over a repeated field still yields one position for an empty list, which
- * is what lets a range that does not constrain the fan-out component see every
- * row (see query/indexkey.ts).
+ * a map has no position for a row with an empty map, and the index of a field
+ * that sets `sparse_index` has none for a row that does not set the field,
+ * including one that holds the zero value of a field with implicit presence.
+ * Any other index that fans out over a repeated field still yields one position
+ * for an empty list, which is what lets a range that does not constrain the
+ * fan-out component see every row (see query/indexkey.ts).
  */
 export function rowPositions(
 	indexes: CompiledIndex[],

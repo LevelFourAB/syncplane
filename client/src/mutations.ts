@@ -263,6 +263,10 @@ export interface WithinDef {
 export interface IndexDef {
 	name: string;
 	key: { path: string[]; desc: boolean }[];
+	/** Set on the index of a field that sets both `indexed` and
+	 * `sparse_index`, which holds an entry only for a row that sets the field
+	 * (see sparseFieldIndexEncoder). */
+	sparseIndex?: boolean;
 }
 
 export function entityDefOf(schema: DescMessage): EntityDef {
@@ -515,8 +519,13 @@ function indexesOf(
 ): IndexDef[] {
 	const out: IndexDef[] = [];
 	for (const field of schema.fields) {
-		if (!fieldBehaviorOf(field)?.indexed) continue;
-		out.push({ name: `__field_${field.name}`, key: [ { path: [ field.name ], desc: false } ] });
+		const behavior = fieldBehaviorOf(field);
+		if (!behavior?.indexed) continue;
+		out.push({
+			name: `__field_${field.name}`,
+			key: [ { path: [ field.name ], desc: false } ],
+			...(behavior.sparseIndex ? { sparseIndex: true } : {}),
+		});
 	}
 	for (const spec of opts.index) {
 		out.push({

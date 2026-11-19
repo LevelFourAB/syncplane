@@ -349,9 +349,10 @@ func planGroupAgainst(idx Index, terms []node, group *Group, order *Order) (*Gro
 		rng = Range{Lo: concatBound(prefix, lo, true), Hi: concatBound(prefix, hi, false)}
 	}
 
-	if idx.Encoder.Sparse() && !insidePresentRanks([]Range{rng}) {
+	if !idx.Encoder.holds([]Range{rng}) {
 		// The walk would visit the groups the sparse index leaves out — the
-		// missing one first among them — as if they were empty.
+		// missing one, or the zero value of a sparse field index — as if they
+		// were empty.
 		return nil, 0
 	}
 

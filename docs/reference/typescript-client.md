@@ -1461,7 +1461,7 @@ Field modifiers:
 
 - `.key()`: Marks a scalar field as a primary key. Every entity requires at least one key field. See [Naming rules](naming.md).
 - `.opaque()`: Disables sub-field merging; writes replace the field value entirely.
-- `.indexed()`: Declares a secondary index on the field.
+- `.indexed()`: Declares a secondary index on the field. `.indexed({ sparse: true })` sets `sparse_index` too: the index then holds no entry for a row whose field holds its zero value (`''`, `0`, `false`), and a query that reads such rows does not use it. The sparse form is valid only on a singular scalar field. See [Sparse field indexes](proto-options.md#sparse-field-indexes).
 - `.order(posField)`: Sets the fractional index ordering property on `keyedList`.
 - `.reverseRelation(name)`: Names the reverse relation a reference adds to its target. Valid on `ref`, `refList`, `workspaceRef`, and `workspaceRefList`. See [Reverse relations](proto-options.md#reverse-relations).
 - `.creator()`: Records who created the row. On a create that is not trusted, the server stores the caller's primary subject in the field, and later writes that are not trusted cannot change it. Valid on a `text()` field that is not a key field.

@@ -1,7 +1,9 @@
 package query
 
 import (
+	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"math/big"
@@ -84,7 +86,10 @@ import (
 //     does NOT constrain the fan-out component still see every row. A SPARSE
 //     index (NewSparseIndexEncoder) drops each entry whose leading component is
 //     missing, and the planner only reads one inside the present ranks of that
-//     component — the region where both forms hold the same entries.
+//     component — the region where both forms hold the same entries. A sparse
+//     field index (NewSparseFieldIndexEncoder) over a field with implicit
+//     presence also drops the entries that hold the field's zero value, and
+//     the planner also keeps out of the range of that one leading component.
 //   - Duplicate positions collapse: they would produce identical bytes, and an
 //     entry is a position, not a count.
 //
@@ -503,6 +508,9 @@ type IndexEncoder struct {
 	fan []fanLevel
 	// sparse drops every entry whose leading component is missing.
 	sparse bool
+	// omit, when set, is one encoded leading component that a sparse encoder
+	// also drops: the zero value of a field with implicit presence.
+	omit []byte
 }
 
 // NewIndexEncoder builds an encoder over already-compiled components. An
@@ -580,17 +588,53 @@ func NewDeclaredIndexEncoder(comps []IndexComponent) (*IndexEncoder, error) {
 	return NewIndexEncoder(comps)
 }
 
+// NewSparseFieldIndexEncoder builds the encoder for the index of a field that
+// sets both (syncplane.v1.field_behavior).indexed and sparse_index, over the
+// one component c compiled from that field.
+//
+// The encoder is sparse as NewSparseIndexEncoder builds it, and when the leaf
+// field has implicit presence it also leaves out each entry that holds the
+// zero value of that field: the empty string, 0, false or the zero enum value.
+// The index then holds an entry only for a row that sets the field. Its
+// SpecHash differs from that of the dense and the sparse encoder, so a stored
+// index rebuilds once when a schema turns the option on or off.
+//
+// It fails when c fans out over a repeated field, and otherwise as
+// NewIndexEncoder does.
+func NewSparseFieldIndexEncoder(c IndexComponent) (*IndexEncoder, error) {
+	if len(fanLevels(c.fields)) > 0 {
+		return nil, fmt.Errorf("a sparse field index needs a singular field, not the repeated %s",
+			fanPathString(fanLevels(c.fields)))
+	}
+	e, err := NewSparseIndexEncoder([]IndexComponent{c})
+	if err != nil {
+		return nil, err
+	}
+	if leaf := c.leafField(); leaf != nil && !leaf.HasPresence() {
+		// Encoded through appendComponent rather than spelled out per kind, so
+		// the bytes Encode compares against are the bytes it writes, -0.0
+		// folded into 0 included.
+		e.omit = appendComponent(nil, c, extractSingular(leaf, leaf.Default()), true)
+	}
+	return e, nil
+}
+
 // Sparse reports whether the encoder leaves out the entries whose leading
-// component is missing, as one built by NewSparseIndexEncoder does.
+// component is missing, as one built by NewSparseIndexEncoder or
+// NewSparseFieldIndexEncoder does.
 func (e *IndexEncoder) Sparse() bool { return e.sparse }
 
 // SpecHash fingerprints what the stored entries of this index depend on. For
 // a dense encoder it equals SpecHash over the same components; a sparse
-// encoder fingerprints differently, so entries stored under one form are
-// stale under the other and rebuild.
+// encoder, and one that also leaves out a zero value, each fingerprint
+// differently, so entries stored under one form are stale under the others
+// and rebuild.
 func (e *IndexEncoder) SpecHash() string {
 	h := SpecHash(e.comps)
-	if e.sparse {
+	switch {
+	case e.omit != nil:
+		return fingerprint(h + ":sparse:" + hex.EncodeToString(e.omit))
+	case e.sparse:
 		return fingerprint(h + ":sparse")
 	}
 	return h
@@ -677,6 +721,11 @@ func (e *IndexEncoder) Encode(msg protoreflect.Message, rowKey string) [][]byte 
 	for _, p := range positions {
 		entry := e.encodeAt(msg, rowKey, p)
 		if e.sparse && entry[0] == tagMissing {
+			continue
+		}
+		// The components are self-delimiting, so an entry that starts with
+		// omit has exactly that leading component.
+		if e.omit != nil && bytes.HasPrefix(entry, e.omit) {
 			continue
 		}
 		// Two positions can encode identically — duplicate list elements, or two

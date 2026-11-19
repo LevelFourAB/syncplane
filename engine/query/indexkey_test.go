@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"math"
 	"os"
 	"slices"
 	"sort"
@@ -35,6 +36,9 @@ type indexSpecVector struct {
 	// Sparse builds the index with NewSparseIndexEncoder. Without it the index
 	// is a declared one, which NewDeclaredIndexEncoder builds.
 	Sparse bool `json:"sparse"`
+	// FieldSparse builds the index of a field that sets sparse_index, over
+	// the spec's one component, with NewSparseFieldIndexEncoder.
+	FieldSparse bool `json:"fieldSparse"`
 }
 
 type encodeCase struct {
@@ -104,7 +108,13 @@ func encoderFor(spec indexSpecVector, typ string) *query.IndexEncoder {
 		comps = append(comps, c)
 	}
 	newEncoder := query.NewDeclaredIndexEncoder
-	if spec.Sparse {
+	switch {
+	case spec.FieldSparse:
+		Expect(comps).To(HaveLen(1), "a field index has one component")
+		newEncoder = func(comps []query.IndexComponent) (*query.IndexEncoder, error) {
+			return query.NewSparseFieldIndexEncoder(comps[0])
+		}
+	case spec.Sparse:
 		newEncoder = query.NewSparseIndexEncoder
 	}
 	enc, err := newEncoder(comps)
@@ -690,6 +700,59 @@ var _ = Describe("Encoding a row into a declared index", func() {
 		Expect(declared.Encode(msg, "w1")).To(Equal(dense.Encode(msg, "w1")))
 		Expect(declared.Encode(msg, "w1")).To(HaveLen(2),
 			"an entry without the value variant keeps its position, because its key is set")
+	})
+})
+
+var _ = Describe("Encoding a row into a sparse field index", func() {
+	widget := (&testdatav1.Widget{}).ProtoReflect().Descriptor()
+
+	encoders := func(field string) (fieldEnc, dense, sparse *query.IndexEncoder) {
+		GinkgoHelper()
+		c, err := query.CompileIndexComponent(widget, []string{field}, false)
+		Expect(err).NotTo(HaveOccurred())
+		fieldEnc, err = query.NewSparseFieldIndexEncoder(c)
+		Expect(err).NotTo(HaveOccurred())
+		dense, err = query.NewIndexEncoder([]query.IndexComponent{c})
+		Expect(err).NotTo(HaveOccurred())
+		sparse, err = query.NewSparseIndexEncoder([]query.IndexComponent{c})
+		Expect(err).NotTo(HaveOccurred())
+		return fieldEnc, dense, sparse
+	}
+
+	DescribeTable("leaves out the zero value of a field with implicit presence, and keeps every other entry the dense index writes",
+		func(field string, zero, set *testdatav1.Widget) {
+			enc, dense, sparse := encoders(field)
+			Expect(enc.Sparse()).To(BeTrue())
+			Expect(dense.Encode(zero.ProtoReflect(), "w1")).To(HaveLen(1))
+			Expect(enc.Encode(zero.ProtoReflect(), "w1")).To(BeEmpty())
+			Expect(enc.Encode(set.ProtoReflect(), "w1")).To(Equal(dense.Encode(set.ProtoReflect(), "w1")))
+			Expect(enc.Encode(set.ProtoReflect(), "w1")).To(HaveLen(1))
+			Expect(enc.SpecHash()).NotTo(Equal(dense.SpecHash()))
+			Expect(enc.SpecHash()).NotTo(Equal(sparse.SpecHash()),
+				"entries stored by a sparse index keep the zero value, so they must rebuild")
+		},
+		Entry("a string", "label", &testdatav1.Widget{}, &testdatav1.Widget{Label: "a"}),
+		Entry("an int32", "count", &testdatav1.Widget{}, &testdatav1.Widget{Count: -1}),
+		Entry("a bool", "flag", &testdatav1.Widget{}, &testdatav1.Widget{Flag: true}),
+		Entry("a signed 64-bit integer", "big", &testdatav1.Widget{}, &testdatav1.Widget{Big: 1}),
+		Entry("an unsigned 64-bit integer", "ubig", &testdatav1.Widget{}, &testdatav1.Widget{Ubig: 1}),
+		Entry("a double at -0", "ratio", &testdatav1.Widget{Ratio: math.Copysign(0, -1)}, &testdatav1.Widget{Ratio: math.NaN()}),
+	)
+
+	It("keeps a zero value that a field with explicit presence sets, as a sparse index does", func() {
+		enc, _, sparse := encoders("maybe")
+		Expect(enc.Encode((&testdatav1.Widget{}).ProtoReflect(), "w1")).To(BeEmpty())
+		set := (&testdatav1.Widget{Maybe: proto.String("")}).ProtoReflect()
+		Expect(enc.Encode(set, "w1")).To(Equal(sparse.Encode(set, "w1")))
+		Expect(enc.Encode(set, "w1")).To(HaveLen(1))
+		Expect(enc.SpecHash()).To(Equal(sparse.SpecHash()))
+	})
+
+	It("refuses a repeated field", func() {
+		c, err := query.CompileIndexComponent(widget, []string{"tags"}, false)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = query.NewSparseFieldIndexEncoder(c)
+		Expect(err).To(MatchError(ContainSubstring("singular field")))
 	})
 })
 

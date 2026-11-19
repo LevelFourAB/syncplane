@@ -47,8 +47,11 @@ import (
 // a range scan from having to re-check whether each hit is a tombstone. A
 // declared index holds every live row, except one whose leading component fans
 // out over a map, which leaves out the rows and map entries whose leading
-// component is missing (see query.NewDeclaredIndexEncoder). A reference index
-// is sparse and holds only the rows that point somewhere (see buildRefIndexes).
+// component is missing (see query.NewDeclaredIndexEncoder). The index of a
+// field that also sets sparse_index holds only the rows that set the field:
+// none whose value is missing, or is the zero value of a field with implicit
+// presence (see query.NewSparseFieldIndexEncoder). A reference index is sparse
+// and holds only the rows that point somewhere (see buildRefIndexes).
 
 // buildRefIndexes derives one index per reference field of the entity, keyed
 // by the target key the row stores.
@@ -128,11 +131,17 @@ func buildDeclaredIndexes(info *entityInfo, eo *syncplanev1.EntityOptions) error
 		seen[info.indexes[i].name] = true
 	}
 
-	add := func(name string, comps []query.IndexComponent) error {
+	add := func(name string, comps []query.IndexComponent, sparseField bool) error {
 		if seen[name] {
 			return fmt.Errorf("index %q is declared twice", name)
 		}
-		enc, err := query.NewDeclaredIndexEncoder(comps)
+		var enc *query.IndexEncoder
+		var err error
+		if sparseField {
+			enc, err = query.NewSparseFieldIndexEncoder(comps[0])
+		} else {
+			enc, err = query.NewDeclaredIndexEncoder(comps)
+		}
 		if err != nil {
 			return fmt.Errorf("index %q: %w", name, err)
 		}
@@ -148,14 +157,18 @@ func buildDeclaredIndexes(info *entityInfo, eo *syncplanev1.EntityOptions) error
 	fields := desc.Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
-		if !fieldBehaviorOf(fd).GetIndexed() {
+		fb := fieldBehaviorOf(fd)
+		if fb.GetSparseIndex() && !fb.GetIndexed() {
+			return fmt.Errorf("field %q sets sparse_index without indexed", fd.Name())
+		}
+		if !fb.GetIndexed() {
 			continue
 		}
 		c, err := query.CompileIndexComponent(desc, []string{string(fd.Name())}, false)
 		if err != nil {
 			return fmt.Errorf("field %q is marked indexed: %w", fd.Name(), err)
 		}
-		if err := add(fieldIndexName(fd), []query.IndexComponent{c}); err != nil {
+		if err := add(fieldIndexName(fd), []query.IndexComponent{c}, fb.GetSparseIndex()); err != nil {
 			return err
 		}
 	}
@@ -187,7 +200,7 @@ func buildDeclaredIndexes(info *entityInfo, eo *syncplanev1.EntityOptions) error
 			}
 			comps = append(comps, c)
 		}
-		if err := add(name, comps); err != nil {
+		if err := add(name, comps, false); err != nil {
 			return err
 		}
 	}

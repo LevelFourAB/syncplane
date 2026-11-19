@@ -58,6 +58,10 @@ const issue = entity('issue', {
 	// User-defined fields: `custom.*.<side>` fans out over EVERY entry, which is
 	// the fourth shape — one entry per (key, value) pair rather than per element.
 	custom: map('string', message({ number: int32(), tag: text() })),
+	// A sparse field mark on a number no composite leads with, so its index is
+	// kept: it holds no entry for a row whose `points` is 0. Last, so the
+	// fields before it keep the numbers an older build gives them.
+	points: int32().indexed({ sparse: true }),
 }, {
 	indexes: [
 		{ name: 'by_state_rank', key: [ { path: 'state' }, { path: 'rank', desc: true } ] },
@@ -93,8 +97,9 @@ const issue = entity('issue', {
 
 type Issue = Infer<typeof issue>;
 /** A seed row: `meta` may be absent — the builder's inferred shape requires
- * it, but a row without one is exactly what the missing rank encodes. */
-type SeedIssue = Omit<Issue, 'meta'> & { meta?: Issue['meta'] };
+ * it, but a row without one is exactly what the missing rank encodes — and
+ * `points` may be left at its zero value. */
+type SeedIssue = Omit<Issue, 'meta' | 'points'> & { meta?: Issue['meta']; points?: number };
 const bundle = defineSchema(issue);
 const IssueSchema = bundle.descMessage('issue');
 const registry = new EntityRegistry([ IssueSchema ]);
@@ -104,6 +109,7 @@ const SEED: SeedIssue[] = [
 	{
 		id: 'i1',
 		title: 'one',
+		points: 3,
 		state: 'open',
 		rank: 5,
 		done: false,
@@ -123,6 +129,7 @@ const SEED: SeedIssue[] = [
 	{
 		id: 'i3',
 		title: 'three',
+		points: -2,
 		state: 'done',
 		rank: 3,
 		done: true,
@@ -137,6 +144,7 @@ const SEED: SeedIssue[] = [
 	{
 		id: 'i5',
 		title: 'five',
+		points: 8,
 		state: 'done',
 		rank: 7,
 		done: false,
@@ -367,6 +375,15 @@ describe('the index path is actually taken', () => {
 			.toBe(false);
 	});
 
+	it('serves a sparse field index only where it holds every row the query reads', async () => {
+		// The `points` index holds no entry for a row whose points are 0.
+		expect(await served(true, { where: (i) => i.points.gt(0) })).toBe(true);
+		expect(await served(true, { where: (i) => i.points.lt(0) })).toBe(true);
+		expect(await served(true, { where: (i) => i.points.eq(0) })).toBe(false);
+		expect(await served(true, { where: (i) => i.points.gte(-5) })).toBe(false);
+		expect(await served(true, { orderBy: (i) => [ i.points.desc() ] })).toBe(false);
+	});
+
 	it('serves presence against a component that can hold the missing rank', async () => {
 		expect(await served(true, { where: (i) => i.meta.due.isNotSet() })).toBe(true);
 		expect(await served(true, { where: (i) => i.meta.due.isSet() })).toBe(true);
@@ -420,6 +437,30 @@ describe('index-served local queries', () => {
 	}, [ 'i3' ]);
 
 	same('a predicate matching nothing', { where: (i) => i.state.eq('archived') }, []);
+
+	// A sparse field index that holds no entry for a zero value. Each answer must be
+	// the scan's, whether the index serves the query or declines it.
+	same('a range above 0 on a field index', { where: (i) => i.points.gt(0) }, [ 'i1', 'i5' ]);
+	same('a range below 0 on a field index', { where: (i) => i.points.lt(0) }, [ 'i3' ]);
+	same('equality on 0, which the field index leaves out', {
+		where: (i) => i.points.eq(0),
+	}, [ 'i2', 'i4', 'i6' ]);
+	same('a range that includes 0', { where: (i) => i.points.gte(-5) }, [
+		'i1',
+		'i2',
+		'i3',
+		'i4',
+		'i5',
+		'i6',
+	]);
+	same('an ordering by a field index with no predicate', {
+		orderBy: (i) => [ i.points.desc() ],
+		limit: 3,
+	}, [ 'i5', 'i1', 'i2' ]);
+	same('an ordering the field index supplies once the predicate leaves out 0', {
+		where: (i) => i.points.gt(0),
+		orderBy: (i) => [ i.points.desc() ],
+	}, [ 'i5', 'i1' ]);
 
 	// Fan-out: one row, several index entries. Every case here is a place the
 	// index could return a row twice, or miss one whose list is empty.

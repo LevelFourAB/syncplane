@@ -1702,8 +1702,29 @@ type FieldBehavior struct {
 	//
 	// To filter by one field and order by a different field, declare an index
 	// in `EntityOptions.index` instead. This option is not supported on
-	// collaborative text fields; use `SearchSpec` for text search.
+	// collaborative text fields; use `SearchSpec` for text search. See
+	// `sparse_index` for an index that leaves out the rows that do not set the
+	// field.
 	Indexed bool `protobuf:"varint,5,opt,name=indexed,proto3" json:"indexed,omitempty"`
+	// Makes the index that `indexed` maintains hold an entry only for a row
+	// that sets the field.
+	//
+	// A field with implicit presence counts as not set when it holds its zero
+	// value: the empty string, 0, false or the zero enum value. A field with
+	// explicit presence (`optional`, or a member of a `oneof`) counts as not
+	// set when it has no value; a zero value that the row sets has an entry.
+	//
+	// A query uses the index only when every row it reads has an entry. An
+	// equality on a value that is set, `!=` against the empty string or
+	// false, and a range that excludes the zero value use it. An equality on
+	// the zero value, a range that includes it, `isNotSet`, `isSet` on a field
+	// with implicit presence, and an ordering or a grouping by the field with
+	// no filter that excludes the zero value read every row, unless another
+	// index serves them.
+	//
+	// Requires `indexed` on a singular field. Registration fails when it is
+	// set without `indexed`, or on a repeated field.
+	SparseIndex bool `protobuf:"varint,13,opt,name=sparse_index,json=sparseIndex,proto3" json:"sparse_index,omitempty"`
 	// Includes this field in append-only history tracking.
 	//
 	// Key fields are never recorded in a history row's mask however they
@@ -1817,6 +1838,13 @@ func (x *FieldBehavior) GetText() bool {
 func (x *FieldBehavior) GetIndexed() bool {
 	if x != nil {
 		return x.Indexed
+	}
+	return false
+}
+
+func (x *FieldBehavior) GetSparseIndex() bool {
+	if x != nil {
+		return x.SparseIndex
 	}
 	return false
 }
@@ -1975,14 +2003,15 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x04desc\x18\x02 \x01(\bR\x04desc\"I\n" +
 	"\tIndexSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12(\n" +
-	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\xe2\x02\n" +
+	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\x85\x03\n" +
 	"\rFieldBehavior\x12\x16\n" +
 	"\x06opaque\x18\x01 \x01(\bR\x06opaque\x12\x1b\n" +
 	"\tkey_field\x18\x02 \x03(\tR\bkeyField\x12\x1f\n" +
 	"\vorder_field\x18\x03 \x01(\tR\n" +
 	"orderField\x12\x12\n" +
 	"\x04text\x18\x04 \x01(\bR\x04text\x12\x18\n" +
-	"\aindexed\x18\x05 \x01(\bR\aindexed\x12\x18\n" +
+	"\aindexed\x18\x05 \x01(\bR\aindexed\x12!\n" +
+	"\fsparse_index\x18\r \x01(\bR\vsparseIndex\x12\x18\n" +
 	"\ahistory\x18\x06 \x01(\bR\ahistory\x12\x1e\n" +
 	"\n" +
 	"searchable\x18\a \x01(\bR\n" +

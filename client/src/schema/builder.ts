@@ -184,6 +184,9 @@ interface FieldSpec {
 	orderField?: string;
 	/** Maintain a single-component secondary index over this field. */
 	indexed?: boolean;
+	/** Make that index hold only the rows that set the field; see
+	 * Field.indexed. */
+	sparseIndex?: boolean;
 	/** Include this field in the entity's full-text search. */
 	searchable?: boolean;
 	/** Record who created the row in this field; see Field.creator. */
@@ -276,8 +279,29 @@ export class Field<T> {
 	 * Nor on a `ref()`, for the opposite reason: the engine already maintains an
 	 * index over every reference field, to-one and to-many alike, which is what
 	 * makes a reverse lookup a range probe.
+	 *
+	 * With `sparse: true` the index holds an entry only for a row whose field is
+	 * not its zero value (`''`, `0`, `false`): the
+	 * (syncplane.v1.field_behavior).sparse_index mark. The index is smaller
+	 * where most rows hold the zero value, and a query that reads such rows —
+	 * an equality on the zero value, a range that includes it, or an ordering
+	 * or grouping by the field with no filter that excludes it — does not use
+	 * it. Throws on a `list()` or any field that is not a scalar.
+	 *
+	 * @example
+	 * ```ts
+	 * const block = schema.entity('block', {
+	 * 	id: schema.text().key(),
+	 * 	task: schema.text().indexed({ sparse: true }),
+	 * });
+	 * ```
 	 */
-	indexed(): Field<T> {
+	indexed(options?: { sparse?: boolean }): Field<T> {
+		if (options?.sparse && (this.spec.kind !== 'scalar' || this.spec.repeated)) {
+			throw new Error(
+				'indexed({ sparse: true }) is only valid on a singular scalar field: a sparse index leaves out the rows that hold the zero value of one field',
+			);
+		}
 		if (this.spec.kind === 'map') {
 			// A mark has no room to say WHICH entry, or which variant of an
 			// app-defined value — and an index over "every entry" is a shape, so
@@ -304,7 +328,11 @@ export class Field<T> {
 				'indexed() is not valid on a ref() field: reference fields are already indexed by the engine',
 			);
 		}
-		return new Field<T>({ ...this.spec, indexed: true });
+		return new Field<T>({
+			...this.spec,
+			indexed: true,
+			...(options?.sparse ? { sparseIndex: true } : {}),
+		});
 	}
 
 	/**
@@ -2539,6 +2567,7 @@ function setScalarMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
 		fieldBehaviorExt,
 		create(FieldBehaviorSchema, {
 			indexed: spec.indexed ?? false,
+			sparseIndex: spec.sparseIndex ?? false,
 			searchable: spec.searchable ?? false,
 			...(spec.creator ? { creator: create(CreatorOptionsSchema) } : {}),
 		}),

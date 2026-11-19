@@ -64,7 +64,10 @@
 // candidate only for a plan whose every range lies inside the present ranks of
 // that component (see insidePresentRanks). isNotSet on it, and any walk that
 // does not bound the leading component, decline to the next candidate or to
-// the scan.
+// the scan. A sparse field index over a field with implicit presence also holds
+// no entry for the field's zero value, so a plan whose range reaches that value
+// declines too (see holds): `x == ""`, isSet, a range that includes 0, and an
+// ordering or a grouping with no bound that leaves the zero value out.
 //
 // Repeated fields DO plan, through the multi-entry indexes indexkey.ts
 // describes: `has` over a repeated scalar and `any` over a repeated message
@@ -613,7 +616,7 @@ function planAgainst(
 		reverse = false;
 	}
 	if (reverse) ranges = splitRanks(ranges[0]!, w.prefixes[0]!);
-	if (idx.encoder.sparse && !insidePresentRanks(ranges)) return undefined;
+	if (!holds(idx.encoder, ranges)) return undefined;
 
 	return {
 		plan: {
@@ -792,8 +795,8 @@ function planGroupAgainst(
 		};
 	}
 	// The walk would visit the groups the sparse index leaves out — the missing
-	// one first among them — as if they were empty.
-	if (idx.encoder.sparse && !insidePresentRanks([ range ])) return undefined;
+	// one, or the zero value of a sparse field index — as if they were empty.
+	if (!holds(idx.encoder, [ range ])) return undefined;
 
 	const residual = residualOf(terms, usedTerms(w));
 	const positionsAreRows = comps.every((c, ci) => c.fans.length === 0 || ci <= w.pinned);
@@ -1417,6 +1420,26 @@ function insidePresentRanks(ranges: IndexRange[]): boolean {
 	return ranges.every((r) =>
 		r.lo !== undefined && r.lo >= TAG_PRESENT && r.hi !== undefined && r.hi <= TAG_MISSING
 	);
+}
+
+/**
+ * Whether the encoder writes every entry inside `ranges` that the dense
+ * encoder over the same components writes, so that reading the ranges gives
+ * the rows the dense index would give. A dense encoder always does. A sparse
+ * one does when every range lies inside the present ranks of the leading
+ * component and, when the encoder also leaves out a value, no non-empty range
+ * reaches into the leading components that start with it. Like
+ * insidePresentRanks, it decides on the keys the plan reads. Mirrors
+ * `IndexEncoder.holds` in engine/query/plan.go.
+ */
+function holds(encoder: IndexEncoder, ranges: IndexRange[]): boolean {
+	if (!encoder.sparse) return true;
+	if (!insidePresentRanks(ranges)) return false;
+	const omitted = encoder.omitted;
+	if (omitted === undefined) return true;
+	const omittedHi = upperBound(omitted)!;
+	// insidePresentRanks leaves every bound set.
+	return ranges.every((r) => r.lo! >= r.hi! || !(r.lo! < omittedHi && omitted < r.hi!));
 }
 
 /** The NaN tag, as a one-character key — the rank between the real values and

@@ -162,6 +162,16 @@ Because query ordering must produce consistent results across scans and indexes,
 - This rank is evaluated before applying the sort direction, so `NaN` and missing values sort to the end under both `asc` and `desc` orderings.
 - `NaN` values do not match comparison operators: `gt`, `gte`, `lt`, `lte`, and `eq` all return false when comparing against `NaN`.
 
+### What a sparse field index leaves out
+
+The index of an `indexed` field stores an entry for each row, also for a row whose value is the zero value of the field. That lets the index serve every query on the field, including an equality on the zero value, `isNotSet`, and a sort or a grouping with no filter.
+
+In many schemas most rows hold the zero value of a field that only a few rows use: blocks of a notes graph where few blocks are tasks, or pages where few pages are journal days. There, the zero-value entries are most of the index, and each write of such a row pays to store one. On a notes graph of 60,000 rows, leaving out the zero values of two such fields removed a fifth of all index entries and about 4% of the store.
+
+`sparse_index` leaves those entries out. The cost is the queries that read the zero value: an equality on it, a range that includes it, `isSet` on a field with implicit presence, `isNotSet`, and a sort or a grouping by the field with no filter that excludes the zero value. Those queries read every row of the entity unless another index serves them. Queries for the rows that set the field, such as `task != ""` or `journal_day > 0`, still use the index.
+
+Use `sparse_index` on a field whose zero value is the common case, and that queries filter for set values. Leave it off a field that a list sorts by, or that a facet groups by, with no filter. A declared index that starts with the field keeps an entry for each row, so it can serve those queries beside a sparse field index.
+
 ## PUT replaces the whole row
 
 `PUT` requests and `EntityTx.Put` replace the entire row. Collaborative-text fields are the exception: they merge with the stored document on every `PUT` path.

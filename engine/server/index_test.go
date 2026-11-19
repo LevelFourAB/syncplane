@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
@@ -819,6 +820,321 @@ var _ = Describe("Secondary indexes", func() {
 			})).To(Succeed())
 			Expect(keys).To(Equal([]string{"i1", "i2", "i4"}), "each matching row exactly once")
 		})
+	})
+
+	Describe("planned queries over the index of a field mark", func() {
+		// With sparse_index, the index of an `indexed` mark on a singular field
+		// holds only the rows that set the field: none for a zero value of a
+		// field with implicit presence, none for an unset field with explicit
+		// presence. The planner must keep every read out of what such an index
+		// leaves out, so each query below runs against the index and against
+		// the scan, and the two must agree. Some are served by the index and
+		// some fall back; the answer must be the same either way. Every query
+		// runs a second time against the same schema without sparse_index,
+		// whose dense indexes serve all of them.
+		note := func(sparse bool) server.DynamicEntity {
+			return server.DynamicEntity{
+				Name:      "note",
+				KeyFields: []string{"id"},
+				Fields: []server.DynamicField{
+					{Name: "id", Number: 1, Kind: protoreflect.StringKind},
+					{Name: "task", Number: 2, Kind: protoreflect.StringKind, Indexed: true, SparseIndex: sparse},
+					{Name: "day", Number: 3, Kind: protoreflect.Int32Kind, Indexed: true, SparseIndex: sparse},
+					{Name: "done", Number: 4, Kind: protoreflect.BoolKind, Indexed: true, SparseIndex: sparse},
+					{Name: "big", Number: 5, Kind: protoreflect.Int64Kind, Indexed: true, SparseIndex: sparse},
+					// Made `optional` below, so that it has explicit presence.
+					{Name: "due", Number: 6, Kind: protoreflect.StringKind, Indexed: true, SparseIndex: sparse},
+				},
+			}
+		}
+		schema := func(sparse bool) []byte {
+			GinkgoHelper()
+			set := &descriptorpb.FileDescriptorSet{}
+			Expect(proto.Unmarshal(descriptorSetBytes(note(sparse)), set)).To(Succeed())
+			found := false
+			for _, file := range set.GetFile() {
+				for _, m := range file.GetMessageType() {
+					for _, f := range m.GetField() {
+						if m.GetName() == "Note" && f.GetName() == "due" {
+							f.Proto3Optional = proto.Bool(true)
+							f.OneofIndex = proto.Int32(int32(len(m.GetOneofDecl())))
+							m.OneofDecl = append(m.OneofDecl, &descriptorpb.OneofDescriptorProto{Name: proto.String("_due")})
+							found = true
+						}
+					}
+				}
+			}
+			Expect(found).To(BeTrue())
+			raw, err := proto.Marshal(set)
+			Expect(err).NotTo(HaveOccurred())
+			return raw
+		}
+
+		type noteRow struct {
+			id, task string
+			day      int32
+			done     bool
+			big      int64
+			due      *string
+		}
+		rows := []noteRow{
+			{"n1", "a", 5, true, 3, proto.String("x")},
+			{"n2", "", 0, false, 0, nil},
+			{"n3", "b", -3, true, -1, proto.String("")},
+			{"n4", "", 7, false, 0, proto.String("y")},
+			{"n5", "c", 0, true, 9, nil},
+		}
+
+		// answer runs one query and returns the row keys in result order, and
+		// how many rows the read walked with an entity scan.
+		answer := func(built, sparse bool, spec query.Spec) ([]string, int) {
+			GinkgoHelper()
+			var opts []server.Option
+			if !built {
+				opts = append(opts, server.WithLimits(server.Limits{DisableIndexes: true}))
+			}
+			store := &entityScanCountingStore{Adapter: newTestStore()}
+			srv := mustNewServer(store, opts...)
+			_, err := srv.RegisterDescriptorSet(schema(sparse))
+			Expect(err).NotTo(HaveOccurred())
+			meta, ok := srv.Entity("note")
+			Expect(ok).To(BeTrue())
+			mt := dynamicpb.NewMessageType(meta.Descriptor)
+			fds := mt.Descriptor().Fields()
+			Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+				for _, r := range rows {
+					m := mt.New()
+					m.Set(fds.ByName("id"), protoreflect.ValueOfString(r.id))
+					m.Set(fds.ByName("task"), protoreflect.ValueOfString(r.task))
+					m.Set(fds.ByName("day"), protoreflect.ValueOfInt32(r.day))
+					m.Set(fds.ByName("done"), protoreflect.ValueOfBool(r.done))
+					m.Set(fds.ByName("big"), protoreflect.ValueOfInt64(r.big))
+					if r.due != nil {
+						m.Set(fds.ByName("due"), protoreflect.ValueOfString(*r.due))
+					}
+					if err := tx.Put(m.Interface()); err != nil {
+						return err
+					}
+				}
+				return nil
+			})).To(Succeed())
+			if built {
+				Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			}
+			store.reset()
+			var keys []string
+			Expect(srv.View(server.Trusted(ctx), ws, func(tx *server.ViewTx) error {
+				return tx.Query(mt.New().Interface(), spec, func(msg proto.Message, _ uint64) error {
+					keys = append(keys, msg.ProtoReflect().Get(fds.ByName("id")).String())
+					return nil
+				})
+			})).To(Succeed())
+			return keys, store.count()
+		}
+
+		// same checks that the index and the scan agree. With sparse_index,
+		// the read with the index built takes the index when served is set and
+		// scans otherwise; without it, the dense index serves every query.
+		same := func(name string, served bool, spec query.Spec, want []string) {
+			GinkgoHelper()
+			check := func(sparse, served bool) {
+				GinkgoHelper()
+				scanned, _ := answer(false, sparse, spec)
+				indexed, walked := answer(true, sparse, spec)
+				Expect(indexed).To(Equal(scanned), "index and scan must agree exactly")
+				Expect(scanned).To(Equal(want))
+				if served {
+					Expect(walked).To(BeZero(), "an index serves this query")
+				} else {
+					Expect(walked).To(Equal(len(rows)), "no index serves this query")
+				}
+			}
+			It(name+", with sparse_index", func() { check(true, served) })
+			It(name+", without sparse_index", func() { check(false, true) })
+		}
+		const served, scans = true, false
+		all := []string{"n1", "n2", "n3", "n4", "n5"}
+
+		// load registers the note schema on a server over store and writes
+		// rows; it returns the server and the message type.
+		load := func(store storage.Adapter, sparse bool) (*server.Server, protoreflect.MessageType) {
+			GinkgoHelper()
+			srv := mustNewServer(store)
+			_, err := srv.RegisterDescriptorSet(schema(sparse))
+			Expect(err).NotTo(HaveOccurred())
+			meta, ok := srv.Entity("note")
+			Expect(ok).To(BeTrue())
+			return srv, dynamicpb.NewMessageType(meta.Descriptor)
+		}
+		putNotes := func(srv *server.Server, mt protoreflect.MessageType, tasks map[string]string) {
+			GinkgoHelper()
+			fds := mt.Descriptor().Fields()
+			Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+				for id, task := range tasks {
+					m := mt.New()
+					m.Set(fds.ByName("id"), protoreflect.ValueOfString(id))
+					m.Set(fds.ByName("task"), protoreflect.ValueOfString(task))
+					if err := tx.Put(m.Interface()); err != nil {
+						return err
+					}
+				}
+				return nil
+			})).To(Succeed())
+		}
+		indexHash := func(store storage.Adapter, index string) string {
+			GinkgoHelper()
+			var hash string
+			Expect(store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
+				h, ready, err := tx.IndexState("note", index)
+				Expect(ready).To(BeTrue())
+				hash = h
+				return err
+			})).To(Succeed())
+			return hash
+		}
+
+		It("writes no entry for a zero value with sparse_index, and one without it", func() {
+			store := newTestStore()
+			srv, mt := load(store, true)
+			putNotes(srv, mt, map[string]string{"n1": "", "n2": "a"})
+			Expect(entriesOf(store, "note", "__field_task")).To(Equal([]string{"n2"}))
+			Expect(entriesOf(store, "note", "__field_day")).To(BeEmpty())
+
+			// A write that clears the field takes the row out of the index.
+			putNotes(srv, mt, map[string]string{"n2": ""})
+			Expect(entriesOf(store, "note", "__field_task")).To(BeEmpty())
+
+			plain := newTestStore()
+			srv, mt = load(plain, false)
+			putNotes(srv, mt, map[string]string{"n1": "", "n2": "a"})
+			Expect(entriesOf(plain, "note", "__field_task")).To(Equal([]string{"n1", "n2"}))
+			Expect(entriesOf(plain, "note", "__field_day")).To(Equal([]string{"n1", "n2"}))
+		})
+
+		It("rebuilds a dense field index once a schema turns sparse_index on", func() {
+			// A store whose schema had no sparse_index holds the dense entries
+			// and a ready state under the dense fingerprint.
+			store := &entityScanCountingStore{Adapter: newTestStore()}
+			srv, mt := load(store, false)
+			putNotes(srv, mt, map[string]string{"n1": "", "n2": "a", "n3": ""})
+			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			dense := indexHash(store, "__field_task")
+			Expect(entriesOf(store, "note", "__field_task")).To(HaveLen(3))
+
+			srv, mt = load(store, true)
+			read := func() []string {
+				GinkgoHelper()
+				var keys []string
+				fds := mt.Descriptor().Fields()
+				Expect(srv.View(server.Trusted(ctx), ws, func(tx *server.ViewTx) error {
+					return tx.Query(mt.New().Interface(), query.Spec{Where: query.Neq("task", "")},
+						func(msg proto.Message, _ uint64) error {
+							keys = append(keys, msg.ProtoReflect().Get(fds.ByName("id")).String())
+							return nil
+						})
+				})).To(Succeed())
+				return keys
+			}
+			store.reset()
+			Expect(read()).To(Equal([]string{"n2"}))
+			Expect(store.count()).To(Equal(3), "the dense entries do not match the fingerprint, so the read scans")
+
+			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			Expect(entriesOf(store, "note", "__field_task")).To(Equal([]string{"n2"}),
+				"the rebuild replaces each row's entries, and an empty task has none")
+			Expect(indexHash(store, "__field_task")).NotTo(Equal(dense))
+			store.reset()
+			Expect(read()).To(Equal([]string{"n2"}))
+			Expect(store.count()).To(BeZero(), "the rebuilt index serves the read")
+		})
+
+		It("refuses sparse_index without indexed, and on a repeated field", func() {
+			patched := func(field string, edit func(*syncplanev1.FieldBehavior), repeated bool) []byte {
+				GinkgoHelper()
+				set := &descriptorpb.FileDescriptorSet{}
+				Expect(proto.Unmarshal(descriptorSetBytes(note(false)), set)).To(Succeed())
+				for _, file := range set.GetFile() {
+					for _, m := range file.GetMessageType() {
+						for _, f := range m.GetField() {
+							if m.GetName() != "Note" || f.GetName() != field {
+								continue
+							}
+							b := proto.GetExtension(f.GetOptions(), syncplanev1.E_FieldBehavior).(*syncplanev1.FieldBehavior)
+							b = proto.Clone(b).(*syncplanev1.FieldBehavior)
+							edit(b)
+							if f.Options == nil {
+								f.Options = &descriptorpb.FieldOptions{}
+							}
+							proto.SetExtension(f.Options, syncplanev1.E_FieldBehavior, b)
+							if repeated {
+								f.Label = descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum()
+							}
+						}
+					}
+				}
+				raw, err := proto.Marshal(set)
+				Expect(err).NotTo(HaveOccurred())
+				return raw
+			}
+			_, err := newBareServer().RegisterDescriptorSet(patched("task", func(b *syncplanev1.FieldBehavior) {
+				b.Indexed, b.SparseIndex = false, true
+			}, false))
+			Expect(err).To(MatchError(ContainSubstring(`field "task" sets sparse_index without indexed`)))
+
+			_, err = newBareServer().RegisterDescriptorSet(patched("task", func(b *syncplanev1.FieldBehavior) {
+				b.SparseIndex = true
+			}, true))
+			Expect(err).To(MatchError(ContainSubstring("a sparse field index needs a singular field")))
+
+			Expect(server.BuildDynamicFile(server.DynamicEntity{
+				Name: "card", KeyFields: []string{"id"}, Fields: []server.DynamicField{
+					{Name: "id", Number: 1, Kind: protoreflect.StringKind},
+					{Name: "tag", Number: 2, Kind: protoreflect.StringKind, SparseIndex: true},
+				},
+			})).Error().To(MatchError(ContainSubstring("sparse_index is only valid with indexed")))
+		})
+
+		same("equality on a set string", served, query.Spec{Where: query.Eq("task", "b")}, []string{"n3"})
+		same("neq against the empty string", served, query.Spec{Where: query.Neq("task", "")}, []string{"n1", "n3", "n5"})
+		same("a range above a set string", served, query.Spec{Where: query.Gt("task", "a")}, []string{"n3", "n5"})
+		same("equality on the empty string, which the index leaves out", scans,
+			query.Spec{Where: query.Eq("task", "")}, []string{"n2", "n4"})
+		same("isSet on a field with implicit presence", scans, query.Spec{Where: query.IsSet("task")}, all)
+		same("isNotSet on a field with implicit presence", scans, query.Spec{Where: query.IsNotSet("task")}, nil)
+		same("a range below a value, which reaches the empty string", scans,
+			query.Spec{Where: query.Lt("task", "b")}, []string{"n1", "n2", "n4"})
+		same("an ordering with no predicate puts the empty strings first", scans,
+			query.Spec{OrderBy: []*syncplanev1.OrderKey{query.Asc("task")}},
+			[]string{"n2", "n4", "n1", "n3", "n5"})
+		same("a descending ordering with no predicate and a limit", scans,
+			query.Spec{OrderBy: []*syncplanev1.OrderKey{query.Desc("task")}, Limit: 2},
+			[]string{"n5", "n3"})
+		same("an ordering the index supplies once the predicate leaves out the empty string", served,
+			query.Spec{Where: query.Neq("task", ""), OrderBy: []*syncplanev1.OrderKey{query.Desc("task")}},
+			[]string{"n5", "n3", "n1"})
+		same("a range above 0", served, query.Spec{Where: query.Gt("day", 0)}, []string{"n1", "n4"})
+		same("a range below 0", served, query.Spec{Where: query.Lt("day", 0)}, []string{"n3"})
+		same("equality on 0, which the index leaves out", scans, query.Spec{Where: query.Eq("day", 0)}, []string{"n2", "n5"})
+		same("a range that includes 0", scans, query.Spec{Where: query.Gte("day", -5)}, all)
+		same("a range that ends at 0 inclusive", scans, query.Spec{Where: query.Lte("day", 0)}, []string{"n2", "n3", "n5"})
+		same("a descending ordering by a number with a limit", scans,
+			query.Spec{OrderBy: []*syncplanev1.OrderKey{query.Desc("day")}, Limit: 2},
+			[]string{"n4", "n1"})
+		same("equality on true", served, query.Spec{Where: query.Eq("done", true)}, []string{"n1", "n3", "n5"})
+		same("neq against false", served, query.Spec{Where: query.Neq("done", false)}, []string{"n1", "n3", "n5"})
+		same("equality on false, which the index leaves out", scans, query.Spec{Where: query.Eq("done", false)}, []string{"n2", "n4"})
+		same("a range above 0 on a 64-bit field", served, query.Spec{Where: query.Gt("big", 0)}, []string{"n1", "n5"})
+		same("equality on 0 on a 64-bit field", scans, query.Spec{Where: query.Eq("big", 0)}, []string{"n2", "n4"})
+		same("an empty string a field with explicit presence sets", served,
+			query.Spec{Where: query.Eq("due", "")}, []string{"n3"})
+		same("isNotSet on a field with explicit presence", scans, query.Spec{Where: query.IsNotSet("due")}, []string{"n2", "n5"})
+		same("isSet on a field with explicit presence", served, query.Spec{Where: query.IsSet("due")}, []string{"n1", "n3", "n4"})
+		same("a union of branches the indexes serve", served,
+			query.Spec{Where: query.Or(query.Eq("task", "a"), query.Eq("day", 7))}, []string{"n1", "n4"})
+		same("a union with a branch on a zero value", scans,
+			query.Spec{Where: query.Or(query.Eq("task", "a"), query.Eq("done", false))}, []string{"n1", "n2", "n4"})
+		same("a range on one field index and a residual on another", served,
+			query.Spec{Where: query.And(query.Neq("task", ""), query.Gt("day", 0))}, []string{"n1"})
 	})
 
 	Describe("declaration surface", func() {

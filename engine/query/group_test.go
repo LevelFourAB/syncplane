@@ -142,6 +142,40 @@ var _ = Describe("PlanGroup", func() {
 		})
 	})
 
+	Describe("over a sparse field index", func() {
+		fieldIndex := func(name, path string) query.Index {
+			GinkgoHelper()
+			c, err := query.CompileIndexComponent(widget, []string{path}, false)
+			Expect(err).NotTo(HaveOccurred())
+			enc, err := query.NewSparseFieldIndexEncoder(c)
+			Expect(err).NotTo(HaveOccurred())
+			return query.Index{Name: name, Encoder: enc}
+		}
+
+		It("declines to partition with no predicate, whose zero-value group it leaves out", func() {
+			Expect(query.PlanGroup([]query.Index{fieldIndex("__field_label", "label")},
+				nil, group("label"))).To(BeNil())
+			Expect(query.PlanGroup([]query.Index{fieldIndex("__field_count", "count")},
+				nil, group("count"))).To(BeNil())
+		})
+
+		It("declines a predicate whose range holds the zero value", func() {
+			Expect(query.PlanGroup([]query.Index{fieldIndex("__field_count", "count")},
+				compile(query.Gte("count", -1)), group("count"))).To(BeNil())
+		})
+
+		It("partitions when the predicate leaves out the zero value", func() {
+			p := query.PlanGroup([]query.Index{fieldIndex("__field_label", "label")},
+				compile(query.Neq("label", "")), group("label"))
+			Expect(p).NotTo(BeNil())
+			Expect(p.Index).To(Equal("__field_label"))
+			p = query.PlanGroup([]query.Index{fieldIndex("__field_count", "count")},
+				compile(query.Lt("count", 0)), group("count"))
+			Expect(p).NotTo(BeNil())
+			Expect(p.Index).To(Equal("__field_count"))
+		})
+	})
+
 	It("partitions on a leading component with no predicate", func() {
 		p := query.PlanGroup([]query.Index{byLabel}, nil, group("label"))
 		Expect(p).NotTo(BeNil())

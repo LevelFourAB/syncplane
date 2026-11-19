@@ -123,6 +123,11 @@ type DynamicField struct {
 	// filtering or ordering by it costs O(result) rather than a scan. Rejected
 	// on a text field and on any leaf a comparison could never reach.
 	Indexed bool
+	// SparseIndex makes the index of Indexed hold only the rows that set the
+	// field (the same (syncplane.v1.field_behavior).sparse_index the compiled
+	// path honours). Valid only together with Indexed on a singular scalar
+	// field.
+	SparseIndex bool
 	// Text marks a field as holding an encoded collaborative text document (the
 	// same (syncplane.v1.field_behavior).text the compiled path honours), so
 	// registration installs the text merger and concurrent edits merge instead
@@ -409,6 +414,9 @@ func dynamicFieldProto(
 	if f.ReverseRelation != "" && !f.isRef() {
 		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: reverse_relation is only valid on a Ref field", ctx, f.Name)
 	}
+	if f.SparseIndex && (!f.Indexed || f.Repeated || f.isMap() || f.isRef() || f.isMessage()) {
+		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: sparse_index is only valid with indexed on a singular scalar field", ctx, f.Name)
+	}
 	if f.Creator && (f.Kind != protoreflect.StringKind || f.Repeated || f.isMap() || f.isRef() || f.isMessage()) {
 		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: creator is only valid on a singular string field", ctx, f.Name)
 	}
@@ -478,8 +486,10 @@ func dynamicFieldProto(
 				return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: opaque is only valid on a singular bytes field", ctx, f.Name)
 			}
 		}
-		if f.Opaque || f.Text || f.Indexed || f.Creator {
-			b := &syncplanev1.FieldBehavior{Opaque: f.Opaque, Text: f.Text, Indexed: f.Indexed}
+		if f.Opaque || f.Text || f.Indexed || f.SparseIndex || f.Creator {
+			b := &syncplanev1.FieldBehavior{
+				Opaque: f.Opaque, Text: f.Text, Indexed: f.Indexed, SparseIndex: f.SparseIndex,
+			}
 			if f.Creator {
 				b.Creator = &syncplanev1.CreatorOptions{}
 			}

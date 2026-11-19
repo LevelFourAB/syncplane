@@ -77,7 +77,11 @@ import (
 // a candidate only for a plan whose every range lies inside the present ranks
 // of that component (see insidePresentRanks). isNotSet on it, and any walk
 // that does not bound the leading component, decline to the next candidate or
-// to the scan.
+// to the scan. A sparse field index over a field with implicit presence also
+// holds no entry for the field's zero value, so a plan whose range reaches
+// that value declines too (see IndexEncoder.holds): `x == ""`, isSet, a range
+// that includes 0, and an ordering or a grouping with no bound that leaves the
+// zero value out.
 //
 // Repeated fields DO plan, through the multi-entry indexes indexkey.go
 // describes: `has` over a repeated scalar and `any` over a repeated message
@@ -581,7 +585,7 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 	if reverse {
 		ranges = splitRanks(ranges[0], w.prefixes[0])
 	}
-	if idx.Encoder.Sparse() && !insidePresentRanks(ranges) {
+	if !idx.Encoder.holds(ranges) {
 		return nil, 0
 	}
 	var prefix []byte
@@ -650,6 +654,35 @@ func insidePresentRanks(ranges []Range) bool {
 			return false
 		}
 		if r.Hi == nil || bytes.Compare(r.Hi, []byte{tagMissing}) > 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// holds reports whether the encoder writes every entry inside ranges that the
+// dense encoder over the same components writes, so that reading ranges gives
+// the rows the dense index would give. A dense encoder always does. A sparse
+// one does when every range lies inside the present ranks of the leading
+// component and, when the encoder also leaves out a zero value, no non-empty
+// range reaches into the leading components that start with it. Like
+// insidePresentRanks, it decides on the bytes the plan reads, so it covers
+// every way the planner reaches a range.
+func (e *IndexEncoder) holds(ranges []Range) bool {
+	if !e.sparse {
+		return true
+	}
+	if !insidePresentRanks(ranges) {
+		return false
+	}
+	if e.omit == nil {
+		return true
+	}
+	// insidePresentRanks leaves every bound set.
+	omitHi := UpperBound(e.omit)
+	for _, r := range ranges {
+		empty := bytes.Compare(r.Lo, r.Hi) >= 0
+		if !empty && bytes.Compare(r.Lo, omitHi) < 0 && bytes.Compare(e.omit, r.Hi) < 0 {
 			return false
 		}
 	}

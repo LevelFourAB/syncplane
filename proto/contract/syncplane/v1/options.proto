@@ -838,8 +838,29 @@ message FieldBehavior {
 	//
 	// To filter by one field and order by a different field, declare an index
 	// in `EntityOptions.index` instead. This option is not supported on
-	// collaborative text fields; use `SearchSpec` for text search.
+	// collaborative text fields; use `SearchSpec` for text search. See
+	// `sparse_index` for an index that leaves out the rows that do not set the
+	// field.
 	bool indexed = 5;
+	// Makes the index that `indexed` maintains hold an entry only for a row
+	// that sets the field.
+	//
+	// A field with implicit presence counts as not set when it holds its zero
+	// value: the empty string, 0, false or the zero enum value. A field with
+	// explicit presence (`optional`, or a member of a `oneof`) counts as not
+	// set when it has no value; a zero value that the row sets has an entry.
+	//
+	// A query uses the index only when every row it reads has an entry. An
+	// equality on a value that is set, `!=` against the empty string or
+	// false, and a range that excludes the zero value use it. An equality on
+	// the zero value, a range that includes it, `isNotSet`, `isSet` on a field
+	// with implicit presence, and an ordering or a grouping by the field with
+	// no filter that excludes the zero value read every row, unless another
+	// index serves them.
+	//
+	// Requires `indexed` on a singular field. Registration fails when it is
+	// set without `indexed`, or on a repeated field.
+	bool sparse_index = 13;
 	// Includes this field in append-only history tracking.
 	//
 	// Key fields are never recorded in a history row's mask however they

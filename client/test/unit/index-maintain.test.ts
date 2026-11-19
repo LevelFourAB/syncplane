@@ -11,7 +11,7 @@ import { create, toBinary } from '@bufbuild/protobuf';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
-import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import { IssueSchema, WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { RowChangeSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
 import {
 	confirmedKey,
@@ -27,16 +27,26 @@ import {
 } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { KVRead, KVStore } from '../../src/kv/store.js';
-import { EntityRegistry } from '../../src/mutations.js';
+import { entityDefOf, EntityRegistry } from '../../src/mutations.js';
 import { ChainMutex } from '../../src/mutex.js';
 import { BUILD_BATCH, buildIndexes } from '../../src/optimistic/index-build.js';
-import { compileIndexes, IndexCache, rowPositions } from '../../src/optimistic/index-maintain.js';
+import {
+	type CompiledIndex,
+	compileIndexes,
+	IndexCache,
+	rowPositions,
+} from '../../src/optimistic/index-maintain.js';
 import {
 	applyServerChanges,
 	dropConfirmedEntities,
 	wipeConfirmedState,
 } from '../../src/optimistic/rebase.js';
-import { specHash } from '../../src/query/indexkey.js';
+import {
+	compileIndexComponent,
+	sparseFieldIndexEncoder,
+	specHash,
+} from '../../src/query/indexkey.js';
+import { defineSchema, entity, int32, list, text } from '../../src/schema/builder.js';
 import { TouchSet } from '../../src/touch.js';
 
 const ws = 'ws1';
@@ -178,7 +188,7 @@ describe('client index maintenance', () => {
 		// index is then maintained for nothing: the planner pins an equality
 		// prefix, so the longer one answers every query the shorter one does.
 		const of = (
-			...defs: { name: string; key: { path: string[]; desc: boolean }[] }[]
+			...defs: { name: string; key: { path: string[]; desc: boolean }[]; sparseIndex?: boolean }[]
 		): string[] => compileIndexes(WidgetSchema, defs).map((i) => i.name);
 
 		const label = { path: [ 'label' ], desc: false };
@@ -255,6 +265,28 @@ describe('client index maintenance', () => {
 			)).toEqual([ 'valueFirst' ]);
 		});
 
+		it('drops a sparse field index that a dense index leads with, and keeps one that leaves out less', () => {
+			// The sparse field index leaves out the rows with an empty label,
+			// which a dense index over the same components holds, so it never
+			// stands in for the dense one.
+			expect(of(
+				{ name: '__field_label', key: [ label ], sparseIndex: true },
+				{ name: 'long', key: [ label, countDesc ] },
+			)).toEqual([ 'long' ]);
+			expect(
+				of(
+					{ name: '__field_label', key: [ label ], sparseIndex: true },
+					{ name: 'same', key: [ label ] },
+				).sort(),
+			).toEqual([ '__field_label', 'same' ]);
+			// A plain field index is dense, so an equal declaration is a
+			// duplicate of it, as before.
+			expect(of(
+				{ name: '__field_label', key: [ label ] },
+				{ name: 'same', key: [ label ] },
+			)).toEqual([ '__field_label' ]);
+		});
+
 		it('keeps only the longest of a chain of prefixes', () => {
 			expect(of(
 				{ name: 'a', key: [ label ] },
@@ -291,6 +323,88 @@ describe('client index maintenance', () => {
 		it('gives a row one position per map entry', () => {
 			const row = create(WidgetSchema, { id: 'w1', attrs: { a: 'x', b: 'y' } });
 			expect(positions(row, 'byAttr')).toHaveLength(2);
+		});
+	});
+
+	describe('the index of a field mark', () => {
+		const field = (name: string, sparseIndex: boolean) => ({
+			name: `__field_${name}`,
+			key: [ { path: [ name ], desc: false } ],
+			...(sparseIndex ? { sparseIndex } : {}),
+		});
+		const sparse = compileIndexes(WidgetSchema, [
+			field('label', true),
+			field('count', true),
+			field('flag', true),
+			field('maybe', true),
+		]);
+		const plain = compileIndexes(WidgetSchema, [
+			field('label', false),
+			field('count', false),
+			field('maybe', false),
+			field('tags', false),
+		]);
+		const byName = (indexes: CompiledIndex[], name: string) =>
+			indexes.find((i) => i.name === `__field_${name}`)!;
+		const positions = (indexes: CompiledIndex[], value: unknown, name: string): string[] =>
+			rowPositions([ byName(indexes, name) ], 'widget', ws, 'w1', value, WidgetSchema);
+		const empty = create(WidgetSchema, { id: 'w1' });
+
+		it('stays dense without sparse_index, under the fingerprint it already stores under', () => {
+			for (const name of [ 'label', 'count', 'maybe', 'tags' ]) {
+				const ix = byName(plain, name);
+				expect(ix.encoder!.sparse, name).toBe(false);
+				expect(ix.specHash, name).toBe(specHash(ix.encoder!.components));
+				expect(positions(plain, empty, name), name).toHaveLength(1);
+			}
+		});
+
+		it('with sparse_index, leaves out the zero value of a field with implicit presence, under its own fingerprint', () => {
+			for (const name of [ 'label', 'count', 'flag' ]) {
+				const ix = byName(sparse, name);
+				expect(ix.encoder!.sparse, name).toBe(true);
+				expect(ix.encoder!.omitted, name).toBeDefined();
+				expect(ix.specHash, name).toBe(ix.encoder!.specHash());
+				expect(ix.specHash, name).not.toBe(specHash(ix.encoder!.components));
+				expect(positions(sparse, empty, name), name).toEqual([]);
+			}
+			const set = create(WidgetSchema, { id: 'w1', label: 'a', count: -1, flag: true });
+			for (const name of [ 'label', 'count', 'flag' ]) {
+				expect(positions(sparse, set, name), name).toHaveLength(1);
+			}
+		});
+
+		it('with sparse_index, keeps a zero value that a field with explicit presence sets', () => {
+			const ix = byName(sparse, 'maybe');
+			expect(ix.encoder!.sparse).toBe(true);
+			expect(ix.encoder!.omitted).toBeUndefined();
+			expect(positions(sparse, empty, 'maybe')).toEqual([]);
+			expect(positions(sparse, create(WidgetSchema, { id: 'w1', maybe: '' }), 'maybe')).toHaveLength(
+				1,
+			);
+		});
+
+		it('refuses sparse_index on a repeated field', () => {
+			expect(() => sparseFieldIndexEncoder(compileIndexComponent(WidgetSchema, [ 'tags' ], false)))
+				.toThrow(/singular field/);
+		});
+
+		it('reads sparse_index off the descriptor', () => {
+			const note = entity('note', {
+				id: text().key(),
+				task: text().indexed({ sparse: true }),
+				day: int32().indexed(),
+			});
+			const defs = entityDefOf(defineSchema(note).descMessage('note')).indexes;
+			expect(defs).toEqual([
+				{ name: '__field_task', key: [ { path: [ 'task' ], desc: false } ], sparseIndex: true },
+				{ name: '__field_day', key: [ { path: [ 'day' ], desc: false } ] },
+			]);
+			expect(entityDefOf(IssueSchema).indexes.every((d) => d.sparseIndex === undefined)).toBe(true);
+		});
+
+		it('refuses the sparse form in the builder on a field that is not a singular scalar', () => {
+			expect(() => list(text()).indexed({ sparse: true })).toThrow(/singular scalar/);
 		});
 	});
 
