@@ -36,6 +36,9 @@ import (
 // scan reads the row key from index_rows: entries a caller makes by hand, and
 // the entries of a row key that the engine's encoding writes in another form
 // than the key itself, which is every key with a code point above U+FFFF.
+// by_id marks the rows of index_rows that hold such an entry, and only those
+// rows are in its index by row id, index_rows_by_rid. Few rows hold one, so
+// every other statement finds the tuples of index_rows by the primary key.
 //
 // PutIndexEntries and DeleteIndexEntries do not reach the server when they are
 // called. They go to entryLog, and resolveEntries writes every logged call of
@@ -130,10 +133,11 @@ func (t *pgTx) customPlanIfPartitioned() (restore func()) {
 }
 
 const (
-	// indexPutSQL replaces the entries of the rows ($2 entity id, $3 row key)
-	// of workspace number $1 by the entries ($4 position of the row in $2 and
-	// $3, $5 index id, $6 entry, $7 rk, or NULL for the row id). A row without
-	// a row id takes a new one.
+	// indexPutSQL replaces the entries of the rows ($2 entity id, $3 row key,
+	// $8 true when an entry of the row holds the row id) of workspace number
+	// $1 by the entries ($4 position of the row in $2 and $3, $5 index id, $6
+	// entry, $7 rk, or NULL for the row id). A row without a row id takes a
+	// new one, and a row whose by_id changes takes the new value.
 	//
 	// It replaces by difference: have is what the rows hold, and only the
 	// entries of it that want lacks are deleted, and only the entries of want
@@ -165,18 +169,30 @@ const (
 	// it the planner has an index condition on the rows of this statement
 	// also when it does not scan by tuple id, as on empty tables, where it
 	// would otherwise scan the table.
+	//
+	// flip finds its tuples by the primary key, as no index of index_rows
+	// holds the row id of a row whose by_id is false. The arrays of entity
+	// ids and row keys name every pair of them, and the condition on rid
+	// keeps the pairs of this statement. Few rows change by_id, so the arrays
+	// are empty in most statements.
 	indexPutSQL = `WITH inp AS MATERIALIZED (
-	SELECT u.ord::int4 AS ord, u.ent, u.key, r.rid
-	FROM unnest($2::int4[], $3::text[]) WITH ORDINALITY AS u(ent, key, ord)
+	SELECT u.ord::int4 AS ord, u.ent, u.key, u.by_id, r.rid, r.by_id AS had_id
+	FROM unnest($2::int4[], $3::text[], $8::bool[]) WITH ORDINALITY AS u(ent, key, by_id, ord)
 	LEFT JOIN LATERAL (
-		SELECT x.rid FROM index_rows x WHERE x.ent = u.ent AND x.wsn = $1 AND x.key = u.key LIMIT 1
+		SELECT x.rid, x.by_id FROM index_rows x WHERE x.ent = u.ent AND x.wsn = $1 AND x.key = u.key LIMIT 1
 	) r ON TRUE
 ),
 fresh AS MATERIALIZED (
-	SELECT i.ord, i.ent, i.key, nextval('index_row_ids') AS rid FROM inp i WHERE i.rid IS NULL
+	SELECT i.ord, i.ent, i.key, i.by_id, nextval('index_row_ids') AS rid FROM inp i WHERE i.rid IS NULL
 ),
 ins AS (
-	INSERT INTO index_rows (wsn, ent, rid, key) SELECT $1, f.ent, f.rid, f.key FROM fresh f
+	INSERT INTO index_rows (wsn, ent, rid, key, by_id) SELECT $1, f.ent, f.rid, f.key, f.by_id FROM fresh f
+),
+flip AS (
+	UPDATE index_rows x SET by_id = NOT x.by_id
+	WHERE x.ent = ANY (ARRAY(SELECT i.ent FROM inp i WHERE i.by_id <> i.had_id)) AND x.wsn = $1
+	  AND x.key = ANY (ARRAY(SELECT i.key FROM inp i WHERE i.by_id <> i.had_id))
+	  AND x.rid = ANY (ARRAY(SELECT i.rid FROM inp i WHERE i.by_id <> i.had_id))
 ),
 want AS MATERIALIZED (
 	SELECT COALESCE(i.rid, f.rid) AS rid, u.scope, u.k, u.rk
@@ -202,14 +218,20 @@ WHERE NOT EXISTS (SELECT 1 FROM have h WHERE h.rid = w.rid AND h.scope = w.scope
 	// indexDeleteSQL deletes the rows ($2 entity id, $3 row key) of workspace
 	// number $1 from index_rows, and their entries. A row that holds no entry
 	// is not in index_rows, and nothing happens for it.
+	//
+	// gone finds its tuples by the primary key, for the reason flip in
+	// indexPutSQL does.
 	indexDeleteSQL = `WITH tgt AS MATERIALIZED (
-	SELECT r.rid FROM unnest($2::int4[], $3::text[]) AS u(ent, key)
+	SELECT u.ent, u.key, r.rid FROM unnest($2::int4[], $3::text[]) AS u(ent, key)
 	CROSS JOIN LATERAL (
 		SELECT x.rid FROM index_rows x WHERE x.ent = u.ent AND x.wsn = $1 AND x.key = u.key LIMIT 1
 	) r
 ),
 gone AS (
-	DELETE FROM index_rows x WHERE x.wsn = $1 AND x.rid = ANY (ARRAY(SELECT t.rid FROM tgt t))
+	DELETE FROM index_rows x
+	WHERE x.ent = ANY (ARRAY(SELECT t.ent FROM tgt t)) AND x.wsn = $1
+	  AND x.key = ANY (ARRAY(SELECT t.key FROM tgt t))
+	  AND x.rid = ANY (ARRAY(SELECT t.rid FROM tgt t))
 )
 DELETE FROM index_entries e WHERE e.wsn = $1 AND e.rid = ANY (ARRAY(SELECT t.rid FROM tgt t))`
 
@@ -223,8 +245,9 @@ FROM unnest($2::text[], $3::text[]) AS u(entity, idx)
 RETURNING entity, idx, scope`
 
 	// indexRowKeysSQL reads the row keys of the row ids $2 of workspace number
-	// $1.
-	indexRowKeysSQL = `SELECT rid, key FROM index_rows WHERE wsn = $1 AND rid = ANY($2::int8[])`
+	// $1, which must be rows whose by_id is true. The condition on by_id is
+	// what lets the plan use index_rows_by_rid.
+	indexRowKeysSQL = `SELECT rid, key FROM index_rows WHERE wsn = $1 AND rid = ANY($2::int8[]) AND by_id`
 )
 
 // entryOp is one PutIndexEntries or DeleteIndexEntries call that the
@@ -429,6 +452,7 @@ func (t *pgTx) indexPutStmt(wsn int32, ops []*entryOp, entries int) queuedStmt {
 	var (
 		ents   = make([]int32, len(ops))
 		keys   = make([]string, len(ops))
+		byID   = make([]bool, len(ops))
 		ords   = make([]int32, 0, entries)
 		scopes = make([]int32, 0, entries)
 		ks     = make([][]byte, 0, entries)
@@ -467,11 +491,11 @@ func (t *pgTx) indexPutStmt(wsn int32, ops []*entryOp, entries int) queuedStmt {
 			if endsWithRowKey(e.k, op.key) {
 				rks = append(rks, &suffix)
 			} else {
-				rks = append(rks, nil)
+				rks, byID[i] = append(rks, nil), true
 			}
 		}
 	}
-	return queuedStmt{sql: indexPutSQL, args: []any{wsn, ents, keys, ords, scopes, ks, rks}}
+	return queuedStmt{sql: indexPutSQL, args: []any{wsn, ents, keys, ords, scopes, ks, rks, byID}}
 }
 
 // makeIndexScopes gives each of names a scope id and adds it to the memo. It

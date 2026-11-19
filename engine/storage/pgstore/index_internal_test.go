@@ -242,6 +242,127 @@ var _ = Describe("Postgres index entries", func() {
 				Expect(ranged).To(ConsistOf(want), "two ranges, paged by key")
 			})
 
+			Describe("the rows that hold an entry with the row id", func() {
+				// byID reads by_id of each row of index_rows, by entity and
+				// row key, and the row id of each.
+				byID := func() (marks map[string]bool, rids map[string]int64) {
+					GinkgoHelper()
+					rows, err := store.pool.Query(ctx, `SELECT s.entity || '/' || x.key, x.by_id, x.rid
+						FROM index_rows x JOIN index_scopes s ON s.scope = x.ent AND s.idx = ''`)
+					Expect(err).NotTo(HaveOccurred())
+					defer rows.Close()
+					marks, rids = map[string]bool{}, map[string]int64{}
+					for rows.Next() {
+						var (
+							name string
+							mark bool
+							rid  int64
+						)
+						Expect(rows.Scan(&name, &mark, &rid)).To(Succeed())
+						marks[name], rids[name] = mark, rid
+					}
+					Expect(rows.Err()).NotTo(HaveOccurred())
+					return marks, rids
+				}
+				valueOnly := func(rowKey string) []storage.IndexEntry {
+					return []storage.IndexEntry{indexEntry("by_v", "v", rowKey)}
+				}
+
+				It("are marked while they hold one, and their row keys are read by row id", func() {
+					Expect(write(func(t *pgTx) error {
+						Expect(t.PutIndexEntries("doc", "r1", valueOnly("r1"))).To(Succeed())
+						Expect(t.PutIndexEntries("doc", "r2", docEntries("v", "r2"))).To(Succeed())
+						return nil
+					})).To(Succeed())
+					marks, first := byID()
+					Expect(marks).To(Equal(map[string]bool{"doc/r1": false, "doc/r2": true}))
+					Expect(stored("doc", "by_tag")).To(Equal([]string{"r2"}))
+
+					// r1 gains one and r2 loses its own, and a read in the
+					// transaction sees both.
+					Expect(write(func(t *pgTx) error {
+						Expect(t.PutIndexEntries("doc", "r1", docEntries("v", "r1"))).To(Succeed())
+						Expect(t.PutIndexEntries("doc", "r2", valueOnly("r2"))).To(Succeed())
+						Expect(rowKeys(t, "doc", "by_tag")).To(Equal([]string{"r1"}))
+						return nil
+					})).To(Succeed())
+					marks, rids := byID()
+					Expect(marks).To(Equal(map[string]bool{"doc/r1": true, "doc/r2": false}))
+					Expect(rids).To(Equal(first), "a change of the mark keeps the row id")
+					Expect(stored("doc", "by_tag")).To(Equal([]string{"r1"}))
+					Expect(stored("doc", "by_v")).To(Equal([]string{"r1", "r2"}))
+
+					// A replace that keeps the kind of entries keeps the mark.
+					Expect(write(func(t *pgTx) error {
+						Expect(t.PutIndexEntries("doc", "r1", docEntries("w", "r1"))).To(Succeed())
+						Expect(t.PutIndexEntries("doc", "r2", []storage.IndexEntry{indexEntry("by_v", "w", "r2")})).To(Succeed())
+						return nil
+					})).To(Succeed())
+					marks, _ = byID()
+					Expect(marks).To(Equal(map[string]bool{"doc/r1": true, "doc/r2": false}))
+					Expect(stored("doc", "by_tag")).To(Equal([]string{"r1"}))
+				})
+
+				It("change their mark and are deleted alone when one statement names rows of two entities with the same keys", func() {
+					// The statements find the rows by arrays of entity ids
+					// and of row keys, which also name doc/b and note/a.
+					Expect(write(func(t *pgTx) error {
+						for _, entity := range []string{"doc", "note"} {
+							for _, key := range []string{"a", "b"} {
+								Expect(t.PutIndexEntries(entity, key, valueOnly(key))).To(Succeed())
+							}
+						}
+						return nil
+					})).To(Succeed())
+					_, first := byID()
+					Expect(write(func(t *pgTx) error {
+						Expect(t.PutIndexEntries("doc", "a", docEntries("v", "a"))).To(Succeed())
+						Expect(t.PutIndexEntries("note", "b", docEntries("v", "b"))).To(Succeed())
+						return nil
+					})).To(Succeed())
+					marks, rids := byID()
+					Expect(marks).To(Equal(map[string]bool{"doc/a": true, "doc/b": false, "note/a": false, "note/b": true}))
+					Expect(rids).To(Equal(first))
+					Expect(stored("doc", "by_tag")).To(Equal([]string{"a"}))
+					Expect(stored("note", "by_tag")).To(Equal([]string{"b"}))
+
+					Expect(write(func(t *pgTx) error {
+						Expect(t.DeleteIndexEntries("doc", "a")).To(Succeed())
+						Expect(t.DeleteIndexEntries("note", "b")).To(Succeed())
+						return nil
+					})).To(Succeed())
+					marks, _ = byID()
+					Expect(marks).To(Equal(map[string]bool{"doc/b": false, "note/a": false}))
+					Expect(stored("doc", "by_v")).To(Equal([]string{"b"}))
+					Expect(stored("note", "by_v")).To(Equal([]string{"a"}))
+					Expect(stored("doc", "by_tag")).To(BeEmpty())
+				})
+
+				It("are deleted with their entries by each delete of rows", func() {
+					Expect(write(func(t *pgTx) error {
+						for _, key := range []string{"r1", "r2", "r3", "r4"} {
+							Expect(t.PutRow("doc", key, []byte("v"), 1, storage.Actor{})).To(Succeed())
+							Expect(t.PutIndexEntries("doc", key, docEntries("v", key))).To(Succeed())
+						}
+						return nil
+					})).To(Succeed())
+					Expect(write(func(t *pgTx) error {
+						Expect(t.DeleteIndexEntries("doc", "r1")).To(Succeed())
+						Expect(t.PutIndexEntries("doc", "r2", nil)).To(Succeed())
+						n, _, err := t.PurgeEntityRows("doc", "r3", time.Time{}, 0)
+						Expect(n).To(Equal(1))
+						return err
+					})).To(Succeed())
+					marks, _ := byID()
+					Expect(marks).To(Equal(map[string]bool{"doc/r4": true}))
+					wsn, ok := workspaceNumber(ctx, store, ws)
+					Expect(ok).To(BeTrue())
+					rows, entries := numberedRows(ctx, store, wsn)
+					Expect([]int{rows, entries}).To(Equal([]int{1, 2}), "index_rows and index_entries")
+					Expect(stored("doc", "by_tag")).To(Equal([]string{"r4"}))
+				})
+			})
+
 			It("gives a row that comes back a new row id", func() {
 				rid := func() (id int64) {
 					GinkgoHelper()

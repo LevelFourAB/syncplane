@@ -39,7 +39,34 @@ var migrations = []migration{
 	{additive: true, sql: fixed(clientsAppliedDDL)},
 	{additive: false, sql: internedNamesSchema},
 	{additive: true, sql: fixed(consumerRetainDDL)},
+	{additive: false, sql: fixed(rowIDIndexDDL)},
 }
+
+// rowIDIndexDDL is migration 7: the index of index_rows by row id holds only
+// the rows whose by_id is true, the rows that hold an entry with the row id in
+// place of the row key (see index.go). Most rows hold none, and their tuples in
+// the index cost about a fifth of the size of index_rows and its indexes. Every
+// other statement on index_rows finds its tuples by the primary key.
+//
+// The step sets by_id for the rows that hold such entries before it drops the
+// index of every row, which serves the UPDATE. The new index takes the name of
+// the old one. ADD COLUMN, CREATE INDEX and DROP INDEX on a partitioned parent
+// reach every partition, so the step does not depend on the layout. It holds
+// an exclusive lock on index_rows from ADD COLUMN until it commits, so a build
+// of the index per partition or CONCURRENTLY would not shorten the lock. It
+// reads index_entries whole.
+//
+// It is not additive: a binary that does not know the step writes rows without
+// by_id, whose row keys a scan then cannot read, and deletes rows by a row id
+// that no index of them holds.
+const rowIDIndexDDL = `
+ALTER TABLE index_rows ADD COLUMN by_id BOOLEAN NOT NULL DEFAULT false;
+UPDATE index_rows x SET by_id = true
+FROM (SELECT DISTINCT wsn, rk FROM index_entries WHERE rk > 0) e
+WHERE x.wsn = e.wsn AND x.rid = e.rk;
+DROP INDEX index_rows_by_rid;
+CREATE UNIQUE INDEX index_rows_by_rid ON index_rows (rid, wsn) WHERE by_id;
+`
 
 // consumerRetainDDL is migration 6: the retain mark of an effect consumer
 // (see storage.ConsumerPosition.Retain). false for every consumer stored

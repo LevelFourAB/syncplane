@@ -103,4 +103,64 @@ var _ = Describe("Table size", func() {
 		Expect(shadows).To(BeNumerically("<", 195))
 		Expect(fieldDeltas).To(BeNumerically("<", 220))
 	})
+
+	// The bytes of index_rows and every index of it, per indexed row after
+	// VACUUM FULL. Workspace ids and row keys are 36-character uuids, each row
+	// holds two entries that end with its row key, as the engine's entries do,
+	// and one row in fifty also holds an entry that does not. Only those rows
+	// are in the index by row id: about 160 bytes per row, where an index of
+	// every row took about 195. The ceiling sits about 8% above.
+	It("keeps the rows of the value index small per row", func() {
+		const (
+			workspaces = 3
+			rowsPerWS  = 1500
+		)
+		dsn := pgtest.DSN()
+		store, err := pgstore.Open(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+
+		rng := rand.New(rand.NewPCG(3, 4))
+		uuid := func() string {
+			return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+				rng.Uint32(), rng.Uint32()&0xffff, rng.Uint32()&0xffff, rng.Uint32()&0xffff, rng.Uint64()&0xffffffffffff)
+		}
+		entry := func(index, value, rowKey string) storage.IndexEntry {
+			return storage.IndexEntry{Index: index, Key: []byte("\x01" + value + "\x00\x00" + rowKey + "\x00\x00")}
+		}
+		for range workspaces {
+			ws := uuid()
+			for start := 0; start < rowsPerWS; start += 250 {
+				Expect(store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
+					for i := start; i < start+250; i++ {
+						key := uuid()
+						entries := []storage.IndexEntry{
+							entry("by_title", fmt.Sprint("title ", i), key),
+							entry("by_done", fmt.Sprint(i%2), key),
+						}
+						if i%50 == 0 {
+							entries = append(entries, storage.IndexEntry{Index: "by_tag", Key: []byte("tag")})
+						}
+						if err := tx.PutIndexEntries("todos", key, entries); err != nil {
+							return err
+						}
+					}
+					return nil
+				})).To(Succeed())
+			}
+		}
+
+		conn, err := pgx.Connect(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(conn.Close(ctx)).To(Succeed()) })
+		_, err = conn.Exec(ctx, `VACUUM FULL index_rows`)
+		Expect(err).NotTo(HaveOccurred())
+		var size, n int64
+		Expect(conn.QueryRow(ctx,
+			`SELECT pg_total_relation_size('index_rows'), (SELECT count(*) FROM index_rows)`).Scan(&size, &n)).To(Succeed())
+		Expect(n).To(Equal(int64(workspaces * rowsPerWS)))
+		perRow := float64(size) / float64(n)
+		GinkgoWriter.Printf("index_rows %.0f bytes/row\n", perRow)
+		Expect(perRow).To(BeNumerically("<", 175))
+	})
 })

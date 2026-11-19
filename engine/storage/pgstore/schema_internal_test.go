@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/levelfourab/syncplane/engine/internal/pgtest"
+	"github.com/levelfourab/syncplane/engine/storage"
 )
 
 // These specs reach inside the package for the two things no caller can see:
@@ -64,6 +65,107 @@ var _ = Describe("Migration 5", func() {
 	})
 })
 
+var _ = Describe("Migration 7", func() {
+	ctx := context.Background()
+
+	for _, layout := range indexLayouts {
+		It("marks the rows that hold an entry with the row id, and indexes only them by row id ("+layout.name+")", func() {
+			dsn := pgtest.DSN()
+			// A database at migration 6, which holds the rows r1 and r2 of
+			// one workspace. Each has an entry that ends with its row key,
+			// and r1 also has one with its row id.
+			full := migrations
+			DeferCleanup(func() { migrations = full })
+			migrations = full[:6]
+			old, err := Open(ctx, dsn, layout.opts...)
+			Expect(err).NotTo(HaveOccurred())
+			scopes := map[string]int32{}
+			rows, err := old.pool.Query(ctx, `INSERT INTO index_scopes (workspace_id, entity, idx, scope)
+				SELECT 'ws', u.entity, u.idx, nextval('posting_scope_ids')::int4
+				FROM unnest(ARRAY['', 'doc', 'doc', 'doc'], ARRAY['', '', 'by_v', 'by_tag']) AS u(entity, idx)
+				RETURNING entity || '/' || idx, scope`)
+			Expect(err).NotTo(HaveOccurred())
+			for rows.Next() {
+				var (
+					name  string
+					scope int32
+				)
+				Expect(rows.Scan(&name, &scope)).To(Succeed())
+				scopes[name] = scope
+			}
+			Expect(rows.Err()).NotTo(HaveOccurred())
+			wsn, ent := scopes["/"], scopes["doc/"]
+			rids := map[string]int64{}
+			for _, key := range []string{"r1", "r2"} {
+				var rid int64
+				Expect(old.pool.QueryRow(ctx, `INSERT INTO index_rows (wsn, ent, rid, key)
+					VALUES ($1, $2, nextval('index_row_ids'), $3) RETURNING rid`, wsn, ent, key).Scan(&rid)).To(Succeed())
+				rids[key] = rid
+			}
+			_, err = old.pool.Exec(ctx, `INSERT INTO index_entries (wsn, scope, rk, rid, k) VALUES
+				($1, $2, -2, $4, $6), ($1, $3, $4, $4, 'x'), ($1, $2, -2, $5, $7)`,
+				wsn, scopes["doc/by_v"], scopes["doc/by_tag"], rids["r1"], rids["r2"],
+				[]byte("\x01a"+indexEntryEnd+"r1"+indexEntryEnd), []byte("\x01b"+indexEntryEnd+"r2"+indexEntryEnd))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(old.Close()).To(Succeed())
+
+			migrations = full
+			store, err := Open(ctx, dsn)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+			Expect(store.partitioned).To(Equal(len(layout.opts) > 0))
+
+			marks := func() map[string]bool {
+				GinkgoHelper()
+				out := map[string]bool{}
+				rows, err := store.pool.Query(ctx, `SELECT key, by_id FROM index_rows`)
+				Expect(err).NotTo(HaveOccurred())
+				defer rows.Close()
+				for rows.Next() {
+					var (
+						key  string
+						mark bool
+					)
+					Expect(rows.Scan(&key, &mark)).To(Succeed())
+					out[key] = mark
+				}
+				Expect(rows.Err()).NotTo(HaveOccurred())
+				return out
+			}
+			Expect(marks()).To(Equal(map[string]bool{"r1": true, "r2": false}))
+			var def string
+			Expect(store.pool.QueryRow(ctx, `SELECT indexdef FROM pg_indexes
+				WHERE schemaname = current_schema() AND indexname = 'index_rows_by_rid'`).Scan(&def)).To(Succeed())
+			Expect(def).To(HaveSuffix("(rid, wsn) WHERE by_id"))
+			var additive bool
+			Expect(store.pool.QueryRow(ctx, `SELECT additive FROM schema_migrations WHERE version = 7`).Scan(&additive)).To(Succeed())
+			Expect(additive).To(BeFalse())
+
+			read := func(index string) []string {
+				GinkgoHelper()
+				var out []string
+				Expect(store.WithReadTx(ctx, "ws", func(tx storage.ReadTx) error {
+					out = rowKeys(tx, "doc", index)
+					return nil
+				})).To(Succeed())
+				return out
+			}
+			Expect(read("by_tag")).To(Equal([]string{"r1"}))
+			Expect(read("by_v")).To(Equal([]string{"r1", "r2"}))
+
+			// The rows the step marked change and go as rows written after
+			// it do.
+			Expect(store.WithWriteTx(ctx, "ws", func(tx storage.WriteTx) error {
+				Expect(tx.PutIndexEntries("doc", "r2", docEntries("b", "r2"))).To(Succeed())
+				return tx.DeleteIndexEntries("doc", "r1")
+			})).To(Succeed())
+			Expect(marks()).To(Equal(map[string]bool{"r2": true}))
+			Expect(read("by_tag")).To(Equal([]string{"r2"}))
+			Expect(read("by_v")).To(Equal([]string{"r2"}))
+		})
+	}
+})
+
 var _ = Describe("Migration scripts", func() {
 	It("creates the ledger in the first script only, and records every step", func() {
 		Expect(migrationSQL(1, layout{})).To(ContainSubstring("CREATE TABLE IF NOT EXISTS schema_migrations"))
@@ -91,6 +193,7 @@ var _ = Describe("Migration scripts", func() {
 		// ones are listed here.
 		decided := map[int]bool{
 			5: true, // field_deltas and consumer_shadows keyed by int ids
+			7: true, // index_rows_by_rid holds only the rows marked by_id
 		}
 		for version, step := range migrations {
 			Expect(step.additive).To(Equal(!decided[version+1]), "migration %d", version+1)

@@ -1674,20 +1674,23 @@ func (t *pgTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, limit
 	ent, entityHasEntries := t.indexScopes[indexKey{entity: entity}]
 	// A workspace or an entity without an id holds no entry.
 	if hasEntries && entityHasEntries {
-		// tgt holds the row ids before either delete runs. It finds them with a
-		// probe per selected row and the deletes take them as an array, for
-		// the reasons indexPutSQL gives.
+		// tgt holds the row keys and ids before either delete runs. It finds
+		// them with a probe per selected row and the deletes take them as an
+		// array, for the reasons indexPutSQL gives. gone finds its tuples by
+		// the primary key, as no index of index_rows holds the row id of every
+		// row.
 		w, e := len(args)+1, len(args)+2
 		restore := t.customPlanIfPartitioned()
 		_, err := t.exec(fmt.Sprintf(
 			`WITH tgt AS MATERIALIZED (
-			     SELECT r.rid FROM (SELECT key FROM rows WHERE %[3]s) s
+			     SELECT s.key, r.rid FROM (SELECT key FROM rows WHERE %[3]s) s
 			     CROSS JOIN LATERAL (
 			       SELECT x.rid FROM index_rows x WHERE x.ent = $%[2]d AND x.wsn = $%[1]d AND x.key = s.key LIMIT 1
 			     ) r
 			 ),
 			 gone AS (
-			     DELETE FROM index_rows x WHERE x.wsn = $%[1]d AND x.rid = ANY (ARRAY(SELECT t.rid FROM tgt t))
+			     DELETE FROM index_rows x
+			     WHERE x.ent = $%[2]d AND x.wsn = $%[1]d AND x.key = ANY (ARRAY(SELECT t.key FROM tgt t))
 			 )
 			 DELETE FROM index_entries e WHERE e.wsn = $%[1]d AND e.rid = ANY (ARRAY(SELECT t.rid FROM tgt t))`,
 			w, e, selected),
