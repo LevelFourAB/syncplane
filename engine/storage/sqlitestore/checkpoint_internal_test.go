@@ -110,7 +110,16 @@ var _ = Describe("SQLite checkpoints", func() {
 		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
 		Expect(pragma(store.write, "wal_autocheckpoint")).To(Equal("256"))
 
-		Expect(burst(store, 0, rows)).To(BeNumerically("<", 1024*walFrameBytes))
+		// The first pass must end before the burst starts. While a pass holds
+		// the checkpoint lock, the writer skips its own checkpoint, so a pass
+		// that the scheduler pauses during the burst lets the WAL grow past
+		// the limit. The WAL is below wal_autocheckpoint here, so only that
+		// pass can make a write rewind it.
+		i := 0
+		Eventually(func() bool { i++; return rewinds(store, i) }, 5*time.Second, 10*time.Millisecond).
+			Should(BeTrue())
+
+		Expect(burst(store, i+1, rows)).To(BeNumerically("<", 1024*walFrameBytes))
 	})
 
 	It("copies the WAL in the background so that the next write rewinds it", func() {
