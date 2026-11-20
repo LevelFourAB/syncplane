@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.10.0](https://github.com/LevelFourAB/syncplane/compare/v0.9.0...v0.10.0) (2026-11-20)
+
+
+### Features
+
+* Let field indexes leave out unset and zero values ([ff6c82e](https://github.com/LevelFourAB/syncplane/commit/ff6c82ef5a3afea2a11932fe001822a1c659fbef))
+
+
+### Bug Fixes
+
+* **client:** Keep undo steps working after a delete is undone ([63c81ea](https://github.com/LevelFourAB/syncplane/commit/63c81eab1c2b6d5199db61295b7fcce7583bf441))
+
+
+### Performance Improvements
+
+* **engine:** Keep a Postgres reverse row index only where needed ([20f5ecc](https://github.com/LevelFourAB/syncplane/commit/20f5ecc18eaf9f895f5129277ecf59e295732925))
+* **engine:** Run SQLite checkpoints off the write path ([42c69ff](https://github.com/LevelFourAB/syncplane/commit/42c69ff6f4c621a9272200529894fb6690fc0ecf))
+* **engine:** Store a row key only for rows that need it ([a85dd7c](https://github.com/LevelFourAB/syncplane/commit/a85dd7ced5b78e89dcabc4fd956668dce67089be))
+* **engine:** Store a short workspace id in Postgres rows ([129bc42](https://github.com/LevelFourAB/syncplane/commit/129bc42bd4b6b2b0c8fb8a45cc18dbf94607f8ff))
+* **engine:** Store a short workspace id in SQLite rows ([cc85207](https://github.com/LevelFourAB/syncplane/commit/cc85207d3ae0df9e93511a796c5b60629737cd00))
+
 ## [0.9.0](https://github.com/LevelFourAB/syncplane/compare/v0.8.2...v0.9.0) (2026-11-15)
 
 
