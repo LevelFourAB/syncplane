@@ -37,7 +37,12 @@ describe('BootstrapProgressTracker', () => {
 		const { p, advance } = tracked();
 		p.start('ws');
 		p.begin('ws', [ 'a', 'b' ], [ 3n, 2n ], false);
-		expect(p.infoOf('ws')).toEqual({ rowsApplied: 0, rowsEstimated: 5, entitiesDone: 0, entitiesTotal: 2 });
+		expect(p.infoOf('ws')).toEqual({
+			rowsApplied: 0,
+			rowsEstimated: 5,
+			entitiesDone: 0,
+			entitiesTotal: 2,
+		});
 
 		p.written('ws', [ 'a', 'a' ]);
 		expect(p.infoOf('ws')?.rowsApplied, 'a written chunk is not shown before it commits').toBe(0);
@@ -46,7 +51,12 @@ describe('BootstrapProgressTracker', () => {
 		p.written('ws', [ 'a', 'b' ]);
 		advance(300);
 		p.committed('ws', [ 'a', 'b' ]);
-		expect(p.infoOf('ws')).toEqual({ rowsApplied: 4, rowsEstimated: 5, entitiesDone: 1, entitiesTotal: 2 });
+		expect(p.infoOf('ws')).toEqual({
+			rowsApplied: 4,
+			rowsEstimated: 5,
+			entitiesDone: 1,
+			entitiesTotal: 2,
+		});
 
 		p.ended('ws');
 		expect(p.infoOf('ws')?.entitiesDone).toBe(2);
@@ -104,7 +114,12 @@ describe('BootstrapProgressTracker', () => {
 		// A server older than row_estimates.
 		p.begin('ws', [ 'a', 'b' ], [], false);
 		p.committed('ws', [ 'a' ]);
-		expect(p.infoOf('ws')).toEqual({ rowsApplied: 1, rowsEstimated: 0, entitiesDone: 0, entitiesTotal: 2 });
+		expect(p.infoOf('ws')).toEqual({
+			rowsApplied: 1,
+			rowsEstimated: 0,
+			entitiesDone: 0,
+			entitiesTotal: 2,
+		});
 	});
 
 	it('treats an estimate list that does not match the entities as no estimate', () => {
@@ -125,12 +140,22 @@ describe('BootstrapProgressTracker', () => {
 	it('continues a resumed snapshot and keeps the smaller estimate', () => {
 		const { p } = tracked();
 		p.start('ws', { rows: 40, estimate: 100, entitiesDone: 1, entitiesTotal: 2 });
-		expect(p.infoOf('ws')).toEqual({ rowsApplied: 40, rowsEstimated: 100, entitiesDone: 1, entitiesTotal: 2 });
+		expect(p.infoOf('ws')).toEqual({
+			rowsApplied: 40,
+			rowsEstimated: 100,
+			entitiesDone: 1,
+			entitiesTotal: 2,
+		});
 		// The resumed Begin counts the whole snapshot again, with rows written
 		// since the first attempt.
 		p.begin('ws', [ 'a', 'b' ], [ 60n, 50n ], true);
 		expect(p.infoOf('ws')?.rowsEstimated).toBe(100);
-		expect(p.written('ws', [ 'b' ])).toEqual({ rows: 41, estimate: 100, entitiesDone: 1, entitiesTotal: 2 });
+		expect(p.written('ws', [ 'b' ])).toEqual({
+			rows: 41,
+			estimate: 100,
+			entitiesDone: 1,
+			entitiesTotal: 2,
+		});
 		p.committed('ws', [ 'b' ]);
 		expect(p.infoOf('ws')?.rowsApplied).toBe(41);
 	});
@@ -139,6 +164,11 @@ describe('BootstrapProgressTracker', () => {
 		const { p } = tracked();
 		p.start('ws', { rows: 40, estimate: 100, entitiesDone: 1, entitiesTotal: 2 });
 		p.begin('ws', [ 'a', 'b' ], [ 60n, 70n ], false);
-		expect(p.infoOf('ws')).toEqual({ rowsApplied: 0, rowsEstimated: 130, entitiesDone: 0, entitiesTotal: 2 });
+		expect(p.infoOf('ws')).toEqual({
+			rowsApplied: 0,
+			rowsEstimated: 130,
+			entitiesDone: 0,
+			entitiesTotal: 2,
+		});
 	});
 });
