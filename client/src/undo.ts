@@ -17,6 +17,10 @@
 //     a no-op) → a SYMBOLIC inverse (src/text/undo-ops.ts) materialised
 //     against the then-current document at undo time; only local ops are
 //     named, so a peer's concurrent edits survive the undo
+//   - a text replay that re-inserts deleted content rewrites the text
+//     inverses of every live stack of the workspace to name the new items
+//     (remapText), so a later step that names the deleted ones finds the
+//     restored text
 //   - custom mutations are a barrier: both stacks clear (not invertible)
 //   - a transact() batch is ONE undo group: undo/redo replays its inverses
 //     together (as one atomic batch), in reverse application order
@@ -43,7 +47,7 @@ import { create } from '@bufbuild/protobuf';
 import { type CrudMutation, CrudMutationSchema, CrudOp } from './gen/syncplane/v1/mutation_pb.js';
 import { type UndoJournal, voidsToken } from './optimistic/undojournal.js';
 import { safeInvoke } from './report.js';
-import type { TextInverseOp } from './text/undo-ops.js';
+import { remapTextInverseOps, type RestoredIds, type TextInverseOp } from './text/undo-ops.js';
 
 /**
  * One recorded inverse: an ordinary CRUD mutation replayed verbatim, or a
@@ -374,6 +378,35 @@ export class UndoManager {
 		const undo = dropGroupsWhere(this.undoStack, voided);
 		const redo = dropGroupsWhere(this.redoStack, voided);
 		if (undo === this.undoStack && redo === this.redoStack) return;
+		this.undoStack = undo;
+		this.redoStack = redo;
+		this.emit();
+	}
+
+	/**
+	 * Rewrites the text inverses of one text field in both stacks so that they
+	 * name the items that hold restored content now (see RestoredIds in
+	 * text/undo-ops.ts). Changed entries are replaced, not changed in place:
+	 * the entries of snapshot() stay as they were. Listeners fire only when an
+	 * entry changed, so a saved scope writes the rewritten entries.
+	 */
+	remapText(entity: string, key: string, field: string, restored: RestoredIds): void {
+		if (restored.size === 0) return;
+		let changed = false;
+		const rewrite = (stack: UndoEntry[]): UndoEntry[] =>
+			stack.map((e) => {
+				const inv = e.inverse;
+				if (inv.kind !== 'text' || inv.entity !== entity || inv.key !== key || inv.field !== field) {
+					return e;
+				}
+				const ops = remapTextInverseOps(inv.ops, restored);
+				if (ops === inv.ops) return e;
+				changed = true;
+				return { ...e, inverse: { ...inv, ops } };
+			});
+		const undo = rewrite(this.undoStack);
+		const redo = rewrite(this.redoStack);
+		if (!changed) return;
 		this.undoStack = undo;
 		this.redoStack = redo;
 		this.emit();

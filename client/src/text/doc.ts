@@ -708,10 +708,24 @@ export class TextDoc {
 	 * an insert's inverse. Returns the deleted segments like delete().
 	 */
 	deleteItems(peer: string, start: number, count: number): DeletedSegment[] {
+		return this.deleteItemRuns([ { peer, start, count } ]);
+	}
+
+	/**
+	 * Tombstones the live items of several id runs in one pass, like
+	 * deleteItems. A visibly-contiguous run of targets is one segment even when
+	 * its items come from different runs, so re-inserting the segments puts the
+	 * content back in its order. Deleting the runs one by one would anchor two
+	 * neighbouring segments at the same survivor, and their re-inserts would
+	 * land in the wrong order.
+	 */
+	deleteItemRuns(runs: readonly InsertedRange[]): DeletedSegment[] {
 		this.requirePeer();
 		const wanted = new Set<string>();
-		for (let c = start; c < start + count; c++) {
-			wanted.add(idKey({ peer, counter: c }));
+		for (const { peer, start, count } of runs) {
+			for (let c = start; c < start + count; c++) {
+				wanted.add(idKey({ peer, counter: c }));
+			}
 		}
 		const targets: TextNode[] = [];
 		for (const it of this.order()) {

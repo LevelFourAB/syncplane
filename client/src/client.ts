@@ -312,7 +312,12 @@ import { decodeTextDoc, encodeTextDoc } from './text/codec.js';
 import type { TextDoc } from './text/doc.js';
 import { openTextHandle, type TextHandle } from './text/handle.js';
 import { createPeerLeases, type PeerLease, type PeerLeases } from './text/peer.js';
-import { applyTextInverse, reinsertOp, type TextInverseOp } from './text/undo-ops.js';
+import {
+	applyTextInverse,
+	reinsertOp,
+	type RestoredIds,
+	type TextInverseOp,
+} from './text/undo-ops.js';
 import { TouchSet } from './touch.js';
 import { claimUndoKey, UndoSaver } from './undo-persist.js';
 import {
@@ -1297,6 +1302,14 @@ export interface RemoveWorkspaceResult {
 	 * silently.
 	 */
 	discarded: DiscardedMutation[];
+}
+
+/** The items one undo or redo replay restored in one text field. */
+interface RestoredField {
+	entity: string;
+	key: string;
+	field: string;
+	ids: RestoredIds;
 }
 
 /** One held row: how many holds it has, and the grace timer once it has none. */
@@ -7371,6 +7384,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// one produced — re-decoding the unchanged row for each would allocate the
 		// same counters twice for different content.
 		const docs = new Map<string, TextDoc>();
+		// What the group's reinserts restored, by text field (same keys as docs).
+		const restored = new Map<string, RestoredField>();
 		for (const inverse of inverses) {
 			if (inverse.kind === 'refused') {
 				// A step another tab voided is skipped, not refused: the caller then
@@ -7386,7 +7401,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				overrides.push(undefined);
 				continue;
 			}
-			const materialised = await this.materialiseTextInverse(scope, inverse, docs, peer);
+			const materialised = await this.materialiseTextInverse(scope, inverse, docs, peer, restored);
 			if (materialised) {
 				cruds.push(materialised.crud);
 				overrides.push(materialised.opposite);
@@ -7410,6 +7425,24 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				{ overrides, guard },
 			);
 		}
+		// Only after the commit: a replay that fails puts the group back, and its
+		// new items never exist.
+		this.remapRestoredText(scope, restored);
+	}
+
+	/**
+	 * Points the text inverses of every live stack of the workspace at the items
+	 * a replay restored, so that a later step that names the deleted items (the
+	 * inverse of the insert that made them, for one) finds the restored text.
+	 * Another view's scope may have recorded that step, so the rewrite reaches
+	 * the root stack and every fork. A saved scope that is closed now, or a
+	 * scope of another tab, keeps the old ids (see text/undo-ops.ts).
+	 */
+	private remapRestoredText(scope: WorkspaceScope<E>, restored: Map<string, RestoredField>): void {
+		for (const { entity, key, field, ids } of restored.values()) {
+			if (ids.size === 0) continue;
+			for (const mgr of scope.undoManagers()) mgr.remapText(entity, key, field, ids);
+		}
 	}
 
 	/**
@@ -7418,13 +7451,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * (what the opposite stack records). Returns undefined when the row (or
 	 * the field/entity) no longer exists — delete-wins, nothing to undo.
 	 * `docs` carries the group's in-progress documents and `peer` its leased
-	 * writer identity (see enqueueInverses).
+	 * writer identity (see enqueueInverses). `restored` collects, by text field,
+	 * the items that the group's reinserts made (see RestoredIds).
 	 */
 	private async materialiseTextInverse(
 		scope: WorkspaceScope<E>,
 		inverse: Extract<Inverse, { kind: 'text' }>,
 		docs: Map<string, TextDoc>,
 		peer: string,
+		restored: Map<string, RestoredField>,
 	): Promise<{ crud: CrudMutation; opposite: Inverse } | undefined> {
 		const def = this.entityRegistry.get(inverse.entity);
 		if (!def) return undefined;
@@ -7444,7 +7479,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			doc = decodeTextDoc(textFieldBytes(def.schema, inverse.field, row), peer);
 			docs.set(cacheKey, doc);
 		}
-		const oppositeOps = applyTextInverse(doc, inverse.ops);
+		let field = restored.get(cacheKey);
+		if (field === undefined) {
+			field = { entity: inverse.entity, key: inverse.key, field: inverse.field, ids: new Map() };
+			restored.set(cacheKey, field);
+		}
+		const oppositeOps = applyTextInverse(doc, inverse.ops, field.ids);
 		const crud = buildPatch(
 			def,
 			def.schema,

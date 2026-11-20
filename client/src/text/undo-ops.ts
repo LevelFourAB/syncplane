@@ -19,12 +19,26 @@
 //
 // What a re-insert restores is the TEXT and its FORMATTING, never the item
 // identities: tombstones are monotone, so there is no un-delete to apply and
-// the content necessarily comes back under new ids. Three consequences worth
-// knowing before building on this:
+// the content necessarily comes back under new ids. A reinsert therefore
+// records the ids it restores (`ids`), and applyTextInverse reports each old
+// id with the new item that now holds its content (RestoredIds). The replay
+// then rewrites the other records of every live undo stack of the workspace
+// with remapTextInverseOps, so a later step that names the old items (the
+// inverse of the insert that created them, a mark range over them, a
+// reinsert anchored after them) finds the restored text. Without this, undo
+// after undo misses the text the first one put back: "Hi" + " abc", delete
+// "c", undo, undo leaves "Hic".
 //
-//   - Anchors held outside the document (a saved cursor, a presence position)
-//     that pointed into the deleted range stay pointed at the collapsed
-//     position; they do not follow the restored text.
+// The rewrite reaches only stacks that are live in this client when the
+// replay commits. A saved scope that is closed at that time, or a scope of
+// another tab, keeps the old ids: its later step skips the restored text.
+//
+// Other consequences of the new ids worth knowing before building on this:
+//
+//   - Anchors held outside the document and outside the undo stacks (a saved
+//     cursor, a presence position) that pointed into the deleted range stay
+//     pointed at the collapsed position; they do not follow the restored
+//     text.
 //   - Restoring a mark mints a NEW mark op, so an unmark a peer issued
 //     concurrently with the delete can be undone along with it.
 //   - The original expand policy is not recorded; marks come back as
@@ -41,11 +55,28 @@ import {
 	AnchorAfter,
 	AnchorBefore,
 	ExpandNone,
+	idKey,
+	type ItemID,
 	type MarkValue,
 	type PriorSpan,
 	type SegmentMark,
 	type TextDoc,
 } from './doc.js';
+
+/** A run of items of one peer with consecutive counters. */
+export interface ItemRun {
+	peer: string;
+	start: number;
+	count: number;
+}
+
+/**
+ * The items a replay restored, by the idKey of the deleted item whose content
+ * each one holds now. Fill it with applyTextInverse and give it to
+ * remapTextInverseOps. Keep one map for each text field: item ids are unique
+ * only in one document.
+ */
+export type RestoredIds = Map<string, ItemID>;
 
 /** A value one mark step wrote over an anchored range; null for a removal. */
 export interface SetSpan {
@@ -57,7 +88,16 @@ export interface SetSpan {
 /** One symbolic step of a text inverse (see the module comment). */
 export type TextInverseOp =
 	| { type: 'deleteItems'; peer: string; start: number; count: number }
-	| { type: 'reinsert'; content: string; at: Anchor; marks?: SegmentMark[] }
+	| {
+		type: 'reinsert';
+		content: string;
+		at: Anchor;
+		marks?: SegmentMark[];
+		/** The deleted items, one for each code point of content, as runs.
+		 * Absent in records made before ids were recorded: such a reinsert
+		 * restores its text, but no other record follows it. */
+		ids?: ItemRun[];
+	}
 	| {
 		type: 'marks';
 		key: string;
@@ -71,75 +111,233 @@ export type TextInverseOp =
 	};
 
 /** Builds the reinsert inverse of one deleted segment, carrying its marks
- * only when there are any (an unmarked document records no extra state). */
+ * only when there are any (an unmarked document records no extra state), and
+ * the ids of the deleted items (see RestoredIds). */
 export function reinsertOp(seg: {
 	content: string;
 	at: Anchor;
 	marks: SegmentMark[];
+	ids?: ItemID[];
 }): TextInverseOp {
-	return seg.marks.length > 0
-		? { type: 'reinsert', content: seg.content, at: seg.at, marks: seg.marks }
-		: { type: 'reinsert', content: seg.content, at: seg.at };
+	const op: TextInverseOp = { type: 'reinsert', content: seg.content, at: seg.at };
+	if (seg.marks.length > 0) op.marks = seg.marks;
+	if (seg.ids !== undefined && seg.ids.length > 0) op.ids = toRuns(seg.ids);
+	return op;
+}
+
+/** Packs ids, in order, into runs of consecutive counters of one peer. */
+function toRuns(ids: readonly ItemID[]): ItemRun[] {
+	const runs: ItemRun[] = [];
+	for (const id of ids) {
+		const last = runs[runs.length - 1];
+		if (last !== undefined && last.peer === id.peer && last.start + last.count === id.counter) {
+			last.count++;
+		} else {
+			runs.push({ peer: id.peer, start: id.counter, count: 1 });
+		}
+	}
+	return runs;
+}
+
+/** The ids of runs, in order. */
+function fromRuns(runs: readonly ItemRun[]): ItemID[] {
+	const ids: ItemID[] = [];
+	for (const run of runs) {
+		for (let c = run.start; c < run.start + run.count; c++) ids.push({ peer: run.peer, counter: c });
+	}
+	return ids;
+}
+
+/**
+ * The item that holds the content of id now: id itself when no replay restored
+ * it. A restored item can be deleted and restored again, so the lookup follows
+ * the chain to its end.
+ */
+function currentId(id: ItemID, restored: RestoredIds): ItemID {
+	let cur = id;
+	// Each step goes to an item that a later insert made, so the chain cannot
+	// loop; the bound only protects against a corrupt map.
+	for (let i = 0; i <= restored.size; i++) {
+		const next = restored.get(idKey(cur));
+		if (next === undefined) return cur;
+		cur = next;
+	}
+	return cur;
+}
+
+function remapAnchor(a: Anchor, restored: RestoredIds): Anchor {
+	if (a.item === undefined) return a;
+	const item = currentId(a.item, restored);
+	return item === a.item ? a : { kind: a.kind, item };
+}
+
+function remapSpans<T extends { start: Anchor; end: Anchor }>(
+	spans: T[],
+	restored: RestoredIds,
+): T[] {
+	let changed = false;
+	const out = spans.map((span) => {
+		const start = remapAnchor(span.start, restored);
+		const end = remapAnchor(span.end, restored);
+		if (start === span.start && end === span.end) return span;
+		changed = true;
+		return { ...span, start, end };
+	});
+	return changed ? out : spans;
+}
+
+/**
+ * Rewrites ops so that every item they name, by id or by anchor, is the item
+ * that holds its content now (see RestoredIds). Returns ops itself when no op
+ * names a restored item. The ids a reinsert records stay as they are: they name
+ * the items that its own delete removed.
+ */
+export function remapTextInverseOps(ops: TextInverseOp[], restored: RestoredIds): TextInverseOp[] {
+	if (restored.size === 0) return ops;
+	let changed = false;
+	const out: TextInverseOp[] = [];
+	for (const op of ops) {
+		switch (op.type) {
+			case 'deleteItems': {
+				let hit = false;
+				for (let c = op.start; c < op.start + op.count && !hit; c++) {
+					hit = restored.has(idKey({ peer: op.peer, counter: c }));
+				}
+				if (!hit) {
+					out.push(op);
+					break;
+				}
+				changed = true;
+				const now = fromRuns([ op ]).map((id) => currentId(id, restored));
+				for (const run of toRuns(now)) out.push({ type: 'deleteItems', ...run });
+				break;
+			}
+			case 'reinsert': {
+				const at = remapAnchor(op.at, restored);
+				if (at === op.at) {
+					out.push(op);
+					break;
+				}
+				changed = true;
+				out.push({ ...op, at });
+				break;
+			}
+			case 'marks': {
+				const start = remapAnchor(op.start, restored);
+				const end = remapAnchor(op.end, restored);
+				const prior = remapSpans(op.prior, restored);
+				const set = remapSpans(op.set, restored);
+				if (start === op.start && end === op.end && prior === op.prior && set === op.set) {
+					out.push(op);
+					break;
+				}
+				changed = true;
+				out.push({ ...op, start, end, prior, set });
+				break;
+			}
+		}
+	}
+	return changed ? out : ops;
 }
 
 /**
  * Applies a recorded inverse against the current document and returns ITS
  * inverse (what redo will apply), captured from the same document just
  * before each step mutated it.
+ *
+ * With `restored`, each reinsert that records ids adds the new item of each
+ * deleted one to it, and each op is first rewritten with what the map holds,
+ * so an op later in the same replay finds text an earlier op restored.
  */
-export function applyTextInverse(doc: TextDoc, ops: TextInverseOp[]): TextInverseOp[] {
+export function applyTextInverse(
+	doc: TextDoc,
+	ops: TextInverseOp[],
+	restored?: RestoredIds,
+): TextInverseOp[] {
 	const redo: TextInverseOp[] = [];
-	for (const op of ops) {
-		switch (op.type) {
-			case 'deleteItems': {
-				const segments = doc.deleteItems(op.peer, op.start, op.count);
-				for (const seg of segments) redo.push(reinsertOp(seg));
-				break;
+	const current = (op: TextInverseOp): TextInverseOp[] =>
+		restored ? remapTextInverseOps([ op ], restored) : [ op ];
+	let i = 0;
+	while (i < ops.length) {
+		if (ops[i]!.type !== 'deleteItems') {
+			for (const op of current(ops[i]!)) {
+				if (op.type !== 'deleteItems') applyOne(doc, op, redo, restored);
 			}
-			case 'reinsert': {
-				const index = doc.resolveAnchor(op.at);
-				const range = doc.insert(index, op.content);
-				if (range.count > 0) {
-					redo.push({
-						type: 'deleteItems',
-						peer: range.peer,
-						start: range.start,
-						count: range.count,
-					});
-				}
-				restoreMarks(doc, index, range.count, op.marks);
-				break;
-			}
-			case 'marks': {
-				const start = doc.resolveAnchor(op.start);
-				const end = doc.resolveAnchor(op.end);
-				if (start >= end) break; // the whole range was deleted meanwhile
-				const runs = stillSet(doc, start, end, op.key, op.set);
-				if (runs.length === 0) break; // later ops wrote over all of it
-				const prior = doc.priorSpans(start, end, op.key);
-				// Clear each run, then restore what the original op overwrote
-				// there. Outside the runs the later ops' values stay.
-				for (const [ s, e ] of runs) {
-					doc.unmark(s, e, op.key, ExpandNone);
-					for (const span of op.prior) {
-						const ps = Math.max(doc.resolveAnchor(span.start), s);
-						const pe = Math.min(doc.resolveAnchor(span.end), e);
-						if (ps < pe) doc.mark(ps, pe, op.key, span.value, ExpandNone);
-					}
-				}
-				redo.push({
-					type: 'marks',
-					key: op.key,
-					start: op.start,
-					end: op.end,
-					prior,
-					set: written(doc, runs, op.key),
-				});
-				break;
+			i++;
+			continue;
+		}
+		// Consecutive deletes go in one pass (see TextDoc.deleteItemRuns). A
+		// remapped delete can be several runs, and the restored text in it
+		// must come back as one segment with the text around it.
+		const runs: ItemRun[] = [];
+		for (; i < ops.length && ops[i]!.type === 'deleteItems'; i++) {
+			for (const op of current(ops[i]!)) {
+				if (op.type === 'deleteItems') runs.push({ peer: op.peer, start: op.start, count: op.count });
 			}
 		}
+		for (const seg of doc.deleteItemRuns(runs)) redo.push(reinsertOp(seg));
 	}
 	return redo;
+}
+
+/** Applies one reinsert or marks op of applyTextInverse and pushes its inverse to redo. */
+function applyOne(
+	doc: TextDoc,
+	op: Exclude<TextInverseOp, { type: 'deleteItems' }>,
+	redo: TextInverseOp[],
+	restored: RestoredIds | undefined,
+): void {
+	switch (op.type) {
+		case 'reinsert': {
+			const index = doc.resolveAnchor(op.at);
+			const range = doc.insert(index, op.content);
+			if (range.count > 0) {
+				redo.push({
+					type: 'deleteItems',
+					peer: range.peer,
+					start: range.start,
+					count: range.count,
+				});
+			}
+			restoreMarks(doc, index, range.count, op.marks);
+			if (restored !== undefined && op.ids !== undefined) {
+				const old = fromRuns(op.ids);
+				// Equal unless the record is corrupt: one id for each code point.
+				const n = Math.min(old.length, range.count);
+				for (let i = 0; i < n; i++) {
+					restored.set(idKey(old[i]!), { peer: range.peer, counter: range.start + i });
+				}
+			}
+			break;
+		}
+		case 'marks': {
+			const start = doc.resolveAnchor(op.start);
+			const end = doc.resolveAnchor(op.end);
+			if (start >= end) break; // the whole range was deleted meanwhile
+			const runs = stillSet(doc, start, end, op.key, op.set);
+			if (runs.length === 0) break; // later ops wrote over all of it
+			const prior = doc.priorSpans(start, end, op.key);
+			// Clear each run, then restore what the original op overwrote
+			// there. Outside the runs the later ops' values stay.
+			for (const [ s, e ] of runs) {
+				doc.unmark(s, e, op.key, ExpandNone);
+				for (const span of op.prior) {
+					const ps = Math.max(doc.resolveAnchor(span.start), s);
+					const pe = Math.min(doc.resolveAnchor(span.end), e);
+					if (ps < pe) doc.mark(ps, pe, op.key, span.value, ExpandNone);
+				}
+			}
+			redo.push({
+				type: 'marks',
+				key: op.key,
+				start: op.start,
+				end: op.end,
+				prior,
+				set: written(doc, runs, op.key),
+			});
+			break;
+		}
+	}
 }
 
 /**

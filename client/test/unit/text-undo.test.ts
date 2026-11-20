@@ -10,6 +10,7 @@ import { AnnotationSchema, NoteSchema } from '../../src/gen/example/todo/v1/todo
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { commentKey, joinAnnotations } from '../../src/text/annotations.js';
+import { AnchorAfter, idKey } from '../../src/text/doc.js';
 import {
 	decodeTextDoc,
 	encodeTextDoc,
@@ -20,6 +21,9 @@ import {
 import {
 	applyTextInverse,
 	recordMarkInverse,
+	reinsertOp,
+	remapTextInverseOps,
+	type RestoredIds,
 	type TextInverseOp,
 } from '../../src/text/undo-ops.js';
 
@@ -462,5 +466,242 @@ describe('text inverses after a peer edited on top of the local edit', () => {
 			{ start: 0, end: 5, key: 'bold', value: false },
 			{ start: 5, end: 11, key: 'bold', value: true },
 		]);
+	});
+});
+
+// A reinsert puts deleted text back under new item ids. The replay rewrites
+// the other records of every live stack to name the new items, so a later step
+// that names the deleted ones still finds the restored text.
+describe('text undo after a restore', () => {
+	/** Moves Date.now past the typing window, so the next edit is a step of its own. */
+	function stepClock() {
+		let offset = 0;
+		const now = Date.now.bind(Date);
+		const spy = vi.spyOn(Date, 'now').mockImplementation(() => now() + offset);
+		return {
+			next: () => {
+				offset += 2_000;
+			},
+			restore: () => spy.mockRestore(),
+		};
+	}
+
+	it('undoes an insert after the undo of a delete inside it, and redoes both', async () => {
+		const client = newClient();
+		await client.db.widget.mutate.put({ id: 'w1', body: bodyDoc('seed', 'Hi') });
+		const handle = await client.db.widget.text('w1', 'body');
+
+		await handle.insert(2, ' abc');
+		await handle.delete(5, 1);
+		expect(handle.value).toBe('Hi ab');
+
+		expect(await client.undo()).toBe(true);
+		await vi.waitFor(() => expect(handle.value).toBe('Hi abc'));
+		expect(await client.undo()).toBe(true);
+		await vi.waitFor(() => expect(handle.value).toBe('Hi'));
+
+		expect(await client.redo()).toBe(true);
+		await vi.waitFor(() => expect(handle.value).toBe('Hi abc'));
+		expect(await client.redo()).toBe(true);
+		await vi.waitFor(() => expect(handle.value).toBe('Hi ab'));
+
+		handle.close();
+		await client.close();
+	});
+
+	it('undoes a typing run that deleted a letter it typed', async () => {
+		const client = newClient();
+		await client.db.widget.mutate.put({ id: 'w1', body: bodyDoc('seed', 'Hi') });
+		const handle = await client.db.widget.text('w1', 'body');
+
+		// One step: the reinsert of "b" replays before the delete of "ab".
+		await handle.insert(2, 'a');
+		await handle.insert(3, 'b');
+		await handle.delete(3, 1);
+		expect(handle.value).toBe('Hia');
+
+		expect(await client.undo()).toBe(true);
+		await vi.waitFor(() => expect(handle.value).toBe('Hi'));
+		expect(await client.redo()).toBe(true);
+		await vi.waitFor(() => expect(handle.value).toBe('Hia'));
+
+		handle.close();
+		await client.close();
+	});
+
+	it('undoes in one scope the insert whose text another scope restored', async () => {
+		const client = newClient();
+		await client.db.widget.mutate.put({ id: 'w1', body: bodyDoc('seed', 'Hi') });
+		const a = client.undoScope();
+		const b = client.undoScope();
+		const inA = await a.db.widget.text('w1', 'body');
+		const inB = await b.db.widget.text('w1', 'body');
+
+		await inA.insert(2, ' abc');
+		await vi.waitFor(() => expect(inB.value).toBe('Hi abc'));
+		await inB.delete(5, 1);
+		await vi.waitFor(() => expect(inA.value).toBe('Hi ab'));
+
+		expect(await b.undo()).toBe(true);
+		await vi.waitFor(() => expect(inA.value).toBe('Hi abc'));
+		expect(await a.undo()).toBe(true);
+		await vi.waitFor(() => expect(inA.value).toBe('Hi'));
+
+		inA.close();
+		inB.close();
+		a.close();
+		b.close();
+		await client.close();
+	});
+
+	it('keeps text a peer wrote while it undoes restored text', async () => {
+		const client = newClient();
+		const base = bodyDoc('seed', 'Hi');
+		await client.db.widget.mutate.put({ id: 'w1', body: base });
+		const view = client.undoScope();
+		const handle = await view.db.widget.text('w1', 'body');
+
+		await handle.insert(2, ' abc');
+		await handle.delete(5, 1);
+		// The peer writes through the root client, so the view's stack holds
+		// only the local edits.
+		const remote = decodeTextDoc(base, 'bob');
+		remote.insert(0, '>> ');
+		await client.db.widget.mutate.patch('w1', { body: encodeTextDoc(remote) });
+		await vi.waitFor(() => expect(handle.value).toBe('>> Hi ab'));
+
+		expect(await view.undo()).toBe(true);
+		expect(await view.undo()).toBe(true);
+		await vi.waitFor(() => expect(handle.value).toBe('>> Hi'));
+
+		handle.close();
+		view.close();
+		await client.close();
+	});
+
+	it('removes a mark from restored text', async () => {
+		const client = newClient();
+		await client.db.widget.mutate.put({ id: 'w1', body: bodyDoc('seed', 'Hi abc') });
+		const handle = await client.db.widget.text('w1', 'body');
+		const clock = stepClock();
+		try {
+			await handle.mark(3, 6, 'bold', true);
+			clock.next();
+			await handle.delete(3, 3);
+			expect(handle.value).toBe('Hi ');
+
+			expect(await client.undo()).toBe(true);
+			await vi.waitFor(() => expect(handle.value).toBe('Hi abc'));
+			expect(handle.doc.resolveMarks()).toEqual([ { start: 3, end: 6, key: 'bold', value: true } ]);
+			expect(await client.undo()).toBe(true);
+			await vi.waitFor(() => expect(handle.doc.resolveMarks()).toEqual([]));
+			expect(handle.value).toBe('Hi abc');
+		} finally {
+			clock.restore();
+			handle.close();
+			await client.close();
+		}
+	});
+
+	it('matches a model of the text over random edits, undos and redos', async () => {
+		// A fixed seed, so a failure replays the same steps.
+		let seed = 0x5eed;
+		// Mulberry32: a small generator with good low bits.
+		const random = (n: number): number => {
+			seed = (seed + 0x6d2b79f5) | 0;
+			let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+			t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+			return (((t ^ (t >>> 14)) >>> 0) % n);
+		};
+		const client = newClient();
+		await client.db.widget.mutate.put({ id: 'w1', body: bodyDoc('seed', 'Hi') });
+		const handle = await client.db.widget.text('w1', 'body');
+		const clock = stepClock();
+		// The text after each step; `at` is the step the document shows.
+		let states = [ 'Hi' ];
+		let at = 0;
+		try {
+			for (let i = 0; i < 150; i++) {
+				clock.next();
+				const text = states[at]!;
+				const roll = random(10);
+				if (roll < 3) {
+					const index = random(text.length + 1);
+					const add = 'xyz'.slice(0, 1 + random(3));
+					await handle.insert(index, add);
+					states = [ ...states.slice(0, at + 1), text.slice(0, index) + add + text.slice(index) ];
+					at++;
+				} else if (roll < 5 && text.length > 0) {
+					const index = random(text.length);
+					const length = 1 + random(Math.min(3, text.length - index));
+					await handle.delete(index, length);
+					states = [ ...states.slice(0, at + 1), text.slice(0, index) + text.slice(index + length) ];
+					at++;
+				} else if (roll < 8) {
+					expect(await client.undo()).toBe(at > 0);
+					if (at > 0) at--;
+				} else {
+					expect(await client.redo()).toBe(at < states.length - 1);
+					if (at < states.length - 1) at++;
+				}
+				const want = states[at];
+				await vi.waitFor(() => expect(handle.value, `step ${i}`).toBe(want));
+			}
+		} finally {
+			clock.restore();
+			handle.close();
+			await client.close();
+		}
+	});
+});
+
+describe('text inverse id remapping', () => {
+	it('records the deleted ids in a reinsert and reports their new items', () => {
+		const doc = new TextDoc('alice');
+		doc.insert(0, 'abc');
+		const ops = doc.delete(1, 1).map(reinsertOp);
+		expect(ops).toEqual([
+			{
+				type: 'reinsert',
+				content: 'b',
+				at: { kind: AnchorAfter, item: { peer: 'alice', counter: 1 } },
+				ids: [ { peer: 'alice', start: 2, count: 1 } ],
+			},
+		]);
+
+		const restored: RestoredIds = new Map();
+		const redo = applyTextInverse(doc, ops, restored);
+		expect(doc.plainText()).toBe('abc');
+		const item = restored.get(idKey({ peer: 'alice', counter: 2 }));
+		expect(redo).toEqual([ { type: 'deleteItems', peer: 'alice', start: item!.counter, count: 1 } ]);
+	});
+
+	it('still applies a reinsert saved without ids', () => {
+		const doc = new TextDoc('alice');
+		doc.insert(0, 'ac');
+		const restored: RestoredIds = new Map();
+		const op: TextInverseOp = {
+			type: 'reinsert',
+			content: 'b',
+			at: { kind: AnchorAfter, item: { peer: 'alice', counter: 1 } },
+		};
+		applyTextInverse(doc, [ op ], restored);
+		expect(doc.plainText()).toBe('abc');
+		expect(restored.size).toBe(0);
+	});
+
+	it('splits a delete of items of which some came back', () => {
+		const restored: RestoredIds = new Map([
+			[ idKey({ peer: 'alice', counter: 3 }), { peer: 'bob', counter: 7 } ],
+			[ idKey({ peer: 'bob', counter: 7 }), { peer: 'carol', counter: 2 } ],
+		]);
+		const ops: TextInverseOp[] = [ { type: 'deleteItems', peer: 'alice', start: 1, count: 4 } ];
+		expect(remapTextInverseOps(ops, restored)).toEqual([
+			{ type: 'deleteItems', peer: 'alice', start: 1, count: 2 },
+			{ type: 'deleteItems', peer: 'carol', start: 2, count: 1 },
+			{ type: 'deleteItems', peer: 'alice', start: 4, count: 1 },
+		]);
+		const untouched: TextInverseOp[] = [ { type: 'deleteItems', peer: 'alice', start: 8, count: 2 } ];
+		expect(remapTextInverseOps(untouched, restored)).toBe(untouched);
 	});
 });

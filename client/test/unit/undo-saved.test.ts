@@ -169,6 +169,36 @@ describe('restoreUndoScope', () => {
 		view.close();
 	});
 
+	it('saves a text step that another scope restored the text of', async () => {
+		const db = newDb();
+		const first = await open(db);
+		const seed = new TextDoc('seed');
+		seed.insert(0, 'Hi');
+		await first.mutate.put(NoteSchema, { id: 'n1', body: encodeTextDoc(seed) });
+		const page = await first.restoreUndoScope('page:1');
+		const journal = await first.restoreUndoScope('journal');
+		const inPage = await page.db.note.text('n1', 'body');
+		const inJournal = await journal.db.note.text('n1', 'body');
+		await inPage.insert(2, ' abc');
+		await vi.waitFor(() => expect(inJournal.value).toBe('Hi abc'));
+		await inJournal.delete(5, 1);
+		// The undo restores "c" under a new id, and the page scope's step now
+		// names it.
+		expect(await journal.undo()).toBe(true);
+		await vi.waitFor(() => expect(inPage.value).toBe('Hi abc'));
+		inPage.close();
+		inJournal.close();
+		await shut(first);
+
+		const second = await open(db);
+		const again = await second.restoreUndoScope('page:1');
+		const view = await second.db.note.text('n1', 'body');
+		expect(view.value).toBe('Hi abc');
+		expect(await again.undo()).toBe(true);
+		await vi.waitFor(() => expect(view.value).toBe('Hi'));
+		view.close();
+	});
+
 	it('gives a second open scope on the same key an unsaved, empty scope', async () => {
 		// One store object for both clients: on a server runtime, that is how two
 		// clients share a store.

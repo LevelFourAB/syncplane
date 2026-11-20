@@ -15,6 +15,7 @@ import {
 } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { DEAD_TOKEN_TTL_MS } from '../../src/optimistic/undojournal.js';
+import { idKey } from '../../src/text/doc.js';
 import { encodeTextDoc, TextDoc } from '../../src/text/index.js';
 import { type Inverse, invertCrud, UndoManager } from '../../src/undo.js';
 
@@ -397,5 +398,58 @@ describe('UndoManager typing runs', () => {
 		mgr.recordGroup(2n, [ undefined ]);
 		mgr.recordGroup(3n, [ inverse('a') ], undefined, { chain, join: true });
 		expect(groups(mgr)).toEqual([ [ 3n ], [ 1n ] ]);
+	});
+});
+
+describe('UndoManager.remapText', () => {
+	function text(key: string, field: string, start: number): Inverse {
+		return {
+			kind: 'text',
+			entity: 'widget',
+			key,
+			field,
+			ops: [ { type: 'deleteItems', peer: 'c1', start, count: 1 } ],
+		};
+	}
+
+	it('rewrites the text inverses of the field in both stacks', () => {
+		const mgr = new UndoManager();
+		mgr.recordGroup(1n, [ text('w1', 'body', 1), text('w2', 'body', 1), text('w1', 'title', 1) ]);
+		mgr.recordGroup(2n, [ text('w1', 'body', 2) ], 'redo');
+		const before = mgr.snapshot();
+		const changes = vi.fn();
+		mgr.onChange(changes);
+
+		mgr.remapText(
+			'widget',
+			'w1',
+			'body',
+			new Map([ [ idKey({ peer: 'c1', counter: 1 }), { peer: 'c9', counter: 5 } ] ]),
+		);
+
+		const after = mgr.snapshot();
+		expect(after.undo.map((e) => e.inverse)).toEqual([
+			{ ...text('w1', 'body', 1), ops: [ { type: 'deleteItems', peer: 'c9', start: 5, count: 1 } ] },
+			text('w2', 'body', 1),
+			text('w1', 'title', 1),
+		]);
+		expect(after.redo[0]).toBe(before.redo[0]);
+		// The old entry is replaced, not changed.
+		expect(before.undo[0]!.inverse).toEqual(text('w1', 'body', 1));
+		expect(changes).toHaveBeenCalledTimes(1);
+	});
+
+	it('does not tell the listeners when no entry names a restored item', () => {
+		const mgr = new UndoManager();
+		mgr.recordGroup(1n, [ text('w1', 'body', 1) ]);
+		const changes = vi.fn();
+		mgr.onChange(changes);
+		mgr.remapText(
+			'widget',
+			'w1',
+			'body',
+			new Map([ [ idKey({ peer: 'c1', counter: 7 }), { peer: 'c9', counter: 5 } ] ]),
+		);
+		expect(changes).not.toHaveBeenCalled();
 	});
 });
